@@ -135,7 +135,7 @@
         for (const id of sortedIds) {
             const opt = document.createElement('option');
             opt.value = id;
-            const modeLabel = ' (Auto-Remediate)';
+            const modeLabel = ' (Adaptive Metrics)';
             opt.textContent = `CH-${String(id).padStart(2, '0')}: ${data[id].name}${modeLabel}`;
             select.appendChild(opt);
         }

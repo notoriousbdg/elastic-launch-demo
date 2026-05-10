@@ -43,13 +43,9 @@ class AlertingMixin:
                     wf_id = item.get("id", "")
                     if not wf_id:
                         continue
-                    if not notification_wf_id and "Auto-Remediate" not in wf_name and (
-                        "Notification" in wf_name or "Significant" in wf_name
-                    ):
+                    if not notification_wf_id and "Adaptive Metrics — review" in wf_name:
                         notification_wf_id = wf_id
-                    elif not auto_remediate_wf_id and "Auto-Remediate" in wf_name and (
-                        "Notification" in wf_name or "Significant" in wf_name
-                    ):
+                    elif not auto_remediate_wf_id and "Adaptive Metrics — auto" in wf_name:
                         auto_remediate_wf_id = wf_id
             except Exception:
                 pass
@@ -92,7 +88,7 @@ class AlertingMixin:
                 severity = "medium"
 
             if has_auto_wf:
-                rule_name = f"{self.scenario.scenario_name} CH{num_str}: {name} (Auto-Remediate)"
+                rule_name = f"{self.scenario.scenario_name} CH{num_str}: {name} (Adaptive Metrics)"
             else:
                 rule_name = f"{self.scenario.scenario_name} CH{num_str}: {name}"
 

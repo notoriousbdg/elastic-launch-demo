@@ -954,25 +954,25 @@ No need to create a webhook connector — the system connector ID is `system-con
 - Alert context is available via `event.*` namespace: `event.rule.name`, `event.rule.tags[N]`, `event.alerts[0].kibana.alert.*`, `event.spaceId`
 - Encode key data in alert rule `tags` for easy workflow access: `tags: ["nova7", "FuelPressureException"]` → `{{ event.rule.tags[1] }}`
 
-### HITL vs Auto-Remediate: Two-Workflow Pattern
+### HITL vs Adaptive Metrics (auto): Two-Workflow Pattern
 
-Channels 1-15 use a HITL workflow; channels 16-20 use an auto-remediate workflow. Two separate
+Channels 1-15 use the review (HITL) workflow; channels 16-20 use the Adaptive Metrics auto workflow. Two separate
 workflow YAML files are deployed; the deployer routes each alert rule to the correct workflow.
 
 **Tag encoding convention** (since inputs are blank, all per-channel data goes in tags):
 ```
 tags[0] = namespace          (e.g. "nova7")
 tags[1] = error_type         (e.g. "RSO-TRACKING-LOSS")
-tags[2] = remediation_action (auto-remediate channels only, e.g. "reset_safety_system")
-tags[3] = channel number     (auto-remediate channels only, e.g. "20")
+tags[2] = remediation_action (auto channels only, e.g. "reset_safety_system")
+tags[3] = channel number     (auto channels only, e.g. "20")
 ```
 
 **Alert rule naming:**
 
 - HITL (CH01–CH15): `"{scenario_name} CH{nn}: {channel_name}"`
-- Auto-Remediate (CH16–CH20): `"{scenario_name} CH{nn}: {channel_name} (Auto-Remediate)"`
+- Adaptive Metrics auto (CH16–CH20): `"{scenario_name} CH{nn}: {channel_name} (Adaptive Metrics)"`
 
-**Case title** for auto-remediate: `"{{ event.rule.name }}"` (not the `"__SCENARIO_NAME__ RCA: ..."` pattern used by HITL). Since the rule name already contains "(Auto-Remediate)", the case title inherits it automatically.
+**Case title** for auto workflow: `"{{ event.rule.name }}"` (not the `"__SCENARIO_NAME__ RCA: ..."` pattern used by HITL). Since the rule name already contains "(Adaptive Metrics)", the case title inherits it automatically.
 
 **Workflow file naming and deployer lookup** (`elastic_config/deployer_alerting.py`):
 
@@ -982,8 +982,8 @@ notification_wf_id    = self._workflow_ids.get("significant_event_notification",
 auto_remediate_wf_id  = self._workflow_ids.get("significant_event_notification_auto_remediate", "")
 ```
 
-Do NOT use a fuzzy "notification in name" search — both workflow names contain "Notification".
-When falling back to `_wf_search`, distinguish by presence/absence of "Auto-Remediate" in the name.
+Do NOT use a fuzzy "notification in name" search — both workflow names contain "Significant Event Notification".
+When falling back to `_wf_search`, distinguish by `"Adaptive Metrics — auto"` vs `"Adaptive Metrics — review"` in the workflow display name.
 
 **Steps shared by both workflows** (after `create_case`):
 

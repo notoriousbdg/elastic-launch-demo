@@ -1,5 +1,5 @@
 version: "1"
-name: __SCENARIO_NAME__ Significant Event Notification (Human in the Loop)
+name: __SCENARIO_NAME__ Significant Event Notification (Adaptive Metrics — review)
 description: >
   Notify launch operations team when a significant event is detected.
   Triggered by alert rules — uses event.rule.tags[1] for the error_type
