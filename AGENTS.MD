@@ -954,9 +954,9 @@ No need to create a webhook connector — the system connector ID is `system-con
 - Alert context is available via `event.*` namespace: `event.rule.name`, `event.rule.tags[N]`, `event.alerts[0].kibana.alert.*`, `event.spaceId`
 - Encode key data in alert rule `tags` for easy workflow access: `tags: ["nova7", "FuelPressureException"]` → `{{ event.rule.tags[1] }}`
 
-### HITL vs Adaptive Metrics (auto): Two-Workflow Pattern
+### HITL vs auto-remediation: Two-Workflow Pattern
 
-Channels 1-15 use the review (HITL) workflow; channels 16-20 use the Adaptive Metrics auto workflow. Two separate
+Channels 1-15 use the **manual review** (HITL) workflow; channels 16-20 use the **auto-remediation** workflow. Two separate
 workflow YAML files are deployed; the deployer routes each alert rule to the correct workflow.
 
 **Tag encoding convention** (since inputs are blank, all per-channel data goes in tags):
@@ -969,10 +969,9 @@ tags[3] = channel number     (auto channels only, e.g. "20")
 
 **Alert rule naming:**
 
-- HITL (CH01–CH15): `"{scenario_name} CH{nn}: {channel_name}"`
-- Adaptive Metrics auto (CH16–CH20): `"{scenario_name} CH{nn}: {channel_name} (Adaptive Metrics)"`
+- All fault channels: `"{scenario_name} CH{nn}: {channel_name}"` (same pattern whether HITL or auto-remediation attach).
 
-**Case title** for auto workflow: `"{{ event.rule.name }}"` (not the `"__SCENARIO_NAME__ RCA: ..."` pattern used by HITL). Since the rule name already contains "(Adaptive Metrics)", the case title inherits it automatically.
+**Case title** for auto workflow: `"{{ event.rule.name }}"` (not the `"__SCENARIO_NAME__ RCA: ..."` pattern used by HITL).
 
 **Workflow file naming and deployer lookup** (`elastic_config/deployer_alerting.py`):
 
@@ -983,7 +982,7 @@ auto_remediate_wf_id  = self._workflow_ids.get("significant_event_notification_a
 ```
 
 Do NOT use a fuzzy "notification in name" search — both workflow names contain "Significant Event Notification".
-When falling back to `_wf_search`, distinguish by `"Adaptive Metrics — auto"` vs `"Adaptive Metrics — review"` in the workflow display name.
+When falling back to `_wf_search`, distinguish by `"(auto-remediation)"` vs `"(manual review)"` in the workflow display name.
 
 **Steps shared by both workflows** (after `create_case`):
 

@@ -1,5 +1,5 @@
 version: "1"
-name: __SCENARIO_NAME__ Significant Event Notification (Adaptive Metrics — auto)
+name: __SCENARIO_NAME__ Significant Event Notification (auto-remediation)
 description: >
   Notify launch operations team and automatically execute remediation when a
   significant event is detected on any fault channel (CH01–CH20).

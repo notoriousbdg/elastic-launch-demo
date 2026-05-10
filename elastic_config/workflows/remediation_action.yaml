@@ -1,5 +1,5 @@
 version: "1"
-name: __SCENARIO_NAME__ Adaptive Metrics action
+name: __SCENARIO_NAME__ Remediation action
 description: >
   Execute remediation actions for __SCENARIO_NAME__ anomalies. Queues a
   remediation command to an ES index for the backend poller to process.

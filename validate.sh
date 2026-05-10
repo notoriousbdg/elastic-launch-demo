@@ -296,8 +296,8 @@ import sys, json
 data = json.load(sys.stdin)
 items = data if isinstance(data, list) else data.get('results', data.get('items', data.get('data', [])))
 expected = {
-    'Adaptive Metrics — review': {'found': False, 'valid': False, 'id': ''},
-    'Adaptive Metrics action': {'found': False, 'valid': False, 'id': ''},
+    'manual review': {'found': False, 'valid': False, 'id': ''},
+    'Remediation action': {'found': False, 'valid': False, 'id': ''},
     'Escalation and Hold Management': {'found': False, 'valid': False, 'id': ''},
 }
 for item in items:
@@ -322,13 +322,13 @@ for key, val in expected.items():
         fi
     done <<< "$wf_check"
 
-    # Check Significant Event Notification (Adaptive Metrics — review) has alert trigger
+    # Check Significant Event Notification (manual review) has alert trigger
     sen_alert=$(echo "$wf_search_body" | python3 -c "
 import sys, json
 data = json.load(sys.stdin)
 items = data if isinstance(data, list) else data.get('results', data.get('items', data.get('data', [])))
 for item in items:
-    if 'Adaptive Metrics — review' in item.get('name', '') and '${SCENARIO_NAME}' in item.get('name', ''):
+    if '(manual review)' in item.get('name', '') and '${SCENARIO_NAME}' in item.get('name', ''):
         defn = item.get('definition', {}) or {}
         triggers = defn.get('triggers', [])
         print('yes' if any(t.get('type') == 'alert' for t in triggers) else 'no')
@@ -347,7 +347,7 @@ import sys, json
 data = json.load(sys.stdin)
 items = data if isinstance(data, list) else data.get('results', data.get('items', data.get('data', [])))
 for item in items:
-    if 'Adaptive Metrics — review' in item.get('name', '') and '${SCENARIO_NAME}' in item.get('name', ''):
+    if '(manual review)' in item.get('name', '') and '${SCENARIO_NAME}' in item.get('name', ''):
         yaml_text = item.get('yaml', '')
         has_email_step = 'type: email' in yaml_text
         has_smtp = 'Elastic-Cloud-SMTP' in yaml_text
@@ -367,7 +367,7 @@ import sys, json
 data = json.load(sys.stdin)
 items = data if isinstance(data, list) else data.get('results', data.get('items', data.get('data', [])))
 for item in items:
-    if 'Adaptive Metrics — review' in item.get('name', '') and '${SCENARIO_NAME}' in item.get('name', ''):
+    if '(manual review)' in item.get('name', '') and '${SCENARIO_NAME}' in item.get('name', ''):
         yaml_text = item.get('yaml', '')
         has_var0 = 'var[0].event_meta' in yaml_text
         has_json_parse = 'json_parse' in yaml_text
@@ -387,7 +387,7 @@ import sys, json, re
 data = json.load(sys.stdin)
 items = data if isinstance(data, list) else data.get('results', data.get('items', data.get('data', [])))
 for item in items:
-    if 'Adaptive Metrics — review' in item.get('name', '') and '${SCENARIO_NAME}' in item.get('name', ''):
+    if '(manual review)' in item.get('name', '') and '${SCENARIO_NAME}' in item.get('name', ''):
         yaml_text = item.get('yaml', '')
         m = re.search(r'NOW\(\) - (\d+) MINUTES', yaml_text, re.IGNORECASE)
         if not m:
@@ -406,13 +406,13 @@ for item in items:
         fail "Notification workflow time window too narrow ($notif_window) — may miss logs"
     fi
 
-    # Check Adaptive Metrics action workflow has case_id input (for direct case closure)
+    # Check Remediation action workflow has case_id input (for direct case closure)
     rem_caseid=$(echo "$wf_search_body" | python3 -c "
 import sys, json
 data = json.load(sys.stdin)
 items = data if isinstance(data, list) else data.get('results', data.get('items', data.get('data', [])))
 for item in items:
-    if 'Adaptive Metrics action' in item.get('name', '') and '${SCENARIO_NAME}' in item.get('name', ''):
+    if 'Remediation action' in item.get('name', '') and '${SCENARIO_NAME}' in item.get('name', ''):
         yaml_text = item.get('yaml', '')
         print('yes' if 'case_id' in yaml_text else 'no')
         break
@@ -537,7 +537,7 @@ import sys, json
 data = json.load(sys.stdin)
 items = data if isinstance(data, list) else data.get('results', data.get('items', data.get('data', [])))
 for w in items:
-    if 'Adaptive Metrics action' in w.get('name', '') and '${SCENARIO_NAME}' in w.get('name', ''):
+    if 'Remediation action' in w.get('name', '') and '${SCENARIO_NAME}' in w.get('name', ''):
         print(w['id']); break
 " 2>/dev/null || echo "")
 

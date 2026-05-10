@@ -30,7 +30,7 @@ class AgentMixin:
                     "type": "workflow",
                     "description": (
                         "Execute remediation actions for anomalies. Triggers the "
-                        "Adaptive Metrics action workflow to resolve faults."
+                        "Remediation action workflow to resolve faults."
                     ),
                     "configuration": {"workflow_id": wf_id},
                 })
