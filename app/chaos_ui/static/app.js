@@ -346,11 +346,14 @@
     let spikeDebounceTimer = null;
 
     function updateSpikesLock() {
-        const locked = myOwnedChannels.size === 0;
+        // Infra spikes apply cluster-wide when no fault is active; only require a deployment context.
+        const spikesLocked = !deployId;
         const panel = document.querySelector('.spikes-panel');
-        if (panel) panel.classList.toggle('locked', locked);
+        if (panel) panel.classList.toggle('locked', spikesLocked);
+        // Daily update stays gated until the operator has started a chaos session (owns a channel).
+        const duLocked = myOwnedChannels.size === 0;
         const duSection = document.querySelector('.daily-update-section');
-        if (duSection) duSection.classList.toggle('locked', locked);
+        if (duSection) duSection.classList.toggle('locked', duLocked);
     }
 
     function initSpikes() {
@@ -421,7 +424,7 @@
     }
 
     function sendSpikes() {
-        if (myOwnedChannels.size === 0) return; // locked — no active session
+        if (!deployId) return;
         const cpu = parseFloat(document.getElementById('spike-cpu').value);
         const mem = parseFloat(document.getElementById('spike-memory').value);
         const oom = parseFloat(document.getElementById('spike-oom').value);
