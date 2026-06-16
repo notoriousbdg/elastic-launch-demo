@@ -459,11 +459,51 @@ class ApmRollupGenerator:
 
     def generate_all(self, hours: int = 12, seed: int = 42) -> dict[str, int]:
         """Generate and insert all three rollup types. Returns doc counts."""
+        # WORKAROUND: when a fresh data stream is created, the first bulk insert
+        # of `aggregate_metric_double` fields (transaction.duration.summary, etc.)
+        # hits a one-time mapping-initialization race where the parent field's
+        # `sum` metric doesn't index correctly — every doc ends up with stored
+        # parent.sum ≈ 0 (literally 5.97e-315 from an uninitialised double).
+        # The flat .sum child is fine, but APM ML / Service Map aggregate
+        # against the parent field, so the latency detector trains on noise
+        # and learns model_upper=0 → never scores anomalies.
+        #
+        # Re-running the backfill after the data stream is established produces
+        # correct docs. So: warm up the data streams with a one-doc seed
+        # before the real backfill. Subsequent writes index correctly.
+        self._seed_data_streams()
         counts = {}
         counts["transaction_1m"] = self._generate_transaction_rollups(hours, seed)
         counts["service_destination_1m"] = self._generate_sd_rollups(hours, seed + 1)
         counts["service_summary_1m"] = self._generate_summary_rollups(hours, seed + 2)
         return counts
+
+    def _seed_data_streams(self) -> None:
+        """Write one disposable doc to each rollup data stream to force ES to
+        materialise the aggregate_metric_double mapping before the real backfill
+        lands. See generate_all() for why this is needed."""
+        from datetime import datetime, timezone
+        seed_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        for ds in [
+            "metrics-transaction.1m.otel-default",
+            "metrics-service_destination.1m.otel-default",
+            "metrics-service_summary.1m.otel-default",
+        ]:
+            self._bulk_insert(ds, [{
+                "@timestamp": seed_ts,
+                "_doc_count": 1,
+                "attributes": {"metricset.name": "_seed", "transaction.type": "_seed"},
+                "data_stream": {
+                    "dataset": ds.split("metrics-")[1].split(".otel-default")[0] + ".otel",
+                    "namespace": "default",
+                    "type": "metrics",
+                },
+                "metrics": {
+                    "transaction.duration.summary": {"sum": 1.0, "value_count": 1},
+                },
+                "resource": {"attributes": {"service.name": "_seed"}},
+                "scope": {"name": "_seed"},
+            }], f"seed-{ds.split('.')[0]}")
 
     def _generate_transaction_rollups(self, hours: int, seed: int) -> int:
         """Generate transaction.1m docs for baseline period."""

@@ -190,6 +190,8 @@
         .card-btn-ops:hover { opacity: 1; }
         .card-btn-chaos { background: var(--yellow); color: var(--dark-ink); border-color: var(--yellow); }
         .card-btn-chaos:hover { background: #e6b310; border-color: #e6b310; }
+        .card-btn-slides { background: #6E4CFF; color: #fff; border-color: #6E4CFF; }
+        .card-btn-slides:hover { background: #5a3ce0; border-color: #5a3ce0; }
         .card-btn-teardown { background: #BD271E; color: #fff; }
         .card-btn-teardown:hover { background: #a8221a; }
         .card-btn-teardown[disabled] {
@@ -523,6 +525,15 @@
         // Load scenarios
         try {
             scenarios = await (await fetch('/api/scenarios')).json();
+            await Promise.all(scenarios.map(async (s) => {
+                try {
+                    const r = await fetch(`/api/setup/has-slides?scenario_id=${s.id}`);
+                    const d = await r.json();
+                    s.has_slides = !!d.has_slides;
+                } catch (e) {
+                    s.has_slides = false;
+                }
+            }));
         } catch (e) {
             scenarios = [];
         }
@@ -638,7 +649,11 @@
             } else if (isTearingDown) {
                 actions = `<button class="card-btn card-btn-teardown" disabled>${teardownLabel}</button>`;
             } else if (dep) {
+                const slidesBtn = s.has_slides
+                    ? `<a class="card-btn card-btn-slides" href="/slides?deployment_id=${dep.deployment_id}" target="_blank" rel="noopener">Slides</a>`
+                    : '';
                 actions = `
+                    ${slidesBtn}
                     <a class="card-btn card-btn-exec" href="${dep.kibana_display_url}/app/dashboards#/view/${dep.namespace}-business-exec-dashboard" target="_blank" rel="noopener">Business Dashboard</a>
                     <a class="card-btn card-btn-ops" href="${dep.kibana_display_url}/app/dashboards#/view/${dep.namespace}-exec-dashboard" target="_blank" rel="noopener">Operations Dashboard</a>
                     <a class="card-btn card-btn-chaos" href="/chaos?deployment_id=${dep.deployment_id}">Chaos</a>
@@ -670,6 +685,7 @@
         const kibanaUrl = document.getElementById('kibana-url').value.trim();
         const esInput = document.getElementById('es-url');
         const otlpInput = document.getElementById('otlp-url');
+        const cloudKeyGroup = document.getElementById('cloud-api-key-group');
 
         if (kibanaUrl && kibanaUrl.includes('.kb.')) {
             if (!esInput.dataset.manual) {
@@ -681,6 +697,10 @@
                 otlpInput.value = otlp;
             }
         }
+
+        // Show Cloud API key field when targeting Elastic Cloud
+        const isCloud = kibanaUrl.includes('.kb.') && kibanaUrl.includes('.elastic.cloud');
+        cloudKeyGroup.style.display = isCloud ? '' : 'none';
     }
 
     document.addEventListener('DOMContentLoaded', () => {
@@ -777,10 +797,12 @@
             const apiKey = document.getElementById('api-key').value.trim();
             const esUrl = document.getElementById('es-url').value.trim() || undefined;
             const otlpUrl = document.getElementById('otlp-url').value.trim() || undefined;
+            const cloudApiKey = document.getElementById('cloud-api-key')?.value.trim() || undefined;
             body.kibana_url = kibanaUrl;
             body.api_key = apiKey;
             if (esUrl) body.elastic_url = esUrl;
             if (otlpUrl) body.otlp_url = otlpUrl;
+            if (cloudApiKey) body.cloud_api_key = cloudApiKey;
         }
 
         cardErrors.delete(scenarioId);

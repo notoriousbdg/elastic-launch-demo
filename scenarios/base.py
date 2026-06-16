@@ -99,6 +99,16 @@ class BaseScenario(ABC):
         return 999
 
     @property
+    def apm_ml_bucket_span(self) -> str:
+        """Bucket span for the APM transaction-metrics ML anomaly detection job.
+
+        Shorter spans surface anomaly scores faster (useful for short live demos)
+        at the cost of more noise. Default "15m" matches the Kibana APM ML module.
+        Override per scenario for faster demo flows.
+        """
+        return "15m"
+
+    @property
     def executive_kpi_emitter_service_name(self) -> str | None:
         """`SERVICE_NAME` of the one microservice that emits synthetic `business.*` executive KPI gauges.
 

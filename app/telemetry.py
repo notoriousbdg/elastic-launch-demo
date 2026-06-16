@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 from typing import Any, Optional
 
@@ -67,7 +68,8 @@ class OTLPClient:
         if self.api_key:
             headers["Authorization"] = f"{self.auth_type} {self.api_key}"
 
-        self.client = httpx.Client(headers=headers, http2=True, timeout=5)
+        self.client = httpx.Client(headers=headers, http2=True, timeout=10)
+        self._send_lock = threading.Lock()
         self.consecutive_failures = 0
         self.max_failures_before_backoff = 5
 
@@ -87,7 +89,7 @@ class OTLPClient:
                 self.client.close()
             except Exception:
                 pass
-        self.client = httpx.Client(headers=headers, http2=True, timeout=5)
+        self.client = httpx.Client(headers=headers, http2=True, timeout=10)
         logger.info("OTLPClient reconfigured → %s", self.endpoint)
 
     # ── Resource helpers ───────────────────────────────────────────────
@@ -266,21 +268,35 @@ class OTLPClient:
         """Send a batch of spans for a single resource."""
         if not spans:
             return
-        trace_resource = self._patch_resource_data_stream(resource, "traces")
-        payload = {
-            "resourceSpans": [
-                {
-                    "resource": trace_resource,
-                    "scopeSpans": [
-                        {
-                            "scope": {"name": SCOPE_NAME},
-                            "spans": spans,
-                        }
-                    ],
-                }
-            ]
-        }
-        self._send(f"{self.endpoint}/v1/traces", payload, "traces")
+        self.send_traces_multi([(resource, spans)])
+
+    def send_traces_multi(
+        self,
+        batches: list[tuple[dict[str, Any], list[dict[str, Any]]]],
+    ) -> None:
+        """Send a batch of spans for multiple resources in a single POST.
+
+        OTLP/HTTP allows multiple `resourceSpans` entries per request — sending
+        all services in one POST instead of one POST per service is N×-cheaper
+        on network RTT, which dominates throughput for cloud OTLP endpoints.
+        """
+        resource_spans = []
+        for resource, spans in batches:
+            if not spans:
+                continue
+            trace_resource = self._patch_resource_data_stream(resource, "traces")
+            resource_spans.append({
+                "resource": trace_resource,
+                "scopeSpans": [
+                    {
+                        "scope": {"name": SCOPE_NAME},
+                        "spans": spans,
+                    }
+                ],
+            })
+        if not resource_spans:
+            return
+        self._send(f"{self.endpoint}/v1/traces", {"resourceSpans": resource_spans}, "traces")
 
     def build_span(
         self,
@@ -363,27 +379,28 @@ class OTLPClient:
             if time.time() % backoff > 1:
                 return
 
-        try:
-            response = self.client.post(url, data=json.dumps(payload))
-            response.raise_for_status()
-            self.consecutive_failures = 0
-        except httpx.RequestError as exc:
-            self.consecutive_failures += 1
-            if self.consecutive_failures <= 3:
-                logger.warning("OTLP %s send failed (connection): %s", signal_name, exc)
-        except httpx.HTTPStatusError as exc:
-            self.consecutive_failures += 1
-            if self.consecutive_failures <= 3:
-                logger.warning(
-                    "OTLP %s send failed (HTTP %d): %s",
-                    signal_name,
-                    exc.response.status_code,
-                    exc.response.text[:200],
-                )
-        except Exception as exc:
-            self.consecutive_failures += 1
-            if self.consecutive_failures <= 3:
-                logger.warning("OTLP %s send failed: %s", signal_name, exc)
+        with self._send_lock:
+            try:
+                response = self.client.post(url, content=json.dumps(payload))
+                response.raise_for_status()
+                self.consecutive_failures = 0
+            except httpx.RequestError as exc:
+                self.consecutive_failures += 1
+                if self.consecutive_failures <= 3:
+                    logger.warning("OTLP %s send failed (connection): %s", signal_name, exc)
+            except httpx.HTTPStatusError as exc:
+                self.consecutive_failures += 1
+                if self.consecutive_failures <= 3:
+                    logger.warning(
+                        "OTLP %s send failed (HTTP %d): %s",
+                        signal_name,
+                        exc.response.status_code,
+                        exc.response.text[:200],
+                    )
+            except Exception as exc:
+                self.consecutive_failures += 1
+                if self.consecutive_failures <= 3:
+                    logger.warning("OTLP %s send failed: %s", signal_name, exc)
 
     def close(self) -> None:
         if self.client:

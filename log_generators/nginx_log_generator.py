@@ -456,6 +456,12 @@ def run(
     if scenario_data and "services" in scenario_data:
         _emit_traces = "nginx-proxy" in scenario_data["services"]
 
+    # Only emit traces if nginx-proxy is in the scenario's services (avoids
+    # disconnected Service Map nodes when the scenario doesn't include it).
+    _emit_traces = True
+    if scenario_data and "services" in scenario_data:
+        _emit_traces = "nginx-proxy" in scenario_data["services"]
+
     total_sent = 0
     total_spans = 0
     error_spike_active = False

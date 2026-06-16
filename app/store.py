@@ -27,10 +27,15 @@ CREATE TABLE IF NOT EXISTS deployments (
     elastic_url     TEXT NOT NULL DEFAULT '',
     elastic_api_key TEXT NOT NULL DEFAULT '',
     kibana_url      TEXT NOT NULL DEFAULT '',
+    cloud_api_key   TEXT NOT NULL DEFAULT '',
     status          TEXT NOT NULL DEFAULT 'active',
     created_at      REAL NOT NULL,
     updated_at      REAL NOT NULL
 );
+"""
+
+_MIGRATE_CLOUD_API_KEY = """
+ALTER TABLE deployments ADD COLUMN cloud_api_key TEXT NOT NULL DEFAULT '';
 """
 
 
@@ -46,6 +51,11 @@ class DeploymentStore:
     def _init_db(self) -> None:
         with self._connect() as conn:
             conn.execute(_CREATE_TABLE)
+            # Migrate: add cloud_api_key column if missing (existing DBs)
+            try:
+                conn.execute(_MIGRATE_CLOUD_API_KEY)
+            except sqlite3.OperationalError:
+                pass  # column already exists
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self._db_path, check_same_thread=False)
@@ -62,6 +72,7 @@ class DeploymentStore:
         elastic_url: str = "",
         elastic_api_key: str = "",
         kibana_url: str = "",
+        cloud_api_key: str = "",
         status: str = "active",
     ) -> None:
         """Insert or replace a deployment record."""
@@ -71,9 +82,9 @@ class DeploymentStore:
                 conn.execute(
                     """INSERT OR REPLACE INTO deployments
                        (deployment_id, scenario_id, otlp_endpoint, otlp_api_key,
-                        elastic_url, elastic_api_key, kibana_url, status,
-                        created_at, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        elastic_url, elastic_api_key, kibana_url, cloud_api_key,
+                        status, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         deployment_id,
                         scenario_id,
@@ -82,6 +93,7 @@ class DeploymentStore:
                         elastic_url,
                         elastic_api_key,
                         kibana_url,
+                        cloud_api_key,
                         status,
                         now,
                         now,

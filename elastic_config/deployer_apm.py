@@ -8,7 +8,7 @@ from typing import Any
 
 import httpx
 
-from elastic_config.deployer_base import _es_headers, ProgressCallback
+from elastic_config.deployer_base import _es_headers, _kibana_headers, ProgressCallback
 
 logger = logging.getLogger("deployer")
 
@@ -165,7 +165,7 @@ class ApmMixin:
                     },
                 },
                 "analysis_config": {
-                    "bucket_span": "15m",
+                    "bucket_span": self.scenario.apm_ml_bucket_span,
                     "summary_count_field_name": "doc_count",
                     "detectors": [
                         {
@@ -250,8 +250,47 @@ class ApmMixin:
                         "aggs": {
                             "@timestamp": {"max": {"field": "@timestamp"}},
                             "transaction_throughput": {"rate": {"unit": "minute"}},
+                            # Compute average transaction latency by summing
+                            # BOTH the parent aggregate_metric_double field
+                            # AND the flat .sum child field.
+                            #
+                            # Synthetic APM rollup backfill: writes the flat
+                            # .sum correctly but the parent .sum stays as
+                            # ~5.97e-315 (uninitialised double from the
+                            # mapping race fixed by _seed_data_streams, but
+                            # already-written docs stay broken).
+                            # Live OTel data: writes the parent correctly
+                            # but the flat .sum is 0 (OTel doesn't promote
+                            # it down).
+                            # Summing both works for either dataset: in any
+                            # given doc one of the two is the real value and
+                            # the other is ~0, so the sum equals the real
+                            # total. Synthetic's ~5.97e-315 is below any
+                            # realistic latency value and contributes
+                            # nothing meaningful even when accumulated.
+                            "latency_sum_parent": {
+                                "sum": {"field": "metrics.transaction.duration.summary"}
+                            },
+                            "latency_sum_flat": {
+                                "sum": {"field": "metrics.transaction.duration.summary.sum"}
+                            },
+                            "latency_count": {
+                                "sum": {"field": "metrics.transaction.duration.summary.value_count"}
+                            },
                             "transaction_latency": {
-                                "avg": {"field": "metrics.transaction.duration.histogram"}
+                                "bucket_script": {
+                                    "buckets_path": {
+                                        "sum_p": "latency_sum_parent",
+                                        "sum_f": "latency_sum_flat",
+                                        "count": "latency_count",
+                                    },
+                                    "script": (
+                                        "double p = Double.isNaN(params.sum_p) ? 0 : params.sum_p; "
+                                        "double f = Double.isNaN(params.sum_f) ? 0 : params.sum_f; "
+                                        "if (params.count == 0) { return 0; } "
+                                        "else { return (p + f) / params.count; }"
+                                    ),
+                                }
                             },
                             "error_count": {
                                 "filter": {"term": {"attributes.event.outcome": "failure"}},
@@ -343,6 +382,26 @@ class ApmMixin:
                 raise RuntimeError(f"ML datafeed start failed: {resp.text}")
 
             self._wait_for_apm_catchup(client, [f"datafeed-{job_id}"], timeout=120)
+
+            # Register the environment with the Kibana APM ML integration so the
+            # Service Map UI picks up our job (matches Superdemo's flow). Without
+            # this Kibana-side registration, the raw ES-created job exists but
+            # the APM Service Map does not surface its anomaly scores as node
+            # colouring. Idempotent: returns 200 {"jobCreated": true} even when
+            # the environment is already registered to our existing job.
+            try:
+                reg_resp = client.post(
+                    f"{self.kibana_url}/internal/apm/settings/anomaly-detection/jobs",
+                    headers=_kibana_headers(self.api_key),
+                    json={"environments": [env]},
+                )
+                if reg_resp.status_code >= 300:
+                    logger.warning(
+                        "Kibana APM ML environment registration returned HTTP %d (non-fatal): %s",
+                        reg_resp.status_code, reg_resp.text[:200],
+                    )
+            except Exception as exc:
+                logger.warning("Kibana APM ML environment registration failed (non-fatal): %s", exc)
 
             step.status = "ok"
             step.detail = f"Started ML job: {job_id}"
@@ -438,3 +497,101 @@ class ApmMixin:
             )
         except Exception:
             pass
+
+    def _cleanup_apm_rollup(self, client: httpx.Client) -> None:
+        """Delete the synthetic APM rollup data streams so the next deploy
+        starts the ML job on a clean healthy baseline.
+
+        Without this, _deploy_apm_rollup appends new synthetic docs to the
+        existing data streams, and the freshly-recreated ML job trains on
+        cumulative history — including any prior live fault periods —
+        poisoning its 'normal' baseline for iterative demo cycles.
+        """
+        data_streams = [
+            "metrics-transaction.1m.otel-default",
+            "metrics-service_destination.1m.otel-default",
+            "metrics-service_summary.1m.otel-default",
+        ]
+        for ds in data_streams:
+            try:
+                client.delete(
+                    f"{self.elastic_url}/_data_stream/{ds}",
+                    headers=_es_headers(self.api_key),
+                )
+            except Exception:
+                pass
+
+
+# ── ML model reset helper (used by chaos controller on fault resolve) ───────
+
+
+def revert_apm_ml_baseline(
+    elastic_url: str,
+    api_key: str,
+    namespace: str,
+) -> bool:
+    """Reset the APM ML job's trained model.
+
+    Called by the chaos controller after a fault resolves so the model
+    "forgets" any adaptation it did while the fault was active. Returns
+    True on success.
+
+    Implementation: stop datafeed → close job → POST _reset → reopen →
+    restart datafeed. ES `_ml/.../_reset` keeps the job config but wipes
+    the trained model; the datafeed then re-trains from the existing
+    rollup data, which is the same source the original training used —
+    so the model returns to the same baseline state without us needing
+    to manage explicit snapshots (those APIs aren't available on
+    serverless).
+
+    Safe to call from any thread; uses a private httpx.Client.
+    """
+    job_id = f"apm-{namespace}-transaction-metrics"
+    datafeed_id = f"datafeed-{job_id}"
+    headers = _es_headers(api_key)
+
+    with httpx.Client(timeout=60.0, verify=True) as client:
+        # Confirm the job exists; bail quietly if not.
+        job_resp = client.get(
+            f"{elastic_url}/_ml/anomaly_detectors/{job_id}",
+            headers=headers,
+        )
+        if job_resp.status_code >= 300:
+            logger.info(
+                "ML reset: job %s not found (status=%d)",
+                job_id, job_resp.status_code,
+            )
+            return False
+
+        try:
+            # Stop datafeed → close job → reset → reopen → restart datafeed.
+            client.post(
+                f"{elastic_url}/_ml/datafeeds/{datafeed_id}/_stop",
+                headers=headers,
+                json={"force": True, "timeout": "30s"},
+            )
+            client.post(
+                f"{elastic_url}/_ml/anomaly_detectors/{job_id}/_close",
+                headers=headers,
+                json={"force": True, "timeout": "30s"},
+            )
+            reset_resp = client.post(
+                f"{elastic_url}/_ml/anomaly_detectors/{job_id}/_reset",
+                headers=headers,
+            )
+            if reset_resp.status_code >= 300:
+                logger.warning("ML reset failed: %s", reset_resp.text[:300])
+                return False
+            client.post(
+                f"{elastic_url}/_ml/anomaly_detectors/{job_id}/_open",
+                headers=headers,
+            )
+            client.post(
+                f"{elastic_url}/_ml/datafeeds/{datafeed_id}/_start",
+                headers=headers,
+            )
+            logger.info("Reset ML job %s — model will re-train on existing rollup", job_id)
+            return True
+        except Exception as exc:
+            logger.warning("ML reset encountered error: %s", exc)
+            return False

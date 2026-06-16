@@ -37,11 +37,21 @@ class ScenarioInstance:
             api_key=ctx.otlp_api_key or None,
         )
 
-        # Per-instance chaos controller with this scenario's channel registry
+        # Per-instance chaos controller with this scenario's channel registry.
+        # Wire the on_resolve hook to revert the APM ML model to its baseline
+        # snapshot whenever the last active channel resolves — keeps the model
+        # from drifting across iterative demo cycles.
+        def _revert_ml_baseline():
+            if not (ctx.elastic_url and ctx.elastic_api_key and ctx.namespace):
+                return
+            from elastic_config.deployer_apm import revert_apm_ml_baseline
+            revert_apm_ml_baseline(ctx.elastic_url, ctx.elastic_api_key, ctx.namespace)
+
         self.chaos_controller = ChaosController(
             channel_registry=ctx.channel_registry,
             chaos_store=chaos_store,
             deployment_id=self.deployment_id,
+            on_resolve=_revert_ml_baseline,
         )
 
         # ServiceManager — owns service threads + generator threads

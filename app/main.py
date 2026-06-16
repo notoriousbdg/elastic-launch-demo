@@ -242,6 +242,17 @@ app.mount(
     name="selector-static",
 )
 
+# Mount per-scenario static dirs (for scenario-specific slides, images, etc.)
+_scenarios_root = os.path.join(os.path.dirname(__file__), "..", "scenarios")
+for _sid in sorted(os.listdir(_scenarios_root)):
+    _sdir = os.path.join(_scenarios_root, _sid, "static")
+    if os.path.isdir(_sdir):
+        app.mount(
+            f"/scenarios/{_sid}/static",
+            StaticFiles(directory=_sdir),
+            name=f"{_sid}-static",
+        )
+
 # ── Scenario helper ──────────────────────────────────────────────────────────
 
 
@@ -327,6 +338,7 @@ body { font-family: 'Inter', -apple-system, system-ui, sans-serif; }"""
         "<!--THEME_CSS-->": f"<style>{css_override}</style>",
         "DEPLOYMENT_ID_PLACEHOLDER": deployment_id or "",
         "SCENARIO_NAME_PLACEHOLDER": scenario.scenario_name,
+        "SCENARIO_DESC_PLACEHOLDER": scenario.scenario_description,
         "SCENARIO_ID_PLACEHOLDER": scenario.scenario_id,
         "NAMESPACE_PLACEHOLDER": scenario.namespace,
         "MISSION_ID_PLACEHOLDER": mission_id,
@@ -434,6 +446,44 @@ async def chaos_page(deployment_id: Optional[str] = None):
     with open(path) as f:
         html = f.read()
     return HTMLResponse(content=_inject_theme(html, deployment_id))
+
+
+@app.get("/slides", response_class=HTMLResponse)
+async def slides(deployment_id: Optional[str] = None):
+    """Per-scenario HTML slide deck. Looks up the deployment's scenario and
+    serves scenarios/<scenario_id>/static/slides.html, or 404 if none."""
+    if not deployment_id:
+        return JSONResponse(status_code=400, content={"error": "deployment_id required"})
+    inst = registry.get(deployment_id)
+    if inst:
+        scenario_id = inst.ctx.scenario.scenario_id
+    else:
+        rec = store.get(deployment_id)
+        if not rec:
+            return JSONResponse(status_code=404, content={"error": "deployment not found"})
+        scenario_id = rec["scenario_id"]
+    slides_path = os.path.join(
+        _base, "..", "scenarios", scenario_id, "static", "slides.html"
+    )
+    if not os.path.isfile(slides_path):
+        return JSONResponse(status_code=404, content={"error": f"no slides for scenario '{scenario_id}'"})
+    with open(slides_path) as f:
+        html = f.read()
+    return HTMLResponse(content=_inject_theme(html, deployment_id))
+
+
+@app.get("/api/setup/has-slides")
+async def has_slides(scenario_id: str):
+    """Return whether the given scenario has a slide deck."""
+    from scenarios import get_scenario
+    try:
+        get_scenario(scenario_id)
+    except KeyError:
+        return {"has_slides": False}
+    slides_path = os.path.join(
+        _base, "..", "scenarios", scenario_id, "static", "slides.html"
+    )
+    return {"has_slides": os.path.isfile(slides_path)}
 
 
 # ── Scenario API ───────────────────────────────────────────────────────────
@@ -881,7 +931,12 @@ async def launch_setup(body: dict):
     explicit_otlp = body.get("otlp_url") or ""
 
     scenario = _get_scenario_by_id(scenario_id)
-    deployer = ScenarioDeployer(scenario, elastic_url, kibana_url, api_key, KIBANA_PROXY)
+    cloud_api_key = (body.get("cloud_api_key") or "").strip()
+    deployer = ScenarioDeployer(
+        scenario, elastic_url, kibana_url, api_key,
+        kibana_proxy=KIBANA_PROXY,
+        cloud_api_key=cloud_api_key,
+    )
 
     # Use scenario_id as deployment_id
     deployment_id = scenario_id
@@ -942,6 +997,7 @@ async def launch_setup(body: dict):
                 elastic_url=elastic_url,
                 elastic_api_key=api_key,
                 kibana_url=kibana_url,
+                cloud_api_key=cloud_api_key,
             )
 
             logger.info("Deployment %s (%s) live", deployment_id, scenario_id)

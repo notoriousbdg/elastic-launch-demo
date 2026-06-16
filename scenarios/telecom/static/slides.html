@@ -1,0 +1,1356 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Elastic AI-Powered Observability — SCENARIO_NAME_PLACEHOLDER</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&family=Space+Mono:wght@400;700&family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <!--THEME_CSS-->
+    <style>
+        :root {
+            --bg-primary: #0a0a0a;
+            --bg-secondary: #111111;
+            --bg-card: #1a1a1a;
+            --border: #2a2a2a;
+            --text-primary: #e0e0e0;
+            --text-secondary: #888888;
+            --text-dim: #555555;
+            --nominal: #00ff41;
+            --nominal-dim: #00ff4122;
+            --elastic-accent: #00bfb3;
+            --kibana-accent: #f04e98;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            font-family: 'JetBrains Mono', 'Space Mono', monospace;
+            overflow: hidden;
+            width: 100vw;
+            height: 100vh;
+        }
+
+        /* ── Slide Container ─────────────────────────── */
+        .slides-container {
+            position: relative;
+            width: 100vw;
+            height: 100vh;
+        }
+
+        .slide {
+            position: absolute;
+            top: 0; left: 0;
+            width: 100%; height: 100%;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            opacity: 0;
+            visibility: hidden;
+            transition: opacity 0.8s ease, visibility 0.8s ease;
+            z-index: 1;
+        }
+
+        .slide.active {
+            opacity: 1;
+            visibility: visible;
+            z-index: 2;
+        }
+
+        /* ── Slide Backgrounds ───────────────────────── */
+        .slide-bg {
+            position: absolute;
+            top: 0; left: 0;
+            width: 100%; height: 100%;
+            background-size: cover;
+            background-position: center;
+            z-index: 0;
+        }
+
+        .slide-bg::after {
+            content: '';
+            position: absolute;
+            top: 0; left: 0;
+            width: 100%; height: 100%;
+            background: rgba(0, 0, 0, 0.55);
+        }
+
+        .slide-1-bg {
+            background-color: #050520;
+            background-image:
+                radial-gradient(ellipse at 30% 70%, rgba(40, 20, 100, 0.5) 0%, transparent 60%),
+                radial-gradient(ellipse at 70% 30%, rgba(0, 80, 160, 0.3) 0%, transparent 50%),
+                linear-gradient(180deg, #050520 0%, #0a0a0a 100%);
+        }
+        .slide-2-bg {
+            background-color: #0a0a1a;
+            background-image:
+                radial-gradient(ellipse at 50% 50%, rgba(0, 191, 179, 0.15) 0%, transparent 60%),
+                radial-gradient(ellipse at 20% 40%, rgba(66, 133, 244, 0.1) 0%, transparent 40%),
+                linear-gradient(180deg, #0a0a1a 0%, #0a0a0a 100%);
+        }
+        .slide-arch-bg {
+            background-color: #0A1628;
+            background-image: none;
+        }
+        .slide-arch-bg::after { background: none; }
+
+        .slide-5-bg {
+            background-color: #0a0505;
+            background-image:
+                radial-gradient(ellipse at 50% 80%, rgba(255, 100, 0, 0.2) 0%, transparent 50%),
+                radial-gradient(ellipse at 50% 20%, rgba(0, 30, 80, 0.3) 0%, transparent 50%),
+                linear-gradient(180deg, #0a0505 0%, #0a0a0a 100%);
+        }
+
+        .slide-content {
+            position: relative;
+            z-index: 1;
+            text-align: center;
+            max-width: 1200px;
+            padding: 40px;
+            width: 100%;
+        }
+
+        /* ── Slide 1 — Title ─────────────────────────── */
+        .slide-1.active .slide-content {
+            animation: fadeInUp 1s ease forwards;
+        }
+
+        .slide-prefix {
+            font-size: 13px;
+            letter-spacing: 8px;
+            color: var(--elastic-accent);
+            text-transform: uppercase;
+            margin-bottom: 24px;
+            opacity: 0.8;
+        }
+
+        .slide-title {
+            font-size: 52px;
+            font-weight: 700;
+            color: #ffffff;
+            line-height: 1.15;
+            letter-spacing: 2px;
+            text-shadow: 0 0 40px rgba(0, 191, 179, 0.3), 0 0 80px rgba(0, 191, 179, 0.1);
+            margin-bottom: 20px;
+        }
+
+        .slide-title .highlight {
+            color: var(--elastic-accent);
+        }
+
+        .slide-tagline {
+            font-size: 20px;
+            color: var(--text-secondary);
+            font-weight: 300;
+            letter-spacing: 3px;
+            text-transform: uppercase;
+            margin-top: 16px;
+        }
+
+        .elastic-logo-text {
+            font-size: 14px;
+            letter-spacing: 6px;
+            color: var(--text-dim);
+            margin-top: 40px;
+            text-transform: uppercase;
+        }
+
+        /* ── Slide 2 — Three Pillars ─────────────────── */
+        .pillars-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 30px;
+            text-align: left;
+            max-width: 1100px;
+            margin: 0 auto;
+        }
+
+        .pillar {
+            background: rgba(26, 26, 26, 0.7);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 30px 24px;
+            backdrop-filter: blur(10px);
+            opacity: 0;
+            transform: translateY(20px);
+        }
+
+        .slide-2.active .pillar {
+            animation: fadeInUp 0.7s ease forwards;
+        }
+        .slide-2.active .pillar:nth-child(1) { animation-delay: 0.2s; }
+        .slide-2.active .pillar:nth-child(2) { animation-delay: 0.4s; }
+        .slide-2.active .pillar:nth-child(3) { animation-delay: 0.6s; }
+
+        .pillar-header {
+            font-size: 22px;
+            font-weight: 700;
+            letter-spacing: 4px;
+            color: #ffffff;
+            text-transform: uppercase;
+            margin-bottom: 8px;
+        }
+
+        .pillar-tagline {
+            font-size: 11px;
+            color: var(--elastic-accent);
+            line-height: 1.5;
+            margin-bottom: 20px;
+            font-style: italic;
+        }
+
+        .pillar-items {
+            list-style: none;
+            margin-bottom: 20px;
+        }
+
+        .pillar-items li {
+            font-size: 13px;
+            color: var(--text-secondary);
+            padding: 6px 0;
+            border-bottom: 1px solid rgba(42, 42, 42, 0.5);
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .pillar-items li:last-child { border-bottom: none; }
+
+        .pillar-items li::before {
+            content: '\203A';
+            color: var(--elastic-accent);
+            font-size: 16px;
+            font-weight: 700;
+        }
+
+        .pillar-label {
+            display: inline-block;
+            font-size: 11px;
+            letter-spacing: 3px;
+            text-transform: uppercase;
+            padding: 5px 14px;
+            border: 1px solid var(--elastic-accent);
+            border-radius: 3px;
+            color: var(--elastic-accent);
+            font-weight: 700;
+            margin-top: 4px;
+        }
+
+        .slide-2-title {
+            font-size: 14px;
+            letter-spacing: 6px;
+            color: var(--text-dim);
+            text-transform: uppercase;
+            margin-bottom: 40px;
+        }
+
+        /* ── Slides 3 & 4 — Architecture ─────────────── */
+        .arch-slide {
+            padding: 48px 0 0 0;
+            justify-content: flex-start;
+            background: #0A1628;
+        }
+
+        .arch-slide .slide-bg {
+            display: none;
+        }
+
+        .arch-header {
+            background: linear-gradient(135deg, #002B5C, #0050AA);
+            padding: 12px 24px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            border-bottom: 2px solid #4A90D9;
+            flex-shrink: 0;
+            width: 100%;
+            z-index: 1;
+        }
+
+        .arch-header-brand h2 {
+            font-size: 1rem;
+            font-weight: 600;
+            letter-spacing: 0.5px;
+            color: #E8ECF1;
+            font-family: 'Segoe UI', -apple-system, sans-serif;
+        }
+
+        .arch-header-brand .arch-subtitle {
+            font-size: 0.75rem;
+            color: #8899AA;
+            font-weight: 400;
+            font-family: 'Segoe UI', -apple-system, sans-serif;
+        }
+
+        .arch-view-label {
+            font-size: 0.8rem;
+            font-weight: 600;
+            letter-spacing: 1px;
+            padding: 6px 16px;
+            border-radius: 8px;
+        }
+
+        .arch-view-label.fragmented {
+            background: rgba(17, 34, 64, 0.8);
+            border: 1px solid #1E3A5F;
+            color: #8899AA;
+        }
+
+        .arch-view-label.unified {
+            background: #00BFB3;
+            color: #0A1628;
+        }
+
+        .arch-diagram {
+            flex: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 16px 24px;
+            min-height: 0;
+            width: 100%;
+            z-index: 1;
+        }
+
+        .arch-svg {
+            width: 100%;
+            height: 100%;
+            max-height: calc(100vh - 80px);
+        }
+
+        .service-node {
+            cursor: pointer;
+            transition: filter 0.2s;
+        }
+
+        .service-node:hover {
+            filter: brightness(1.2);
+        }
+
+        /* ── Architecture Tooltip ────────────────────── */
+        .arch-tooltip {
+            display: none;
+            position: fixed;
+            z-index: 100;
+            width: 300px;
+            background: #112240;
+            border: 1px solid #1E3A5F;
+            border-radius: 10px;
+            padding: 16px;
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity 0.15s;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+        }
+
+        .arch-tooltip.visible {
+            display: block;
+            opacity: 1;
+        }
+
+        .tt-name {
+            font-size: 0.95rem;
+            font-weight: 600;
+            color: #E8ECF1;
+            margin-bottom: 8px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid #1E3A5F;
+            font-family: 'Segoe UI', -apple-system, sans-serif;
+        }
+
+        .tt-desc {
+            font-size: 0.8rem;
+            color: #8899AA;
+            line-height: 1.5;
+            margin-bottom: 12px;
+            font-family: 'Segoe UI', -apple-system, sans-serif;
+        }
+
+        .tt-section {
+            font-size: 0.65rem;
+            font-weight: 600;
+            color: #8899AA;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 6px;
+            font-family: 'Segoe UI', -apple-system, sans-serif;
+        }
+
+        .tt-tags {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 4px;
+        }
+
+        .tt-tag {
+            display: inline-block;
+            font-size: 0.7rem;
+            color: #E8ECF1;
+            background: rgba(74, 144, 217, 0.15);
+            border: 1px solid rgba(74, 144, 217, 0.25);
+            border-radius: 4px;
+            padding: 2px 8px;
+            font-family: 'Segoe UI', -apple-system, sans-serif;
+        }
+
+        .tt-tag[data-tool="appdynamics"] { background: rgba(0,180,216,0.15); border-color: rgba(0,180,216,0.3); }
+        .tt-tag[data-tool="splunk"]      { background: rgba(101,166,55,0.15); border-color: rgba(101,166,55,0.3); }
+        .tt-tag[data-tool="bmc"]         { background: rgba(249,115,22,0.15); border-color: rgba(249,115,22,0.3); }
+        .tt-tag[data-tool="aws"]         { background: rgba(255,153,0,0.15); border-color: rgba(255,153,0,0.3); }
+        .tt-tag[data-tool="azure"]       { background: rgba(0,137,214,0.15); border-color: rgba(0,137,214,0.3); }
+        .tt-tag[data-tool="gcp"]         { background: rgba(66,133,244,0.15); border-color: rgba(66,133,244,0.3); }
+        .tt-tag[data-tool="elastic"]     { background: rgba(0,191,179,0.15); border-color: rgba(0,191,179,0.3); }
+        .tt-tag[data-tool="other"]       { background: rgba(148,163,184,0.12); border-color: rgba(148,163,184,0.25); }
+
+        /* ── Slide 5 — Demo ──────────────────────────── */
+        .slide-5.active .slide-content {
+            animation: fadeInUp 0.8s ease forwards;
+        }
+
+        .demo-title {
+            font-size: 42px;
+            font-weight: 700;
+            color: #ffffff;
+            letter-spacing: 3px;
+            text-shadow: 0 0 40px rgba(255, 100, 0, 0.3);
+            margin-bottom: 12px;
+        }
+
+        .demo-desc {
+            font-size: 14px;
+            color: var(--text-secondary);
+            max-width: 600px;
+            margin: 0 auto 40px;
+            line-height: 1.7;
+        }
+
+        .demo-stats {
+            display: flex;
+            justify-content: center;
+            gap: 50px;
+            margin-bottom: 40px;
+        }
+
+        .demo-stat {
+            text-align: center;
+        }
+
+        .demo-stat-value {
+            font-size: 36px;
+            font-weight: 700;
+            color: var(--nominal);
+            text-shadow: 0 0 20px rgba(0, 255, 65, 0.3);
+        }
+
+        .demo-stat-label {
+            font-size: 10px;
+            letter-spacing: 3px;
+            text-transform: uppercase;
+            color: var(--text-dim);
+            margin-top: 4px;
+        }
+
+        .launch-btn {
+            display: inline-block;
+            padding: 16px 48px;
+            background: transparent;
+            border: 2px solid var(--nominal);
+            border-radius: 4px;
+            color: var(--nominal);
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 16px;
+            font-weight: 700;
+            letter-spacing: 4px;
+            text-transform: uppercase;
+            text-decoration: none;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            box-shadow: 0 0 20px rgba(0, 255, 65, 0.1);
+        }
+
+        .launch-btn:hover {
+            background: var(--nominal);
+            color: #000;
+            box-shadow: 0 0 40px rgba(0, 255, 65, 0.4), 0 0 80px rgba(0, 255, 65, 0.1);
+            transform: scale(1.05);
+        }
+
+        /* ── Navigation ─────────────────────────────── */
+        .slide-nav {
+            position: fixed;
+            bottom: 30px;
+            left: 50%;
+            transform: translateX(-50%);
+            display: flex;
+            gap: 16px;
+            z-index: 100;
+        }
+
+        .slide-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            border: 1px solid var(--text-dim);
+            background: transparent;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        .slide-dot.active {
+            background: var(--elastic-accent);
+            border-color: var(--elastic-accent);
+            box-shadow: 0 0 10px rgba(0, 191, 179, 0.5);
+        }
+
+        .slide-dot:hover {
+            border-color: var(--elastic-accent);
+        }
+
+        .slide-arrow {
+            position: fixed;
+            top: 50%;
+            transform: translateY(-50%);
+            z-index: 100;
+            width: 48px;
+            height: 48px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: rgba(26, 26, 26, 0.6);
+            border: 1px solid var(--border);
+            border-radius: 50%;
+            color: var(--text-secondary);
+            font-size: 20px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            backdrop-filter: blur(5px);
+            user-select: none;
+        }
+
+        .slide-arrow:hover {
+            background: rgba(26, 26, 26, 0.9);
+            border-color: var(--elastic-accent);
+            color: var(--elastic-accent);
+        }
+
+        .slide-arrow.prev { left: 24px; }
+        .slide-arrow.next { right: 24px; }
+
+        .back-link {
+            position: fixed;
+            top: 20px;
+            left: 24px;
+            z-index: 100;
+            font-size: 11px;
+            letter-spacing: 2px;
+            text-transform: uppercase;
+            color: var(--text-dim);
+            text-decoration: none;
+            transition: color 0.3s ease;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .back-link:hover {
+            color: var(--elastic-accent);
+        }
+
+        .slide-counter {
+            position: fixed;
+            top: 20px;
+            right: 24px;
+            z-index: 100;
+            font-size: 12px;
+            letter-spacing: 2px;
+            color: var(--text-dim);
+        }
+
+        /* ── Animations ──────────────────────────────── */
+        @keyframes fadeInUp {
+            from { opacity: 0; transform: translateY(30px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        /* ── Responsive ──────────────────────────────── */
+        @media (max-width: 900px) {
+            .slide-title { font-size: 32px; }
+            .pillars-grid { grid-template-columns: 1fr; max-width: 500px; }
+            .pillar { opacity: 1; transform: none; }
+            .demo-title { font-size: 28px; }
+            .demo-stats { gap: 24px; }
+            .demo-stat-value { font-size: 28px; }
+            .slide-content { padding: 20px; }
+            .slide-arrow { display: none; }
+        }
+    </style>
+</head>
+<body>
+
+    <!-- Back to landing -->
+    <a href="/home" class="back-link">&#8592; SCENARIO_NAME_PLACEHOLDER</a>
+
+    <!-- Slide counter -->
+    <div class="slide-counter"><span id="current-num">1</span> / 5</div>
+
+    <!-- Arrow navigation -->
+    <div class="slide-arrow prev" onclick="prevSlide()">&#8249;</div>
+    <div class="slide-arrow next" onclick="nextSlide()">&#8250;</div>
+
+    <!-- Slides -->
+    <div class="slides-container">
+
+        <!-- ══════════════════════════════════════════════════
+             Slide 1 — Title
+             ══════════════════════════════════════════════════ -->
+        <div class="slide slide-1 active" data-slide="0">
+            <div class="slide-bg slide-1-bg"></div>
+            <div class="slide-content">
+                <div class="slide-prefix">Elastic</div>
+                <div class="slide-title">
+                    <span class="highlight">AI-Powered</span><br>
+                    Observability Platform
+                </div>
+                <div class="slide-tagline">The foundation of AI-first Observability</div>
+                <div class="elastic-logo-text">elastic.co</div>
+            </div>
+        </div>
+
+        <!-- ══════════════════════════════════════════════════
+             Slide 2 — Three Pillars
+             ══════════════════════════════════════════════════ -->
+        <div class="slide slide-2" data-slide="1">
+            <div class="slide-bg slide-2-bg"></div>
+            <div class="slide-content">
+                <div class="slide-2-title">AI-Powered Observability Pillars</div>
+                <div class="pillars-grid">
+                    <div class="pillar">
+                        <div class="pillar-header">Context</div>
+                        <div class="pillar-tagline">AI can understand the system</div>
+                        <ul class="pillar-items">
+                            <li>Unify logs, metrics, traces</li>
+                            <li>Enrich with topology &amp; metadata</li>
+                            <li>Detect Significant Events</li>
+                        </ul>
+                        <span class="pillar-label">Knowledge</span>
+                    </div>
+                    <div class="pillar">
+                        <div class="pillar-header">Agentic</div>
+                        <div class="pillar-tagline">AI can act on behalf of the user</div>
+                        <ul class="pillar-items">
+                            <li>Automated Root Cause Analysis</li>
+                            <li>Propose fixes</li>
+                            <li>Trigger safe actions</li>
+                        </ul>
+                        <span class="pillar-label">Actions</span>
+                    </div>
+                    <div class="pillar">
+                        <div class="pillar-header">Workflow</div>
+                        <div class="pillar-tagline">AI can drive the process</div>
+                        <ul class="pillar-items">
+                            <li>Correlate signals</li>
+                            <li>Guide investigations</li>
+                            <li>Automate runbooks</li>
+                        </ul>
+                        <span class="pillar-label">Automation</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ══════════════════════════════════════════════════
+             Slide 3 — "Today" Architecture (Fragmented)
+             ══════════════════════════════════════════════════ -->
+        <div class="slide slide-3 arch-slide" data-slide="2">
+            <div class="slide-bg slide-arch-bg"></div>
+            <div class="arch-header">
+                <div class="arch-header-brand">
+                    <h2>SCENARIO_NAME_PLACEHOLDER</h2>
+                    <div class="arch-subtitle">5G Activation Platform &mdash; Service Architecture</div>
+                </div>
+                <span class="arch-view-label fragmented">Today</span>
+            </div>
+            <div class="arch-diagram">
+                <svg viewBox="0 0 1400 600" xmlns="http://www.w3.org/2000/svg" class="arch-svg" id="svg-fragmented">
+                    <defs>
+                        <marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5"
+                                markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                            <path d="M 0 1 L 10 5 L 0 9 z" fill="#64748b"/>
+                        </marker>
+                    </defs>
+
+                    <!-- Title -->
+                    <text x="700" y="30" text-anchor="middle" fill="#e2e8f0"
+                          font-size="18" font-weight="600"
+                          font-family="'Segoe UI', sans-serif">
+                        5G Activation &mdash; Request Flow
+                    </text>
+                    <text x="700" y="50" text-anchor="middle" fill="#64748b"
+                          font-size="13"
+                          font-family="'Segoe UI', sans-serif">
+                        9 services &#183; 3 cloud regions &#183; 4 monitoring tools
+                    </text>
+
+                    <!-- ── Arrows ───────────────────────────── -->
+                    <!-- Customer → Gateway -->
+                    <line x1="185" y1="295" x2="237" y2="295"
+                          stroke="#64748b" stroke-width="2" marker-end="url(#arrowhead)"/>
+                    <text x="211" y="282" text-anchor="middle" fill="#94a3b8"
+                          font-size="10" font-family="'Segoe UI', sans-serif">5G Activate</text>
+
+                    <!-- Gateway → Auth (up) -->
+                    <line x1="320" y1="248" x2="320" y2="180"
+                          stroke="#64748b" stroke-width="2" marker-end="url(#arrowhead)"/>
+                    <text x="334" y="218" fill="#94a3b8"
+                          font-size="10" font-family="'Segoe UI', sans-serif">validate</text>
+
+                    <!-- Auth → Identity DB (right) -->
+                    <line x1="400" y1="130" x2="462" y2="130"
+                          stroke="#64748b" stroke-width="2" marker-end="url(#arrowhead)"/>
+                    <text x="431" y="117" text-anchor="middle" fill="#94a3b8"
+                          font-size="10" font-family="'Segoe UI', sans-serif">lookup</text>
+
+                    <!-- Gateway → Activation -->
+                    <line x1="400" y1="295" x2="462" y2="295"
+                          stroke="#64748b" stroke-width="2" marker-end="url(#arrowhead)"/>
+                    <text x="431" y="282" text-anchor="middle" fill="#94a3b8"
+                          font-size="10" font-family="'Segoe UI', sans-serif">activate</text>
+
+                    <!-- Activation → Provisioning -->
+                    <line x1="625" y1="295" x2="697" y2="295"
+                          stroke="#64748b" stroke-width="2" marker-end="url(#arrowhead)"/>
+                    <text x="661" y="282" text-anchor="middle" fill="#94a3b8"
+                          font-size="10" font-family="'Segoe UI', sans-serif">provision</text>
+
+                    <!-- Activation → Notification (down) -->
+                    <line x1="545" y1="343" x2="545" y2="440"
+                          stroke="#64748b" stroke-width="2" marker-end="url(#arrowhead)"/>
+                    <text x="559" y="395" fill="#94a3b8"
+                          font-size="10" font-family="'Segoe UI', sans-serif">notify</text>
+
+                    <!-- Provisioning → Subscriber DB (down) -->
+                    <line x1="780" y1="343" x2="780" y2="440"
+                          stroke="#64748b" stroke-width="2" marker-end="url(#arrowhead)"/>
+                    <text x="794" y="395" fill="#94a3b8"
+                          font-size="10" font-family="'Segoe UI', sans-serif">query</text>
+
+                    <!-- Provisioning → Network -->
+                    <line x1="860" y1="295" x2="947" y2="295"
+                          stroke="#64748b" stroke-width="2" marker-end="url(#arrowhead)"/>
+                    <text x="903" y="282" text-anchor="middle" fill="#94a3b8"
+                          font-size="10" font-family="'Segoe UI', sans-serif">allocate</text>
+
+                    <!-- Network → BSS -->
+                    <line x1="1110" y1="295" x2="1197" y2="295"
+                          stroke="#64748b" stroke-width="2" marker-end="url(#arrowhead)"/>
+                    <text x="1153" y="282" text-anchor="middle" fill="#94a3b8"
+                          font-size="10" font-family="'Segoe UI', sans-serif">bill</text>
+
+                    <!-- ── Service Boxes ────────────────────── -->
+
+                    <!-- Customer -->
+                    <g class="service-node" data-service="customer" data-view="fragmented">
+                        <rect x="25" y="248" width="160" height="95" rx="10"
+                              fill="#059669" stroke="#047857" stroke-width="2"/>
+                        <text x="105" y="286" text-anchor="middle" fill="white"
+                              font-size="15" font-weight="600" font-family="'Segoe UI', sans-serif">Customer</text>
+                        <text x="105" y="306" text-anchor="middle" fill="rgba(255,255,255,0.7)"
+                              font-size="12" font-family="'Segoe UI', sans-serif">O2 Mobile App</text>
+                    </g>
+
+                    <!-- API Gateway -->
+                    <g class="service-node" data-service="api-gateway" data-view="fragmented">
+                        <rect x="240" y="248" width="160" height="95" rx="10"
+                              fill="#2563eb" stroke="#1d4ed8" stroke-width="2"/>
+                        <text x="320" y="280" text-anchor="middle" fill="white"
+                              font-size="15" font-weight="600" font-family="'Segoe UI', sans-serif">API Gateway</text>
+                        <text x="320" y="300" text-anchor="middle" fill="rgba(255,255,255,0.7)"
+                              font-size="12" font-family="'Segoe UI', sans-serif">Go</text>
+                        <text x="320" y="330" text-anchor="middle" fill="rgba(255,255,255,0.4)"
+                              font-size="10" font-family="'Segoe UI', sans-serif">AWS eu-central-1</text>
+                    </g>
+
+                    <!-- Auth Service -->
+                    <g class="service-node" data-service="auth-service" data-view="fragmented">
+                        <rect x="240" y="83" width="160" height="95" rx="10"
+                              fill="#7c3aed" stroke="#6d28d9" stroke-width="2"/>
+                        <text x="320" y="115" text-anchor="middle" fill="white"
+                              font-size="15" font-weight="600" font-family="'Segoe UI', sans-serif">Auth Service</text>
+                        <text x="320" y="135" text-anchor="middle" fill="rgba(255,255,255,0.7)"
+                              font-size="12" font-family="'Segoe UI', sans-serif">Python &middot; Azure AD</text>
+                        <text x="320" y="165" text-anchor="middle" fill="rgba(255,255,255,0.4)"
+                              font-size="10" font-family="'Segoe UI', sans-serif">Azure westeurope</text>
+                    </g>
+
+                    <!-- Identity DB -->
+                    <g class="service-node" data-service="identity-db" data-view="fragmented">
+                        <rect x="465" y="83" width="160" height="95" rx="10"
+                              fill="#7c3aed" stroke="#6d28d9" stroke-width="2"/>
+                        <text x="545" y="115" text-anchor="middle" fill="white"
+                              font-size="15" font-weight="600" font-family="'Segoe UI', sans-serif">Identity DB</text>
+                        <text x="545" y="135" text-anchor="middle" fill="rgba(255,255,255,0.7)"
+                              font-size="12" font-family="'Segoe UI', sans-serif">PostgreSQL</text>
+                        <text x="545" y="165" text-anchor="middle" fill="rgba(255,255,255,0.4)"
+                              font-size="10" font-family="'Segoe UI', sans-serif">Azure westeurope</text>
+                    </g>
+
+                    <!-- Activation Service -->
+                    <g class="service-node" data-service="activation-service" data-view="fragmented">
+                        <rect x="465" y="248" width="160" height="95" rx="10"
+                              fill="#f59e0b" stroke="#d97706" stroke-width="2"/>
+                        <text x="545" y="280" text-anchor="middle" fill="#1e293b"
+                              font-size="14" font-weight="600" font-family="'Segoe UI', sans-serif">Activation Service</text>
+                        <text x="545" y="300" text-anchor="middle" fill="rgba(30,41,59,0.7)"
+                              font-size="12" font-family="'Segoe UI', sans-serif">Java</text>
+                        <text x="545" y="330" text-anchor="middle" fill="rgba(30,41,59,0.5)"
+                              font-size="10" font-family="'Segoe UI', sans-serif">AWS eu-central-1</text>
+                    </g>
+
+                    <!-- Notification Service -->
+                    <g class="service-node" data-service="notification-service" data-view="fragmented">
+                        <rect x="465" y="443" width="160" height="95" rx="10"
+                              fill="#8b5cf6" stroke="#7c3aed" stroke-width="2"/>
+                        <text x="545" y="475" text-anchor="middle" fill="white"
+                              font-size="14" font-weight="600" font-family="'Segoe UI', sans-serif">Notification</text>
+                        <text x="545" y="495" text-anchor="middle" fill="rgba(255,255,255,0.7)"
+                              font-size="12" font-family="'Segoe UI', sans-serif">Python</text>
+                        <text x="545" y="525" text-anchor="middle" fill="rgba(255,255,255,0.4)"
+                              font-size="10" font-family="'Segoe UI', sans-serif">GCP europe-west3</text>
+                    </g>
+
+                    <!-- Provisioning Service -->
+                    <g class="service-node" data-service="provisioning-service" data-view="fragmented">
+                        <rect x="700" y="248" width="160" height="95" rx="10"
+                              fill="#ea580c" stroke="#c2410c" stroke-width="2"/>
+                        <text x="780" y="280" text-anchor="middle" fill="white"
+                              font-size="15" font-weight="600" font-family="'Segoe UI', sans-serif">Provisioning</text>
+                        <text x="780" y="300" text-anchor="middle" fill="rgba(255,255,255,0.7)"
+                              font-size="12" font-family="'Segoe UI', sans-serif">Java</text>
+                        <text x="780" y="330" text-anchor="middle" fill="rgba(255,255,255,0.4)"
+                              font-size="10" font-family="'Segoe UI', sans-serif">GCP europe-west3</text>
+                    </g>
+
+                    <!-- Subscriber DB -->
+                    <g class="service-node" data-service="subscriber-db" data-view="fragmented">
+                        <rect x="700" y="443" width="160" height="95" rx="10"
+                              fill="#2563eb" stroke="#1d4ed8" stroke-width="2"/>
+                        <text x="780" y="475" text-anchor="middle" fill="white"
+                              font-size="15" font-weight="600" font-family="'Segoe UI', sans-serif">Subscriber DB</text>
+                        <text x="780" y="495" text-anchor="middle" fill="rgba(255,255,255,0.7)"
+                              font-size="12" font-family="'Segoe UI', sans-serif">PostgreSQL &middot; 45M rows</text>
+                        <text x="780" y="525" text-anchor="middle" fill="rgba(255,255,255,0.4)"
+                              font-size="10" font-family="'Segoe UI', sans-serif">AWS eu-central-1</text>
+                    </g>
+
+                    <!-- Network Core -->
+                    <g class="service-node" data-service="network-core" data-view="fragmented">
+                        <rect x="950" y="248" width="160" height="95" rx="10"
+                              fill="#0d9488" stroke="#0f766e" stroke-width="2"/>
+                        <text x="1030" y="280" text-anchor="middle" fill="white"
+                              font-size="15" font-weight="600" font-family="'Segoe UI', sans-serif">Network Core</text>
+                        <text x="1030" y="300" text-anchor="middle" fill="rgba(255,255,255,0.7)"
+                              font-size="12" font-family="'Segoe UI', sans-serif">C++ &middot; 5G NE</text>
+                        <text x="1030" y="330" text-anchor="middle" fill="rgba(255,255,255,0.4)"
+                              font-size="10" font-family="'Segoe UI', sans-serif">On-Prem Munich DC1</text>
+                    </g>
+
+                    <!-- BSS Billing -->
+                    <g class="service-node" data-service="bss-billing" data-view="fragmented">
+                        <rect x="1200" y="248" width="160" height="95" rx="10"
+                              fill="#2563eb" stroke="#1d4ed8" stroke-width="2"/>
+                        <text x="1280" y="280" text-anchor="middle" fill="white"
+                              font-size="15" font-weight="600" font-family="'Segoe UI', sans-serif">BSS Billing</text>
+                        <text x="1280" y="300" text-anchor="middle" fill="rgba(255,255,255,0.7)"
+                              font-size="12" font-family="'Segoe UI', sans-serif">Java</text>
+                        <text x="1280" y="330" text-anchor="middle" fill="rgba(255,255,255,0.4)"
+                              font-size="10" font-family="'Segoe UI', sans-serif">AWS eu-central-1</text>
+                    </g>
+
+                    <!-- Legend -->
+                    <g transform="translate(25, 585)">
+                        <text x="0" y="0" fill="#64748b" font-size="11" font-weight="600"
+                              letter-spacing="1" font-family="'Segoe UI', sans-serif">
+                            INVESTIGATION: 4 tools &#183; 3 teams &#183; ~45 min MTTR
+                        </text>
+                    </g>
+                </svg>
+            </div>
+        </div>
+
+        <!-- ══════════════════════════════════════════════════
+             Slide 4 — "With Elastic" Architecture (Unified)
+             ══════════════════════════════════════════════════ -->
+        <div class="slide slide-4 arch-slide" data-slide="3">
+            <div class="slide-bg slide-arch-bg"></div>
+            <div class="arch-header">
+                <div class="arch-header-brand">
+                    <h2>SCENARIO_NAME_PLACEHOLDER</h2>
+                    <div class="arch-subtitle">5G Activation Platform &mdash; Service Architecture</div>
+                </div>
+                <span class="arch-view-label unified">With Elastic</span>
+            </div>
+            <div class="arch-diagram">
+                <svg viewBox="0 0 1400 600" xmlns="http://www.w3.org/2000/svg" class="arch-svg" id="svg-unified">
+                    <defs>
+                        <marker id="arrowhead2" viewBox="0 0 10 10" refX="9" refY="5"
+                                markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                            <path d="M 0 1 L 10 5 L 0 9 z" fill="#64748b"/>
+                        </marker>
+                    </defs>
+
+                    <!-- Title -->
+                    <text x="700" y="30" text-anchor="middle" fill="#e2e8f0"
+                          font-size="18" font-weight="600"
+                          font-family="'Segoe UI', sans-serif">
+                        5G Activation &mdash; Request Flow
+                    </text>
+                    <text x="700" y="50" text-anchor="middle" fill="#64748b"
+                          font-size="13"
+                          font-family="'Segoe UI', sans-serif">
+                        9 services &#183; 3 cloud regions &#183; 1 observability platform
+                    </text>
+
+                    <!-- ── Arrows (same layout) ────────────── -->
+                    <line x1="185" y1="295" x2="237" y2="295" stroke="#64748b" stroke-width="2" marker-end="url(#arrowhead2)"/>
+                    <text x="211" y="282" text-anchor="middle" fill="#94a3b8" font-size="10" font-family="'Segoe UI', sans-serif">5G Activate</text>
+
+                    <line x1="320" y1="248" x2="320" y2="180" stroke="#64748b" stroke-width="2" marker-end="url(#arrowhead2)"/>
+                    <text x="334" y="218" fill="#94a3b8" font-size="10" font-family="'Segoe UI', sans-serif">validate</text>
+
+                    <line x1="400" y1="130" x2="462" y2="130" stroke="#64748b" stroke-width="2" marker-end="url(#arrowhead2)"/>
+                    <text x="431" y="117" text-anchor="middle" fill="#94a3b8" font-size="10" font-family="'Segoe UI', sans-serif">lookup</text>
+
+                    <line x1="400" y1="295" x2="462" y2="295" stroke="#64748b" stroke-width="2" marker-end="url(#arrowhead2)"/>
+                    <text x="431" y="282" text-anchor="middle" fill="#94a3b8" font-size="10" font-family="'Segoe UI', sans-serif">activate</text>
+
+                    <line x1="625" y1="295" x2="697" y2="295" stroke="#64748b" stroke-width="2" marker-end="url(#arrowhead2)"/>
+                    <text x="661" y="282" text-anchor="middle" fill="#94a3b8" font-size="10" font-family="'Segoe UI', sans-serif">provision</text>
+
+                    <line x1="545" y1="343" x2="545" y2="440" stroke="#64748b" stroke-width="2" marker-end="url(#arrowhead2)"/>
+                    <text x="559" y="395" fill="#94a3b8" font-size="10" font-family="'Segoe UI', sans-serif">notify</text>
+
+                    <line x1="780" y1="343" x2="780" y2="440" stroke="#64748b" stroke-width="2" marker-end="url(#arrowhead2)"/>
+                    <text x="794" y="395" fill="#94a3b8" font-size="10" font-family="'Segoe UI', sans-serif">query</text>
+
+                    <line x1="860" y1="295" x2="947" y2="295" stroke="#64748b" stroke-width="2" marker-end="url(#arrowhead2)"/>
+                    <text x="903" y="282" text-anchor="middle" fill="#94a3b8" font-size="10" font-family="'Segoe UI', sans-serif">allocate</text>
+
+                    <line x1="1110" y1="295" x2="1197" y2="295" stroke="#64748b" stroke-width="2" marker-end="url(#arrowhead2)"/>
+                    <text x="1153" y="282" text-anchor="middle" fill="#94a3b8" font-size="10" font-family="'Segoe UI', sans-serif">bill</text>
+
+                    <!-- ── Service Boxes (identical layout) ─── -->
+                    <g class="service-node" data-service="customer" data-view="unified">
+                        <rect x="25" y="248" width="160" height="95" rx="10" fill="#059669" stroke="#047857" stroke-width="2"/>
+                        <text x="105" y="286" text-anchor="middle" fill="white" font-size="15" font-weight="600" font-family="'Segoe UI', sans-serif">Customer</text>
+                        <text x="105" y="306" text-anchor="middle" fill="rgba(255,255,255,0.7)" font-size="12" font-family="'Segoe UI', sans-serif">O2 Mobile App</text>
+                    </g>
+
+                    <g class="service-node" data-service="api-gateway" data-view="unified">
+                        <rect x="240" y="248" width="160" height="95" rx="10" fill="#2563eb" stroke="#1d4ed8" stroke-width="2"/>
+                        <text x="320" y="280" text-anchor="middle" fill="white" font-size="15" font-weight="600" font-family="'Segoe UI', sans-serif">API Gateway</text>
+                        <text x="320" y="300" text-anchor="middle" fill="rgba(255,255,255,0.7)" font-size="12" font-family="'Segoe UI', sans-serif">Go</text>
+                        <text x="320" y="330" text-anchor="middle" fill="rgba(255,255,255,0.4)" font-size="10" font-family="'Segoe UI', sans-serif">AWS eu-central-1</text>
+                    </g>
+
+                    <g class="service-node" data-service="auth-service" data-view="unified">
+                        <rect x="240" y="83" width="160" height="95" rx="10" fill="#7c3aed" stroke="#6d28d9" stroke-width="2"/>
+                        <text x="320" y="115" text-anchor="middle" fill="white" font-size="15" font-weight="600" font-family="'Segoe UI', sans-serif">Auth Service</text>
+                        <text x="320" y="135" text-anchor="middle" fill="rgba(255,255,255,0.7)" font-size="12" font-family="'Segoe UI', sans-serif">Python &middot; Azure AD</text>
+                        <text x="320" y="165" text-anchor="middle" fill="rgba(255,255,255,0.4)" font-size="10" font-family="'Segoe UI', sans-serif">Azure westeurope</text>
+                    </g>
+
+                    <g class="service-node" data-service="identity-db" data-view="unified">
+                        <rect x="465" y="83" width="160" height="95" rx="10" fill="#7c3aed" stroke="#6d28d9" stroke-width="2"/>
+                        <text x="545" y="115" text-anchor="middle" fill="white" font-size="15" font-weight="600" font-family="'Segoe UI', sans-serif">Identity DB</text>
+                        <text x="545" y="135" text-anchor="middle" fill="rgba(255,255,255,0.7)" font-size="12" font-family="'Segoe UI', sans-serif">PostgreSQL</text>
+                        <text x="545" y="165" text-anchor="middle" fill="rgba(255,255,255,0.4)" font-size="10" font-family="'Segoe UI', sans-serif">Azure westeurope</text>
+                    </g>
+
+                    <g class="service-node" data-service="activation-service" data-view="unified">
+                        <rect x="465" y="248" width="160" height="95" rx="10" fill="#f59e0b" stroke="#d97706" stroke-width="2"/>
+                        <text x="545" y="280" text-anchor="middle" fill="#1e293b" font-size="14" font-weight="600" font-family="'Segoe UI', sans-serif">Activation Service</text>
+                        <text x="545" y="300" text-anchor="middle" fill="rgba(30,41,59,0.7)" font-size="12" font-family="'Segoe UI', sans-serif">Java</text>
+                        <text x="545" y="330" text-anchor="middle" fill="rgba(30,41,59,0.5)" font-size="10" font-family="'Segoe UI', sans-serif">AWS eu-central-1</text>
+                    </g>
+
+                    <g class="service-node" data-service="notification-service" data-view="unified">
+                        <rect x="465" y="443" width="160" height="95" rx="10" fill="#8b5cf6" stroke="#7c3aed" stroke-width="2"/>
+                        <text x="545" y="475" text-anchor="middle" fill="white" font-size="14" font-weight="600" font-family="'Segoe UI', sans-serif">Notification</text>
+                        <text x="545" y="495" text-anchor="middle" fill="rgba(255,255,255,0.7)" font-size="12" font-family="'Segoe UI', sans-serif">Python</text>
+                        <text x="545" y="525" text-anchor="middle" fill="rgba(255,255,255,0.4)" font-size="10" font-family="'Segoe UI', sans-serif">GCP europe-west3</text>
+                    </g>
+
+                    <g class="service-node" data-service="provisioning-service" data-view="unified">
+                        <rect x="700" y="248" width="160" height="95" rx="10" fill="#ea580c" stroke="#c2410c" stroke-width="2"/>
+                        <text x="780" y="280" text-anchor="middle" fill="white" font-size="15" font-weight="600" font-family="'Segoe UI', sans-serif">Provisioning</text>
+                        <text x="780" y="300" text-anchor="middle" fill="rgba(255,255,255,0.7)" font-size="12" font-family="'Segoe UI', sans-serif">Java</text>
+                        <text x="780" y="330" text-anchor="middle" fill="rgba(255,255,255,0.4)" font-size="10" font-family="'Segoe UI', sans-serif">GCP europe-west3</text>
+                    </g>
+
+                    <g class="service-node" data-service="subscriber-db" data-view="unified">
+                        <rect x="700" y="443" width="160" height="95" rx="10" fill="#2563eb" stroke="#1d4ed8" stroke-width="2"/>
+                        <text x="780" y="475" text-anchor="middle" fill="white" font-size="15" font-weight="600" font-family="'Segoe UI', sans-serif">Subscriber DB</text>
+                        <text x="780" y="495" text-anchor="middle" fill="rgba(255,255,255,0.7)" font-size="12" font-family="'Segoe UI', sans-serif">PostgreSQL &middot; 45M rows</text>
+                        <text x="780" y="525" text-anchor="middle" fill="rgba(255,255,255,0.4)" font-size="10" font-family="'Segoe UI', sans-serif">AWS eu-central-1</text>
+                    </g>
+
+                    <g class="service-node" data-service="network-core" data-view="unified">
+                        <rect x="950" y="248" width="160" height="95" rx="10" fill="#0d9488" stroke="#0f766e" stroke-width="2"/>
+                        <text x="1030" y="280" text-anchor="middle" fill="white" font-size="15" font-weight="600" font-family="'Segoe UI', sans-serif">Network Core</text>
+                        <text x="1030" y="300" text-anchor="middle" fill="rgba(255,255,255,0.7)" font-size="12" font-family="'Segoe UI', sans-serif">C++ &middot; 5G NE</text>
+                        <text x="1030" y="330" text-anchor="middle" fill="rgba(255,255,255,0.4)" font-size="10" font-family="'Segoe UI', sans-serif">On-Prem Munich DC1</text>
+                    </g>
+
+                    <g class="service-node" data-service="bss-billing" data-view="unified">
+                        <rect x="1200" y="248" width="160" height="95" rx="10" fill="#2563eb" stroke="#1d4ed8" stroke-width="2"/>
+                        <text x="1280" y="280" text-anchor="middle" fill="white" font-size="15" font-weight="600" font-family="'Segoe UI', sans-serif">BSS Billing</text>
+                        <text x="1280" y="300" text-anchor="middle" fill="rgba(255,255,255,0.7)" font-size="12" font-family="'Segoe UI', sans-serif">Java</text>
+                        <text x="1280" y="330" text-anchor="middle" fill="rgba(255,255,255,0.4)" font-size="10" font-family="'Segoe UI', sans-serif">AWS eu-central-1</text>
+                    </g>
+
+                    <!-- Legend -->
+                    <g transform="translate(25, 585)">
+                        <text x="0" y="0" fill="#00BFB3" font-size="11" font-weight="600"
+                              letter-spacing="1" font-family="'Segoe UI', sans-serif">
+                            INVESTIGATION: 1 platform &#183; AI-assisted &#183; ~5 min MTTR
+                        </text>
+                    </g>
+                </svg>
+            </div>
+        </div>
+
+        <!-- ══════════════════════════════════════════════════
+             Slide 5 — Demo Launch
+             ══════════════════════════════════════════════════ -->
+        <div class="slide slide-5" data-slide="4">
+            <div class="slide-bg slide-5-bg"></div>
+            <div class="slide-content">
+                <div class="slide-prefix">Live Demo</div>
+                <div class="demo-title">SCENARIO_NAME_PLACEHOLDER</div>
+                <div class="demo-desc">SCENARIO_DESC_PLACEHOLDER</div>
+                <div class="demo-stats">
+                    <div class="demo-stat">
+                        <div class="demo-stat-value">9</div>
+                        <div class="demo-stat-label">Services</div>
+                    </div>
+                    <div class="demo-stat">
+                        <div class="demo-stat-value">20</div>
+                        <div class="demo-stat-label">Fault Channels</div>
+                    </div>
+                    <div class="demo-stat">
+                        <div class="demo-stat-value">3</div>
+                        <div class="demo-stat-label">Clouds</div>
+                    </div>
+                </div>
+                <a href="KIBANA_URL_PLACEHOLDER/app/apm/service-map" class="launch-btn" target="_blank" rel="noopener">Open Service Map</a>
+            </div>
+        </div>
+
+    </div>
+
+    <!-- Dot navigation -->
+    <div class="slide-nav">
+        <div class="slide-dot active" data-target="0" onclick="goToSlide(0)"></div>
+        <div class="slide-dot" data-target="1" onclick="goToSlide(1)"></div>
+        <div class="slide-dot" data-target="2" onclick="goToSlide(2)"></div>
+        <div class="slide-dot" data-target="3" onclick="goToSlide(3)"></div>
+        <div class="slide-dot" data-target="4" onclick="goToSlide(4)"></div>
+    </div>
+
+    <!-- Architecture Tooltip (shared by slides 3 & 4) -->
+    <div class="arch-tooltip" id="arch-tooltip"></div>
+
+    <script>
+        // ── Service metadata for tooltips ─────────────────────────────────
+        var SERVICES = {
+            'customer': {
+                name: 'Customer \u2014 O2 Mobile App',
+                desc: 'End-user mobile application for O2 Germany subscribers. Initiates 5G SIM activation requests via the API Gateway.',
+                fragmented: [
+                    { tool: 'other', label: 'Firebase Analytics \u00b7 Mobile telemetry' },
+                    { tool: 'other', label: 'No backend correlation' }
+                ],
+                unified: [
+                    { tool: 'elastic', label: 'Elastic RUM \u00b7 Real User Monitoring' },
+                    { tool: 'elastic', label: 'Synthetics \u00b7 Uptime & availability' }
+                ]
+            },
+            'api-gateway': {
+                name: 'API Gateway \u2014 Go',
+                desc: 'Single entry point for all API traffic. Validates auth tokens via the Auth Service, applies rate limiting, then routes activation requests downstream.',
+                fragmented: [
+                    { tool: 'appdynamics', label: 'AppDynamics \u00b7 Request tracing' },
+                    { tool: 'aws', label: 'AWS CloudWatch \u00b7 Gateway metrics' },
+                    { tool: 'splunk', label: 'Splunk \u00b7 Access log aggregation' }
+                ],
+                unified: [
+                    { tool: 'elastic', label: 'APM Service Map \u00b7 E2E request flow' },
+                    { tool: 'elastic', label: 'Distributed Traces \u00b7 Full waterfall' },
+                    { tool: 'elastic', label: 'Logs \u00b7 Correlated with trace context' },
+                    { tool: 'elastic', label: 'Infrastructure \u00b7 Host metrics' }
+                ]
+            },
+            'auth-service': {
+                name: 'Auth Service \u2014 Python / Azure AD',
+                desc: 'Validates OAuth2 bearer tokens and resolves subscriber identity via Azure Active Directory.',
+                fragmented: [
+                    { tool: 'azure', label: 'Azure Monitor \u00b7 Service health' },
+                    { tool: 'appdynamics', label: 'AppDynamics \u00b7 Request tracing' },
+                    { tool: 'splunk', label: 'Splunk \u00b7 Auth failure logs' }
+                ],
+                unified: [
+                    { tool: 'elastic', label: 'APM Service Map \u00b7 Auth dependencies' },
+                    { tool: 'elastic', label: 'Distributed Traces \u00b7 Auth flow latency' },
+                    { tool: 'elastic', label: 'Logs \u00b7 Auth failures with trace ID' }
+                ]
+            },
+            'identity-db': {
+                name: 'Identity DB \u2014 PostgreSQL',
+                desc: 'Identity store for Azure AD token resolution. Queried by Auth Service for subscriber identity lookup and session validation.',
+                fragmented: [
+                    { tool: 'azure', label: 'Azure Monitor \u00b7 DB metrics' },
+                    { tool: 'splunk', label: 'Splunk \u00b7 Query logs' }
+                ],
+                unified: [
+                    { tool: 'elastic', label: 'Infrastructure Metrics \u00b7 DB latency' },
+                    { tool: 'elastic', label: 'Logs \u00b7 Query correlation with trace ID' }
+                ]
+            },
+            'activation-service': {
+                name: 'Activation Service \u2014 Java',
+                desc: 'Orchestrates the end-to-end 5G activation workflow using a saga pattern. Coordinates provisioning, network allocation, and billing.',
+                fragmented: [
+                    { tool: 'appdynamics', label: 'AppDynamics \u00b7 Java APM & errors' },
+                    { tool: 'aws', label: 'AWS CloudWatch \u00b7 ECS task metrics' },
+                    { tool: 'splunk', label: 'Splunk \u00b7 Application logs' }
+                ],
+                unified: [
+                    { tool: 'elastic', label: 'APM Service Map \u00b7 Saga orchestration' },
+                    { tool: 'elastic', label: 'Distributed Traces \u00b7 Cross-service waterfall' },
+                    { tool: 'elastic', label: 'ML Anomaly Detection \u00b7 Error rate baseline' },
+                    { tool: 'elastic', label: 'Logs \u00b7 Error correlation' }
+                ]
+            },
+            'notification-service': {
+                name: 'Notification Service \u2014 Python',
+                desc: 'Handles SMS, push notification, email, and MVNO webhook delivery for activation status updates and alerts.',
+                fragmented: [
+                    { tool: 'gcp', label: 'GCP Cloud Monitoring \u00b7 Function metrics' },
+                    { tool: 'splunk', label: 'Splunk \u00b7 Delivery logs' },
+                    { tool: 'other', label: 'Twilio Dashboard \u00b7 SMS delivery rates' }
+                ],
+                unified: [
+                    { tool: 'elastic', label: 'APM Service Map \u00b7 Delivery pipeline' },
+                    { tool: 'elastic', label: 'Distributed Traces \u00b7 End-to-end flow' },
+                    { tool: 'elastic', label: 'Logs \u00b7 Delivery status with trace ID' }
+                ]
+            },
+            'provisioning-service': {
+                name: 'Provisioning Service \u2014 Java',
+                desc: 'Provisions subscriber records for 5G activation. Queries the Subscriber DB for eligibility, then requests network resource allocation.',
+                fragmented: [
+                    { tool: 'appdynamics', label: 'AppDynamics \u00b7 Java APM & timeouts' },
+                    { tool: 'gcp', label: 'GCP Cloud Monitoring \u00b7 Compute metrics' },
+                    { tool: 'splunk', label: 'Splunk \u00b7 Application logs' }
+                ],
+                unified: [
+                    { tool: 'elastic', label: 'APM Service Map \u00b7 DB & network deps' },
+                    { tool: 'elastic', label: 'Distributed Traces \u00b7 Timeout visibility' },
+                    { tool: 'elastic', label: 'Alerting \u00b7 Connection pool thresholds' },
+                    { tool: 'elastic', label: 'Logs \u00b7 Retry & slow query correlation' }
+                ]
+            },
+            'subscriber-db': {
+                name: 'Subscriber DB \u2014 PostgreSQL',
+                desc: 'Primary subscriber database with 45M records on AWS Aurora. Handles all subscriber lookups for provisioning and activation.',
+                fragmented: [
+                    { tool: 'aws', label: 'AWS CloudWatch \u00b7 RDS instance metrics' },
+                    { tool: 'splunk', label: 'Splunk \u00b7 Slow query logs' },
+                    { tool: 'aws', label: 'RDS Performance Insights \u00b7 Query profiling' }
+                ],
+                unified: [
+                    { tool: 'elastic', label: 'Infrastructure Metrics \u00b7 DB latency p50/p99' },
+                    { tool: 'elastic', label: 'ML Anomaly Detection \u00b7 Latency spike detection' },
+                    { tool: 'elastic', label: 'Logs \u00b7 CloudTrail change events' },
+                    { tool: 'elastic', label: 'AI Assistant \u00b7 Root cause analysis' }
+                ]
+            },
+            'network-core': {
+                name: 'Network Core \u2014 C++ / 5G NE',
+                desc: '5G network element controller. Allocates radio resources, network slices, and IP addresses to newly activated subscribers.',
+                fragmented: [
+                    { tool: 'bmc', label: 'BMC \u00b7 Infrastructure & SNMP' },
+                    { tool: 'other', label: 'Custom NMS \u00b7 Network element mgmt' },
+                    { tool: 'splunk', label: 'Splunk \u00b7 Syslog aggregation' }
+                ],
+                unified: [
+                    { tool: 'elastic', label: 'APM Service Map \u00b7 Network allocation' },
+                    { tool: 'elastic', label: 'Distributed Traces \u00b7 Resource allocation' },
+                    { tool: 'elastic', label: 'Network Flow Logs \u00b7 Traffic analysis' },
+                    { tool: 'elastic', label: 'Infrastructure Inventory \u00b7 Host metrics' }
+                ]
+            },
+            'bss-billing': {
+                name: 'BSS Billing \u2014 Java',
+                desc: 'Business Support System. Records activation events for billing, generates CDRs, and handles revenue assurance.',
+                fragmented: [
+                    { tool: 'elastic', label: 'Elastic \u00b7 1 of 10 apps on Elastic today' },
+                    { tool: 'appdynamics', label: 'AppDynamics \u00b7 Transaction tracing' },
+                    { tool: 'aws', label: 'AWS CloudWatch \u00b7 Infrastructure' }
+                ],
+                unified: [
+                    { tool: 'elastic', label: 'APM Service Map \u00b7 Billing pipeline' },
+                    { tool: 'elastic', label: 'Distributed Traces \u00b7 Transaction tracing' },
+                    { tool: 'elastic', label: 'Logs \u00b7 Billing event audit trail' }
+                ]
+            }
+        };
+
+        // ── Slide navigation ────────────────────────────────────────────
+        var currentSlide = 0;
+        var totalSlides = 5;
+        var slides = document.querySelectorAll('.slide');
+        var dots = document.querySelectorAll('.slide-dot');
+        var counter = document.getElementById('current-num');
+        var transitioning = false;
+
+        function goToSlide(n) {
+            if (transitioning || n === currentSlide || n < 0 || n >= totalSlides) return;
+            transitioning = true;
+            hideArchTooltip();
+
+            slides[currentSlide].classList.remove('active');
+            dots[currentSlide].classList.remove('active');
+
+            currentSlide = n;
+
+            slides[currentSlide].classList.add('active');
+            dots[currentSlide].classList.add('active');
+            counter.textContent = currentSlide + 1;
+
+            setTimeout(function() { transitioning = false; }, 800);
+        }
+
+        function nextSlide() {
+            if (currentSlide < totalSlides - 1) goToSlide(currentSlide + 1);
+        }
+
+        function prevSlide() {
+            if (currentSlide > 0) goToSlide(currentSlide - 1);
+        }
+
+        // Keyboard
+        document.addEventListener('keydown', function(e) {
+            if (e.key === 'ArrowRight' || e.key === ' ') {
+                e.preventDefault();
+                nextSlide();
+            } else if (e.key === 'ArrowLeft') {
+                e.preventDefault();
+                prevSlide();
+            } else if (e.key === 'Escape') {
+                window.location.href = '/home';
+            }
+        });
+
+        // Click navigation
+        document.addEventListener('click', function(e) {
+            if (e.target.closest('a, button, .slide-dot, .slide-arrow, .back-link, .service-node')) return;
+            var x = e.clientX;
+            var w = window.innerWidth;
+            if (x > w * 0.6) nextSlide();
+            else if (x < w * 0.4) prevSlide();
+        });
+
+        // Touch swipe
+        var touchStartX = 0;
+        document.addEventListener('touchstart', function(e) {
+            touchStartX = e.changedTouches[0].screenX;
+        });
+        document.addEventListener('touchend', function(e) {
+            var diff = touchStartX - e.changedTouches[0].screenX;
+            if (Math.abs(diff) > 50) {
+                if (diff > 0) nextSlide();
+                else prevSlide();
+            }
+        });
+
+        // ── Architecture tooltip logic ──────────────────────────────────
+        var archTooltip = document.getElementById('arch-tooltip');
+
+        function showArchTooltip(serviceKey, view, g) {
+            var info = SERVICES[serviceKey];
+            if (!info) return;
+
+            var monitors = info[view] || [];
+            var sectionLabel = view === 'fragmented'
+                ? 'Currently monitored by'
+                : 'Unified in Elastic';
+
+            archTooltip.innerHTML =
+                '<div class="tt-name">' + info.name + '</div>' +
+                '<div class="tt-desc">' + info.desc + '</div>' +
+                '<div class="tt-section">' + sectionLabel + '</div>' +
+                '<div class="tt-tags">' +
+                    monitors.map(function(m) {
+                        return '<span class="tt-tag" data-tool="' + m.tool + '">' + m.label + '</span>';
+                    }).join('') +
+                '</div>';
+
+            archTooltip.style.left = '-9999px';
+            archTooltip.classList.add('visible');
+
+            var rect = g.getBoundingClientRect();
+            var ttRect = archTooltip.getBoundingClientRect();
+            var vw = window.innerWidth;
+            var vh = window.innerHeight;
+
+            var left;
+            if (rect.right + ttRect.width + 16 < vw) {
+                left = rect.right + 12;
+            } else {
+                left = rect.left - ttRect.width - 12;
+            }
+
+            var top = rect.top + (rect.height / 2) - (ttRect.height / 2);
+            top = Math.max(8, Math.min(top, vh - ttRect.height - 8));
+
+            archTooltip.style.left = left + 'px';
+            archTooltip.style.top = top + 'px';
+        }
+
+        function hideArchTooltip() {
+            archTooltip.classList.remove('visible');
+        }
+
+        // Attach hover listeners to all service nodes in both architecture slides
+        document.querySelectorAll('.service-node[data-service]').forEach(function(g) {
+            var view = g.getAttribute('data-view');
+            g.addEventListener('mouseenter', function() {
+                showArchTooltip(g.dataset.service, view, g);
+            });
+            g.addEventListener('mouseleave', hideArchTooltip);
+        });
+
+        // ── Deployment ID propagation ───────────────────────────────────
+        window.DEPLOYMENT_ID = 'DEPLOYMENT_ID_PLACEHOLDER';
+        (function() {
+            var did = window.DEPLOYMENT_ID;
+            if (!did) return;
+            var qs = '?deployment_id=' + encodeURIComponent(did);
+            document.querySelectorAll('a[href]').forEach(function(a) {
+                var href = a.getAttribute('href');
+                if (href && href.startsWith('/') && !href.startsWith('//') && href.indexOf('?') === -1) {
+                    a.setAttribute('href', href + qs);
+                }
+            });
+        })();
+    </script>
+
+</body>
+</html>
