@@ -497,6 +497,14 @@ async def list_scenarios():
     return _list()
 
 
+@app.post("/api/scenarios/reload")
+async def reload_scenarios():
+    """Re-scan scenarios/*/scenario.py and reload modules from disk."""
+    from scenarios import reload_registry
+
+    return reload_registry()
+
+
 @app.get("/api/scenario")
 async def current_scenario(deployment_id: Optional[str] = None):
     """Return active scenario metadata and theme."""

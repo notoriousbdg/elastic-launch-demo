@@ -1014,6 +1014,17 @@ POST /api/actions/connector
 
 ---
 
+## Scenario hot reload
+
+Scenarios are discovered from `scenarios/*/scenario.py` via [`scenarios/__init__.py`](scenarios/__init__.py). After adding or editing scenario code on disk (e.g. LLM-generated packages under `scenarios/<id>/`), reload without restarting uvicorn:
+
+- **API:** `POST /api/scenarios/reload` — evicts cached `scenarios.<pkg>.*` modules, re-scans the filesystem, returns `{scenarios, added, removed, errors, count}`.
+- **UI:** Selector page **Refresh list** button (same endpoint).
+
+Reload updates the selector and the next **Launch** / deploy path (`get_scenario` → `ScenarioContext`). Already-running `ScenarioInstance`s keep their in-memory context until stop/redeploy. Module-level `app.config` (`SERVICES`, `CHANNEL_REGISTRY` for `ACTIVE_SCENARIO`) is not refreshed — multi-deployment launch uses per-instance context instead.
+
+---
+
 ## General Lessons
 
 1. **Search docs before trial-and-error** — API schemas aren't always intuitive; check official docs and GitHub issues first

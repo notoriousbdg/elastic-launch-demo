@@ -87,19 +87,33 @@ class DataViewsMixin:
 
         step.items_total = len(views)
         created = 0
+        failures: list[str] = []
         for view in views:
-            resp = client.post(
-                f"{self.kibana_url}/api/data_views/data_view",
-                headers=_kibana_headers(self.api_key),
-                json=view,
+            view_id = view.get("data_view", {}).get("id", "<unknown>")
+            resp = _retry_http(
+                lambda: client.post(
+                    f"{self.kibana_url}/api/data_views/data_view",
+                    headers=_kibana_headers(self.api_key),
+                    json=view,
+                ),
+                label=f"create data view {view_id}",
             )
-            if resp.status_code < 300:
+            if resp is not None and resp.status_code < 300:
                 created += 1
                 step.items_done = created
                 notify(self.progress)
+            else:
+                status = getattr(resp, "status_code", "error")
+                failures.append(f"{view_id} (HTTP {status})")
 
-        step.status = "ok"
-        step.detail = f"Created {created} data views"
+        if failures:
+            step.status = "failed"
+            step.detail = (
+                f"Created {created}/{len(views)} data views; failed: {', '.join(failures)}"
+            )
+        else:
+            step.status = "ok"
+            step.detail = f"Created {created} data views"
         notify(self.progress)
 
     def _cleanup_data_views(self, client: httpx.Client) -> tuple[int, int]:
