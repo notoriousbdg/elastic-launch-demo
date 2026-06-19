@@ -382,8 +382,12 @@ def _build_dashboard_ndjson(
     error_types: "list[str] | None" = None,
 ) -> str:
     """Build the full dashboard NDJSON from parameters."""
-    # Override the module-level constant so panels reference the deployed data view
+    # Override module-level constants so every panel references the deployed,
+    # scenario-namespaced data views rather than the shared literal IDs.
+    # (deployer_views.py creates these with the same IDs so they always match.)
     DATA_VIEW_ID_LOGS = f"logs.otel.{namespace}"
+    DATA_VIEW_ID_TRACES = f"traces.otel.{namespace}"
+    DATA_VIEW_ID_METRICS = f"metrics.otel.{namespace}"
 
     TILE_WIDTH = 5
 
@@ -1213,6 +1217,7 @@ def _build_business_executive_dashboard_ndjson(scenario) -> str:
     scenario_name = scenario.scenario_name
     namespace = scenario.namespace
     dashboard_id = f"{namespace}-business-exec-dashboard"
+    DATA_VIEW_ID_METRICS = f"metrics.otel.{namespace}"  # noqa: F841 — shadows module-level constant
     svc_kql = f'resource.attributes.service.name: "{svc}"'
     intro = scenario.executive_dashboard_intro
 

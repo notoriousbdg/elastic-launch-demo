@@ -57,7 +57,7 @@ class DataViewsMixin:
             },
             {
                 "data_view": {
-                    "id": "traces-*",
+                    "id": f"traces.otel.{self.ns}",
                     "title": "traces-*",
                     "name": f"{self.scenario.scenario_name} Traces",
                     "timeFieldName": "@timestamp",
@@ -66,7 +66,7 @@ class DataViewsMixin:
             },
             {
                 "data_view": {
-                    "id": "metrics-*",
+                    "id": f"metrics.otel.{self.ns}",
                     "title": "metrics-*",
                     "name": f"{self.scenario.scenario_name} Metrics",
                     "timeFieldName": "@timestamp",
