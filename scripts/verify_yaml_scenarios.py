@@ -98,7 +98,7 @@ def check_scenario(scenario_id: str) -> tuple[list[str], list[str]]:
 
     # Load via YamlScenario
     try:
-        from scenarios.yaml_scenario import load_yaml_scenario
+        from scenario_engine.yaml_scenario import load_yaml_scenario
         s = load_yaml_scenario(scenario_dir)
     except Exception as exc:
         return [f"load_yaml_scenario() raised: {exc}"], []
@@ -164,9 +164,17 @@ def check_scenario(scenario_id: str) -> tuple[list[str], list[str]]:
     # ── Check 9: Placeholder parity (missing AND orphan fault_params) ─────────
     for ch_num, ch in sorted(reg.items()):
         raw = raw_channels.get(ch_num, ch)
-        all_placeholders = (
+        # "missing" side: only error_message + stack_trace (log signature fields).
+        # Widening this to include investigation_notes would create false errors
+        # from descriptive placeholders that intentionally have no fault_param.
+        log_placeholders = (
             _placeholders(raw.get("error_message", ch.get("error_message", "")))
             | _placeholders(raw.get("stack_trace", ch.get("stack_trace", "")))
+        )
+        # "orphan" side: include investigation_notes as a valid reference site —
+        # a fault_param used only in the agent runbook is still genuinely consumed.
+        referenced = log_placeholders | _placeholders(
+            raw.get("investigation_notes", ch.get("investigation_notes", ""))
         )
         try:
             params = s.get_fault_params(ch_num)
@@ -174,8 +182,8 @@ def check_scenario(scenario_id: str) -> tuple[list[str], list[str]]:
             errors.append(f"ch {ch_num}: get_fault_params() raised: {exc}")
             continue
         param_keys = set(params.keys())
-        missing = all_placeholders - param_keys
-        orphans = param_keys - all_placeholders
+        missing = log_placeholders - param_keys
+        orphans = param_keys - referenced
         if missing:
             errors.append(
                 f"ch {ch_num} '{ch.get('name', '')}': missing fault_params keys: {sorted(missing)}"

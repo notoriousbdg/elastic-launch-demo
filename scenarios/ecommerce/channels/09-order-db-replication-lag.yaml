@@ -28,6 +28,7 @@ stack_trace: |-
   Lag:                  {replication_lag_ms}ms
   Relay log space:      {relay_log_space_mb}MB
   Seconds behind master:{seconds_behind_master}s
+  Failover threshold:   {failover_threshold_ms}ms
   I/O thread:           Running
   SQL thread:           Running (delayed)
 correlation_attr:

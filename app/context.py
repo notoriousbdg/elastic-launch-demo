@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from scenarios.base import BaseScenario
+from scenario_engine.base import BaseScenario
 
 
 @dataclass

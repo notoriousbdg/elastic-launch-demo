@@ -27,6 +27,7 @@ stack_trace: |-
   Cache hit rate:    {cache_hit_rate_pct}% (normal: {normal_cache_hit_pct}%)
   Evicted entries:   {evicted_entries}
   P99 latency:       {p99_latency_ms}ms
+  Warm cache p99:    {warm_latency_ms}ms
   Cache size:        {cache_size_mb}MB
   Eviction policy:   LRU
 correlation_attr:

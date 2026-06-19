@@ -22,7 +22,8 @@ from typing import Any
 
 import httpx
 
-from scenarios.base import BaseScenario
+from elastic_config.deployer_base import ConcurrentBulkIndexer
+from scenario_engine.base import BaseScenario
 
 logger = logging.getLogger("apm-rollup")
 
@@ -608,49 +609,12 @@ class ApmRollupGenerator:
     ) -> int:
         """Bulk-insert docs into an ES data stream. Returns count inserted."""
         logger.info("Inserting %d %s docs...", len(docs), label)
-        headers = {
-            "Content-Type": "application/x-ndjson",
-            "Authorization": f"ApiKey {self.api_key}",
-        }
-        inserted = 0
-
-        with httpx.Client(timeout=30.0, verify=True) as client:
-            for batch_start in range(0, len(docs), 500):
-                batch = docs[batch_start:batch_start + 500]
-                lines = []
-                for doc in batch:
-                    lines.append(json.dumps({"create": {}}))
-                    lines.append(json.dumps(doc))
-                body = "\n".join(lines) + "\n"
-
-                r = client.post(
-                    f"{self.elastic_url}/{data_stream}/_bulk",
-                    content=body,
-                    headers=headers,
-                )
-                if r.status_code == 200:
-                    result = r.json()
-                    items = result.get("items", [])
-                    ok = sum(
-                        1 for item in items
-                        if item.get("create", {}).get("status") in (200, 201)
-                    )
-                    inserted += ok
-                    if result.get("errors"):
-                        for item in items:
-                            err = item.get("create", {}).get("error")
-                            if err:
-                                logger.warning(
-                                    "%s bulk error: %s", label,
-                                    json.dumps(err)[:200],
-                                )
-                                break
-                else:
-                    logger.warning(
-                        "%s bulk failed: %d %s", label,
-                        r.status_code, r.text[:200],
-                    )
-
+        with ConcurrentBulkIndexer(
+            self.elastic_url, self.api_key, data_stream, label=label
+        ) as idx:
+            for doc in docs:
+                idx.add(doc)
+            inserted = idx.flush()
         logger.info("%s: %d/%d docs inserted", label, inserted, len(docs))
         return inserted
 

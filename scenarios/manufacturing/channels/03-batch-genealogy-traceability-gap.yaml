@@ -28,7 +28,7 @@ stack_trace: |-
   OP-040      | LINE-03-B  | LOT-RM-{raw_lot_id}    | OK
   OP-050      | PACK-01    | NULL             | MISSING
   ------------------------------------------------------------------------
-  MES-BATCH-GENEALOGY-BREAK: {missing_link_count} operations missing parent lot — IATF 16949 risk
+  MES-BATCH-GENEALOGY-BREAK: {missing_link_count} operations missing parent lot — IATF 16949 risk — first orphan: {operation_id}
 correlation_attr:
   key: deployment.mes_genealogy_engine
   value: genealogy-v2.7.0-experimental

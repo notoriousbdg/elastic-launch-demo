@@ -28,6 +28,7 @@ stack_trace: |-
   Abandoned carts:   {abandoned_carts}
   Revenue at risk:   ${revenue_at_risk_usd}
   Abandon step:      {abandon_step}
+  Coupon timeout:    {coupon_timeout_ms}ms
   Time in funnel:    {avg_funnel_time_sec}s avg
 correlation_attr:
   key: orders.abandonment_elevated

@@ -20,7 +20,7 @@ stack_trace: |-
   ------------------------------------------------------------------------
   ASSET         | CLASS | TYPE       | OVERDUE (d)  | LAST PM
   ------------------------------------------------------------------------
-  MTR-CONV-01    | A     | preventive | {oldest_days}            | --
+  {asset_id}    | A     | preventive | {oldest_days}d           | --
   SPN-MILL-04    | A     | preventive | 45           | 2026-01-14
   PMP-COOL-02    | B     | preventive | 22           | 2026-02-01
   CMP-AIR-01     | A     | predictive | 18           | 2026-02-08

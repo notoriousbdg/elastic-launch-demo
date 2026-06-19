@@ -1,4 +1,4 @@
-"""Unit tests for scenarios/fault_spec.py DSL resolver."""
+"""Unit tests for scenario_engine/fault_spec.py DSL resolver."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import re
 
 import pytest
 
-from scenarios.fault_spec import resolve, resolve_dict
+from scenario_engine.fault_spec import resolve, resolve_dict
 
 
 # Seed for deterministic test assertions.

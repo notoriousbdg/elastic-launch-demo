@@ -133,8 +133,12 @@ class ApmMixin:
         except Exception as exc:
             logger.warning("metrics@custom look_back_time update failed (non-fatal): %s", exc)
 
-    def _deploy_apm_anomaly_detection(self, client: httpx.Client, notify: ProgressCallback):
-        """Create APM ML anomaly detection job and start datafeed.
+    def _setup_apm_anomaly_detection(self, client: httpx.Client, notify: ProgressCallback):
+        """Step 15 (head): create the APM ML anomaly detection job and start its
+        datafeed, but do NOT block on catch-up. Called early (right after the
+        rollup data is generated) so ES processes the 12h backfill server-side
+        during the intervening deploy steps; _finalize_apm_anomaly_detection
+        polls for catch-up at the end of the pipeline.
 
         Modelled after the job created by the Kibana APM ML module:
         - Single job, three detectors (latency / throughput / failure-rate)
@@ -143,6 +147,7 @@ class ApmMixin:
         """
         step = self._step(15)
         step.status = "running"
+        self._apm_ml_started = False
         notify(self.progress)
 
         try:
@@ -381,14 +386,14 @@ class ApmMixin:
             if resp.status_code >= 300:
                 raise RuntimeError(f"ML datafeed start failed: {resp.text}")
 
-            self._wait_for_apm_catchup(client, [f"datafeed-{job_id}"], timeout=120)
-
             # Register the environment with the Kibana APM ML integration so the
             # Service Map UI picks up our job (matches Superdemo's flow). Without
             # this Kibana-side registration, the raw ES-created job exists but
             # the APM Service Map does not surface its anomaly scores as node
             # colouring. Idempotent: returns 200 {"jobCreated": true} even when
             # the environment is already registered to our existing job.
+            # Only needs the job to exist (not be caught up), so it runs here in
+            # the setup half rather than waiting for catch-up.
             try:
                 reg_resp = client.post(
                     f"{self.kibana_url}/internal/apm/settings/anomaly-detection/jobs",
@@ -403,12 +408,35 @@ class ApmMixin:
             except Exception as exc:
                 logger.warning("Kibana APM ML environment registration failed (non-fatal): %s", exc)
 
-            step.status = "ok"
-            step.detail = f"Started ML job: {job_id}"
+            # Hand off to _finalize_apm_anomaly_detection, which blocks on
+            # catch-up at the end of the pipeline. Leave the step "running".
+            self._apm_ml_job_id = job_id
+            self._apm_ml_feed_ids = [f"datafeed-{job_id}"]
+            self._apm_ml_started = True
+            step.detail = f"ML job {job_id} started — training in background"
         except Exception as exc:
             step.status = "failed"
             step.detail = str(exc)
             logger.warning("APM anomaly detection setup failed (non-fatal): %s", exc)
+        notify(self.progress)
+
+    def _finalize_apm_anomaly_detection(self, client: httpx.Client, notify: ProgressCallback):
+        """Step 15 (tail): block until the APM datafeed catches up to real-time,
+        then finalize the step status. The datafeed was started early in
+        _setup_apm_anomaly_detection, so ES has been processing the 12h backfill
+        during the intervening deploy steps — by now the catch-up poll is usually
+        near-instant."""
+        step = self._step(15)
+        if not getattr(self, "_apm_ml_started", False):
+            return  # setup failed or was skipped — leave its status as-is
+        try:
+            self._wait_for_apm_catchup(client, self._apm_ml_feed_ids, timeout=120)
+            step.status = "ok"
+            step.detail = f"Started ML job: {self._apm_ml_job_id}"
+        except Exception as exc:
+            step.status = "failed"
+            step.detail = str(exc)
+            logger.warning("APM anomaly detection finalize failed (non-fatal): %s", exc)
         notify(self.progress)
 
     def _wait_for_apm_catchup(

@@ -1,12 +1,29 @@
 #!/bin/bash
 set -euo pipefail
 
-# On first boot the /app PVC is empty — seed it from the image snapshot.
-# On subsequent boots the PVC already has content (including any Claude Code edits).
-if [ ! -f /app/app/main.py ]; then
-  echo "First boot: seeding /app from image snapshot..."
-  cp -rp /app-seed/. /app/
+# On first boot the scenarios PVC has no scenario data — seed it from the image snapshot.
+# Subsequent boots keep whatever scenarios the user has created or uploaded.
+# Detect a fresh PVC by the absence of any seeded scenario data (robust to
+# lost+found on fresh ext4 PVCs, needs no marker file).
+if ! ls /app/scenarios/*/scenario.yaml >/dev/null 2>&1; then
+  echo "First boot: seeding /app/scenarios from image snapshot..."
+  cp -rp /app-seed-scenarios/. /app/scenarios/
+else
+  # Structural migration guard: if a built-in scenario's seed has scenario.yaml but the PVC
+  # does not (Python → YAML service migration), re-seed that scenario from the image.
+  # This fires exactly once after a schema-breaking upgrade; subsequent boots skip it.
+  for seed_scenario in /app-seed-scenarios/*/; do
+    sname=$(basename "$seed_scenario")
+    if [ -f "/app-seed-scenarios/$sname/scenario.yaml" ] && [ ! -f "/app/scenarios/$sname/scenario.yaml" ]; then
+      echo "Structural migration: re-seeding $sname (Python → YAML)..."
+      rm -rf "/app/scenarios/$sname"
+      cp -rp "$seed_scenario" "/app/scenarios/$sname"
+    fi
+  done
 fi
+
+# Ensure the data directory exists for the SQLite deployment store.
+mkdir -p /app/data
 
 mkdir -p /root/.claude /root/.claude/projects
 
@@ -201,12 +218,6 @@ node -e "
 export ELASTIC_API_KEY="${ELASTIC_API_KEY:-${ELASTICSEARCH_API_KEY:-}}"
 export ELASTIC_URL="${ELASTIC_URL:-${ELASTICSEARCH_URL:-}}"
 export OTLP_ENDPOINT="${OTLP_ENDPOINT:-${INGEST_URL:-}}"
-
-# If credentials are available but no scenario was explicitly pinned, default to
-# the space scenario so the app auto-deploys on first boot.
-if [ -n "${ELASTIC_API_KEY}" ] && [ -n "${KIBANA_URL}" ] && [ -z "${ACTIVE_SCENARIO:-}" ]; then
-  export ACTIVE_SCENARIO="space"
-fi
 
 # Start the app in the background; tini (PID 1) will reap it when code-server exits.
 python -m uvicorn app.main:app --host 0.0.0.0 --port 8080 &

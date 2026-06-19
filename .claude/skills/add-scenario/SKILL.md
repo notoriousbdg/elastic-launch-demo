@@ -347,7 +347,7 @@ After generation, run these checks:
 **Auto-discovery check:**
 ```bash
 python3 -c "
-from scenarios import list_scenarios
+from scenario_engine import list_scenarios
 hit = next((s for s in list_scenarios() if s['id'] == '<id>'), None)
 print('FOUND:', hit) if hit else print('NOT FOUND — check that scenarios/<id>/scenario.yaml exists and is picked up by the glob')
 "
@@ -376,7 +376,7 @@ Iterate until the verifier exits 0 before calling the work done.
 ```bash
 python3 -c "
 from pathlib import Path
-from scenarios.yaml_scenario import load_yaml_scenario
+from scenario_engine.yaml_scenario import load_yaml_scenario
 sc = load_yaml_scenario(Path('scenarios/<id>'))
 classes = sc.get_service_classes()
 print(f'{len(classes)} service classes loaded:')

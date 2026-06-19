@@ -28,7 +28,7 @@ stack_trace: |-
   ------------------------------------------------------------------------
   Related Event ID 7034: The {win_service_name} service terminated unexpectedly.
   Related Event ID 7036: The {win_service_name} service entered the stopped state.
-  ERP-WIN-SERVICE-CRASH: IDoc backlog={idoc_backlog}; SAP RFC unavailable for {elapsed_min}m
+  ERP-WIN-SERVICE-CRASH: IDoc backlog={idoc_backlog}; SAP RFC unavailable for {elapsed_min}m; service stopped at {failure_time}
 correlation_attr:
   key: infra.windows_patch_level
   value: win2022-kb5034441-pending

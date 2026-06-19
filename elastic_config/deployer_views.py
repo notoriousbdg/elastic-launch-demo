@@ -73,13 +73,16 @@ class DataViewsMixin:
                 },
                 "override": True,
             },
-            # Required by [OTel] Host Details dashboards
+            # Required by [OTel] Host Details dashboards. allowNoIndex lets
+            # Kibana create this view even when the host-metrics receiver index
+            # hasn't been populated yet (e.g. OTel collector not yet running).
             {
                 "data_view": {
                     "id": "metrics-hostmetricsreceiver.otel-*",
                     "title": "metrics-hostmetricsreceiver.otel-*",
                     "name": "metrics-hostmetricsreceiver.otel-*",
                     "timeFieldName": "@timestamp",
+                    "allowNoIndex": True,
                 },
                 "override": True,
             },
@@ -88,8 +91,10 @@ class DataViewsMixin:
         step.items_total = len(views)
         created = 0
         failures: list[str] = []
+        deferred: list[str] = []
         for view in views:
             view_id = view.get("data_view", {}).get("id", "<unknown>")
+            allow_no_index = view.get("data_view", {}).get("allowNoIndex", False)
             resp = _retry_http(
                 lambda: client.post(
                     f"{self.kibana_url}/api/data_views/data_view",
@@ -102,6 +107,11 @@ class DataViewsMixin:
                 created += 1
                 step.items_done = created
                 notify(self.progress)
+            elif resp is not None and resp.status_code == 404 and allow_no_index:
+                # Kibana rejects creation when no indices match the pattern yet.
+                # allowNoIndex views are safe to defer — the view becomes usable
+                # automatically once the OTel collector starts populating the index.
+                deferred.append(view_id)
             else:
                 status = getattr(resp, "status_code", "error")
                 failures.append(f"{view_id} (HTTP {status})")
@@ -110,6 +120,13 @@ class DataViewsMixin:
             step.status = "failed"
             step.detail = (
                 f"Created {created}/{len(views)} data views; failed: {', '.join(failures)}"
+                + (f"; deferred: {', '.join(deferred)}" if deferred else "")
+            )
+        elif deferred:
+            step.status = "ok"
+            step.detail = (
+                f"Created {created} data views; "
+                f"{len(deferred)} deferred (index not yet available)"
             )
         else:
             step.status = "ok"

@@ -55,11 +55,11 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
-# Move entrypoint outside /app so it survives the /app PVC mount on first boot.
-# Also snapshot the full app tree to /app-seed for PVC initialization.
+# Move entrypoint outside /app so it is always executed from the image layer.
+# Snapshot only scenarios/ for first-boot seeding of the scenarios PVC.
 RUN cp /app/entrypoint.sh /entrypoint.sh \
     && chmod +x /entrypoint.sh \
-    && cp -rp /app /app-seed
+    && cp -rp /app/scenarios /app-seed-scenarios
 
 EXPOSE 8080 8443
 

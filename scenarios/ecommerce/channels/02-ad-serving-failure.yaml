@@ -30,6 +30,8 @@ stack_trace: |-
   Error Detail:    {ad_error_detail}
   DSP Status:      DEGRADED
   Targeting Index: STALE ({targeting_staleness_min}min)
+  Expected CPM:    ${cpm_usd}
+  Exp. imp/sec:    {expected_impressions}
 correlation_attr:
   key: ads.serving_degraded
   value: true

@@ -26,6 +26,7 @@ stack_trace: |-
   Campaign:          {campaign_id}
   Budget spent:      ${budget_spent_usd}/${budget_daily_usd}
   Avg CPC:           ${avg_cpc_usd}
+  Expected CPC:      ${expected_cpc_usd}
   Win rate:          {win_rate_pct}%
   Hours remaining:   {hours_remaining}
   Revenue/hr missed: ${hourly_revenue_usd}

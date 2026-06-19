@@ -28,6 +28,7 @@ stack_trace: |-
   Consumer lag:      {consumer_lag} events
   Events/sec:        {events_per_sec}
   Hot partition:     {hot_partition}
+  Partition skew:    {hot_partition_events}x
   Stages behind:     etl_transform, aggregation
 correlation_attr:
   key: analytics.pipeline_lagging

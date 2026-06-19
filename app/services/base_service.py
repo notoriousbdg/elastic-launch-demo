@@ -18,7 +18,7 @@ logger = logging.getLogger("nova7.services")
 
 
 def _get_scenario():
-    from scenarios import get_scenario
+    from scenario_engine import get_scenario
 
     return get_scenario(ACTIVE_SCENARIO)
 

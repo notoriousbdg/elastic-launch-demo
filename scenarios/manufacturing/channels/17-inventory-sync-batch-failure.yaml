@@ -15,7 +15,7 @@ remediation_action: retry_inventory_batch
 error_message: '[WMS] INVENTORY-SYNC-BATCH-FAIL: batch={batch_id} records={record_count} failure_mode={failure_mode} retry_count={retry_count}'
 stack_trace: |-
   === INVENTORY SYNC BATCH — {batch_id} ===
-  Records: {record_count} | Started: 2026-05-06T14:00:00Z
+  Records: {record_count} | Started: 2026-05-06T14:00:00Z | Failed: {failure_time}
   ------------------------------------------------------------------------
   STAGE         | STATUS    | DURATION (s)
   ------------------------------------------------------------------------

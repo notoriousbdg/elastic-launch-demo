@@ -180,7 +180,7 @@ PROCESS_TEMPLATES = [
 
 # ── Host definitions from active scenario ─────────────────────────────────────
 def _load_hosts_and_clusters():
-    from scenarios import get_scenario
+    from scenario_engine import get_scenario
 
     scn = get_scenario(ACTIVE_SCENARIO)
     cluster_by_provider = {c["provider"]: c["name"] for c in scn.k8s_clusters}

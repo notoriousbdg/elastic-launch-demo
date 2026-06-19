@@ -132,6 +132,14 @@
             opacity: 0.6;
             cursor: not-allowed;
         }
+        .btn-upload-scenarios {
+            font-size: 12px;
+            padding: 6px 14px;
+        }
+        .btn-upload-scenarios:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
         .scenario-grid {
             display: grid;
             grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
@@ -183,6 +191,31 @@
             background: rgba(11, 100, 221, 0.08);
             padding: 2px 8px;
             border-radius: 4px;
+        }
+        .scenario-title-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 6px;
+            margin-bottom: 6px;
+        }
+        .scenario-title-row h3 {
+            margin-bottom: 0;
+            flex: 1;
+        }
+        .scenario-dl {
+            flex-shrink: 0;
+            background: none;
+            border: none;
+            padding: 2px 4px;
+            cursor: pointer;
+            color: var(--text-muted);
+            line-height: 1;
+            border-radius: 4px;
+            transition: color 0.15s;
+        }
+        .scenario-dl:hover {
+            color: var(--elastic-blue);
         }
         .scenario-actions {
             margin-top: 16px;
@@ -506,6 +539,10 @@
                 <button type="button" class="btn btn-secondary btn-reload-scenarios" id="btn-reload-scenarios" onclick="reloadScenarios()">
                     Refresh list
                 </button>
+                <button type="button" class="btn btn-secondary btn-upload-scenarios" id="btn-upload-scenarios" onclick="document.getElementById('scenario-upload-input').click()">
+                    Upload
+                </button>
+                <input type="file" id="scenario-upload-input" accept=".zip" style="display:none" onchange="uploadScenario(this)">
             </div>
         </div>
         <div class="scenario-grid" id="scenario-grid">
@@ -558,12 +595,12 @@
             document.getElementById('connection-panel').classList.add('visible');
         }
 
-        // Load scenarios
+        // Load scenarios (no-store ensures back-navigation re-fetches fresh data)
         try {
-            scenarios = await (await fetch('/api/scenarios')).json();
+            scenarios = await (await fetch('/api/scenarios', { cache: 'no-store' })).json();
             await Promise.all(scenarios.map(async (s) => {
                 try {
-                    const r = await fetch(`/api/setup/has-slides?scenario_id=${s.id}`);
+                    const r = await fetch(`/api/setup/has-slides?scenario_id=${s.id}`, { cache: 'no-store' });
                     const d = await r.json();
                     s.has_slides = !!d.has_slides;
                 } catch (e) {
@@ -608,7 +645,7 @@
 
     async function refreshDeployments() {
         try {
-            activeDeployments = await (await fetch('/api/deployments')).json();
+            activeDeployments = await (await fetch('/api/deployments', { cache: 'no-store' })).json();
         } catch (e) {
             activeDeployments = [];
         }
@@ -652,6 +689,44 @@
             statusEl.textContent = 'Refresh failed: ' + e.message;
         } finally {
             btn.disabled = false;
+        }
+    }
+
+    function downloadScenario(id) {
+        window.location.href = '/api/scenarios/' + encodeURIComponent(id) + '/download';
+    }
+
+    async function uploadScenario(input) {
+        const file = input.files[0];
+        if (!file) return;
+        const btn = document.getElementById('btn-upload-scenarios');
+        const statusEl = document.getElementById('reload-status');
+        btn.disabled = true;
+        statusEl.className = 'reload-status';
+        statusEl.textContent = 'Uploading ' + file.name + '…';
+
+        try {
+            const resp = await fetch('/api/scenarios/upload', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/zip' },
+                body: file,
+            });
+            const data = await resp.json();
+            if (!resp.ok) {
+                throw new Error(data.error || data.detail || 'Upload failed');
+            }
+
+            scenarios = data.scenarios || [];
+            await refreshDeployments();
+
+            const label = data.id ? data.id + ' · ' : '';
+            statusEl.textContent = 'Imported ' + label + data.count + ' scenario' + (data.count === 1 ? '' : 's');
+        } catch (e) {
+            statusEl.className = 'reload-status error';
+            statusEl.textContent = 'Upload failed: ' + e.message;
+        } finally {
+            btn.disabled = false;
+            input.value = '';  // allow re-uploading the same file
         }
     }
 
@@ -746,7 +821,16 @@
                 ${runningPill}
                 <div class="card-body">
                     <div class="scenario-icon">${s.icon || '\uD83D\uDD27'}</div>
-                    <h3>${s.name}</h3>
+                    <div class="scenario-title-row">
+                        <h3>${s.name}</h3>
+                        <button class="scenario-dl" title="Download ${s.id}.zip" onclick="downloadScenario('${s.id}')">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                                <polyline points="7 10 12 15 17 10"/>
+                                <line x1="12" y1="15" x2="12" y2="3"/>
+                            </svg>
+                        </button>
+                    </div>
                     <p>${s.description}</p>
                     <span class="scenario-ns">${s.namespace}</span>
                 </div>
@@ -1110,6 +1194,27 @@
     }
 
     init();
+
+    // When the browser restores this page from the back-forward cache the JS
+    // state is frozen at the moment the user left — any scenario added or
+    // uploaded since then won't appear. Re-fetch the scenario list so the grid
+    // is always current after a back navigation.
+    window.addEventListener('pageshow', (event) => {
+        if (!event.persisted) return;
+        fetch('/api/scenarios', { cache: 'no-store' }).then(r => r.json()).then(async (data) => {
+            scenarios = data;
+            await Promise.all(scenarios.map(async (s) => {
+                try {
+                    const r = await fetch(`/api/setup/has-slides?scenario_id=${s.id}`, { cache: 'no-store' });
+                    const d = await r.json();
+                    s.has_slides = !!d.has_slides;
+                } catch (e) {
+                    s.has_slides = false;
+                }
+            }));
+            refreshDeployments();
+        }).catch(() => {});
+    });
 </script>
 </body>
 </html>

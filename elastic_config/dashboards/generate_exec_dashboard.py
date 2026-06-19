@@ -512,7 +512,7 @@ def _build_dashboard_ndjson(
         "layerType": "data",
         "metricAccessor": cid,
         "palette": PALETTE_LATENCY_P99,
-        "subtitle": "nanoseconds",
+        "subtitle": "response time",
     })
     panels.append(make_panel("p30",
         {"h": 6, "i": "p30", "w": 12, "x": 0, "y": 16},
@@ -528,7 +528,7 @@ def _build_dashboard_ndjson(
         "layerType": "data",
         "metricAccessor": cid,
         "palette": PALETTE_LATENCY_P50,
-        "subtitle": "nanoseconds",
+        "subtitle": "response time",
     })
     panels.append(make_panel("p31",
         {"h": 6, "i": "p31", "w": 12, "x": 12, "y": 16},
@@ -1386,7 +1386,7 @@ if __name__ == "__main__":
     import sys
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-    from scenarios import get_scenario
+    from scenario_engine import get_scenario
 
     scenario_id = sys.argv[1] if len(sys.argv) > 1 else "space"
     scenario = get_scenario(scenario_id)

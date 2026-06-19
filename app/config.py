@@ -62,7 +62,7 @@ KIBANA_PROXY = _kibana_proxy_raw
 ELASTIC_API_KEY = os.getenv("ELASTIC_API_KEY", "")
 ELASTIC_URL = os.getenv("ELASTIC_URL", "")
 
-from scenarios import get_scenario  # noqa: E402
+from scenario_engine import get_scenario  # noqa: E402
 
 _scenario = get_scenario(ACTIVE_SCENARIO)
 

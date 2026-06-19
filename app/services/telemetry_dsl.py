@@ -68,7 +68,7 @@ from typing import Any
 
 from app.services.base_service import BaseService
 from app.services.expr import _SAFE_TIME, make_safe_rand, safe_eval
-from scenarios.fault_spec import resolve
+from scenario_engine.fault_spec import resolve
 
 
 class YamlService(BaseService):
@@ -158,7 +158,7 @@ class YamlService(BaseService):
 
         # KPI emission (implicitly gated by scenario.executive_kpi_emitter_service_name)
         if spec.get("kpi_emitter", False):
-            from scenarios.yaml_scenario import emit_executive_business_metrics_if_eligible
+            from scenario_engine.yaml_scenario import emit_executive_business_metrics_if_eligible
             emit_executive_business_metrics_if_eligible(self)
 
     # ── Environment builders ──────────────────────────────────────────────────
