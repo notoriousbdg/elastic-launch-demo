@@ -1,0 +1,42 @@
+name: Settlement Timeout
+subsystem: settlement
+vehicle_section: settlement_engine
+error_type: SETTLE-T2-TIMEOUT
+sensor_type: settlement_timer
+affected_services:
+- settlement-processor
+- audit-logger
+cascade_services:
+- risk-calculator
+- compliance-monitor
+description: Trade settlement fails to complete within T+2 SLA window
+investigation_notes: ''
+remediation_action: ''
+error_message: '[SETTLE] SETTLE-T2-TIMEOUT: trade={trade_id} settlement={settlement_id} pending_hours={pending_hours}h sla={sla_hours}h
+  counterparty={counterparty}'
+stack_trace: |-
+  === SETTLEMENT LIFECYCLE ===
+  trade={trade_id}  settlement={settlement_id}  counterparty={counterparty}
+  PHASE               STATUS      TIMESTAMP
+  trade_capture       COMPLETE    2026-02-14T14:32:07Z
+  affirmation         COMPLETE    2026-02-14T15:01:22Z
+  netting             COMPLETE    2026-02-14T18:00:00Z
+  DTCC_submission     COMPLETE    2026-02-14T20:15:33Z
+  NSCC_CNS_match      PENDING     ---  <<< STALLED
+  DTC_delivery        WAITING     ---
+  funds_transfer      WAITING     ---
+  elapsed={pending_hours}h  sla={sla_hours}h  breach=true
+  depository=DTC  clearing=NSCC  method=DVP
+  ACTION: escalate_counterparty=true  reg_report=SEC-15c6  alert=SETTLE-T2-TIMEOUT
+correlation_attr: {}
+fault_params:
+  trade_id:
+    format: "TRD-{n}"
+    n: {randint: [100000, 999999]}
+  settlement_id:
+    format: "STL-{n}"
+    n: {randint: [100000, 999999]}
+  pending_hours: {uniform: [48.5, 96.0], round: 1}
+  sla_hours: 48
+  counterparty: {choice: [Goldman Sachs, Morgan Stanley, JP Morgan, Citadel Securities, Virtu Financial, Jane Street]}
+rca_clues: {}

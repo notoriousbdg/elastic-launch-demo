@@ -1,0 +1,39 @@
+name: MES Queue Overflow
+subsystem: mes
+vehicle_section: work_order_queue
+error_type: MES-QUEUE-OVERFLOW
+sensor_type: work_order_queue
+affected_services:
+- mes-controller
+cascade_services:
+- oee-analytics
+description: MES work-order queue backlog exceeded soft watermark; auto-scale workers eligible
+investigation_notes: |-
+  Root Cause: Queue depth growing past the soft watermark indicates inbound rate has temporarily exceeded the worker pool's drain rate. This is normal during shift change and during morning release windows. Auto-scaling workers within the configured max is safe.
+  Remediation (auto-remediate eligible): 1) Scale workers: `mes-admin scale-workers --pool WORK-ORDER --count {target_workers}`. 2) Confirm queue depth recovers within 5 min. 3) If recurring, raise the steady-state pool size in the deployment config.
+remediation_action: scale_mes_workers
+error_message: '[MES] MES-QUEUE-OVERFLOW: queue=WORK-ORDER depth={queue_depth} soft_watermark=2000 hard_watermark=5000 workers={current_workers}'
+stack_trace: |-
+  === MES QUEUE STATUS — WORK-ORDER ===
+  Depth: {queue_depth} | Soft watermark: 2000 | Hard watermark: 5000
+  Workers: {current_workers} (max: 16)
+  ------------------------------------------------------------------------
+  Recent rates:
+    Inbound:    480/min
+    Drain:      320/min
+    Net:        +160/min
+  ------------------------------------------------------------------------
+  MES-QUEUE-OVERFLOW: auto-scale workers from {current_workers} → {target_workers}
+correlation_attr:
+  key: deployment.mes_worker_pool_config
+  value: worker-pool-v2.5.0-low-concurrency
+fault_params:
+  queue_depth: {randint: [2200, 4800]}
+  current_workers: {randint: [4, 8]}
+  target_workers: {randint: [10, 16]}
+rca_clues:
+  mes-controller:
+    mes.queue_depth: {randint: [2200, 4800]}
+    mes.worker_count: {randint: [4, 8]}
+  oee-analytics:
+    oee.event_intake_lag_s: {randint: [15, 75]}

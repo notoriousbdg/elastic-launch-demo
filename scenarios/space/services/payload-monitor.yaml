@@ -1,0 +1,232 @@
+service: payload-monitor
+sort_order: 6
+cloud_provider: gcp
+cloud_region: us-central1
+cloud_platform: gcp_compute_engine
+cloud_availability_zone: us-central1-a
+subsystem: payload
+language: python
+topology:
+- - sensor-validator
+  - /api/v1/validate/vibration
+  - POST
+- - sensor-validator
+  - /api/v1/validate/payload-thermal
+  - POST
+entry_endpoints:
+- - /api/v1/payload/scan
+  - POST
+emit_fault_logs: true
+kpi_emitter: false
+constants:
+  PAYLOAD_SENSORS:
+    bay_temperature:
+      lo: -5.0
+      hi: 35.0
+      unit: C
+    bay_humidity:
+      lo: 10.0
+      hi: 45.0
+      unit: '%'
+    vibration_x:
+      lo: 0.0
+      hi: 0.8
+      unit: g
+    vibration_y:
+      lo: 0.0
+      hi: 0.8
+      unit: g
+    vibration_z:
+      lo: 0.0
+      hi: 1.0
+      unit: g
+    power_draw:
+      lo: 120.0
+      hi: 180.0
+      unit: W
+    data_bus_utilization:
+      lo: 15.0
+      hi: 65.0
+      unit: '%'
+state:
+  _scan_count:
+    init: 0
+  _last_health_report:
+    init: now
+steps:
+- sample:
+    bay_temperature_val:
+      uniform:
+      - -5.0
+      - 35.0
+      round: 2
+- metric:
+    name: payload.bay_temperature
+    value:
+      var: bay_temperature_val
+    unit: C
+- log:
+    level: INFO
+    message: '[PLD] sensor=bay_temperature reading={bay_temperature_val}C nominal=-5.0-35.0C status=NOMINAL'
+    attrs:
+      payload.sensor: bay_temperature
+      payload.reading:
+        var: bay_temperature_val
+      payload.unit: C
+      payload.status: NOMINAL
+      operation: payload_reading
+- sample:
+    bay_humidity_val:
+      uniform:
+      - 10.0
+      - 45.0
+      round: 2
+- metric:
+    name: payload.bay_humidity
+    value:
+      var: bay_humidity_val
+    unit: '%'
+- log:
+    level: INFO
+    message: '[PLD] sensor=bay_humidity reading={bay_humidity_val}% nominal=10.0-45.0% status=NOMINAL'
+    attrs:
+      payload.sensor: bay_humidity
+      payload.reading:
+        var: bay_humidity_val
+      payload.unit: '%'
+      payload.status: NOMINAL
+      operation: payload_reading
+- sample:
+    vibration_x_val:
+      uniform:
+      - 0.0
+      - 0.8
+      round: 2
+- metric:
+    name: payload.vibration_x
+    value:
+      var: vibration_x_val
+    unit: g
+- log:
+    level: INFO
+    message: '[PLD] sensor=vibration_x reading={vibration_x_val}g nominal=0.0-0.8g status=NOMINAL'
+    attrs:
+      payload.sensor: vibration_x
+      payload.reading:
+        var: vibration_x_val
+      payload.unit: g
+      payload.status: NOMINAL
+      operation: payload_reading
+- sample:
+    vibration_y_val:
+      uniform:
+      - 0.0
+      - 0.8
+      round: 2
+- metric:
+    name: payload.vibration_y
+    value:
+      var: vibration_y_val
+    unit: g
+- log:
+    level: INFO
+    message: '[PLD] sensor=vibration_y reading={vibration_y_val}g nominal=0.0-0.8g status=NOMINAL'
+    attrs:
+      payload.sensor: vibration_y
+      payload.reading:
+        var: vibration_y_val
+      payload.unit: g
+      payload.status: NOMINAL
+      operation: payload_reading
+- sample:
+    vibration_z_val:
+      uniform:
+      - 0.0
+      - 1.0
+      round: 2
+- metric:
+    name: payload.vibration_z
+    value:
+      var: vibration_z_val
+    unit: g
+- log:
+    level: INFO
+    message: '[PLD] sensor=vibration_z reading={vibration_z_val}g nominal=0.0-1.0g status=NOMINAL'
+    attrs:
+      payload.sensor: vibration_z
+      payload.reading:
+        var: vibration_z_val
+      payload.unit: g
+      payload.status: NOMINAL
+      operation: payload_reading
+- sample:
+    power_draw_val:
+      uniform:
+      - 120.0
+      - 180.0
+      round: 2
+- metric:
+    name: payload.power_draw
+    value:
+      var: power_draw_val
+    unit: W
+- log:
+    level: INFO
+    message: '[PLD] sensor=power_draw reading={power_draw_val}W nominal=120.0-180.0W status=NOMINAL'
+    attrs:
+      payload.sensor: power_draw
+      payload.reading:
+        var: power_draw_val
+      payload.unit: W
+      payload.status: NOMINAL
+      operation: payload_reading
+- sample:
+    data_bus_utilization_val:
+      uniform:
+      - 15.0
+      - 65.0
+      round: 2
+- metric:
+    name: payload.data_bus_utilization
+    value:
+      var: data_bus_utilization_val
+    unit: '%'
+- log:
+    level: INFO
+    message: '[PLD] sensor=data_bus_utilization reading={data_bus_utilization_val}% nominal=15.0-65.0% status=NOMINAL'
+    attrs:
+      payload.sensor: data_bus_utilization
+      payload.reading:
+        var: data_bus_utilization_val
+      payload.unit: '%'
+      payload.status: NOMINAL
+      operation: payload_reading
+- counter:
+    state_key: _scan_count
+    by: 1
+- metric:
+    name: payload.scan_count
+    value:
+      var: _scan_count
+    unit: scans
+- every:
+    seconds: 10
+    state_key: _last_health_report
+    steps:
+    - log:
+        level: INFO
+        message: '[PLD] health_check scan={_scan_count} sensors=7 failures=0 satellite=READY status=NOMINAL'
+        attrs:
+          operation: payload_health
+          payload.status: NOMINAL
+          payload.sensor_count: 7
+          payload.scan_count:
+            var: _scan_count
+    else:
+    - log:
+        level: INFO
+        message: '[PLD] health_check sensors=7 failures=0 satellite=READY status=NOMINAL'
+        attrs:
+          operation: payload_health
+          payload.status: NOMINAL
+          payload.sensor_count: 7

@@ -1,0 +1,123 @@
+service: auth-gateway
+sort_order: 6
+cloud_provider: gcp
+cloud_region: us-central1
+cloud_platform: gcp_compute_engine
+cloud_availability_zone: us-central1-c
+subsystem: authentication
+language: go
+entry_endpoints:
+- - /api/v1/auth/login
+  - POST
+- - /api/v1/auth/mfa
+  - POST
+- - /api/v1/auth/biometric
+  - POST
+db_operations:
+- - SELECT
+  - member_credentials
+  - SELECT member_id, auth_method, mfa_enrolled, last_login FROM member_credentials WHERE member_id = ? AND status = 'ACTIVE'
+- - INSERT
+  - auth_events
+  - INSERT INTO auth_events (event_id, member_id, method, result, ip_addr, device, ts) VALUES (?, ?, ?, ?, ?, ?, NOW())
+emit_fault_logs: true
+kpi_emitter: false
+state:
+  _auth_count:
+    init: 0
+  _last_summary:
+    init: now
+steps:
+- sample:
+    auth_method:
+      choice:
+      - FACE_ID
+      - FINGERPRINT
+      - PIN
+      - PASSWORD
+      - SSO
+    auth_latency_ms:
+      uniform:
+      - 50.0
+      - 300.0
+      round: 1
+- counter:
+    state_key: _auth_count
+    by: 1
+- log:
+    level: INFO
+    message: '[AUTH] auth_verified method={auth_method} latency_ms={auth_latency_ms} mfa=true device_trusted=true status=SUCCESS'
+    attrs:
+      operation: auth_verified
+      auth.method:
+        var: auth_method
+      auth.latency_ms:
+        var: auth_latency_ms
+      auth.mfa: true
+      auth.status: SUCCESS
+- sample:
+    mfa_channel:
+      choice:
+      - SMS
+      - PUSH
+      - TOTP
+      - EMAIL
+    mfa_delivery_ms:
+      uniform:
+      - 200.0
+      - 2000.0
+      round: 1
+- log:
+    level: INFO
+    message: '[AUTH] mfa_delivered channel={mfa_channel} delivery_ms={mfa_delivery_ms} provider=Twilio status=DELIVERED'
+    attrs:
+      operation: mfa_delivered
+      mfa.channel:
+        var: mfa_channel
+      mfa.delivery_ms:
+        var: mfa_delivery_ms
+      mfa.status: DELIVERED
+- every:
+    seconds: 10
+    state_key: _last_summary
+    steps:
+    - log:
+        level: INFO
+        message: '[AUTH] gateway_summary total_auths={_auth_count} biometric_pct=72% mfa_pct=98% fraud_flags=0 status=NOMINAL'
+        attrs:
+          operation: gateway_summary
+          auth.total:
+            var: _auth_count
+          auth.biometric_pct: 72
+- sample:
+    auth_success_rate:
+      if_active:
+        uniform:
+        - 60.0
+        - 85.0
+        round: 2
+      else:
+        uniform:
+        - 98.0
+        - 99.9
+        round: 2
+- metric:
+    name: auth_gateway.success_rate
+    value:
+      var: auth_success_rate
+    unit: '%'
+- metric:
+    name: auth_gateway.active_sessions
+    value:
+      randint:
+      - 40000
+      - 120000
+    unit: sessions
+- metric:
+    name: auth_gateway.mfa_delivery_rate
+    value:
+      uniform:
+      - 95.0
+      - 99.5
+      round: 1
+    unit: '%'

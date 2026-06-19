@@ -1,0 +1,63 @@
+name: Checkout Session Storm
+subsystem: storefront
+vehicle_section: session_management
+error_type: SESSION-STORM
+sensor_type: session_pool
+affected_services:
+- storefront-gateway
+- order-management
+cascade_services:
+- product-catalog
+- analytics-pipeline
+description: Surge of concurrent checkout sessions exhausting session pool capacity, causing checkout failures during peak
+  traffic
+investigation_notes: |-
+  1. Check storefront-gateway logs for SESSION-STORM — active_sessions={active_sessions} vs max_sessions={max_sessions} shows utilization.
+  2. Identify the traffic source: check storefront.active_sessions metric trend — a sudden spike suggests a flash sale, bot storm, or marketing campaign.
+  3. Check for sticky session imbalance: if sessions are pinned to specific instances, some nodes may be at 100% while others are idle.
+  4. Review session TTL settings — sessions not expiring after abandonment keep slots occupied; default 30min TTL is too long for checkout flows.
+  5. Enable the rate limiter: if requests per IP exceed {rps_threshold}/s, apply throttling to prevent individual clients from monopolizing the pool.
+  6. As a circuit breaker, redirect overflow traffic to a static 'temporarily busy' page rather than queuing — queued requests timeout and hold slots longer.
+remediation_action: drain_session_pool
+error_message: '[StorefrontGateway] SESSION-STORM: active_sessions={active_sessions}/{max_sessions} ({session_util_pct}%)
+  new_sessions_rejected={rejected_sessions} rps={current_rps} threshold={rps_threshold} top_source_ip={top_source_ip}'
+stack_trace: |-
+  SessionPoolExhaustedException: SESSION-STORM
+    at SessionManager.acquire(pool_id={pool_id})
+    at CheckoutController.initSession(request_id={request_id})
+  Active sessions:    {active_sessions}/{max_sessions} ({session_util_pct}%)
+  Rejected sessions:  {rejected_sessions}
+  Current RPS:        {current_rps}
+  RPS threshold:      {rps_threshold}
+  Top source IP:      {top_source_ip}
+  Session TTL:        1800s
+correlation_attr:
+  key: storefront.session_pressure
+  value: true
+fault_params:
+  active_sessions: {randint: [48000, 55000]}
+  max_sessions: 50000
+  session_util_pct: {randint: [94, 110]}
+  rejected_sessions: {randint: [100, 5000]}
+  current_rps: {randint: [5000, 20000]}
+  rps_threshold: 10000
+  top_source_ip:
+    format: "203.{a}.{b}.{c}"
+    a: {randint: [0, 255]}
+    b: {randint: [0, 255]}
+    c: {randint: [0, 255]}
+  pool_id: {format: "pool-{n}", n: {randint: [1, 4]}}
+  request_id: {format: "REQ-{n}", n: {randint: [100000, 999999]}}
+rca_clues:
+  storefront-gateway:
+    storefront.session_pool_utilization_pct: {uniform: [90, 100], round: 1}
+    storefront.new_sessions_rejected: {randint: [100, 2000]}
+  order-management:
+    order.cart_creation_rate_drop_pct: {uniform: [20, 70], round: 1}
+    order.checkout_queue_depth: {randint: [50, 500]}
+  product-catalog:
+    catalog.request_queue_depth: {randint: [200, 2000]}
+    catalog.p99_latency_ms: {randint: [2000, 10000]}
+  analytics-pipeline:
+    analytics.session_event_spike: true
+    analytics.ingest_rate_multiplier: {uniform: [3, 10], round: 1}

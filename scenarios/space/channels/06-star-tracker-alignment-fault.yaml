@@ -1,0 +1,48 @@
+name: Star Tracker Alignment Fault
+subsystem: guidance
+vehicle_section: avionics
+error_type: GNC-STAR-TRACKER-ALIGN
+sensor_type: star_tracker
+affected_services:
+- navigation
+- sensor-validator
+cascade_services:
+- mission-control
+description: Star tracker optical alignment exceeds tolerance
+investigation_notes: 'Root cause: boresight error from optical contamination (outgassing deposits on CCD window), thermal
+  distortion of the star tracker mounting bracket, or stale star catalog. Only 8/22 catalog matches (minimum 12 required)
+  suggests the field of view is shifted or obscured. Check CCD temperature (-28.4C nominal, should be <-25C for low dark current).
+  Verify no thruster plume impingement on the optics baffle. Review attitude quaternion for sudden discontinuities indicating
+  a bracket shift. Remediation: run optics bakeout heater cycle (ST_BAKEOUT 60s), reload backup star catalog (ST_CATALOG LOAD
+  B), and attempt recalibration (ST_RECAL). If boresight error persists, switch to Star Tracker B and flag unit A for ground
+  inspection.'
+remediation_action: recalibrate_navigation
+error_message: '[GNC] GNC-STAR-TRACKER-ALIGN: boresight_error={error_arcsec}arcsec limit={limit_arcsec}arcsec catalog_match=DEGRADED'
+stack_trace: |-
+  == GN&C SYSTEM STATUS == STAR TRACKER ASSEMBLY ==
+  TIMESTAMP: MET+00:04:14.501 | FRAME: 0x4A34 | SEQ: 18447
+  ---------------------------------------------------------------
+  PARAMETER            VALUE        LIMIT      STATUS
+  BORESIGHT_ERROR      {error_arcsec}arcsec   {limit_arcsec}arcsec  **FAULT**
+  CATALOG_MATCHES      8/22         12 min     DEGRADED
+  CCD_TEMP             -28.4C       -30.0C     NOMINAL
+  INTEGRATION_TIME     250ms        500ms      NOMINAL
+  ---------------------------------------------------------------
+  ATTITUDE_SOURCE: STAR_TRACKER_A | QUATERNION: [0.707, 0.0, 0.707, 0.0]
+  GNC-STAR-TRACKER-ALIGN: Boresight error {error_arcsec} arcsec exceeds {limit_arcsec} limit
+  ACTION: Verify optics cleanliness, attempt recalibration with backup catalog
+correlation_attr:
+  key: deployment.image_tag
+  value: star-tracker-v3.1.0-beta
+fault_params:
+  error_arcsec: {uniform: [10.0, 45.0], round: 1}
+  limit_arcsec: 5.0
+rca_clues:
+  navigation:
+    gnc.st_catalog_matches: {randint: [5, 11]}
+    gnc.ccd_temp_c: {uniform: [-30, -25], round: 1}
+  sensor-validator:
+    validation.boresight_error_arcsec: {uniform: [8.0, 40.0], round: 1}
+    validation.optics_contamination: {choice: [true, false]}
+  mission-control:
+    upstream.degraded_subsystem: guidance

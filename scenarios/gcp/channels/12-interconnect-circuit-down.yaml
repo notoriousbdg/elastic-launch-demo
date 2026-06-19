@@ -1,0 +1,57 @@
+name: Interconnect Circuit Down
+subsystem: connectivity
+vehicle_section: dedicated_interconnect
+error_type: INTERCONNECT-CIRCUIT-DOWN
+sensor_type: circuit_status
+affected_services:
+- cloud-interconnect
+- vpc-network-manager
+cascade_services:
+- cloud-vpn-gateway
+- network-intelligence
+description: Dedicated Interconnect circuit losing link, failing over to backup path
+investigation_notes: |-
+  Root cause: Dedicated Interconnect circuit link is DOWN, indicating a physical layer issue. LACP state DETACHED means the link aggregation group has lost member links. Common causes: fiber cut at colocation facility, optics degradation, or cross-connect issue. Diagnose with:
+    gcloud compute interconnects describe <interconnect> --format='value(state,operationalStatus,circuitInfos)'
+    gcloud compute interconnects attachments describe <attachment> --region=<region>
+    Console > Hybrid Connectivity > Interconnect > <name> > Diagnostics tab
+  Remediation: If failover is ACTIVE_ON_BACKUP, traffic is flowing via the secondary path. Contact the colocation provider to inspect the cross-connect and verify optic light levels. Check for maintenance notifications: gcloud compute interconnects get-macsec-config <name>. If NO_BACKUP, immediately engage VPN as emergency backup:
+    gcloud compute vpn-tunnels create emergency-tunnel --region=<region> --peer-address=<peer> --shared-secret=<secret> --router=<router>
+remediation_action: reset_interconnect_attachment
+error_message: '[Interconnect] INTERCONNECT-CIRCUIT-DOWN attachment={interconnect_name} circuit_id={circuit_id} location={interconnect_location}
+  link_status=DOWN since {circuit_down_sec}s bandwidth={interconnect_bw_gbps}Gbps failover={failover_status}'
+stack_trace: |-
+  Cloud Interconnect Circuit Report
+  -----------------------------------
+  Attachment:   {interconnect_name}
+  Circuit ID:   {circuit_id}
+  Location:     {interconnect_location}
+  Link Status:  DOWN
+  Down Since:   {circuit_down_sec}s
+  Bandwidth:    {interconnect_bw_gbps} Gbps
+  Failover:     {failover_status}
+  LACP State:   DETACHED
+  Action: Contact colo provider, verify cross-connect
+correlation_attr:
+  key: infra.interconnect_optic
+  value: lr4-100g-batch-2024q3
+fault_params:
+  interconnect_name: {choice: [gcpnet-interconnect-primary, gcpnet-interconnect-secondary]}
+  circuit_id: {format: "CIR-{n}", n: {randint: [100000, 999999]}}
+  interconnect_location: {choice: [iad-zone1-1, dfw-zone1-1, ams-zone1-1]}
+  circuit_down_sec: {randint: [10, 300]}
+  interconnect_bw_gbps: {choice: [10, 100]}
+  failover_status: {choice: [ACTIVE_ON_BACKUP, FAILOVER_IN_PROGRESS, NO_BACKUP]}
+rca_clues:
+  cloud-interconnect:
+    interconnect.lacp_state: DETACHED
+    interconnect.light_level_dbm: {uniform: [-30, -20], round: 1}
+  vpc-network-manager:
+    vpc.onprem_route_withdrawn: true
+    vpc.bgp_routes_lost: {randint: [10, 50]}
+  cloud-vpn-gateway:
+    vpn.failover_activated: true
+    vpn.backup_tunnel_latency_ms: {randint: [15, 80]}
+  network-intelligence:
+    ni.interconnect_path_test: UNREACHABLE
+    ni.failover_status: IN_PROGRESS

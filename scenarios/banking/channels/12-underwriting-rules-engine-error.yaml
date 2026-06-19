@@ -1,0 +1,61 @@
+name: Underwriting Rules Engine Error
+subsystem: underwriting
+vehicle_section: rules_engine
+error_type: UW-RULES-ENGINE-ERR
+sensor_type: underwriting_rules
+affected_services:
+- quote-engine
+- policy-manager
+cascade_services:
+- member-portal
+- claims-processor
+description: Underwriting rules engine producing inconsistent decisions on policy applications
+investigation_notes: |-
+  1. Identify the conflicting rule — check which specific rule in the 2,847-rule chain is producing inconsistent results. Cross-reference with change_set CS-4827 deployed on 2026-02-15.
+  2. Conflict rate 2.4% vs 0.5% threshold indicates a systematic issue, not isolated cases. Review the rule deployment diff: git diff CS-4826..CS-4827 -- rules/ to identify changed rules.
+  3. Check rule execution order dependencies — rules like military_discount_eligibility and multi_policy_bundle may have ordering conflicts when both conditions apply simultaneously.
+  4. Verify garaging_zip risk factors are using current ISO territory data — outdated territory mappings near military bases can cause incorrect risk classification (e.g., Fort Liberty zip codes).
+  5. For affected applications, route to manual underwriting queue with full rule execution trace. Flag applications where expected=APPROVE but actual=DECLINE for priority review — these represent members being incorrectly denied coverage.
+  6. Consider rules engine rollback if conflict rate doesn't stabilize within 1 hour. Rollback command: kubectl rollout undo deployment/rules-engine -n banking-underwriting.
+remediation_action: rollback_rules_engine
+error_message: '[UW] UW-RULES-ENGINE-ERR: application={app_id} product={insurance_product} rule={failed_rule} expected={expected_decision}
+  actual={actual_decision}'
+stack_trace: |-
+  === UNDERWRITING RULES ENGINE ===
+  application={app_id}  product={insurance_product}
+  --- RULE EXECUTION CHAIN ---
+    RULE                     RESULT      DETAIL
+    eligibility_check        PASS        member_since=2018, active_duty
+    credit_score_tier        PASS        score=742, tier=PREFERRED
+    driving_record           PASS        violations=0, accidents=0
+    garaging_zip_risk        PASS        zip={garaging_zip}, risk=LOW
+    {failed_rule}            CONFLICT    expected={expected_decision} got={actual_decision}
+    bundle_discount          SKIPPED     blocked by conflict
+  --- RULE ENGINE HEALTH ---
+    version=RulesEngine-v7.4  rule_count=2,847
+    conflict_rate=2.4%  threshold=0.5%  <<< EXCEEDED
+    last_deployment=2026-02-15  change_set=CS-4827
+  ACTION: flag_manual_uw=true  rollback_rules=EVALUATE  alert=UW-RULES-ENGINE-ERR
+correlation_attr:
+  key: runtime.underwriting_rule_chain
+  value: uw-rules-v7.4.1-canary
+fault_params:
+  app_id: {format: "APP-{n}", n: {randint: [100000, 999999]}}
+  insurance_product: {choice: [AUTO_PERSONAL, AUTO_COMMERCIAL, HOMEOWNERS_HO3, RENTERS_HO4, UMBRELLA, VALUABLE_PERSONAL_PROPERTY]}
+  failed_rule: {choice: [military_discount_eligibility, multi_policy_bundle, garaging_risk_factor, vehicle_safety_rating, deployment_surcharge_waiver, good_driver_discount]}
+  expected_decision: {choice: [APPROVE, REFER]}
+  actual_decision: {choice: [DECLINE, APPROVE, REFER]}
+  garaging_zip: {choice: ["78209", "78216", "32225", "23452", "80917", "28307"]}
+rca_clues:
+  quote-engine:
+    quote.rules_engine_conflict_rate_pct: {uniform: [1.5, 4.0], round: 1}
+    quote.change_set_version: CS-4827
+  policy-manager:
+    policy.manual_uw_queue_depth: {randint: [50, 300]}
+    policy.incorrect_decline_count: {randint: [10, 80]}
+  member-portal:
+    portal.application_status_display: UNDER_REVIEW
+    portal.member_callback_requested: {randint: [20, 100]}
+  claims-processor:
+    claims.coverage_verification_delayed: true
+    claims.rule_conflict_flag: true

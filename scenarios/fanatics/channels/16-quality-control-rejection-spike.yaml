@@ -1,0 +1,62 @@
+name: Quality Control Rejection Spike
+subsystem: manufacturing
+vehicle_section: quality_assurance
+error_type: MES-QC-REJECT-THRESHOLD
+sensor_type: qc_inspection
+affected_services:
+- card-printing-system
+- packaging-fulfillment
+cascade_services:
+- digital-marketplace
+- auction-engine
+description: Automated quality inspection system rejecting cards above acceptable defect rate
+investigation_notes: |-
+  1. Identify the primary defect type: `color_registration_shift` and `die_cut_misalignment` are mechanical issues; `foil_stamp_incomplete` is heat/pressure related.
+  2. Check the QC camera calibration: if the vision system is miscalibrated, it may be rejecting good cards — run `mes-qc calibrate --line <line>`.
+  3. For `centering_off` defects, inspect the sheet feeder alignment and gripper pressure on the affected print line.
+  4. Review the defect rate trend: a gradual increase indicates wear (replace cutting dies or print heads); a sudden spike indicates a material batch problem.
+  5. Cross-reference the reject batch with the paper/cardstock lot number — a bad material lot will cause consistent defects across all printers.
+  6. If the defect rate exceeds 10%, halt the production line for mechanical inspection rather than wasting material on continued rejects.
+remediation_action: recalibrate_qc_sensors
+error_message: '[QCInspector] MES-QC-REJECT-THRESHOLD: batch={qc_batch_id} rejected={qc_reject_count}/{qc_inspected_count}
+  ({qc_reject_pct}% defect rate, threshold {qc_threshold_pct}%) defect={qc_defect_type} line={qc_line_number}'
+stack_trace: "com.fanatics.mes.exception.QCRejectException: MES-QC-REJECT-THRESHOLD: defect rate {qc_reject_pct}% exceeds\
+  \ threshold {qc_threshold_pct}%\n\tat com.fanatics.mes.quality.QCInspector.inspectBatch(QCInspector.java:234)\n\tat com.fanatics.mes.quality.QCInspector.runInspection(QCInspector.java:178)\n\
+  \tat com.fanatics.mes.quality.InspectionPipeline.process(InspectionPipeline.java:145)\n\tat com.fanatics.mes.api.QCController.triggerInspection(QCController.java:56)\n\
+  \tat java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1136)\n\tat java.base/java.lang.Thread.run(Thread.java:842)\n\
+  \  Batch: {qc_batch_id} Line: {qc_line_number}\n  Primary defect: {qc_defect_type}\n  Inspected: {qc_inspected_count} Rejected:\
+  \ {qc_reject_count}"
+correlation_attr:
+  key: deployment.qc_vision_model
+  value: defect-detect-v2.1.0-retrained
+fault_params:
+  qc_batch_id:
+    format: "BATCH-{n}"
+    n: {randint: [1000, 9999]}
+  qc_reject_count: {randint: [20, 150]}
+  qc_inspected_count: {randint: [500, 2000]}
+  qc_reject_pct: {uniform: [5.0, 25.0], round: 1}
+  qc_threshold_pct: 2.0
+  qc_defect_type:
+    choice:
+    - color_registration_shift
+    - die_cut_misalignment
+    - foil_stamp_incomplete
+    - surface_scratch
+    - centering_off
+  qc_line_number: {choice: [LINE-A, LINE-B, LINE-C]}
+rca_clues:
+  card-printing-system:
+    print.defect_type: {choice: [color_registration_shift, die_cut_misalignment, foil_stamp_incomplete]}
+    print.material_lot:
+      format: "LOT-{n}"
+      n: {randint: [2024001, 2024999]}
+  packaging-fulfillment:
+    warehouse.reprint_queue_depth: {randint: [20, 200]}
+    warehouse.wasted_material_sheets: {randint: [50, 500]}
+  digital-marketplace:
+    marketplace.out_of_stock_skus: {randint: [5, 50]}
+    marketplace.customer_refund_queue: {randint: [3, 30]}
+  auction-engine:
+    auction.delayed_shipment_auctions: {randint: [2, 20]}
+    auction.buyer_dispute_count: {randint: [1, 10]}

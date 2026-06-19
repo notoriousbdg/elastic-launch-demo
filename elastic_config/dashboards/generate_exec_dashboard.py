@@ -11,7 +11,7 @@ Primary output: **Systems Operations Dashboard** (saved object id `{namespace}-e
 
 Also emits a second saved object, **Executive Dashboard** (id `{namespace}-business-exec-dashboard`),
 when the scenario defines `executive_kpi_emitter_service_name`. Synthetic `business.*` OTLP gauges
-are emitted once per cycle from that service (`scenarios/{name}/executive_kpis.py`).
+are emitted once per cycle from that service via the telemetry DSL executor.
 
 Produces by-value Lens panels using the formBased datasource format that matches
 the built-in [OTel] dashboards shipped with Kibana 9.4, including all required
@@ -512,7 +512,7 @@ def _build_dashboard_ndjson(
         "layerType": "data",
         "metricAccessor": cid,
         "palette": PALETTE_LATENCY_P99,
-        "subtitle": "nanoseconds",
+        "subtitle": "response time",
     })
     panels.append(make_panel("p30",
         {"h": 6, "i": "p30", "w": 12, "x": 0, "y": 16},
@@ -528,7 +528,7 @@ def _build_dashboard_ndjson(
         "layerType": "data",
         "metricAccessor": cid,
         "palette": PALETTE_LATENCY_P50,
-        "subtitle": "nanoseconds",
+        "subtitle": "response time",
     })
     panels.append(make_panel("p31",
         {"h": 6, "i": "p31", "w": 12, "x": 12, "y": 16},
@@ -1386,7 +1386,7 @@ if __name__ == "__main__":
     import sys
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-    from scenarios import get_scenario
+    from scenario_engine import get_scenario
 
     scenario_id = sys.argv[1] if len(sys.argv) > 1 else "space"
     scenario = get_scenario(scenario_id)

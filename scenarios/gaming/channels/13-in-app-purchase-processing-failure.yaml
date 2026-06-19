@@ -1,0 +1,67 @@
+name: In-App Purchase Processing Failure
+subsystem: monetization
+vehicle_section: payment_gateway
+error_type: IAP-PURCHASE-FAIL
+sensor_type: transaction_monitor
+affected_services:
+- payment-processor
+- auth-gateway
+cascade_services:
+- analytics-pipeline
+description: In-app purchase transactions failing at the payment gateway level due to provider timeouts or validation errors
+investigation_notes: |-
+  Root cause: the payment provider is returning HTTP 402 with elevated latency (8412ms vs normal <500ms), indicating provider-side degradation. The gateway retry logic compounds the issue by sending duplicate requests that may result in double charges.
+  1. Check provider status: visit the payment provider status page (Stripe/PayPal/Apple/Google) for active incidents — if provider is degraded, enable circuit breaker to fail fast.
+  2. Review error code distribution: TIMEOUT and PROVIDER_ERROR indicate provider issues; DECLINED and INSUFFICIENT_FUNDS are normal user errors and should not trigger alerts.
+  3. Verify idempotency: the `{purchase_id}-r{retry_count}` key must be honored by the provider — check for duplicate gateway_txn IDs in the transaction log.
+  4. Remediate: issue `reset_payment_gateway` to restart connection pools and clear stuck transactions; switch to backup payment provider if primary remains degraded.
+  5. Queue failed purchases for automatic retry once provider recovers; notify affected players with an in-game message about the temporary payment disruption.
+remediation_action: reset_payment_gateway
+error_message: '[IAP] IAP-PURCHASE-FAIL: txn={purchase_id} player={player_id} amount={amount}{currency} provider={payment_provider}
+  code={error_code} retry={retry_count}/{max_retries}'
+stack_trace: |-
+  === PAYMENT GATEWAY TRANSACTION TRACE ===
+  txn={purchase_id}  player={player_id}
+  ----------- request -----------------
+    amount       = {amount} {currency}
+    provider     = {payment_provider}
+    item_sku     = SKU-PREMIUM-PACK-01
+    idempotency  = {purchase_id}-r{retry_count}
+  ----------- provider response -------
+    status_code  = 402
+    error_code   = {error_code}
+    latency_ms   = 8,412
+    gateway_txn  = GW-8a4f2e1b-c930
+  ----------- retry state -------------
+    attempt      = {retry_count}/{max_retries}
+    backoff_ms   = 4,000
+    next_retry   = 2026-02-17T14:22:08.000Z
+  ----------- receipt validation ------
+    receipt_valid = false
+    signature    = (not provided — payment not completed)
+  IAP-PURCHASE-FAIL: txn {purchase_id} failed with {error_code} via {payment_provider}
+correlation_attr:
+  key: deployment.payment_sdk
+  value: stripe-sdk-v12.1.0-rc2
+fault_params:
+  purchase_id:
+    format: "TXN-{n}"
+    n: {randint: [10000000, 99999999]}
+  player_id:
+    format: "PLR-{n}"
+    n: {randint: [100000, 999999]}
+  amount: {uniform: [0.99, 99.99], round: 2}
+  currency: {choice: [USD, EUR, GBP, JPY]}
+  payment_provider: {choice: [stripe, paypal, apple_iap, google_play]}
+  error_code: {choice: [TIMEOUT, DECLINED, INSUFFICIENT_FUNDS, FRAUD_HOLD, PROVIDER_ERROR]}
+  retry_count: {randint: [1, 5]}
+  max_retries: 3
+rca_clues:
+  payment-processor:
+    payment.provider_latency_ms: {randint: [3000, 12000]}
+    payment.circuit_breaker_state: {choice: [HALF_OPEN, OPEN]}
+  auth-gateway:
+    auth.purchase_identity_verify: timeout
+    auth.token_valid: true
+  analytics-pipeline:
+    analytics.failed_txn_count: {randint: [100, 2000]}

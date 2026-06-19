@@ -1,0 +1,46 @@
+name: Search Index Corruption
+subsystem: catalog
+vehicle_section: search_engine
+error_type: CATALOG-INDEX-CORRUPT
+sensor_type: search_index
+affected_services:
+- product-catalog
+cascade_services:
+- storefront-gateway
+- recommendation-engine
+description: Product search index corrupted or partially rebuilt, returning incomplete or incorrect results
+investigation_notes: |-
+  1. Check product-catalog logs for CATALOG-INDEX-CORRUPT — note the affected shard ({shard_id}) and document count mismatch.
+  2. Run an index health check: GET /_cluster/health — red/yellow status with unassigned shards confirms corruption.
+  3. Check for partial writes during a previous index rebuild: `show index stats` — a rebuild that aborted midway leaves an inconsistent index.
+  4. Identify affected categories: query `catalog.items_indexed` metric — a drop below {expected_items} items indicates missing documents.
+  5. Do not trigger a full rebuild during peak traffic — it will consume all indexing throughput and further degrade search latency.
+  6. Roll back to the last known-good snapshot and replay the indexing changelog from that point forward.
+remediation_action: rebuild_search_index
+error_message: '[ProductCatalog] CATALOG-INDEX-CORRUPT: shard={shard_id} expected_docs={expected_items} actual_docs={actual_items}
+  delta={doc_delta} affected_categories={affected_categories} last_clean_snapshot={snapshot_age_min}m ago'
+stack_trace: "com.ecommerce.catalog.IndexException: CATALOG-INDEX-CORRUPT\n\tat com.ecommerce.catalog.SearchIndexManager.validateShard(SearchIndexManager.java:312)\n\
+  \tat com.ecommerce.catalog.SearchIndexManager.healthCheck(SearchIndexManager.java:245)\n\tat com.ecommerce.catalog.CatalogService.serveSearchRequest(CatalogService.java:189)\n\
+  Shard:           {shard_id}\nExpected docs:   {expected_items}\nActual docs:     {actual_items}\nDelta:           -{doc_delta}\n\
+  Affected cats:   {affected_categories}\nSnapshot age:    {snapshot_age_min}m"
+correlation_attr:
+  key: catalog.index_unhealthy
+  value: true
+fault_params:
+  shard_id: {format: "shard-{n}", n: {randint: [0, 7]}}
+  expected_items: {randint: [500000, 2000000]}
+  actual_items: {randint: [100000, 400000]}
+  doc_delta: {randint: [100000, 1600000]}
+  affected_categories: {choice: ["electronics,apparel", "home,beauty", "sports,books", all_categories]}
+  snapshot_age_min: {randint: [60, 480]}
+rca_clues:
+  product-catalog:
+    catalog.shard_health: RED
+    catalog.missing_docs_pct: {uniform: [5, 40], round: 1}
+    catalog.search_accuracy_pct: {uniform: [40, 80], round: 1}
+  storefront-gateway:
+    storefront.search_zero_results_pct: {uniform: [20, 60], round: 1}
+    storefront.search_fallback_active: true
+  recommendation-engine:
+    reco.catalog_data_stale: true
+    reco.fallback_to_trending: true

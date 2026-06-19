@@ -1,0 +1,154 @@
+service: imaging-service
+sort_order: 5
+cloud_provider: gcp
+cloud_region: us-central1
+cloud_platform: gcp_compute_engine
+cloud_availability_zone: us-central1-b
+subsystem: radiology
+language: python
+topology:
+- - ehr-system
+  - /api/v1/ehr/imaging-results
+  - POST
+- - data-warehouse
+  - /api/v1/warehouse/imaging-archive
+  - POST
+entry_endpoints:
+- - /api/v1/imaging/study
+  - POST
+emit_fault_logs: true
+kpi_emitter: false
+constants:
+  MODALITIES:
+  - CT
+  - MRI
+  - XR
+  - US
+  - MG
+  - NM
+state:
+  _studies_processed:
+    init: 0
+  _last_pacs_report:
+    init: now
+steps:
+- sample:
+    modality:
+      choice: MODALITIES
+    study_uid_mid:
+      randint:
+      - 10000
+      - 99999
+    study_uid_end:
+      randint:
+      - 1
+      - 999
+    images:
+      randint:
+      - 20
+      - 600
+    size_mb:
+      uniform:
+      - 50.0
+      - 1500.0
+      round: 1
+    transfer_ms:
+      randint:
+      - 500
+      - 3000
+- sample:
+    study_uid:
+      expr: f'1.2.840.{study_uid_mid}.{study_uid_end}'
+- log:
+    level: INFO
+    message: '[PACS] c_store_complete modality={modality} study={study_uid} images={images} size={size_mb}MB transfer_ms={transfer_ms}
+      status=STORED'
+    attrs:
+      operation: study_transfer
+      imaging.modality:
+        var: modality
+      imaging.study_uid:
+        var: study_uid
+      imaging.image_count:
+        var: images
+      imaging.size_mb:
+        var: size_mb
+      imaging.transfer_ms:
+        var: transfer_ms
+      imaging.status: STORED
+- sample:
+    wl_modality:
+      choice: MODALITIES
+    pending:
+      randint:
+      - 2
+      - 20
+    next_patient:
+      expr: f'PT-{rand.randint(100000, 999999)}'
+- log:
+    level: INFO
+    message: '[PACS] mwl_query modality={wl_modality} queued={pending} next_patient={next_patient} status=OK'
+    attrs:
+      operation: worklist_query
+      imaging.modality:
+        var: wl_modality
+      imaging.worklist_pending:
+        var: pending
+      imaging.next_patient:
+        var: next_patient
+- every:
+    seconds: 10
+    state_key: _last_pacs_report
+    steps:
+    - sample:
+        volumes_online:
+          randint:
+          - 3
+          - 5
+        total_tb:
+          uniform:
+          - 40.0
+          - 80.0
+          round: 1
+    - log:
+        level: INFO
+        message: '[PACS] storage_status volumes={volumes_online} total_tb={total_tb} studies_today={_studies_processed} archive=NOMINAL'
+        attrs:
+          operation: pacs_status
+          pacs.volumes_online:
+            var: volumes_online
+          pacs.total_storage_tb:
+            var: total_tb
+          pacs.studies_today:
+            var: _studies_processed
+- counter:
+    state_key: _studies_processed
+    by: 1
+- metric:
+    name: imaging.studies_processed
+    value:
+      var: _studies_processed
+    unit: studies
+- sample:
+    transfer_latency_ms:
+      if_active:
+        randint:
+        - 8000
+        - 30000
+      else:
+        randint:
+        - 200
+        - 2000
+- metric:
+    name: imaging.transfer_latency_ms
+    value:
+      var: transfer_latency_ms
+    unit: ms
+- metric:
+    name: imaging.pacs_storage_used_pct
+    value:
+      uniform:
+      - 60.0
+      - 82.0
+      round: 1
+    unit: '%'

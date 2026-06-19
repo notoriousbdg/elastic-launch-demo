@@ -1,0 +1,115 @@
+service: document-vault
+sort_order: 9
+cloud_provider: azure
+cloud_region: eastus
+cloud_platform: azure_vm
+cloud_availability_zone: eastus-3
+subsystem: document_management
+language: dotnet
+entry_endpoints:
+- - /api/v1/docs/upload
+  - POST
+- - /api/v1/docs/retrieve
+  - GET
+emit_fault_logs: true
+kpi_emitter: false
+state:
+  _docs_processed:
+    init: 0
+  _last_summary:
+    init: now
+steps:
+- sample:
+    doc_type:
+      choice:
+      - CLAIM_PHOTO
+      - POLICY_DEC_PAGE
+      - ID_VERIFICATION
+      - PROOF_OF_LOSS
+      - COE_VA_LOAN
+      - DD214_DISCHARGE
+    doc_operation_raw:
+      choice:
+      - upload
+      - retrieve
+      - index
+    doc_size_mb:
+      uniform:
+      - 0.2
+      - 15.0
+      round: 1
+    doc_operation_label:
+      expr: f'document_{doc_operation_raw}'
+- counter:
+    state_key: _docs_processed
+    by: 1
+- log:
+    level: INFO
+    message: '[DOC] {doc_operation_label} type={doc_type} size={doc_size_mb}MB pii_scan=CLEAN encryption=AES256 status=SUCCESS'
+    attrs:
+      operation:
+        var: doc_operation_label
+      doc.type:
+        var: doc_type
+      doc.size_mb:
+        var: doc_size_mb
+      doc.pii_scan: CLEAN
+- sample:
+    bucket_util:
+      uniform:
+      - 62.0
+      - 78.0
+      round: 1
+- log:
+    level: INFO
+    message: '[DOC] storage_health bucket_utilization={bucket_util}% replication=3x encryption=SSE-KMS lifecycle_policy=ACTIVE
+      status=NOMINAL'
+    attrs:
+      operation: storage_health
+      storage.utilization:
+        var: bucket_util
+      storage.replication: 3
+- every:
+    seconds: 10
+    state_key: _last_summary
+    steps:
+    - log:
+        level: INFO
+        message: '[DOC] vault_summary processed={_docs_processed} storage_tb=45.2 compliance=SOX/HIPAA retention=7yr status=NOMINAL'
+        attrs:
+          operation: vault_summary
+          vault.processed:
+            var: _docs_processed
+          vault.storage_tb: 45.2
+- sample:
+    upload_rate:
+      if_active:
+        uniform:
+        - 5.0
+        - 20.0
+        round: 1
+      else:
+        uniform:
+        - 40.0
+        - 150.0
+        round: 1
+- metric:
+    name: document_vault.upload_rate
+    value:
+      var: upload_rate
+    unit: docs/min
+- metric:
+    name: document_vault.storage_used_tb
+    value:
+      uniform:
+      - 42.0
+      - 48.0
+      round: 2
+    unit: TB
+- metric:
+    name: document_vault.ocr_queue_depth
+    value:
+      randint:
+      - 5
+      - 50
+    unit: docs

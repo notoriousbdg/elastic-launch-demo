@@ -35,7 +35,7 @@ SCOPE_VERSION = "0.115.0"
 
 # ── Load from active scenario ────────────────────────────────────────────────
 def _load_scenario_data():
-    from scenarios import get_scenario
+    from scenario_engine import get_scenario
     scenario = get_scenario(ACTIVE_SCENARIO)
     return list(scenario.services.keys()), scenario.k8s_clusters
 
@@ -115,8 +115,8 @@ def _gauge(name: str, unit: str, value, is_int: bool = False, attributes: dict |
     return {"name": name, "unit": unit, "gauge": {"dataPoints": [dp]}}
 
 
-def _cumulative_sum(name: str, unit: str, value, is_int: bool = True, attributes: dict | None = None) -> dict:
-    now = _now_ns()
+def _cumulative_sum(name: str, unit: str, value, is_int: bool = True, attributes: dict | None = None, ts: str | None = None) -> dict:
+    now = ts or _now_ns()
     dp: dict = {"timeUnixNano": now}
     if is_int:
         dp["asInt"] = str(int(value))
@@ -215,34 +215,35 @@ def _generate_pod_metrics(svc: str, state: K8sState, rng: random.Random) -> list
     """Generate pod + container metrics for one service."""
     metrics = []
     p_info = None  # not needed, we use state
+    ts = _now_ns()  # shared timestamp — all metrics go into one TSDB document
 
     # Pod CPU
-    metrics.append(_gauge("k8s.pod.cpu.usage", "ns", rng.randint(10_000_000, 500_000_000), is_int=True))
-    metrics.append(_gauge("k8s.pod.cpu_limit_utilization", "1", rng.uniform(0.05, 0.85)))
-    metrics.append(_gauge("k8s.pod.cpu.node.utilization", "1", rng.uniform(0.05, 0.45)))
+    metrics.append(_gauge("k8s.pod.cpu.usage", "ns", rng.randint(10_000_000, 500_000_000), is_int=True, ts=ts))
+    metrics.append(_gauge("k8s.pod.cpu_limit_utilization", "1", rng.uniform(0.05, 0.85), ts=ts))
+    metrics.append(_gauge("k8s.pod.cpu.node.utilization", "1", rng.uniform(0.05, 0.45), ts=ts))
 
     # Pod Memory
-    metrics.append(_gauge("k8s.pod.memory.usage", "By", rng.randint(100_000_000, 800_000_000), is_int=True))
-    metrics.append(_gauge("k8s.pod.memory_limit_utilization", "1", rng.uniform(0.25, 0.85)))
-    metrics.append(_gauge("k8s.pod.memory.node.utilization", "1", rng.uniform(0.001, 0.05)))
-    metrics.append(_gauge("k8s.pod.memory.working_set", "By", rng.randint(80_000_000, 600_000_000), is_int=True))
+    metrics.append(_gauge("k8s.pod.memory.usage", "By", rng.randint(100_000_000, 800_000_000), is_int=True, ts=ts))
+    metrics.append(_gauge("k8s.pod.memory_limit_utilization", "1", rng.uniform(0.25, 0.85), ts=ts))
+    metrics.append(_gauge("k8s.pod.memory.node.utilization", "1", rng.uniform(0.001, 0.05), ts=ts))
+    metrics.append(_gauge("k8s.pod.memory.working_set", "By", rng.randint(80_000_000, 600_000_000), is_int=True, ts=ts))
 
     # Pod Network (cumulative)
-    metrics.append(_cumulative_sum("k8s.pod.network.rx", "By", state.net_rx[svc]))
-    metrics.append(_cumulative_sum("k8s.pod.network.tx", "By", state.net_tx[svc]))
+    metrics.append(_cumulative_sum("k8s.pod.network.rx", "By", state.net_rx[svc], ts=ts))
+    metrics.append(_cumulative_sum("k8s.pod.network.tx", "By", state.net_tx[svc], ts=ts))
 
     # Pod Filesystem
-    metrics.append(_gauge("k8s.pod.filesystem.usage", "By", rng.randint(100_000_000, 500_000_000), is_int=True))
+    metrics.append(_gauge("k8s.pod.filesystem.usage", "By", rng.randint(100_000_000, 500_000_000), is_int=True, ts=ts))
 
     # Container metrics
     container_attrs = {"container.name": f"{svc}-container"}
-    metrics.append(_gauge("k8s.container.cpu.usage", "ns", rng.randint(10_000_000, 600_000_000), is_int=True, attributes=container_attrs))
-    metrics.append(_gauge("k8s.container.memory_request", "By", rng.randint(128 * 2**20, 512 * 2**20), is_int=True, attributes=container_attrs))
-    metrics.append(_gauge("k8s.container.memory_limit", "By", rng.randint(256 * 2**20, 1024 * 2**20), is_int=True, attributes=container_attrs))
-    metrics.append(_gauge("k8s.container.cpu_limit", "{cpu}", rng.uniform(0.5, 2.0), attributes=container_attrs))
-    metrics.append(_gauge("k8s.container.cpu_request", "{cpu}", rng.uniform(0.1, 1.0), attributes=container_attrs))
-    metrics.append(_gauge("k8s.container.memory.working_set", "By", rng.randint(100_000_000, 400_000_000), is_int=True, attributes=container_attrs))
-    metrics.append(_cumulative_sum("k8s.container.restarts", "{restart}", state.restarts[svc], attributes=container_attrs))
+    metrics.append(_gauge("k8s.container.cpu.usage", "ns", rng.randint(10_000_000, 600_000_000), is_int=True, attributes=container_attrs, ts=ts))
+    metrics.append(_gauge("k8s.container.memory_request", "By", rng.randint(128 * 2**20, 512 * 2**20), is_int=True, attributes=container_attrs, ts=ts))
+    metrics.append(_gauge("k8s.container.memory_limit", "By", rng.randint(256 * 2**20, 1024 * 2**20), is_int=True, attributes=container_attrs, ts=ts))
+    metrics.append(_gauge("k8s.container.cpu_limit", "{cpu}", rng.uniform(0.5, 2.0), attributes=container_attrs, ts=ts))
+    metrics.append(_gauge("k8s.container.cpu_request", "{cpu}", rng.uniform(0.1, 1.0), attributes=container_attrs, ts=ts))
+    metrics.append(_gauge("k8s.container.memory.working_set", "By", rng.randint(100_000_000, 400_000_000), is_int=True, attributes=container_attrs, ts=ts))
+    metrics.append(_cumulative_sum("k8s.container.restarts", "{restart}", state.restarts[svc], attributes=container_attrs, ts=ts))
 
     return metrics
 
@@ -252,23 +253,24 @@ def _generate_node_metrics(rng: random.Random) -> list:
     allocatable_cores = rng.uniform(2.0, 8.0)
     utilization = rng.uniform(0.1, 0.8)
     cpu_usage_ns = int(allocatable_cores * utilization * 10)
+    ts = _now_ns()  # shared timestamp — all metrics go into one TSDB document
 
     return [
-        _gauge("k8s.node.cpu.usage", "ns", cpu_usage_ns, is_int=True),
-        _gauge("k8s.node.allocatable_cpu", "1", allocatable_cores),
-        _gauge("k8s.node.cpu.utilization", "1", utilization),
-        _gauge("k8s.node.memory.usage", "By", rng.randint(2_000_000_000, 8_000_000_000), is_int=True),
-        _gauge("k8s.node.memory.working_set", "By", rng.randint(1_500_000_000, 6_000_000_000), is_int=True),
-        _gauge("k8s.node.allocatable_memory", "By", rng.randint(8_000_000_000, 16_000_000_000), is_int=True),
-        _gauge("k8s.node.memory.utilization", "1", rng.uniform(0.2, 0.7)),
-        _gauge("k8s.node.filesystem.usage", "By", rng.randint(20_000_000_000, 80_000_000_000), is_int=True),
-        _gauge("k8s.node.filesystem.capacity", "By", rng.randint(100_000_000_000, 200_000_000_000), is_int=True),
-        _gauge("k8s.node.filesystem.utilization", "1", rng.uniform(0.1, 0.6)),
-        _cumulative_sum("k8s.node.network.rx", "By", rng.randint(1_000_000_000, 10_000_000_000)),
-        _cumulative_sum("k8s.node.network.tx", "By", rng.randint(1_000_000_000, 10_000_000_000)),
-        _gauge("k8s.node.condition_ready", "1", 1, is_int=True),
-        _gauge("k8s.node.condition_memory_pressure", "1", 1 if rng.random() < 0.1 else 0, is_int=True),
-        _gauge("k8s.node.condition_disk_pressure", "1", 1 if rng.random() < 0.05 else 0, is_int=True),
+        _gauge("k8s.node.cpu.usage", "ns", cpu_usage_ns, is_int=True, ts=ts),
+        _gauge("k8s.node.allocatable_cpu", "1", allocatable_cores, ts=ts),
+        _gauge("k8s.node.cpu.utilization", "1", utilization, ts=ts),
+        _gauge("k8s.node.memory.usage", "By", rng.randint(2_000_000_000, 8_000_000_000), is_int=True, ts=ts),
+        _gauge("k8s.node.memory.working_set", "By", rng.randint(1_500_000_000, 6_000_000_000), is_int=True, ts=ts),
+        _gauge("k8s.node.allocatable_memory", "By", rng.randint(8_000_000_000, 16_000_000_000), is_int=True, ts=ts),
+        _gauge("k8s.node.memory.utilization", "1", rng.uniform(0.2, 0.7), ts=ts),
+        _gauge("k8s.node.filesystem.usage", "By", rng.randint(20_000_000_000, 80_000_000_000), is_int=True, ts=ts),
+        _gauge("k8s.node.filesystem.capacity", "By", rng.randint(100_000_000_000, 200_000_000_000), is_int=True, ts=ts),
+        _gauge("k8s.node.filesystem.utilization", "1", rng.uniform(0.1, 0.6), ts=ts),
+        _cumulative_sum("k8s.node.network.rx", "By", rng.randint(1_000_000_000, 10_000_000_000), ts=ts),
+        _cumulative_sum("k8s.node.network.tx", "By", rng.randint(1_000_000_000, 10_000_000_000), ts=ts),
+        _gauge("k8s.node.condition_ready", "1", 1, is_int=True, ts=ts),
+        _gauge("k8s.node.condition_memory_pressure", "1", 1 if rng.random() < 0.1 else 0, is_int=True, ts=ts),
+        _gauge("k8s.node.condition_disk_pressure", "1", 1 if rng.random() < 0.05 else 0, is_int=True, ts=ts),
     ]
 
 

@@ -18,7 +18,7 @@ steps:
     type: elasticsearch.esql.query
     with:
       query: >
-        FROM logs.otel.__NS__,logs.otel.__NS__.* | WHERE KQL("body.text: \"{{ event.rule.tags[1] }}\" AND severity_text: \"ERROR\"") | KEEP event_name
+        FROM logs.otel.__NS__,logs.otel.__NS__.* | WHERE KQL("body.text: \"{{ event.rule.tags[1] }}\" AND severity_text: \"ERROR\"") AND event_name IS NOT NULL | SORT @timestamp DESC | KEEP event_name | LIMIT 1
       format: json
 
   - name: count_errors
@@ -34,7 +34,7 @@ steps:
     type: data.set
     with:
       var:
-        - event_meta: "${{ steps.enrich_context.output.values[1][0] | json_parse }}"
+        - event_meta: "${{ steps.enrich_context.output.values[0][0] | json_parse }}"
 
   - name: send_notification
     type: email

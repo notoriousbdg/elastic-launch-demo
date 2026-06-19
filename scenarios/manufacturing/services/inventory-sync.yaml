@@ -1,0 +1,133 @@
+service: inventory-sync
+sort_order: 8
+cloud_provider: azure
+cloud_region: eastus
+cloud_platform: azure_vm
+cloud_availability_zone: eastus-1
+subsystem: inventory
+language: java
+topology:
+- - mes-controller
+  - /api/v1/mes/material-availability
+  - POST
+entry_endpoints:
+- - /api/v1/inventory/sync
+  - POST
+db_operations:
+- - SELECT
+  - material_master
+  - SELECT material_code, on_hand_qty, reorder_point, safety_stock FROM material_master WHERE plant_id = ?
+- - INSERT
+  - inventory_deltas
+  - INSERT INTO inventory_deltas (material_code, delta_units, location, source_doc, ts) VALUES (?, ?, ?, ?, NOW())
+emit_fault_logs: true
+kpi_emitter: false
+constants:
+  MATERIALS:
+  - RM-STEEL-A36
+  - RM-ALU-6061
+  - RM-PLASTIC-ABS
+  - RM-COPPER-110
+  - RM-RUBBER-EPDM
+state:
+  _batches_total:
+    init: 0
+  _last_supplier_report:
+    init: now
+steps:
+- sample:
+    material:
+      choice: MATERIALS
+    delta:
+      randint:
+      - -500
+      - 2000
+    on_hand:
+      randint:
+      - 2000
+      - 50000
+- log:
+    level: INFO
+    message: '[WMS] inventory_delta material={material} delta={delta} on_hand={on_hand} location=WH-A-01'
+    attrs:
+      operation: inventory_delta
+      inventory.material:
+        var: material
+      inventory.delta_units:
+        var: delta
+      inventory.on_hand_units:
+        var: on_hand
+- sample:
+    supplier:
+      expr: f'SUP-{rand.randint(1000, 9999)}'
+    po_id:
+      expr: f'PO-{rand.randint(100000, 999999)}'
+    lead_days:
+      randint:
+      - 3
+      - 28
+- log:
+    level: INFO
+    message: '[WMS] supplier_po po={po_id} supplier={supplier} lead_days={lead_days} status=CONFIRMED'
+    attrs:
+      operation: supplier_po
+      inventory.purchase_order:
+        var: po_id
+      inventory.supplier:
+        var: supplier
+      inventory.lead_days:
+        var: lead_days
+- every:
+    seconds: 10
+    state_key: _last_supplier_report
+    steps:
+    - sample:
+        reorder_material:
+          choice: MATERIALS
+        reorder_on_hand:
+          randint:
+          - 800
+          - 12000
+        reorder_point:
+          randint:
+          - 1500
+          - 4000
+    - sample:
+        reorder_action:
+          expr: '''REORDER'' if reorder_on_hand < reorder_point else ''NONE'''
+    - log:
+        level: INFO
+        message: '[WMS] reorder_check material={reorder_material} on_hand={reorder_on_hand} reorder_point={reorder_point}
+          action={reorder_action}'
+        attrs:
+          operation: reorder_check
+          inventory.material:
+            var: reorder_material
+          inventory.on_hand_units:
+            var: reorder_on_hand
+          inventory.reorder_point:
+            var: reorder_point
+- counter:
+    state_key: _batches_total
+    by: 1
+- metric:
+    name: inventory.batches_synced
+    value:
+      var: _batches_total
+    unit: batches
+- metric:
+    name: inventory.stockout_risk_pct
+    value:
+      uniform:
+      - 2.0
+      - 14.5
+      round: 2
+    unit: '%'
+- metric:
+    name: inventory.turns_per_year
+    value:
+      uniform:
+      - 7.0
+      - 16.0
+      round: 2
+    unit: turns/yr

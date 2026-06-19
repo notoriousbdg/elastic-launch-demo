@@ -1,0 +1,43 @@
+name: OT Historian Backpressure
+subsystem: historian
+vehicle_section: write_pipeline
+error_type: OT-HISTORIAN-BACKPRESSURE
+sensor_type: write_pipeline
+affected_services:
+- ot-historian
+cascade_services:
+- scada-gateway
+- oee-analytics
+description: Historian write lag exceeds threshold; risks dropping OT tag data on the floor
+investigation_notes: |-
+  Root Cause: Backpressure occurs when the disk-write throughput on the historian archive volume falls below the incoming tag rate — usually due to a stuck compaction job, a snapshot operation blocking the write path, or a degraded RAID volume. Persistent lag risks the in-memory buffer cycling out un-archived points.
+  Remediation: 1) Check disk I/O: `iostat -x 1 5` on `mfg-historian-host`. 2) Check compaction job status: `historian-admin compaction-status`. 3) Pause non-essential snapshots: `historian-admin pause-snapshot --duration 15m`. 4) Force a buffer flush to a secondary volume if available: `historian-admin failover-write --target AR-SECONDARY`. 5) Open an infrastructure ticket if the disk SMART status shows degraded.
+remediation_action: drain_historian_buffer
+error_message: '[HIST] OT-HISTORIAN-BACKPRESSURE: archive={archive_id} buffer_depth={buffer_depth} write_lag_s={write_lag_s}
+  threshold=10s'
+stack_trace: |-
+  === HISTORIAN WRITE PIPELINE STATUS ===
+  Archive: {archive_id} | Buffer: {buffer_depth}/50000 (high watermark)
+  ------------------------------------------------------------------------
+  STAGE              | STATUS    | LAG (s)  | THROUGHPUT
+  ------------------------------------------------------------------------
+  ingest_queue        | OK        | 0.1      | 4200 pts/s
+  buffer_to_archive   | DEGRADED  | {write_lag_s}      | 350 pts/s
+  compaction          | STALLED   | --       | 0 pts/s
+  ------------------------------------------------------------------------
+  OT-HISTORIAN-BACKPRESSURE: write lag {write_lag_s}s; buffer at {buffer_depth}/50000
+correlation_attr:
+  key: infra.historian_storage_volume
+  value: ar-current-vol-degraded
+fault_params:
+  archive_id: {choice: [AR-CURRENT, AR-DAILY-01, AR-DAILY-02]}
+  buffer_depth: {randint: [38000, 50000]}
+  write_lag_s: {randint: [8, 45]}
+rca_clues:
+  ot-historian:
+    historian.write_lag_s: {randint: [8, 45]}
+    historian.compaction_status: stalled
+  scada-gateway:
+    scada.write_retry_count: {randint: [10, 200]}
+  oee-analytics:
+    oee.tag_feed_lag_s: {randint: [5, 30]}

@@ -1,0 +1,55 @@
+name: DNSSEC Validation Failure
+subsystem: dns
+vehicle_section: dns_security
+error_type: DNS-DNSSEC-VALIDATION-FAILURE
+sensor_type: dnssec_validator
+affected_services:
+- cloud-dns-resolver
+- vpc-network-manager
+cascade_services:
+- cloud-armor-waf
+- network-intelligence
+description: DNSSEC signature validation failing for managed DNS zones
+investigation_notes: |-
+  Root cause: DNSSEC validation failures typically stem from expired RRSIG signatures, missing or mismatched DS records at the parent zone, or key rotation failures. Cloud DNS manages DNSSEC keys automatically, but DS records at the domain registrar must be updated manually when key-signing keys (KSK) rotate. Diagnose with:
+    gcloud dns managed-zones describe <zone> --format='value(dnssecConfig)'
+    gcloud dns dns-keys list --zone=<zone> --format='table(id,type,algorithm,isActive,dsRecord)'
+    dig +dnssec +trace <record_name> @8.8.8.8
+  Remediation: If DS record is MISSING/STALE, get the current DS record from Cloud DNS and update at the registrar:
+    gcloud dns dns-keys describe <key-id> --zone=<zone> --format='value(dsRecord)'
+  If RRSIG is expired, force a key rotation: Console > Cloud DNS > <zone> > DNSSEC > Rotate Keys. Allow 24-48 hours for DNS propagation of new DS records through the global DNS hierarchy.
+remediation_action: reset_dns_zone
+error_message: 'cloud-dns: DNS-DNSSEC-VALIDATION-FAILURE zone={dns_zone} record={dns_record_name} type={dns_record_type} rrsig_expiry={dnssec_rrsig_expiry}
+  ds_status={dnssec_ds_status} validation_errors={dnssec_error_count}/m'
+stack_trace: |-
+  Cloud DNS DNSSEC Validation Report
+  ------------------------------------
+  Zone:              {dns_zone}
+  Record:            {dns_record_name} ({dns_record_type})
+  RRSIG Expiry:      {dnssec_rrsig_expiry}
+  DS Record Status:  {dnssec_ds_status}
+  Validation Errors: {dnssec_error_count}/min
+  DNSKEY Algorithm:  RSASHA256
+  Action: Rotate DNSSEC keys or update DS record at registrar
+correlation_attr:
+  key: network.dnssec_key_id
+  value: ksk-2024q4-rotation
+fault_params:
+  dns_zone: {choice: [gcpnet-internal, gcpnet-prod-zone, gcpnet-services]}
+  dns_record_name: {choice: [api.gcpnet.internal, lb.gcpnet.prod, cdn.gcpnet.internal, vpn.gcpnet.internal]}
+  dns_record_type: {choice: [A, AAAA, CNAME, MX]}
+  dnssec_rrsig_expiry: {choice: [EXPIRED, "2h remaining", "30m remaining"]}
+  dnssec_ds_status: {choice: [MISSING, STALE, MISMATCHED_ALGORITHM]}
+  dnssec_error_count: {randint: [50, 500]}
+rca_clues:
+  cloud-dns-resolver:
+    dns.rrsig_status: {choice: [EXPIRED, EXPIRING]}
+    dns.ds_record_stale: true
+  vpc-network-manager:
+    vpc.dns_resolution_failures: {randint: [50, 300]}
+    vpc.affected_services: internal
+  cloud-armor-waf:
+    armor.dns_based_rules_stale: true
+  network-intelligence:
+    ni.dns_path_test: FAIL
+    ni.dnssec_chain_broken: true

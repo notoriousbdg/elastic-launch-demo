@@ -1,0 +1,63 @@
+name: DNS Resolution Failure Over VPN
+subsystem: network_services
+vehicle_section: name_resolution
+error_type: NAMED-SERVFAIL-FORWARDER
+sensor_type: dns_query
+affected_services:
+- dns-dhcp-service
+- network-controller
+cascade_services:
+- digital-marketplace
+- auction-engine
+- cloud-inventory-scanner
+description: DNS queries traversing VPN tunnel failing to resolve internal records
+investigation_notes: |-
+  1. Verify VPN tunnel status first: if the tunnel carrying DNS traffic is down, all forwarded queries will fail — check `show vpn ike-sa` / `show vpn ipsec-sa`.
+  2. Test DNS resolution from within the tunnel: `dig @<forwarder_ip> <query_name> +tcp` — if TCP works but UDP fails, MTU/fragmentation is the issue.
+  3. Check `named.conf` forwarder configuration: ensure both primary and fallback forwarders are reachable over the VPN and DNS port 53 is permitted.
+  4. Run `rndc querylog on` to enable query logging on the DNS server, then trace the query path to identify where resolution breaks.
+  5. If the forwarder is in Azure, verify Azure Private DNS zone is linked to the correct VNet and conditional forwarding rules are configured.
+  6. As a workaround, add static host entries for critical internal services to `/etc/hosts` or Windows DNS client cache while resolving the VPN issue.
+remediation_action: restart_dns_forwarder
+error_message: 'named[12345]: NAMED-SERVFAIL-FORWARDER: query ''{dns_query_name}'' type {dns_query_type} via tunnel {vpn_tunnel_name}:
+  forwarder {dns_forwarder_ip} unreachable, fallback {dns_fallback_ip} timeout after {dns_timeout_ms}ms, returning {dns_rcode}'
+stack_trace: |-
+  named[12345]: debug: query '{dns_query_name}' IN {dns_query_type} +E(0)
+  named[12345]: debug: forwarding query to {dns_forwarder_ip} via {vpn_tunnel_name}
+  named[12345]: debug: send: no response from {dns_forwarder_ip}#53
+  named[12345]: debug: trying fallback forwarder {dns_fallback_ip}
+  named[12345]: debug: receive: timeout from {dns_fallback_ip}#53 after {dns_timeout_ms}ms
+  named[12345]: error: NAMED-SERVFAIL-FORWARDER: all forwarders unreachable for '{dns_query_name}'
+  named[12345]: debug: query failed (SERVFAIL) '{dns_query_name}/{dns_query_type}/IN': all forwarders failed
+correlation_attr:
+  key: network.vpn_ike_profile
+  value: ikev2-profile-aes256-sha512
+fault_params:
+  dns_query_name:
+    choice:
+    - marketplace.fanatics.internal
+    - auction-api.collectibles.prod
+    - card-printer-01.warehouse.local
+    - inventory.cloud-ops.internal
+  dns_query_type: {choice: [A, AAAA, CNAME, SRV]}
+  vpn_tunnel_name: {choice: [aws-to-azure-01, aws-to-gcp-01, gcp-to-azure-01]}
+  dns_forwarder_ip: {choice: ["10.0.0.53", "10.1.0.53", "168.63.129.16"]}
+  dns_fallback_ip: {choice: ["10.0.1.53", "10.2.0.53"]}
+  dns_timeout_ms: {randint: [3000, 10000]}
+  dns_rcode: {choice: [SERVFAIL, REFUSED, NXDOMAIN]}
+rca_clues:
+  dns-dhcp-service:
+    dns.forwarder_timeout_ms: {randint: [3000, 10000]}
+    dns.vpn_dependent_zones: {randint: [3, 12]}
+  network-controller:
+    network.vpn_tunnel_state: DOWN
+    network.ipsec_sa_expired: true
+  digital-marketplace:
+    marketplace.internal_api_dns_failures: {randint: [50, 500]}
+    marketplace.service_discovery_degraded: true
+  auction-engine:
+    auction.api_hostname_unresolvable: true
+    auction.failover_to_ip: true
+  cloud-inventory-scanner:
+    cloud_scan.cross_cloud_dns_broken: true
+    cloud_scan.affected_provider: {choice: [aws, azure, gcp]}

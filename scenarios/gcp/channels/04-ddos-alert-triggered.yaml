@@ -1,0 +1,58 @@
+name: DDoS Alert Triggered
+subsystem: security
+vehicle_section: ddos_protection
+error_type: ARMOR-DDOS-ALERT
+sensor_type: ddos_detector
+affected_services:
+- cloud-armor-waf
+- cloud-load-balancer
+cascade_services:
+- vpc-network-manager
+- cloud-cdn-service
+description: Cloud Armor detecting and mitigating a volumetric DDoS attack
+investigation_notes: |-
+  Root cause: Volumetric DDoS attack targeting the backend service through the external load balancer. Cloud Armor Adaptive Protection has engaged but may not be fully mitigating. Check:
+    gcloud compute security-policies describe <policy> --format=json
+    gcloud compute security-policies rules list <policy>
+  Review Adaptive Protection events in Console > Network Security > Cloud Armor > Events tab.
+  Remediation: Enable Adaptive Protection auto-deploy if not active:
+    gcloud compute security-policies update <policy> --enable-layer7-ddos-defense
+  Add rate-limiting rules targeting source regions: gcloud compute security-policies rules create <priority> --security-policy=<policy> --expression='origin.region_code=="CN"' --action=throttle --rate-limit-threshold-count=100 --rate-limit-threshold-interval-sec=60. Escalate to Google Cloud Support for L3/L4 scrubbing if volume exceeds 100Gbps.
+remediation_action: reset_security_policy
+error_message: '[CloudArmor] ARMOR-DDOS-ALERT policy={armor_policy} attack_type={ddos_attack_type} volume={ddos_volume_gbps}Gbps
+  source_regions={ddos_source_regions} mitigated={ddos_mitigated_pct}% backend={armor_backend} rule={armor_rule_name}'
+stack_trace: |-
+  Cloud Armor DDoS Mitigation Report
+  ------------------------------------
+  Policy:         {armor_policy}
+  Attack Type:    {ddos_attack_type}
+  Volume:         {ddos_volume_gbps} Gbps
+  Source Regions: {ddos_source_regions}
+  Mitigated:      {ddos_mitigated_pct}%
+  Backend:        {armor_backend}
+  Rule Matched:   {armor_rule_name}
+  Duration:       ongoing
+  Action:         Adaptive protection engaged, monitoring escalation
+correlation_attr:
+  key: infra.armor_ruleset
+  value: owasp-crs-v4.0.0-rc2
+fault_params:
+  armor_policy: {choice: [gcpnet-waf-policy, gcpnet-ddos-policy, gcpnet-edge-policy]}
+  armor_backend: {choice: [backend-lb-central1, backend-lb-east1, backend-lb-europe1]}
+  armor_rule_name: {choice: [rate-limit-global, geo-block-sanctioned, sqli-detection, xss-prevention]}
+  ddos_attack_type: {choice: [SYN_FLOOD, UDP_AMPLIFICATION, HTTP_FLOOD, DNS_AMPLIFICATION]}
+  ddos_volume_gbps: {uniform: [5.0, 120.0], round: 1}
+  ddos_source_regions: {choice: ["CN,RU,BR", "RU,UA,KZ", "multiple (>20 countries)"]}
+  ddos_mitigated_pct: {uniform: [92.0, 99.9], round: 1}
+rca_clues:
+  cloud-armor-waf:
+    armor.attack_vector: {choice: [SYN_FLOOD, HTTP_FLOOD]}
+    armor.adaptive_protection_mode: engaged
+  cloud-load-balancer:
+    lb.request_spike_pct: {uniform: [400, 2000], round: 0}
+    lb.backend_overload: true
+  vpc-network-manager:
+    vpc.ingress_bandwidth_spike: true
+    vpc.flow_log_anomaly: volumetric
+  cloud-cdn-service:
+    cdn.cache_bypass_rate: {uniform: [60, 95], round: 1}

@@ -1,0 +1,69 @@
+name: Session Store Redis Saturation
+subsystem: authentication
+vehicle_section: session_store
+error_type: AUTH-SESSION-SATURATE
+sensor_type: session_mgmt
+affected_services:
+- auth-service
+- identity-db
+cascade_services:
+- api-gateway
+- activation-service
+description: Redis session store memory saturation causing session eviction and mass re-authentication storms
+investigation_notes: |
+  1. Check Redis memory usage: redis-cli INFO memory | grep used_memory_human. Memory at 100% triggers LRU eviction of active sessions, causing mass re-authentication.
+  2. Session count growth rate — if new sessions exceed eviction rate, Redis enters thrashing mode. Current session count: redis-cli DBSIZE. Expected baseline: ~500K sessions.
+  3. Thundering herd problem: evicted sessions trigger re-authentication on identity-db, which cannot handle the spike. Auth-service circuit breaker opens at 1000 req/s to protect identity-db.
+  4. Increase Redis maxmemory immediately: redis-cli CONFIG SET maxmemory 8gb. Then investigate why session count exceeded capacity (possible session leak, missing TTL on new session types).
+  5. Review session TTL distribution — sessions without explicit TTL accumulate indefinitely. Ensure all session types have TTL <= 3600s: redis-cli --scan --pattern 'session:*' | head -20 | xargs -I{} redis-cli TTL {}.
+remediation_action: flush_expired_sessions
+error_message: '[AUTH] AUTH-SESSION-SATURATE: memory_used_pct={redis_memory_pct}% sessions={redis_session_count} evictions={redis_evictions}/min reauth_rate={reauth_rate}/min'
+stack_trace: |
+  === REDIS SESSION STORE STATUS ===
+  cluster=auth-redis-cluster  mode=sentinel
+  --- MEMORY STATUS ---
+    used_memory={redis_memory_pct}%  maxmemory=4GB
+    eviction_policy=allkeys-lru  evictions={redis_evictions}/min
+    sessions_active={redis_session_count}  sessions_baseline=500000
+  --- EVICTION CASCADE ---
+    T+0s    memory_threshold_exceeded
+    T+2s    lru_eviction_started  rate={redis_evictions}/min
+    T+5s    reauth_storm  rate={reauth_rate}/min
+    T+8s    identity-db connection spike
+    T+12s   auth-service circuit_breaker=OPEN
+  --- IMPACT ---
+    api-gateway: 401 responses, all segments affected
+    activation-service: blocked on auth, queue building
+  ACTION: increase_maxmemory=true  flush_expired=true  alert=AUTH-SESSION-SATURATE
+infrastructure_events:
+- body: '[AzureHealth] RedisCacheMemorySaturation: resource=meridian-session-cache memory_used_pct=98 eviction_policy=volatile-lru evictions_per_sec=450 region=westeurope'
+  severity: ERROR
+  event_name: azure.health.RedisCacheMemorySaturation
+  service: auth-service
+  attributes:
+    cloud.provider: azure
+    cloud.service: redis_cache
+    azure.health.status: Critical
+    azure.health.cause: MEMORY_SATURATION
+    infrastructure.source: AzureHealth
+correlation_attr:
+  key: infra.redis_cluster_config
+  value: redis-7.2.4-sentinel-patch
+fault_params:
+  redis_memory_pct: {randint: [95, 100]}
+  redis_session_count: {randint: [500000, 1000000]}
+  redis_evictions: {randint: [500, 2000]}
+  reauth_rate: {randint: [1000, 5000]}
+rca_clues:
+  auth-service:
+    auth.redis_memory_pct: {randint: [95, 100]}
+    auth.eviction_rate_per_min: {randint: [500, 2000]}
+  identity-db:
+    db.reauth_connection_spike: {randint: [200, 500]}
+    db.connection_pool_stress: true
+  api-gateway:
+    gateway.session_failure_rate: {uniform: [0.1, 0.4], round: 2}
+    gateway.thundering_herd: true
+  activation-service:
+    activation.auth_dependency_blocked: true
+    activation.queue_building: true

@@ -1,0 +1,61 @@
+name: Player Telemetry Buffer Overflow
+subsystem: analytics
+vehicle_section: telemetry_buffer
+error_type: ANALYTICS-TELEMETRY-OVERFLOW
+sensor_type: buffer_monitor
+affected_services:
+- analytics-pipeline
+- game-server
+cascade_services:
+- matchmaking-engine
+description: Player telemetry ring buffer overflows causing event data loss for analytics and anti-cheat systems
+investigation_notes: |-
+  Root cause: the ring buffer consumer (analytics pipeline) is draining slower than the producer (game server), and the buffer has no backpressure mechanism — when full, new events silently overwrite the oldest 20%, creating gaps in anti-cheat telemetry.
+  1. Check event breakdown: player_move at 42.1% of buffer is the largest category — consider downsampling movement events (every 5th tick instead of every tick).
+  2. Review drop rate: 12.4% sustained drop rate means anti-cheat is blind to ~1 in 8 player actions — this creates exploitable detection gaps.
+  3. Inspect buffer sizing: current max of 100,000 slots may be undersized for peak concurrent players; calculate required capacity as `events_per_second * drain_latency_s`.
+  4. Remediate: issue `resize_telemetry_buffer` to increase capacity to 500,000 slots and `restart_buffer_consumers` to clear the current overflow condition.
+  5. Implement backpressure: when buffer hits 80%, throttle low-priority event types (player_move, state_snapshot) while preserving combat_event for anti-cheat integrity.
+remediation_action: resize_telemetry_buffer
+error_message: '[Analytics] ANALYTICS-TELEMETRY-OVERFLOW: buffer={buffer_id} usage={buffer_usage_pct}% capacity={buffer_size}/{max_buffer_size}
+  dropped={dropped_events}'
+stack_trace: |-
+  === RING BUFFER DIAGNOSTIC ===
+  buffer={buffer_id}
+  ----------- buffer state ------------
+    usage        = {buffer_usage_pct}%
+    size         = {buffer_size}/{max_buffer_size}
+    head_offset  = 99,847
+    tail_offset  = 99,201
+    writable     = 646 slots
+  ----------- drop statistics ---------
+    dropped_total   = {dropped_events}
+    dropped_1min    = 1,204
+    dropped_5min    = 4,821
+    drop_rate       = 12.4%
+  ----------- event breakdown ---------
+    player_move     : 42.1% of buffer
+    combat_event    : 28.4% of buffer
+    state_snapshot  : 18.7% of buffer
+    misc            : 10.8% of buffer
+  ----------- action ------------------
+    EVICT oldest 20%  ALERT anti-cheat (data gap)
+  ANALYTICS-TELEMETRY-OVERFLOW: buffer {buffer_id} at {buffer_usage_pct}% — {dropped_events} events lost
+correlation_attr:
+  key: deployment.ring_buffer_config
+  value: ringbuf-v2.0.0-no-backpressure
+fault_params:
+  buffer_id: {choice: [buf-player-events, buf-game-state, buf-combat-log]}
+  buffer_usage_pct: {uniform: [95.0, 100.0], round: 1}
+  buffer_size: {randint: [90000, 100000]}
+  max_buffer_size: 100000
+  dropped_events: {randint: [100, 10000]}
+rca_clues:
+  analytics-pipeline:
+    analytics.ring_buffer_writable_slots: {randint: [100, 1000]}
+    analytics.consumer_drain_lag_ms: {randint: [500, 5000]}
+  game-server:
+    game.anticheat_data_gap: true
+    game.movement_events_dropped_pct: {uniform: [5.0, 25.0], round: 1}
+  matchmaking-engine:
+    matchmaking.player_stats_stale: true

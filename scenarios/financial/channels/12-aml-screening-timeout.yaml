@@ -1,0 +1,37 @@
+name: AML Screening Timeout
+subsystem: compliance
+vehicle_section: screening_engine
+error_type: COMPL-AML-SCREENING
+sensor_type: aml_screener
+affected_services:
+- compliance-monitor
+- fraud-detector
+cascade_services:
+- order-gateway
+- customer-portal
+description: Anti-money laundering screening service exceeds response time SLA
+investigation_notes: ''
+remediation_action: ''
+error_message: '[COMPL] COMPL-AML-SCREENING: transaction={transaction_id} screening_ms={screening_ms} sla_ms={aml_sla_ms}
+  jurisdiction={jurisdiction}'
+stack_trace: |-
+  === AML SCREENING RESULTS ===
+  transaction={transaction_id}  jurisdiction={jurisdiction}
+  --- WATCHLIST CHECKS ---
+    OFAC_SDN         checked=true   hits=0   elapsed=1,240ms
+    EU_SANCTIONS     checked=true   hits=0   elapsed=2,100ms
+    UN_CONSOLIDATED  checked=true   hits=0   elapsed=890ms
+    PEP_DATABASE     checked=true   hits=1   elapsed=8,400ms  <<< SLOW
+    ADVERSE_MEDIA    checked=false  hits=--  elapsed=TIMEOUT
+  total_screening_ms={screening_ms}  sla_ms={aml_sla_ms}  breach=true
+  pep_hit_score=0.72  pep_name_match='partial'  disposition=PENDING_REVIEW
+  ACTION: hold_transaction=true  escalate_mlro=true  alert=COMPL-AML-SCREENING
+correlation_attr: {}
+fault_params:
+  transaction_id:
+    format: "TXN-{n}"
+    n: {randint: [100000, 999999]}
+  screening_ms: {randint: [5000, 30000]}
+  aml_sla_ms: 3000
+  jurisdiction: {choice: [US-SEC, US-CFTC, UK-FCA, EU-ESMA, SG-MAS, JP-FSA]}
+rca_clues: {}

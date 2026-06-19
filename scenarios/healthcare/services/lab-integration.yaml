@@ -1,0 +1,153 @@
+service: lab-integration
+sort_order: 3
+cloud_provider: aws
+cloud_region: us-east-1
+cloud_platform: aws_ec2
+cloud_availability_zone: us-east-1c
+subsystem: laboratory
+language: go
+topology:
+- - ehr-system
+  - /api/v1/ehr/results
+  - POST
+- - clinical-alerts
+  - /api/v1/alerts/critical-lab
+  - POST
+entry_endpoints:
+- - /api/v1/lab/submit
+  - POST
+db_operations:
+- - SELECT
+  - lab_orders
+  - SELECT order_id, test_code, priority, status FROM lab_orders WHERE patient_id = ? AND status IN ('pending', 'in-progress')
+- - INSERT
+  - lab_results
+  - INSERT INTO lab_results (order_id, test_code, value, unit, reference_range, abnormal_flag) VALUES (?, ?, ?, ?, ?, ?)
+emit_fault_logs: true
+kpi_emitter: false
+constants:
+  TEST_TYPES:
+  - CBC
+  - BMP
+  - CMP
+  - PT/INR
+  - Troponin
+  - BNP
+  - Lipase
+  - UA
+  - Blood Culture
+state:
+  _results_processed:
+    init: 0
+  _last_queue_report:
+    init: now
+steps:
+- sample:
+    test:
+      choice: TEST_TYPES
+    order_id:
+      expr: f'LAB-{rand.randint(100000, 999999)}'
+    tat_min:
+      randint:
+      - 12
+      - 55
+    abnormal_choice:
+      choice:
+      - true
+      - false
+      - false
+      - false
+- sample:
+    abnormal_flag:
+      expr: '''ABNORMAL'' if abnormal_choice else ''NORMAL'''
+- log:
+    level: INFO
+    message: '[LIS] result_delivered order={order_id} test={test} tat={tat_min}min flag={abnormal_flag} status=DELIVERED'
+    attrs:
+      operation: result_delivery
+      lab.order_id:
+        var: order_id
+      lab.test_code:
+        var: test
+      lab.tat_minutes:
+        var: tat_min
+      lab.abnormal_flag:
+        var: abnormal_flag
+      lab.status: DELIVERED
+- sample:
+    order_test:
+      choice: TEST_TYPES
+    priority:
+      choice:
+      - STAT
+      - ROUTINE
+      - ROUTINE
+      - TIMED
+    order_patient_id:
+      expr: f'PT-{rand.randint(100000, 999999)}'
+- log:
+    level: INFO
+    message: '[LIS] order_received test={order_test} priority={priority} patient={order_patient_id} specimen=RECEIVED status=IN_PROGRESS'
+    attrs:
+      operation: order_processing
+      lab.test_code:
+        var: order_test
+      lab.priority:
+        var: priority
+      lab.patient_id:
+        var: order_patient_id
+      lab.status: SPECIMEN_RECEIVED
+- every:
+    seconds: 10
+    state_key: _last_queue_report
+    steps:
+    - sample:
+        q_pending:
+          randint:
+          - 15
+          - 60
+        q_in_progress:
+          randint:
+          - 10
+          - 40
+    - log:
+        level: INFO
+        message: '[LIS] queue_status pending={q_pending} in_progress={q_in_progress} completed={_results_processed} pipeline=NOMINAL'
+        attrs:
+          operation: queue_status
+          queue.pending:
+            var: q_pending
+          queue.in_progress:
+            var: q_in_progress
+          queue.completed:
+            var: _results_processed
+- counter:
+    state_key: _results_processed
+    by: 1
+- metric:
+    name: lab.results_processed
+    value:
+      var: _results_processed
+    unit: results
+- sample:
+    tat_minutes:
+      if_active:
+        randint:
+        - 90
+        - 300
+      else:
+        randint:
+        - 10
+        - 45
+- metric:
+    name: lab.avg_turnaround_minutes
+    value:
+      var: tat_minutes
+    unit: min
+- metric:
+    name: lab.pending_orders
+    value:
+      randint:
+      - 20
+      - 80
+    unit: orders

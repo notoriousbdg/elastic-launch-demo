@@ -1,0 +1,390 @@
+scenario_id: fanatics
+scenario_name: Fanatics Collectibles
+scenario_description: Enterprise infrastructure and network operations for vertically integrated trading cards and memorabilia.
+  Recently migrated 100% out of physical DCs to 50% AWS / 50% Azure with GCP edge.
+namespace: fanatics
+scenario_icon: 🏈
+sort_order: 2
+nominal_label: NORMAL
+hosts:
+- host.name: fanatics-aws-host-01
+  host.id: i-0f2a3b4c5d6e78901
+  host.arch: amd64
+  host.type: m5.xlarge
+  host.image.id: ami-0fedcba987654321
+  host.cpu.model.name: Intel(R) Xeon(R) Platinum 8175M CPU @ 2.50GHz
+  host.cpu.vendor.id: GenuineIntel
+  host.cpu.family: '6'
+  host.cpu.model.id: '85'
+  host.cpu.stepping: '4'
+  host.cpu.cache.l2.size: 1048576
+  host.ip:
+  - 10.10.1.50
+  - 172.16.1.10
+  host.mac:
+  - 0a:2b:3c:4d:5e:6f
+  - 0a:2b:3c:4d:5e:70
+  os.type: linux
+  os.description: Amazon Linux 2023.6.20250115
+  cloud.provider: aws
+  cloud.platform: aws_ec2
+  cloud.region: us-east-1
+  cloud.availability_zone: us-east-1a
+  cloud.account.id: '987654321012'
+  cloud.instance.id: i-0f2a3b4c5d6e78901
+  cpu_count: 4
+  memory_total_bytes: 17179869184
+  disk_total_bytes: 214748364800
+- host.name: fanatics-gcp-host-01
+  host.id: '7823456789012345678'
+  host.arch: amd64
+  host.type: e2-standard-4
+  host.image.id: projects/debian-cloud/global/images/debian-12-bookworm-v20250115
+  host.cpu.model.name: Intel(R) Xeon(R) CPU @ 2.20GHz
+  host.cpu.vendor.id: GenuineIntel
+  host.cpu.family: '6'
+  host.cpu.model.id: '85'
+  host.cpu.stepping: '7'
+  host.cpu.cache.l2.size: 1048576
+  host.ip:
+  - 10.128.1.20
+  - 10.128.1.21
+  host.mac:
+  - 42:01:0a:80:01:14
+  - 42:01:0a:80:01:15
+  os.type: linux
+  os.description: Debian GNU/Linux 12 (bookworm)
+  cloud.provider: gcp
+  cloud.platform: gcp_compute_engine
+  cloud.region: us-central1
+  cloud.availability_zone: us-central1-a
+  cloud.account.id: fanatics-infra-prod
+  cloud.instance.id: '7823456789012345678'
+  cpu_count: 4
+  memory_total_bytes: 17179869184
+  disk_total_bytes: 107374182400
+- host.name: fanatics-azure-host-01
+  host.id: /subscriptions/fab-012/resourceGroups/fanatics-rg/providers/Microsoft.Compute/virtualMachines/fanatics-vm-01
+  host.arch: amd64
+  host.type: Standard_D4s_v3
+  host.image.id: Canonical:0001-com-ubuntu-server-jammy:22_04-lts-gen2:latest
+  host.cpu.model.name: Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz
+  host.cpu.vendor.id: GenuineIntel
+  host.cpu.family: '6'
+  host.cpu.model.id: '106'
+  host.cpu.stepping: '6'
+  host.cpu.cache.l2.size: 1310720
+  host.ip:
+  - 10.2.0.10
+  - 10.2.0.11
+  host.mac:
+  - 00:0d:3a:7e:8f:9a
+  - 00:0d:3a:7e:8f:9b
+  os.type: linux
+  os.description: Ubuntu 22.04.5 LTS
+  cloud.provider: azure
+  cloud.platform: azure_vm
+  cloud.region: eastus
+  cloud.availability_zone: eastus-1
+  cloud.account.id: fab-012-345-678
+  cloud.instance.id: fanatics-vm-01
+  cpu_count: 4
+  memory_total_bytes: 17179869184
+  disk_total_bytes: 137438953472
+k8s_clusters:
+- name: fanatics-eks-cluster
+  provider: aws
+  platform: aws_eks
+  region: us-east-1
+  zones:
+  - us-east-1a
+  - us-east-1b
+  - us-east-1c
+  os_description: Amazon Linux 2
+  services:
+  - card-printing-system
+  - digital-marketplace
+  - auction-engine
+- name: fanatics-gke-cluster
+  provider: gcp
+  platform: gcp_gke
+  region: us-central1
+  zones:
+  - us-central1-a
+  - us-central1-b
+  - us-central1-c
+  os_description: Container-Optimized OS
+  services:
+  - packaging-fulfillment
+  - wifi-controller
+  - cloud-inventory-scanner
+- name: fanatics-aks-cluster
+  provider: azure
+  platform: azure_aks
+  region: eastus
+  zones:
+  - eastus-1
+  - eastus-2
+  - eastus-3
+  os_description: Ubuntu 22.04 LTS
+  services:
+  - network-controller
+  - firewall-gateway
+  - dns-dhcp-service
+agent_config:
+  id: fanatics-infra-analyst
+  name: Infrastructure & Network Analyst
+  assessment_tool_name: platform_load_assessment
+  system_prompt: 'You are the Fanatics Infrastructure & Network Analyst, an expert AI assistant for enterprise network and
+    infrastructure operations. You help NOC engineers investigate incidents, analyze telemetry data, and provide root cause
+    analysis for fault conditions across 9 infrastructure services spanning AWS, GCP, and Azure. You have deep expertise in
+    Cisco IOS-XE/NX-OS switching and routing, Palo Alto PAN-OS firewall management, Juniper Mist wireless LAN controllers,
+    Infoblox DDI (DNS/DHCP/IPAM), AWS VPC networking, Azure Virtual Network, and GCP VPC. You understand BGP peering, spanning
+    tree protocol, 802.1X/RADIUS authentication, SSL inspection, and cross-cloud VPN tunneling. When investigating incidents,
+    search for these vendor-specific identifiers in logs: Cisco syslog mnemonics (SW_MATM-4-MACFLAP_NOTIF, SPANTREE-2-TOPO_CHANGE,
+    BGP-3-NOTIFICATION), PAN-OS system events (SYSTEM-session-threshold, SYSTEM-cpu-critical, SYSTEM-cert-expire), Juniper
+    Mist events (AP_DISCONNECTED, INTERFERENCE_DETECTED, AUTH_FAILURE_STORM), DNS/DHCP faults (NAMED-SERVFAIL-FORWARDER, DHCPD-LEASE-EXHAUSTION),
+    commerce errors (BID_LATENCY_SLA_BREACH, PAYMENT_GATEWAY_TIMEOUT, CATALOG_SYNC_FAILURE), manufacturing faults (MES-QUEUE-OVERFLOW,
+    MES-QC-REJECT-THRESHOLD), warehouse faults (WMS-LABEL-PRINTER-FAULT, WMS-SCANNER-DESYNC), and cloud ops events (CLOUD-ORPHANED-RESOURCE,
+    VPN-TUNNEL-FLAP). Log messages are in body.text — NEVER search the body field alone.'
+assessment_tool_config:
+  id: platform_load_assessment
+  description: 'Comprehensive platform load assessment. Evaluates all infrastructure services against event-day readiness
+    criteria. Returns data for load evaluation across networking, DNS, VPN, firewall, and cloud infrastructure systems. Log
+    message field: body.text (never use ''body'' alone).'
+executive_kpi_emitter_service_name: digital-marketplace
+executive_dashboard_intro: '**Fanatics executive KPIs** — sports media, streaming, fantasy, collectibles commerce, sponsorship,
+  and regulated wagering (synthetic `business.*` from `digital-marketplace`).'
+executive_kpi_sections:
+- header: '**Monetization & wagering** — ads, subscriptions, handle, and margin'
+  specs:
+  - - Ad revenue (USD/min)
+    - metrics.business.ad_revenue_usd_per_min
+  - - Programmatic fill (%)
+    - metrics.business.programmatic_fill_rate_pct
+  - - Betting handle (USD/min)
+    - metrics.business.betting_handle_usd_per_min
+  - - Sportsbook hold (%)
+    - metrics.business.betting_hold_pct
+  - - Gross win (USD/min)
+    - metrics.business.betting_gross_win_usd_per_min
+  - - Subscription MRR (USD/min)
+    - metrics.business.subscription_mrr_usd_per_min
+- header: '**Audience & engagement** — live scale, video, traffic, sessions, fantasy'
+  specs:
+  - - Live concurrent viewers
+    - metrics.business.live_concurrent_viewers
+  - - Video min engaged / min
+    - metrics.business.video_minutes_engaged_per_min
+  - - Page views / min
+    - metrics.business.page_views_per_min
+  - - App sessions / min
+    - metrics.business.app_sessions_per_min
+  - - Content completion (%)
+    - metrics.business.content_completion_rate_pct
+  - - Fantasy active entries
+    - metrics.business.fantasy_active_entries
+- header: '**Commerce & partners** — merch, tickets, sponsorship, B2B data'
+  specs:
+  - - Merch GMV (USD/min)
+    - metrics.business.merch_gmv_usd_per_min
+  - - Live ticketing (USD/min)
+    - metrics.business.live_event_ticketing_usd_per_min
+  - - Partner sponsorship (USD/min)
+    - metrics.business.partner_sponsorship_usd_per_min
+  - - API / data partner (USD/min)
+    - metrics.business.api_data_partner_revenue_usd_per_min
+  - - Sponsored inv. (s/min)
+    - metrics.business.sponsored_inventory_seconds_per_min
+  - - Premium ARPU (USD)
+    - metrics.business.premium_tier_arpu_usd
+- header: '**Marketing & health** — CRM, loyalty, social, churn & satisfaction proxies'
+  specs:
+  - - Push CTR (%)
+    - metrics.business.push_notification_ctr_pct
+  - - Newsletter open (%)
+    - metrics.business.newsletter_open_rate_pct
+  - - Loyalty redeem (pts/min)
+    - metrics.business.loyalty_points_redeemed_per_min
+  - - Social clip shares / min
+    - metrics.business.social_clip_shares_per_min
+  - - Churn risk (0–100)
+    - metrics.business.churn_risk_index_0_100
+  - - Satisfaction proxy (NPS-like)
+    - metrics.business.net_satisfaction_proxy_nps
+executive_trend_charts:
+- title: Ad revenue trend
+  field: metrics.business.ad_revenue_usd_per_min
+  y_label: USD/min
+- title: Video engagement (min/min)
+  field: metrics.business.video_minutes_engaged_per_min
+  y_label: min/min
+- title: Live concurrent viewers
+  field: metrics.business.live_concurrent_viewers
+  y_label: viewers
+- title: Betting handle trend
+  field: metrics.business.betting_handle_usd_per_min
+  y_label: USD/min
+- title: Subscription MRR trend
+  field: metrics.business.subscription_mrr_usd_per_min
+  y_label: USD/min
+- title: Merch GMV trend
+  field: metrics.business.merch_gmv_usd_per_min
+  y_label: USD/min
+executive_kpi_emissions:
+- name: business.ad_revenue_usd_per_min
+  value: {uniform: [85000.0, 520000.0], round: 1}
+  unit: USD/min
+- name: business.programmatic_fill_rate_pct
+  value: {uniform: [82.0, 98.4], round: 2}
+  unit: '%'
+- name: business.betting_handle_usd_per_min
+  value: {uniform: [180000.0, 2200000.0], round: 1}
+  unit: USD/min
+- name: business.betting_hold_pct
+  value: {uniform: [6.5, 14.2], round: 2}
+  unit: '%'
+- name: business.betting_gross_win_usd_per_min
+  value: {uniform: [12000.0, 210000.0], round: 1}
+  unit: USD/min
+- name: business.subscription_mrr_usd_per_min
+  value: {uniform: [18000.0, 185000.0], round: 1}
+  unit: USD/min
+- name: business.live_concurrent_viewers
+  value: {randint: [78000, 520000]}
+  unit: viewers
+- name: business.video_minutes_engaged_per_min
+  value: {uniform: [120000.0, 980000.0], round: 1}
+  unit: min/min
+- name: business.page_views_per_min
+  value: {randint: [180000, 2400000]}
+  unit: views/min
+- name: business.app_sessions_per_min
+  value: {randint: [900, 12000]}
+  unit: sessions/min
+- name: business.content_completion_rate_pct
+  value: {uniform: [38.0, 82.0], round: 2}
+  unit: '%'
+- name: business.fantasy_active_entries
+  value: {randint: [9000, 220000]}
+  unit: entries
+- name: business.merch_gmv_usd_per_min
+  value: {uniform: [28000.0, 310000.0], round: 1}
+  unit: USD/min
+- name: business.live_event_ticketing_usd_per_min
+  value: {uniform: [4500.0, 98000.0], round: 1}
+  unit: USD/min
+- name: business.partner_sponsorship_usd_per_min
+  value: {uniform: [15000.0, 195000.0], round: 1}
+  unit: USD/min
+- name: business.api_data_partner_revenue_usd_per_min
+  value: {uniform: [6000.0, 72000.0], round: 1}
+  unit: USD/min
+- name: business.sponsored_inventory_seconds_per_min
+  value: {randint: [400, 12000]}
+  unit: s/min
+- name: business.premium_tier_arpu_usd
+  value: {uniform: [8.2, 34.9], round: 2}
+  unit: USD
+- name: business.push_notification_ctr_pct
+  value: {uniform: [2.0, 11.5], round: 2}
+  unit: '%'
+- name: business.newsletter_open_rate_pct
+  value: {uniform: [16.0, 38.0], round: 2}
+  unit: '%'
+- name: business.loyalty_points_redeemed_per_min
+  value: {randint: [25000, 380000]}
+  unit: pts/min
+- name: business.social_clip_shares_per_min
+  value: {randint: [3000, 95000]}
+  unit: shares/min
+- name: business.churn_risk_index_0_100
+  value: {uniform: [11.0, 52.0], round: 1}
+  unit: index
+- name: business.net_satisfaction_proxy_nps
+  value: {uniform: [-8.0, 68.0], round: 1}
+  unit: score
+raw_log_profile:
+  service_name: commerce-edge
+  user_id_prefix: fan
+  tier_field: member_tier
+  tier_values:
+  - - guest
+    - 60
+  - - member
+    - 30
+  - - allstar
+    - 10
+  country_weights:
+    US: 80
+    CA: 8
+    GB: 5
+    MX: 4
+    AU: 3
+  methods:
+  - GET
+  - POST
+  - PUT
+  - DELETE
+  paths:
+  - /api/v1/catalog
+  - /api/v1/cart
+  - /api/v1/checkout
+  - /api/v1/orders
+  - /api/v1/jerseys/{team}
+  - /api/v1/teams
+  - /login
+  - /health
+  change_point_path: /api/v1/checkout
+trace_attributes:
+  base:
+    platform.region: {choice: [us-east-1, us-central1, eastus]}
+    platform.traffic_tier: {choice: [normal, normal, elevated, peak]}
+  services:
+    card-printing-system:
+      print.batch_id:
+        format: "BATCH-{n}"
+        n: {randint: [1000, 9999]}
+      print.card_rarity: {choice: [common, uncommon, rare, ultra-rare, 1-of-1]}
+      print.line_number: {choice: [LINE-A, LINE-B, LINE-C]}
+      print.substrate: {choice: [standard-cardstock, chrome-foil, refractor-film, acetate]}
+    digital-marketplace:
+      marketplace.listing_type: {choice: [buy-now, auction, make-offer, pre-order]}
+      marketplace.price_tier: {choice: [budget, mid-range, premium, ultra-premium]}
+      marketplace.cart_items: {randint: [1, 12]}
+      marketplace.session_type: {choice: [browse, search, checkout, watchlist]}
+    auction-engine:
+      auction.state: {choice: [accepting_bids, going_once, going_twice, closed, extending]}
+      auction.bid_count: {randint: [1, 250]}
+      auction.reserve_met: {choice: [true, true, true, false]}
+      auction.time_remaining_s: {randint: [0, 7200]}
+    packaging-fulfillment:
+      warehouse.zone: {choice: [receiving, storage-A, storage-B, packing, shipping-dock]}
+      warehouse.pick_velocity: {choice: [normal, express, priority, rush]}
+      warehouse.carrier: {choice: [UPS, FedEx, USPS, DHL]}
+      warehouse.package_weight_oz: {uniform: [2.0, 48.0], round: 1}
+    wifi-controller:
+      wifi.ssid: {choice: [Fanatics-Corp, Fanatics-Warehouse, Fanatics-Guest, Fanatics-IoT]}
+      wifi.band: {choice: [2.4GHz, 5GHz, 6GHz]}
+      wifi.ap_count: {randint: [20, 120]}
+      wifi.client_count: {randint: [50, 800]}
+    cloud-inventory-scanner:
+      cloud_scan.provider: {choice: [aws, azure, gcp]}
+      cloud_scan.resource_count: {randint: [200, 5000]}
+      cloud_scan.compliance_pct: {uniform: [75.0, 99.5], round: 1}
+      cloud_scan.orphan_count: {randint: [0, 45]}
+    network-controller:
+      network.switch_tier: {choice: [core, distribution, access, spine, leaf]}
+      network.vlan_count: {randint: [20, 200]}
+      network.port_utilization_pct: {uniform: [30.0, 95.0], round: 1}
+      network.protocol: {choice: [OSPF, BGP, RSTP, LACP]}
+    firewall-gateway:
+      firewall.zone_pair: {choice: ["TRUST->UNTRUST", "UNTRUST->DMZ", "TRUST->DMZ", "DMZ->TRUST"]}
+      firewall.policy_count: {randint: [400, 2500]}
+      firewall.session_rate: {randint: [2000, 12000]}
+      firewall.threat_level: {choice: [low, medium, high, critical]}
+    dns-dhcp-service:
+      dns.query_type: {choice: [A, AAAA, CNAME, SRV, PTR, MX]}
+      dns.zone: {choice: [fanatics.internal, warehouse.local, collectibles.prod]}
+      dhcp.scope_utilization_pct: {uniform: [40.0, 98.0], round: 1}
+      dhcp.lease_duration_s: {choice: [3600, 7200, 14400, 28800, 86400]}

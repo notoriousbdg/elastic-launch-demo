@@ -1,0 +1,55 @@
+name: Bed Management Sync Error
+subsystem: scheduling
+vehicle_section: bed_board
+error_type: SCHED-BED-MGMT-FAIL
+sensor_type: bed_tracker
+affected_services:
+- scheduling-api
+- ehr-system
+cascade_services:
+- clinical-alerts
+description: Bed management system loses synchronization with ADT events, showing stale census data
+investigation_notes: |-
+  Root Cause: The bed board receives ADT A01 (admit), A02 (transfer), and A03 (discharge) events via HL7 interface. Sync lag occurs when the ADT feed queue backs up or the bed board API fails to process events in order, causing census discrepancies between the bed board UI and actual patient locations.
+  Remediation: 1) Check the ADT-to-bed-board interface queue: `bed-admin queue-status --unit {nursing_unit}`. 2) Force a census resync from the ADT master: `bed-admin resync --unit {nursing_unit} --source ADT-MASTER`. 3) Restart the bed board sync service: `systemctl restart bed-management-sync`. 4) Verify the HL7 ADT listener port is accepting connections: `netstat -an | grep 2575`. 5) Manually update conflicting bed status via charge nurse console if patient safety is at risk. 6) Review the bed board event processing log for out-of-order sequence numbers.
+remediation_action: resync_bed_board
+error_message: '[SCHED] SCHED-BED-MGMT-FAIL: unit={nursing_unit} bed={bed_id} status={bed_status} adt_event={adt_event} sync_lag={sync_lag_seconds}s'
+stack_trace: |-
+  === BED BOARD STATUS — {nursing_unit} ===
+  Sync Lag: {sync_lag_seconds}s | Last ADT Event: {adt_event}
+  ------------------------------------------------------------------------
+  BED       | BED-BOARD  | ADT-STATE  | PATIENT     | CONFLICT
+  ------------------------------------------------------------------------
+  {bed_id}   | {bed_status:10s} | {adt_event:10s} | {patient_id}  | YES
+  A-102     | occupied   | occupied   | PT-443821   | NO
+  B-205     | vacant     | vacant     | --          | NO
+  C-310     | cleaning   | cleaning   | --          | NO
+  ------------------------------------------------------------------------
+  SCHED-BED-MGMT-FAIL: Bed {bed_id} state mismatch detected
+  Bed board shows '{bed_status}' but ADT event '{adt_event}' received {sync_lag_seconds}s ago
+  Census accuracy degraded — patient placement at risk
+correlation_attr:
+  key: infra.bed_board_sync_driver
+  value: adt-bridge-v1.9.4-unstable
+fault_params:
+  nursing_unit: {choice: [ICU-3A, ICU-3B, MedSurg-4N, MedSurg-4S, ED-1, NICU-2]}
+  bed_id:
+    format: "{ward}-{num}"
+    ward: {choice: [A, B, C, D]}
+    num: {randint: [101, 450]}
+  bed_status: {choice: [occupied, vacant, cleaning, blocked]}
+  adt_event: {choice: [discharge, transfer, admit]}
+  sync_lag_seconds: {randint: [60, 600]}
+  patient_id:
+    format: "PT-{n}"
+    n: {randint: [100000, 999999]}
+rca_clues:
+  scheduling-api:
+    bed_board.adt_queue_lag_s: {randint: [60, 600]}
+    bed_board.stale_census_count: {randint: [3, 15]}
+  ehr-system:
+    ehr.adt_event_backlog: {randint: [20, 100]}
+    ehr.census_accuracy_pct: {uniform: [70, 90], round: 1}
+  clinical-alerts:
+    alerts.patient_location_stale: true
+    alerts.affected_units: {randint: [1, 4]}

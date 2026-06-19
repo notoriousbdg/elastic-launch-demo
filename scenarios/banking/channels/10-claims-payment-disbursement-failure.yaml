@@ -1,0 +1,62 @@
+name: Claims Payment Disbursement Failure
+subsystem: claims_management
+vehicle_section: claims_payment
+error_type: CLAIMS-DISBURSEMENT-FAIL
+sensor_type: payment_disbursement
+affected_services:
+- claims-processor
+- payment-engine
+cascade_services:
+- member-portal
+- document-vault
+description: Claims settlement payment failing to disburse to member account or body shop
+investigation_notes: |-
+  1. Check the disbursement error type: PAYEE_ACCOUNT_MISMATCH means the body shop's banking details changed — verify with DRP (Direct Repair Program) network coordinator. DAILY_LIMIT_EXCEEDED requires treasury approval for limit override.
+  2. For ROUTING_VALIDATION_FAIL, the payee's routing number failed ABA validation — cross-reference with the Federal Reserve's E-Payments routing directory: https://www.frbservices.org/EPaymentsDirectory.
+  3. FRAUD_HOLD_ACTIVE means fraud-sentinel flagged the disbursement — review the fraud alert and determine if the hold is legitimate or a false positive from the claims payment pattern.
+  4. Member impact: 12 days since loss with rental_extension=REQUIRED means the member's rental car coverage is expiring. Approve rental extension while disbursement is resolved to avoid out-of-pocket.
+  5. For body shop payees in the DRP network, contact the shop directly to verify banking details. Non-DRP shops may require updated W-9 and payment authorization forms.
+  6. Check 1099 generation — failed disbursements that were partially processed may need 1099 reversal to avoid incorrect tax reporting to the IRS.
+remediation_action: retry_claims_disbursement
+error_message: '[CLAIMS] CLAIMS-DISBURSEMENT-FAIL: claim={claim_id} amount=${claim_amount} payee={claim_payee} method={disbursement_method}
+  error={disbursement_error}'
+stack_trace: |-
+  === CLAIMS DISBURSEMENT STATUS ===
+  claim={claim_id}  amount=${claim_amount}  payee={claim_payee}
+  --- PAYMENT ATTEMPT ---
+    method={disbursement_method}  attempt=3/3
+    STEP                STATUS      DETAIL
+    claim_approved      COMPLETE    adjuster_id=ADJ-4827
+    amount_verified     COMPLETE    estimate=${claim_amount} deductible=$500
+    payee_validated     COMPLETE    {claim_payee}
+    funds_transfer      FAILED      {disbursement_error}  <<< BLOCKED
+    1099_generation     SKIPPED     ---
+  --- PAYEE INFO ---
+    type=BODY_SHOP  routing={routing_number}  acct=****{acct_last4}
+    DRP_network=true  preferred_shop=true
+  rental_extension=REQUIRED  member_waiting=true  days_since_loss=12
+  ACTION: retry_payment=true  extend_rental=true  alert=CLAIMS-DISBURSEMENT-FAIL
+correlation_attr:
+  key: infra.disbursement_routing_table
+  value: pay-route-v2.1.0-rc3
+fault_params:
+  claim_id: {format: "CLM-{n}", n: {randint: [100000, 999999]}}
+  claim_amount: {uniform: [500.0, 50000.0], round: 2}
+  claim_payee: {choice: [Caliber Collision, Service King, ABRA Auto Body, Gerber Collision, Maaco, Member Direct Deposit]}
+  disbursement_method: {choice: [ACH_CREDIT, CHECK_MAIL, VIRTUAL_CARD, WIRE]}
+  disbursement_error: {choice: [PAYEE_ACCOUNT_MISMATCH, DAILY_LIMIT_EXCEEDED, ROUTING_VALIDATION_FAIL, FRAUD_HOLD_ACTIVE]}
+  routing_number: {format: "{n}", n: {randint: [100000000, 999999999]}}
+  acct_last4: {format: "{n}", n: {randint: [1000, 9999]}}
+rca_clues:
+  claims-processor:
+    claims.disbursement_error_type: {choice: [PAYEE_ACCOUNT_MISMATCH, ROUTING_VALIDATION_FAIL, DAILY_LIMIT_EXCEEDED]}
+    claims.days_since_loss: {randint: [5, 30]}
+  payment-engine:
+    payment.disbursement_retry_count: 3
+    payment.drp_payee_validation: FAILED
+  member-portal:
+    portal.rental_extension_needed: true
+    portal.member_outreach_status: PENDING
+  document-vault:
+    document.w9_on_file: {choice: [true, false]}
+    document.tax_1099_status: BLOCKED

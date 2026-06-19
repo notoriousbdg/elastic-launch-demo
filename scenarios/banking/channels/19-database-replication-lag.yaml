@@ -1,0 +1,60 @@
+name: Database Replication Lag
+subsystem: payment_processing
+vehicle_section: database_infra
+error_type: INFRA-DB-REPL-LAG
+sensor_type: replication_monitor
+affected_services:
+- payment-engine
+- mobile-gateway
+cascade_services:
+- claims-processor
+- member-portal
+description: Primary-replica database replication lag causing stale reads and balance inconsistencies
+investigation_notes: |-
+  1. Replication lag root cause: WAL replay rate (8MB/s) cannot keep up with WAL send rate (12MB/s) — 33% throughput deficit means lag will continue growing. Check replica disk IOPS saturation.
+  2. Stale balance reads affect 33% of queries (round-robin across 3 nodes, 1 lagged) — members may see incorrect available balances, leading to overdrafts or failed transactions.
+  3. Immediate action: route all reads to primary to ensure consistency. This increases primary load but prevents stale data. Command: UPDATE pg_settings SET setting='primary' WHERE name='read_routing'.
+  4. Scale replica IOPS: aws rds modify-db-instance --db-instance-identifier {cluster}-b --iops 10000 --apply-immediately. Current IOPS is SATURATED — Aurora allows up to 64K IOPS.
+  5. Check for long-running queries on the replica that may be blocking WAL replay: SELECT pid, now()-query_start, query FROM pg_stat_activity WHERE state='active' ORDER BY query_start.
+  6. Monitor pending_txns — if this exceeds 100K, the replica may need to be rebuilt from snapshot. Aurora can create a new replica in ~15 minutes from the primary's storage volume.
+remediation_action: failover_db_replica
+error_message: '[INFRA] INFRA-DB-REPL-LAG: cluster={db_cluster} lag_ms={db_lag_ms} max_ms={db_max_lag_ms} replica={db_replica}
+  pending_txns={db_pending_txns}'
+stack_trace: |-
+  === DATABASE REPLICATION STATUS ===
+  cluster={db_cluster}  engine=Aurora_PostgreSQL_15.4
+  --- REPLICATION TOPOLOGY ---
+    NODE              ROLE        LAG_MS    STATUS
+    {db_cluster}-a    PRIMARY     0         OK
+    {db_cluster}-b    REPLICA     {db_lag_ms}     BEHIND  <<< ALERT
+    {db_cluster}-c    REPLICA     1,240     WARNING
+  --- LAG ANALYSIS ---
+    current_lag={db_lag_ms}ms  max_allowed={db_max_lag_ms}ms  breach=true
+    pending_txns={db_pending_txns}  wal_send_rate=12MB/s  wal_replay_rate=8MB/s
+    disk_iops=SATURATED  cpu_replica=94%
+  --- IMPACT ---
+    stale_balance_reads=POSSIBLE  affected_members=~12,000
+    read_routing=ROUND_ROBIN  stale_read_pct=33%
+  ACTION: route_reads_primary=true  scale_replica_iops=true  alert=INFRA-DB-REPL-LAG
+correlation_attr:
+  key: infra.aurora_replica_config
+  value: aurora-pg15-iops-tuned-v2
+fault_params:
+  db_cluster: {choice: [banking-aurora-payments, banking-aurora-members, banking-aurora-claims]}
+  db_lag_ms: {randint: [5000, 60000]}
+  db_max_lag_ms: 3000
+  db_replica: {choice: [replica-b, replica-c]}
+  db_pending_txns: {randint: [1000, 50000]}
+rca_clues:
+  payment-engine:
+    payment.db_repl_lag_ms: {randint: [5000, 30000]}
+    payment.wal_replay_deficit_pct: {uniform: [20, 50], round: 0}
+  mobile-gateway:
+    gateway.stale_balance_reads_pct: {uniform: [25, 40], round: 1}
+    gateway.read_routing_policy: ROUND_ROBIN
+  claims-processor:
+    claims.claim_status_stale: true
+    claims.db_read_routing: REPLICA_LAGGED
+  member-portal:
+    portal.balance_inconsistency_reports: {randint: [50, 200]}
+    portal.overdraft_risk_elevated: true

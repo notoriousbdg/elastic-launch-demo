@@ -1,0 +1,51 @@
+name: IMU Synchronization Loss
+subsystem: guidance
+vehicle_section: avionics
+error_type: GNC-IMU-SYNC-LOSS
+sensor_type: imu
+affected_services:
+- navigation
+- sensor-validator
+cascade_services:
+- mission-control
+- range-safety
+description: Inertial measurement unit loses time synchronization
+investigation_notes: 'Root cause: GPS 1PPS (one pulse-per-second) signal degradation or OCXO (oven-controlled crystal oscillator)
+  aging drift causing the IMU time base to decouple from mission time. Check PPS signal integrity at the IMU input connector
+  — signal amplitude <2.5V indicates cable or driver failure. Verify OCXO-A temperature stability (nominal 42C +/-0.5C). Single-axis
+  drift suggests gyro bias shift on that axis; multi-axis drift points to clock source. Remediation: initiate IMU realignment
+  sequence (GNC_IMU_ALIGN), switch PPS source to backup (PPS_SELECT GPS_1PPS_B), and verify drift converges below 3.0ms threshold.
+  If OCXO drift persists, switch to redundant IMU-B.'
+remediation_action: reset_guidance
+error_message: '[GNC] GNC-IMU-SYNC-LOSS: axis={axis} drift={drift_ms}ms threshold={threshold_ms}ms sync_state=LOST'
+stack_trace: |-
+  == GN&C SYSTEM STATUS == IMU SYNCHRONIZATION ==
+  TIMESTAMP: MET+00:04:14.228 | FRAME: 0x4A33 | SEQ: 18446
+  ---------------------------------------------------------------
+  AXIS    DRIFT_MS   THRESHOLD   GYRO_BIAS    STATUS
+  {axis}       {drift_ms}ms    {threshold_ms}ms       +0.0021d/h   **SYNC_LOSS**
+  Y       0.42ms     3.0ms       -0.0008d/h   NOMINAL
+  Z       0.18ms     3.0ms       +0.0003d/h   NOMINAL
+  ---------------------------------------------------------------
+  PPS_SOURCE: GPS_1PPS | CLOCK_REF: OCXO-A | TEMP: 42.1C
+  GNC-IMU-SYNC-LOSS: {axis}-axis clock drift {drift_ms}ms exceeds threshold
+  ACTION: Initiate IMU realignment sequence, verify PPS signal integrity
+correlation_attr:
+  key: infra.ntp_source
+  value: gps-pps-backup
+fault_params:
+  axis: {choice: [X, Y, Z]}
+  drift_ms: {uniform: [5.0, 25.0], round: 1}
+  threshold_ms: 3.0
+rca_clues:
+  navigation:
+    gnc.pps_source: {choice: [GPS_1PPS_A, GPS_1PPS_B]}
+    gnc.ocxo_temp_c: {uniform: [41.0, 43.5], round: 1}
+  sensor-validator:
+    validation.imu_drift_axis: {choice: [X, Y, Z]}
+    validation.clock_delta_ms: {uniform: [3.5, 15.0], round: 1}
+  mission-control:
+    upstream.degraded_subsystem: guidance
+    telemetry.imu_status: sync_loss
+  range-safety:
+    safety.nav_solution_status: degraded

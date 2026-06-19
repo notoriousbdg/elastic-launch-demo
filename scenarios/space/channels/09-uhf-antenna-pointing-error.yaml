@@ -1,0 +1,47 @@
+name: UHF Antenna Pointing Error
+subsystem: communications
+vehicle_section: antenna_array
+error_type: COMM-ANTENNA-POINTING
+sensor_type: antenna_position
+affected_services:
+- comms-array
+- sensor-validator
+cascade_services:
+- mission-control
+description: UHF antenna gimbal pointing error exceeds tolerance
+investigation_notes: 'Root cause: gimbal servo controller failing to track TDRSS-W satellite — resolver feedback indicates
+  mechanical binding or servo amplifier saturation. Pointing errors in both azimuth and elevation suggest the tracking algorithm
+  lost lock, not a single-axis mechanical fault. Check gimbal motor current (nominal 2.1A, >3.5A indicates binding). Verify
+  resolver calibration date — resolvers drift after thermal cycling. Inspect gimbal cable wrap for interference at azimuth
+  limits. Remediation: reset gimbal controller (COMM_GIMBAL_RESET UHF-PRIMARY), run resolver calibration (COMM_RESOLVER_CAL
+  UHF), then command reacquisition of TDRSS-W target (COMM_TRACK TDRSS-W AUTO). If binding persists, switch to UHF-SECONDARY
+  gimbal.'
+remediation_action: reconfigure_antenna
+error_message: '[COMM] COMM-ANTENNA-POINTING: az_error={az_error}deg el_error={el_error}deg gimbal=UHF-PRIMARY lock=LOST'
+stack_trace: |-
+  == ANTENNA STATUS DUMP == UHF GIMBAL CONTROLLER ==
+  TIMESTAMP: MET+00:04:15.445 | FRAME: 0x4A37 | SEQ: 18450
+  ---------------------------------------------------------------
+  AXIS         CMD       ACTUAL    ERROR     STATUS
+  AZIMUTH      127.3d    {az_error}d err  {az_error}deg   **FAULT**
+  ELEVATION    45.8d     {el_error}d err  {el_error}deg   **FAULT**
+  ---------------------------------------------------------------
+  GIMBAL_TEMP: 38.2C | MOTOR_CURRENT: 2.1A | RESOLVER: VALID
+  TRACKING_MODE: AUTO | TARGET: TDRSS-W | LOCK: LOST
+  COMM-ANTENNA-POINTING: Pointing error az={az_error}deg el={el_error}deg
+  ACTION: Reset gimbal controller, verify resolver calibration
+correlation_attr:
+  key: deployment.servo_fw
+  value: gimbal-ctrl-v2.0.1-rc3
+fault_params:
+  az_error: {uniform: [1.0, 5.0], round: 2}
+  el_error: {uniform: [0.5, 3.0], round: 2}
+rca_clues:
+  comms-array:
+    comms.gimbal_motor_current_a: {uniform: [2.5, 4.0], round: 1}
+    comms.tracking_target: TDRSS-W
+  sensor-validator:
+    validation.pointing_error_deg: {uniform: [1.0, 5.0], round: 2}
+    validation.servo_status: fault
+  mission-control:
+    upstream.degraded_subsystem: communications

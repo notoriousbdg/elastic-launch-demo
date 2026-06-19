@@ -1,0 +1,53 @@
+name: Cross-Cloud Relay Latency
+subsystem: relay
+vehicle_section: ground_network
+error_type: RLY-LATENCY-CRITICAL
+sensor_type: network_latency
+affected_services:
+- telemetry-relay
+- sensor-validator
+cascade_services:
+- mission-control
+- comms-array
+description: Cross-cloud telemetry relay latency exceeds acceptable bounds
+investigation_notes: 'Root cause: relay buffer saturation at 87% utilization causing queuing delay, compounded by 342 retransmits
+  indicating packet loss on the inter-cloud link. High buffer utilization points to a congestion event — either a telemetry
+  data burst from upstream sensors or a bandwidth reduction on the cross-cloud peering link. Check if the affected route has
+  a degraded BGP path (longer AS path) or if cloud provider maintenance reduced link capacity. 42ms jitter on the nominal
+  routes confirms the issue is isolated to the affected hop. Remediation: failover to backup route (RLY_ROUTE_FAILOVER {source}->{dest}
+  BACKUP), flush relay buffers (RLY_BUFFER_FLUSH), and enable QoS priority tagging for telemetry frames (RLY_QOS TELEMETRY
+  HIGH). Monitor latency convergence below 200ms threshold.'
+remediation_action: reset_relay_link
+error_message: '[RLY] RLY-LATENCY-CRITICAL: hop={source_cloud}->{dest_cloud} latency={latency_ms}ms threshold={threshold_ms_relay}ms'
+stack_trace: |-
+  == RELAY DIAGNOSTIC REPORT == CROSS-CLOUD ROUTER ==
+  TIMESTAMP: MET+00:04:17.001 | FRAME: 0x4A3A | SEQ: 18453
+  ---------------------------------------------------------------
+  ROUTE                LATENCY    THRESHOLD   JITTER    STATUS
+  {source_cloud}->{dest_cloud}         {latency_ms}ms    {threshold_ms_relay}ms      42ms      **CRITICAL**
+  gcp->azure           38ms       200ms       5ms       NOMINAL
+  aws->azure           45ms       200ms       8ms       NOMINAL
+  ---------------------------------------------------------------
+  ROUTE TABLE: 6 active | BUFFER_UTIL: 87% | RETRANSMITS: 342
+  RLY-LATENCY-CRITICAL: {source_cloud}->{dest_cloud} latency {latency_ms}ms exceeds {threshold_ms_relay}ms
+  ACTION: Check intermediate hops, consider failover to backup route
+correlation_attr:
+  key: network.bgp_as_path
+  value: 64512-64513-64515
+fault_params:
+  source_cloud: {choice: [aws, gcp, azure]}
+  dest_cloud: {choice: [aws, gcp, azure]}
+  latency_ms: {randint: [500, 3000]}
+  threshold_ms_relay: 200
+rca_clues:
+  telemetry-relay:
+    relay.buffer_utilization_pct: {uniform: [75.0, 95.0], round: 1}
+    relay.retransmit_count: {randint: [200, 600]}
+  sensor-validator:
+    validation.relay_health: degraded
+    validation.affected_route: {choice: [aws->gcp, gcp->azure, aws->azure]}
+  mission-control:
+    upstream.degraded_subsystem: relay
+    telemetry.data_freshness: stale
+  comms-array:
+    comms.upstream_relay_status: congested

@@ -1,0 +1,57 @@
+name: CDN Cache Miss Storm
+subsystem: cdn
+vehicle_section: cdn_edge
+error_type: CDN-CACHE-MISS-STORM
+sensor_type: cache_monitor
+affected_services:
+- content-delivery
+- game-server
+cascade_services:
+- analytics-pipeline
+description: Cascading cache misses overwhelm origin servers as hot content expires simultaneously across edge nodes
+investigation_notes: |-
+  Root cause: cache TTL alignment — all edge nodes received the same asset bundle version at the same time, so TTLs expire simultaneously, causing a thundering herd of origin requests. The origin circuit breaker enters HALF_OPEN state under the load spike.
+  1. Check origin health: verify origin S3/GCS bucket response times in CloudWatch or Stackdriver — p99 >500ms confirms origin saturation.
+  2. Review cache eviction logs: 14,203 evictions/min with only 32.1% warm cache means the edge LRU is thrashing; increase edge cache capacity or tier hot assets.
+  3. Inspect per-asset-group miss rates: textures-hd at 4,201 misses/min is the primary driver — pre-warm these via `cdn-cli prefetch --group textures-hd --edges all`.
+  4. Remediate: issue `purge_cdn_cache` on stale edges and then `reset_cdn_origin` to restart origin connection pools; add jittered TTL offsets (TTL + rand(0, 300s)) to prevent future synchronized expiration storms.
+  5. Enable request coalescing on the CDN edge layer so concurrent misses for the same asset are collapsed into a single origin fetch.
+remediation_action: purge_cdn_cache
+error_message: '[CDN] CDN-CACHE-MISS-STORM: edge={edge_node} hit_rate={cache_hit_rate}% threshold=85% origin_load={origin_load_pct}%
+  asset_group={asset_group}'
+stack_trace: |-
+  === CDN EDGE NODE CACHE STATISTICS ===
+  edge={edge_node}  asset_group={asset_group}
+  ----------- cache metrics -----------
+    hit_rate    = {cache_hit_rate}%  (threshold 85%)
+    miss_rate   = {origin_load_pct}%
+    evictions   = 14,203/min
+    warm_pct    = 32.1%
+    cold_pct    = 67.9%
+  ----------- origin load -------------
+    rps_to_origin   = 8,421
+    origin_p99_ms   = 847
+    origin_errors   = 127 (circuit_breaker=HALF_OPEN)
+    bandwidth_gbps  = 12.4
+  ----------- top miss groups ---------
+    textures-hd     : 4,201 misses/min
+    models-char     : 2,103 misses/min
+    audio-sfx       : 891 misses/min
+  CDN-CACHE-MISS-STORM: edge {edge_node} hit rate {cache_hit_rate}% below threshold
+correlation_attr:
+  key: deployment.cdn_edge_config
+  value: edge-config-v2.8.0-rc1
+fault_params:
+  edge_node: {choice: [edge-iad-01, edge-lax-02, edge-fra-01, edge-nrt-01]}
+  cache_hit_rate: {uniform: [20.0, 75.0], round: 1}
+  origin_load_pct: {uniform: [85.0, 100.0], round: 1}
+  asset_group: {choice: [textures-hd, models-characters, audio-sfx, maps-terrain]}
+rca_clues:
+  content-delivery:
+    cdn.ttl_alignment_detected: true
+    cdn.origin_rps: {randint: [5000, 15000]}
+  game-server:
+    game.asset_load_timeout_pct: {uniform: [5.0, 30.0], round: 1}
+    game.client_crash_rate: {uniform: [0.5, 3.0], round: 1}
+  analytics-pipeline:
+    analytics.cdn_error_events: {randint: [1000, 5000]}

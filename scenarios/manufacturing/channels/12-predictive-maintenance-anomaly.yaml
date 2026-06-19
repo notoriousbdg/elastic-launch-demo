@@ -1,0 +1,47 @@
+name: Predictive Maintenance Anomaly
+subsystem: maintenance
+vehicle_section: predictive_engine
+error_type: PREDICTIVE-MAINT-ANOMALY
+sensor_type: vibration_sensor
+affected_services:
+- maintenance-scheduler
+cascade_services:
+- mes-controller
+- scada-gateway
+description: Vibration / thermal anomaly on a critical asset; remaining useful life estimate dropped
+investigation_notes: |-
+  Root Cause: Vibration RMS climbing above ISO 10816 zone B for a Class A motor or spindle is an early warning of bearing wear, misalignment, or unbalance. Thermal deltas above 8°C between matched bearings are an early warning of inadequate lubrication or imminent failure.
+  Remediation: 1) Pull the trend: `cmms-admin signal-trend --asset {asset_id} --sensor vibration_rms_mm_s`. 2) Schedule a precision alignment check next available window. 3) Lubricate per the manufacturer's spec if not already done in the last cycle. 4) Order spare bearing assembly to local stock if not already on hand. 5) If RMS exceeds zone C (per ISO 10816), schedule a planned shutdown for the next changeover, do NOT wait for unplanned failure.
+remediation_action: schedule_predictive_intervention
+error_message: '[CMMS] PREDICTIVE-MAINT-ANOMALY: asset={asset_id} sensor={sensor_type} value={sensor_value} rul_days={rul_days}
+  confidence={ml_confidence}'
+stack_trace: |-
+  === PREDICTIVE MAINTENANCE — {asset_id} ===
+  Sensor: {sensor_type} | Current: {sensor_value} | ISO 10816 Zone: C
+  ------------------------------------------------------------------------
+  TIME (h ago) | VALUE   | TREND
+  ------------------------------------------------------------------------
+  168          | 1.8     | ↑ slow
+  72           | 2.4     | ↑ slow
+  24           | 4.1     | ↑ accelerating
+  1            | {sensor_value}   | ↑ accelerating
+  ------------------------------------------------------------------------
+  Remaining Useful Life: {rul_days} days (ML confidence: {ml_confidence})
+  PREDICTIVE-MAINT-ANOMALY: schedule intervention before next changeover
+correlation_attr:
+  key: infra.predictive_model_version
+  value: rul-xgboost-v2.1-rc1
+fault_params:
+  asset_id: {choice: [MTR-CONV-01, SPN-MILL-04, PMP-COOL-02, CMP-AIR-01]}
+  sensor_type: {choice: [vibration_rms_mm_s, bearing_temp_c, thermal_dt_c]}
+  sensor_value: {uniform: [4.5, 12.0], round: 2}
+  rul_days: {randint: [3, 21]}
+  ml_confidence: {uniform: [0.78, 0.96], round: 3}
+rca_clues:
+  maintenance-scheduler:
+    cmms.vibration_zone: C
+    cmms.rul_days: {randint: [3, 21]}
+  mes-controller:
+    mes.asset_at_risk: true
+  scada-gateway:
+    scada.thermal_dt_c: {uniform: [8.0, 18.0], round: 1}

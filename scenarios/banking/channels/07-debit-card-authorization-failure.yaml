@@ -1,0 +1,65 @@
+name: Debit Card Authorization Failure
+subsystem: payment_processing
+vehicle_section: card_auth
+error_type: PAY-CARD-AUTH-FAIL
+sensor_type: card_authorization
+affected_services:
+- payment-engine
+- fraud-sentinel
+cascade_services:
+- mobile-gateway
+- member-portal
+description: Debit card authorization requests failing at Visa/Mastercard network level
+investigation_notes: |-
+  1. Check the ISO 8583 response code: 05=Do Not Honor, 14=Invalid Card, 51=Insufficient Funds, 54=Expired Card, 61=Exceeds Limit, 91=Issuer Unavailable, 96=System Malfunction.
+  2. Response code 91 (SYSTEM_MALFUNCTION) indicates the card network itself is having issues — check Visa/Mastercard network status pages and recent advisories for regional outages.
+  3. Verify STIP (Stand-In Processing) eligibility — if network_auth fails but STIP is available, the payment-engine should authorize locally using risk parameters and post-authorize later.
+  4. Monitor decline rate by merchant MCC code — elevated declines at military exchanges (MCC 5411, AAFES) or commissaries (DeCA) indicate a pattern requiring immediate network liaison escalation.
+  5. Check fraud-sentinel score — if fraud_score PASS with score 12/100 but network declines, the issue is external. Contact card network operations: Visa (1-800-847-2750) or MC (1-800-307-7309).
+  6. Review retry_eligible flag — if true, implement exponential backoff retry (2s, 4s, 8s) before returning decline to member. Log all retry attempts for chargeback dispute support.
+remediation_action: reset_card_auth_gateway
+error_message: '[PAY] PAY-CARD-AUTH-FAIL: auth={auth_id} card=****{card_last4} amount=${auth_amount} merchant={merchant_name}
+  decline_code={decline_code}'
+stack_trace: |-
+  === CARD AUTHORIZATION FAILURE ===
+  auth={auth_id}  card=****{card_last4}  network={card_network}
+  --- TRANSACTION ---
+    merchant={merchant_name}  mcc={merchant_mcc}
+    amount=${auth_amount}  currency=USD
+    pos_entry=CHIP  pin_verified=true
+  --- AUTHORIZATION CHAIN ---
+    STEP                STATUS      CODE
+    velocity_check      PASS        ---
+    balance_check       PASS        avail=${available_balance}
+    fraud_score         PASS        score=12/100
+    network_auth        DECLINED    {decline_code}  <<< FAILED
+    stand_in            N/A         STIP not eligible
+  --- NETWORK RESPONSE ---
+    iso8583_rc={decline_code}  response_ms=2340  timeout=false
+    issuer_response=SYSTEM_MALFUNCTION  retry_eligible=true
+  ACTION: retry_network=true  notify_member=true  alert=PAY-CARD-AUTH-FAIL
+correlation_attr:
+  key: network.card_network_proxy
+  value: visa-proxy-v1.4.3-unstable
+fault_params:
+  auth_id: {format: "AUTH-{n}", n: {randint: [100000, 999999]}}
+  card_last4: {randint: [1000, 9999]}
+  auth_amount: {uniform: [5.0, 2000.0], round: 2}
+  merchant_name: {choice: [AAFES PX Fort Liberty, Commissary DeCA, Navy Exchange, Shell Gas Station, Amazon.com, Walmart Supercenter]}
+  decline_code: {choice: ['05', '14', '51', '54', '61', '91', '96']}
+  card_network: {choice: [VISA, MASTERCARD, AMEX]}
+  merchant_mcc: {choice: ['5411', '5541', '5912', '5999', '7011', '5311']}
+  available_balance: {uniform: [100.0, 25000.0], round: 2}
+rca_clues:
+  payment-engine:
+    payment.iso8583_response_code: {choice: ['05', '91', '96']}
+    payment.network_auth_status: DECLINED
+  fraud-sentinel:
+    fraud.card_risk_score: {randint: [5, 25]}
+    fraud.card_screening_result: PASS
+  mobile-gateway:
+    gateway.card_decline_display: NETWORK_ERROR
+    gateway.stip_eligible: false
+  member-portal:
+    portal.card_decline_notification_sent: true
+    portal.merchant_mcc: {choice: ['5411', '5541', '5999', '7011']}

@@ -1,0 +1,141 @@
+service: auth-gateway
+sort_order: 6
+cloud_provider: gcp
+cloud_region: us-central1
+cloud_platform: gcp_compute_engine
+cloud_availability_zone: us-central1-a
+subsystem: identity
+language: python
+entry_endpoints:
+- - /api/v1/auth/login
+  - POST
+db_operations:
+- - SELECT
+  - player_sessions
+  - SELECT session_id, player_id, token_expires_at FROM player_sessions WHERE token = ? AND expires_at > NOW()
+emit_fault_logs: true
+kpi_emitter: false
+constants:
+  PROVIDERS:
+  - oauth-google
+  - oauth-discord
+  - oauth-steam
+  - oauth-epic
+  - email-password
+state:
+  _auth_requests:
+    init: 0
+  _last_auth_report:
+    init: now
+steps:
+- counter:
+    state_key: _auth_requests
+    by: 1
+- sample:
+    provider:
+      choice: PROVIDERS
+    auth_latency_ms:
+      uniform:
+      - 15.0
+      - 80.0
+      round: 1
+    player_id:
+      format: PLR-{n}
+      n:
+        randint:
+        - 100000
+        - 999999
+- log:
+    level: INFO
+    message: '[Auth] login provider={provider} player={player_id} latency={auth_latency_ms}ms result=SUCCESS session_created=true'
+    attrs:
+      operation: auth_request
+      auth.provider:
+        var: provider
+      auth.player_id:
+        var: player_id
+      auth.latency_ms:
+        var: auth_latency_ms
+      auth.result: SUCCESS
+- sample:
+    token_age_min:
+      randint:
+      - 1
+      - 55
+    token_ttl_min:
+      expr: 60 - token_age_min
+    session_id:
+      format: SESS-{n}
+      n:
+        randint:
+        - 10000000
+        - 99999999
+- log:
+    level: INFO
+    message: '[Auth] token_validate session={session_id} age={token_age_min}min ttl={token_ttl_min}min status=VALID algo=RS256'
+    attrs:
+      operation: token_validation
+      token.session_id:
+        var: session_id
+      token.age_min:
+        var: token_age_min
+      token.ttl_min:
+        var: token_ttl_min
+      token.status: VALID
+- every:
+    seconds: 10
+    state_key: _last_auth_report
+    steps:
+    - log:
+        level: INFO
+        message: '[Auth] summary total_requests={_auth_requests} providers=5 active_sessions=84201 refresh_rate=412/s'
+        attrs:
+          operation: auth_summary
+          summary.total_requests:
+            var: _auth_requests
+          summary.provider_count: 5
+- sample:
+    auth_latency:
+      if_active:
+        uniform:
+        - 200.0
+        - 2000.0
+        round: 1
+      else:
+        uniform:
+        - 10.0
+        - 60.0
+        round: 1
+    token_refresh_rate:
+      if_active:
+        randint:
+        - 5000
+        - 50000
+      else:
+        randint:
+        - 100
+        - 1500
+    active_sessions:
+      randint:
+      - 20000
+      - 150000
+- metric:
+    name: auth.request_latency_ms
+    value:
+      var: auth_latency
+    unit: ms
+- metric:
+    name: auth.total_requests
+    value:
+      var: _auth_requests
+    unit: requests
+- metric:
+    name: auth.active_sessions
+    value:
+      var: active_sessions
+    unit: sessions
+- metric:
+    name: auth.token_refresh_rate
+    value:
+      var: token_refresh_rate
+    unit: req/s

@@ -1,0 +1,61 @@
+name: Leaderboard Corruption
+subsystem: progression
+vehicle_section: leaderboard_core
+error_type: LB-DATA-CORRUPT
+sensor_type: consistency_checker
+affected_services:
+- leaderboard-api
+- game-server
+cascade_services:
+- analytics-pipeline
+- moderation-engine
+description: Leaderboard sorted set becomes inconsistent due to concurrent score updates causing rank calculation errors
+investigation_notes: |-
+  Root cause: concurrent ZADD operations to the Redis sorted set during AOF rewrite cause race conditions — two game servers submit score updates for overlapping rank ranges without distributed locking, producing rank inversions and NaN entries.
+  1. Check Redis state: `redis-cli info persistence` — if `aof_rewrite_in_progress=1`, the rewrite is contending with writes; defer bulk score updates until rewrite completes.
+  2. Audit the corruption: rank 42018 score > rank 42017 score is a classic ZADD race; NaN at rank 42103 indicates a Lua script received non-numeric input from game server.
+  3. Verify ZSET cardinality: `ZCARD {leaderboard_id}` should match `total_entries` — any mismatch indicates phantom entries from incomplete transaction rollbacks.
+  4. Remediate: issue `freeze_leaderboard` to block new writes, then `rebuild_leaderboard` to reconstruct the sorted set from the transaction log source of truth.
+  5. Deploy Redlock-based distributed mutex for score update batches and add input validation to reject NaN/Infinity scores at the game server API boundary.
+remediation_action: rebuild_leaderboard
+error_message: '[LB] LB-DATA-CORRUPT: board={leaderboard_id} affected={corrupt_entries} checksum_fail=true season={season_id}'
+stack_trace: |-
+  === LEADERBOARD CONSISTENCY CHECK ===
+  board={leaderboard_id}  season={season_id}
+  ----------- sorted set audit --------
+    total_entries    = 1,284,301
+    corrupt_entries  = {corrupt_entries}
+    checksum_fail    = true
+    last_valid_rank  = 42,017
+  ----------- sample violations -------
+    rank 42018: score=8401 > rank 42017: score=8399  (INVERSION)
+    rank 42019: score=8401  (DUPLICATE score, different player)
+    rank 42103: score=NaN   (CORRUPT value)
+  ----------- redis state -------------
+    zset_card    = 1,284,301
+    memory_used  = 142MB
+    last_write   = 2026-02-17T14:21:58.441Z
+    aof_rewrite  = IN_PROGRESS
+  ----------- action ------------------
+    FREEZE board  REBUILD from transaction log
+  LB-DATA-CORRUPT: board {leaderboard_id} has {corrupt_entries} invalid entries
+correlation_attr:
+  key: deployment.redis_config
+  value: redis-7.2.4-aof-experimental
+fault_params:
+  leaderboard_id: {choice: [ranked-global, seasonal-solo, guild-wars, tournament-finals]}
+  corrupt_entries: {randint: [10, 500]}
+  season_id:
+    format: "S{n}"
+    n: {randint: [1, 12]}
+rca_clues:
+  leaderboard-api:
+    leaderboard.redis_aof_rewrite: true
+    leaderboard.zadd_race_detected: true
+  game-server:
+    game.rank_display_stale: true
+    game.score_submit_retries: {randint: [3, 10]}
+  analytics-pipeline:
+    analytics.rank_anomaly_events: {randint: [100, 500]}
+  moderation-engine:
+    moderation.rank_exploit_check: inconclusive

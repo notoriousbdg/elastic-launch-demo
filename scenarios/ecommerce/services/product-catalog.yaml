@@ -1,0 +1,103 @@
+service: product-catalog
+sort_order: 2
+cloud_provider: aws
+cloud_region: us-east-1
+cloud_platform: aws_ec2
+cloud_availability_zone: us-east-1b
+subsystem: catalog
+language: java
+topology:
+- - inventory-service
+  - /api/v1/inventory/availability
+  - GET
+- - recommendation-engine
+  - /api/v1/recommendations/similar
+  - GET
+entry_endpoints:
+- - /api/v1/catalog/search
+  - GET
+- - /api/v1/catalog/product
+  - GET
+- - /api/v1/catalog/categories
+  - GET
+db_operations:
+- - SELECT
+  - products
+  - SELECT id, name, price, description, category, stock_status FROM products WHERE status = 'active' AND category = ? ORDER
+    BY relevance_score DESC LIMIT 50
+- - SELECT
+  - product_images
+  - SELECT product_id, image_url, alt_text FROM product_images WHERE product_id = ? AND primary = true
+- - UPDATE
+  - search_index
+  - UPDATE search_index SET last_indexed = NOW(), doc_count = ? WHERE shard_id = ?
+emit_fault_logs: true
+kpi_emitter: false
+steps:
+- sample:
+    search_latency_ms:
+      uniform:
+      - 18.0
+      - 95.0
+      round: 1
+    items_indexed:
+      randint:
+      - 1200000
+      - 2000000
+    reco_click_rate:
+      uniform:
+      - 4.5
+      - 12.0
+      round: 2
+    search_rps:
+      uniform:
+      - 300.0
+      - 1200.0
+      round: 1
+- metric:
+    name: catalog.search_latency_ms
+    value:
+      var: search_latency_ms
+    unit: ms
+- metric:
+    name: catalog.items_indexed
+    value:
+      var: items_indexed
+    unit: items
+- metric:
+    name: catalog.recommendation_click_rate_pct
+    value:
+      var: reco_click_rate
+    unit: '%'
+- metric:
+    name: catalog.search_rps
+    value:
+      var: search_rps
+    unit: rps
+- log:
+    level: INFO
+    message: catalog.health search_latency_ms={search_latency_ms} items_indexed={items_indexed} reco_click_rate={reco_click_rate}%
+      search_rps={search_rps}
+    attrs:
+      operation: catalog_health
+      catalog.search_latency_ms:
+        var: search_latency_ms
+      catalog.items_indexed:
+        var: items_indexed
+      catalog.reco_click_rate_pct:
+        var: reco_click_rate
+      catalog.search_rps:
+        var: search_rps
+- sample:
+    index_health_pct:
+      uniform:
+      - 98.5
+      - 100.0
+      round: 2
+- log:
+    level: INFO
+    message: catalog.index_health health_pct={index_health_pct}% items={items_indexed}
+    attrs:
+      operation: index_health
+      catalog.index_health_pct:
+        var: index_health_pct

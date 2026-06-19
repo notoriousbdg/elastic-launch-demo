@@ -1,0 +1,59 @@
+name: Report Queue Overflow
+subsystem: trust_safety
+vehicle_section: report_processor
+error_type: MOD-REPORT-QUEUE-OVERFLOW
+sensor_type: queue_monitor
+affected_services:
+- moderation-engine
+- chat-service
+cascade_services:
+- auth-gateway
+description: Player report queue exceeds processing capacity causing delays in abuse case resolution
+investigation_notes: |-
+  Root cause: 8 of 12 report processing workers have crashed (likely OOM on GPU inference nodes), reducing processing capacity by 67%. Auto-resolve is disabled due to high false positive rates from the automod model, creating a dual failure mode.
+  1. Check worker pods: `kubectl get pods -l app=report-processor` on the AKS cluster — look for OOMKilled or CrashLoopBackOff status on GPU-attached pods.
+  2. Review SLA breaches: harassment reports at 12h (SLA: 4h) and hate_speech at 6h (SLA: 1h) are critical compliance violations — escalate to the T&S lead.
+  3. Inspect GPU memory: `nvidia-smi` on inference nodes — if 2 nodes show OOM, the batch size for the classification model may need to be reduced.
+  4. Remediate: issue `restart_report_workers` to recover crashed processors and `prioritize_sla_breached` to reorder the queue by SLA violation severity.
+  5. Enable CPU-fallback inference for lower-priority categories (spam, exploits) to free GPU capacity for high-SLA categories (hate_speech, harassment).
+remediation_action: restart_report_workers
+error_message: '[T&S] MOD-REPORT-QUEUE-OVERFLOW: queue={report_queue_depth} rate={processing_rate}/min oldest={oldest_report_hours}h
+  category={report_category}'
+stack_trace: |-
+  === REPORT QUEUE STATUS ===
+  category={report_category}
+  ----------- queue metrics -----------
+    depth           = {report_queue_depth}
+    processing_rate = {processing_rate}/min
+    oldest_report   = {oldest_report_hours}h
+    drain_eta       = NEVER (inflow > capacity)
+  ----------- category breakdown ------
+    harassment   : 8,421 pending  (SLA: 4h, actual: 12h)
+    cheating     : 4,201 pending  (SLA: 2h, actual: 8h)
+    hate_speech  : 2,847 pending  (SLA: 1h, actual: 6h)
+    exploits     : 1,204 pending  (SLA: 4h, actual: 24h)
+    spam         : 891 pending    (SLA: 8h, actual: 48h)
+  ----------- processor state ---------
+    workers_active  = 4/12 (8 CRASHED)
+    gpu_inference   = DEGRADED (OOM on 2 nodes)
+    auto_resolve    = DISABLED (fp_rate too high)
+  ----------- action ------------------
+    RESTART crashed workers  PRIORITIZE by SLA breach
+  MOD-REPORT-QUEUE-OVERFLOW: queue {report_queue_depth} reports, oldest {oldest_report_hours}h
+correlation_attr:
+  key: infra.gpu_memory_config
+  value: a100-40gb-batch-oversized
+fault_params:
+  report_queue_depth: {randint: [5000, 50000]}
+  processing_rate: {uniform: [5.0, 30.0], round: 1}
+  oldest_report_hours: {uniform: [4.0, 72.0], round: 1}
+  report_category: {choice: [harassment, cheating, hate_speech, exploits, spam]}
+rca_clues:
+  moderation-engine:
+    moderation.workers_crashed: {randint: [4, 10]}
+    moderation.gpu_inference_status: OOM
+  chat-service:
+    chat.unmoderated_messages_pct: {uniform: [10.0, 40.0], round: 1}
+    chat.report_button_clicks: {randint: [1000, 10000]}
+  auth-gateway:
+    auth.flagged_account_backlog: {randint: [100, 1000]}

@@ -1,0 +1,38 @@
+name: Audit Log Sequence Gap
+subsystem: audit
+vehicle_section: audit_pipeline
+error_type: AUDIT-SEQ-GAP
+sensor_type: sequence_validator
+affected_services:
+- audit-logger
+- compliance-monitor
+cascade_services:
+- settlement-processor
+description: Audit trail event sequence numbers have gaps indicating lost events
+investigation_notes: ''
+remediation_action: ''
+error_message: '[AUDIT] AUDIT-SEQ-GAP: stream={audit_stream} expected={expected_seq} received={last_seq} gap_count={gap_count}'
+stack_trace: |-
+  === AUDIT PIPELINE STATUS ===
+  stream={audit_stream}  partition=0
+  --- SEQUENCE ANALYSIS ---
+    last_committed_seq   {last_seq}
+    expected_next_seq    {expected_seq}
+    gap_size             {gap_count} events
+    gap_duration         ~4.2s
+  --- PIPELINE HEALTH ---
+    kafka_consumer_lag   2,340
+    write_ahead_log      BEHIND
+    hash_chain           BROKEN (gap invalidates chain from seq {expected_seq})
+    immutability_proof   INVALID
+  --- RECOVERY ---
+    replay_source=kafka  replay_from={expected_seq}  estimated_time=12s
+    reg_impact=SEC-17a4  audit_gap_report=REQUIRED
+  ACTION: pause_pipeline=true  request_replay=true  alert=AUDIT-SEQ-GAP
+correlation_attr: {}
+fault_params:
+  audit_stream: {choice: [orders, trades, settlements, risk-events, compliance-alerts]}
+  expected_seq: {randint: [1000000, 9999999]}
+  last_seq: {randint: [1000000, 9999999]}
+  gap_count: {randint: [1, 100]}
+rca_clues: {}

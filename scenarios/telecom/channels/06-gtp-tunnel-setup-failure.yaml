@@ -1,0 +1,64 @@
+name: GTP Tunnel Setup Failure
+subsystem: network
+vehicle_section: packet_core
+error_type: NET-GTP-TUNNEL-FAIL
+sensor_type: tunnel_setup
+affected_services:
+- network-core
+cascade_services:
+- activation-service
+- bss-billing
+description: GTP-C/GTP-U tunnel establishment failing between SGW and PGW causing data path setup failures
+investigation_notes: |
+  1. Check PGW GTP-C response status — Create Session Response with cause NOT_ACCEPTED indicates PGW resource exhaustion. Monitor: pgw.active_pdp_contexts and pgw.gtp_tunnel_count.
+  2. GTP tunnel setup requires TEID (Tunnel Endpoint Identifier) allocation on both SGW and PGW. TEID pool exhaustion on either node prevents new tunnel creation.
+  3. Review GTP path failure detection — GTP echo request/response timeout (3x missed) triggers path failure, tearing down all tunnels on the affected path. Check for intermittent network connectivity.
+  4. APN configuration mismatch can cause tunnel setup rejection — verify APN 'internet.meridian.eu' is correctly configured on both SGW and PGW. Check: show apn configuration internet.meridian.eu.
+  5. Impact assessment: GTP tunnel failure prevents data connectivity for activated subscribers. Bearer allocation succeeds (radio path OK) but user plane data cannot flow without the GTP tunnel.
+remediation_action: reset_gtp_tunnels
+error_message: '[NET] NET-GTP-TUNNEL-FAIL: tunnel_id={tunnel_id} sgw={sgw_id} pgw={pgw_id} cause={gtp_cause} teid_pool_util={teid_util_pct}%'
+stack_trace: |
+  === GTP TUNNEL SETUP FAILURE ===
+  tunnel_id={tunnel_id}  apn=internet.meridian.eu
+  --- TUNNEL SETUP SEQUENCE ---
+    STEP                        STATUS      DETAIL
+    create_session_request       SENT        sgw={sgw_id} → pgw={pgw_id}
+    teid_allocation_sgw          COMPLETE    teid_sgw=0x{teid_sgw}
+    teid_allocation_pgw          FAILED      {gtp_cause}  <<< REJECTED
+    create_session_response      ERROR       cause=RESOURCE_UNAVAILABLE
+    gtp_u_path_setup             SKIPPED     ---
+  --- NODE STATUS ---
+    sgw_id={sgw_id}  active_tunnels=48,200  capacity=50,000
+    pgw_id={pgw_id}  teid_pool_util={teid_util_pct}%  pdp_contexts=SATURATED
+    gtp_echo_status=OK  path_failure=false
+  ACTION: clear_stale_tunnels=true  scale_pgw=true  alert=NET-GTP-TUNNEL-FAIL
+infrastructure_events:
+- body: '[GCP-Monitoring] GTPTunnelSetupFailure: tunnel_type=GTPv2-C failure_rate=35% cause=RESOURCE_UNAVAILABLE pgw=network-core-pgw region=europe-west3'
+  severity: ERROR
+  event_name: gcp.monitoring.GTPTunnelSetupFailure
+  service: network-core
+  attributes:
+    cloud.provider: gcp
+    cloud.service: monitoring
+    gcp.resource_type: gke_container
+    infrastructure.source: GCP-Monitoring
+correlation_attr:
+  key: network.pgw_config_version
+  value: pgw-5g-v3.1.0-patch
+fault_params:
+  tunnel_id: {format: "TUN-{n}", n: {randint: [100000, 999999]}}
+  sgw_id: {format: "SGW-FRA-{n:02d}", n: {randint: [1, 4]}}
+  pgw_id: {format: "PGW-FRA-{n:02d}", n: {randint: [1, 4]}}
+  gtp_cause: {choice: [RESOURCE_UNAVAILABLE, TEID_POOL_EXHAUSTED, PGW_OVERLOADED, APN_MISMATCH]}
+  teid_util_pct: {randint: [90, 99]}
+  teid_sgw: {format: "{n:08X}", n: {randint: [268435456, 4294967295]}}
+rca_clues:
+  network-core:
+    network.teid_pool_util_pct: {randint: [90, 99]}
+    network.pgw_status: RESOURCE_UNAVAILABLE
+  activation-service:
+    activation.data_path_setup_failed: true
+    activation.bearer_ok_tunnel_fail: true
+  bss-billing:
+    billing.activation_incomplete: true
+    billing.data_usage_tracking: BLOCKED

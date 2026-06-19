@@ -1,0 +1,62 @@
+name: Claims Processing Batch Failure
+subsystem: billing
+vehicle_section: claims_engine
+error_type: X12-837-REJECT
+sensor_type: x12_837
+affected_services:
+- billing-processor
+- data-warehouse
+cascade_services:
+- ehr-system
+- scheduling-api
+description: Batch claims processing pipeline fails during X12 837 generation or submission
+investigation_notes: |-
+  Root Cause: X12 837 Professional/Institutional claim rejections are stage-specific. Validation-stage failures indicate missing/invalid CLM segment data (DX codes, CPT codes, NPI). Submission-stage failures point to clearinghouse connectivity or envelope (ISA/GS) formatting issues. Adjudication-stage rejections come from payer business rules (timely filing, authorization requirements).
+  Remediation by stage: VALIDATION — run claim scrubber: `claims-admin scrub --batch {batch_id} --fix-codes`. SUBMISSION — verify clearinghouse connection: `claims-admin ch-status --payer {payer_id}` and resubmit: `claims-admin resubmit --batch {batch_id} --claims-only REJECTED`. ADJUDICATION — review the 999/277 response for specific rejection reason codes and correct per payer guidelines. General: 1) Reset the X12 837 gateway: `systemctl restart claims-submission-engine`. 2) Verify the 5010 companion guide for the rejecting payer is current. 3) Resubmit corrected claims: `claims-admin resubmit --batch {batch_id} --stage {claim_stage}`.
+remediation_action: resubmit_claims_batch
+error_message: '[CLAIMS] X12-837-REJECT: batch={batch_id} claim={claim_id} patient={patient_id} payer={payer_id} stage={claim_stage}'
+stack_trace: |-
+  --- X12 837 CLAIM SUBMISSION TRACE ---
+  >>> 837 Professional Claim
+  ISA*00*          *00*          *ZZ*FACILITY-01    *ZZ*{payer_id}        *20260217143052*^*00501*000000001*0*P*:
+  GS*HC*FACILITY-01*{payer_id}*20260217143052*0001*X*005010X222A1
+  ST*837*0001*005010X222A1
+  BHT*0019*00*{batch_id}*20260217143052*CH
+  CLM*{claim_id}*5000***11:B:1*Y**A*Y*Y
+  NM1*IL*1*DOE*JANE****MI*{insurance_id}
+  SE*8*0001
+  <<< 999 Acknowledgment
+    AK9*R*1*1*0
+    IK3*CLM*4*2300*8
+    IK4*2*782*7*{claim_stage}
+  X12-837-REJECT: Claim {claim_id} in batch {batch_id} rejected at {claim_stage}
+  Patient: {patient_id} | Payer: {payer_id} | Queued for correction
+correlation_attr:
+  key: deployment.claims_engine_build
+  value: x12-837-processor-v5.1.2-beta
+fault_params:
+  batch_id:
+    format: "BATCH-{n}"
+    n: {randint: [1000, 9999]}
+  claim_id:
+    format: "CLM-{n}"
+    n: {randint: [100000, 999999]}
+  patient_id:
+    format: "PT-{n}"
+    n: {randint: [100000, 999999]}
+  payer_id: {choice: [BCBS-001, AETNA-002, UHC-003, CIGNA-004, MDCR-005, MDCD-006]}
+  claim_stage: {choice: [validation, scrubbing, submission, adjudication]}
+  insurance_id:
+    format: "INS-{n}"
+    n: {randint: [100000, 999999]}
+rca_clues:
+  billing-processor:
+    x12.batch_rejection_rate_pct: {uniform: [15, 60], round: 1}
+    x12.isa_envelope_error: true
+  data-warehouse:
+    etl.claims_feed_stalled: true
+    etl.pending_claim_records: {randint: [500, 5000]}
+  ehr-system:
+    ehr.unbilled_encounters: {randint: [20, 100]}
+  scheduling-api:
+    sched.charge_capture_lag_s: {randint: [300, 1800]}

@@ -1,0 +1,54 @@
+name: Payment Processing Timeout
+subsystem: commerce
+vehicle_section: payment_system
+error_type: PAYMENT_GATEWAY_TIMEOUT
+sensor_type: payment_gateway
+affected_services:
+- digital-marketplace
+- auction-engine
+cascade_services:
+- firewall-gateway
+description: Payment gateway requests timing out, affecting checkout and auction settlements
+investigation_notes: |-
+  1. Check the payment provider status page (e.g., status.stripe.com) — gateway timeouts are often caused by provider-side degradation.
+  2. Review the HTTP response codes: 504 (Gateway Timeout) and 503 (Service Unavailable) indicate the provider is overloaded; 429 means rate limiting.
+  3. Verify the firewall is not blocking or throttling outbound HTTPS to payment endpoints: `show session all filter destination <gateway_ip>`.
+  4. Check connection pool exhaustion in the marketplace service: `netstat -an | grep <gateway_ip> | wc -l` — too many TIME_WAIT connections indicate pool leak.
+  5. Implement circuit breaker pattern: after 3 consecutive timeouts to a provider, failover to the backup provider (e.g., Stripe -> Adyen).
+  6. Queue failed payment retries in SQS/SNS with exponential backoff rather than blocking the checkout flow — return a pending status to the user.
+remediation_action: reset_payment_gateway
+error_message: '[PaymentHandler] PAYMENT_GATEWAY_TIMEOUT: order={order_id} provider={payment_provider} timeout={payment_timeout_ms}ms
+  gateway_code={gateway_response_code} retry={payment_retry_count}/{payment_max_retries} amount=${payment_amount}'
+stack_trace: |-
+  Traceback (most recent call last):
+    File "/app/marketplace/handlers/payment.py", line 178, in process_payment
+      response = await self.gateway.charge(order_id, amount, provider)
+    File "/app/marketplace/gateways/{payment_provider}.py", line 92, in charge
+      result = await self._http.post(self.endpoint, json=payload, timeout={payment_timeout_ms}/1000)
+    File "/app/venv/lib/python3.11/site-packages/httpx/_client.py", line 1574, in post
+      raise ReadTimeout("Timed out while receiving data")
+  httpx.ReadTimeout: Payment gateway did not respond within {payment_timeout_ms}ms
+  PAYMENT_GATEWAY_TIMEOUT: order {order_id} via {payment_provider} — {gateway_response_code}
+correlation_attr:
+  key: infra.payment_gateway_sdk
+  value: stripe-sdk-v14.2.0-beta3
+fault_params:
+  order_id:
+    format: "ORD-{n}"
+    n: {randint: [100000, 999999]}
+  payment_provider: {choice: [Stripe, PayPal, Adyen, Braintree]}
+  payment_timeout_ms: {randint: [5000, 30000]}
+  gateway_response_code: {choice: ["504", "408", "429", "503"]}
+  payment_retry_count: {randint: [1, 3]}
+  payment_max_retries: 3
+  payment_amount: {uniform: [9.99, 4999.99], round: 2}
+rca_clues:
+  digital-marketplace:
+    marketplace.payment_circuit_breaker: {choice: [CLOSED, HALF_OPEN, OPEN]}
+    marketplace.failed_checkout_count: {randint: [10, 200]}
+  auction-engine:
+    auction.settlement_backlog: {randint: [5, 100]}
+    auction.payment_retry_queue: {randint: [3, 50]}
+  firewall-gateway:
+    firewall.outbound_https_throttled: {choice: [true, false]}
+    firewall.payment_gateway_sessions: {randint: [500, 5000]}

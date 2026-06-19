@@ -1,0 +1,62 @@
+name: Billing Mediation Failure
+subsystem: billing
+vehicle_section: mediation
+error_type: BSS-MEDIATION-FAIL
+sensor_type: billing_mediation
+affected_services:
+- bss-billing
+cascade_services:
+- activation-service
+- provisioning-service
+description: Billing mediation node failure causing CDR deduplication errors and incorrect charge application
+investigation_notes: |
+  1. Check mediation node health — node failure causes CDR routing to surviving nodes, which may lack the deduplication state for in-flight CDRs. This leads to duplicate charges.
+  2. CDR deduplication uses a 24-hour sliding window with SHA-256 hash of (MSISDN, timestamp, duration, APN). Node failure loses the in-memory dedup window for that node's partition.
+  3. Duplicate charge detection: SELECT msisdn, COUNT(*) FROM cdr_rated WHERE ts > NOW() - INTERVAL 1 HOUR GROUP BY msisdn, event_hash HAVING COUNT(*) > 1. Flag these for reversal.
+  4. Provisioning-service and activation-service are impacted because new activations require a billing validation step — if mediation is unhealthy, the validation returns errors.
+  5. Initiate CDR replay for the failed node's partition after recovery — replay from the last checkpoint ensures no CDRs are lost. Monitor for duplicates during replay.
+remediation_action: failover_mediation_node
+error_message: '[BSS] BSS-MEDIATION-FAIL: node={mediation_node} partition={mediation_partition} duplicate_cdrs={duplicate_cdr_count} checkpoint_age_min={checkpoint_age_min}'
+stack_trace: |
+  === BILLING MEDIATION STATUS ===
+  cluster=meridian-mediation  mode=active-active
+  --- NODE STATUS ---
+    NODE              STATUS      PARTITION    LAST_CHECKPOINT
+    mediation-01      OK          P0,P1        2min ago
+    mediation-02      FAILED      P2,P3        {checkpoint_age_min}min ago  <<< DOWN
+    mediation-03      OK          P4,P5        1min ago
+  --- IMPACT ---
+    dedup_window_lost=true  partition={mediation_partition}
+    duplicate_cdrs_detected={duplicate_cdr_count}
+    cdrs_at_risk={cdrs_at_risk}  replay_required=true
+    billing_validation=DEGRADED  new_activations=DELAYED
+  ACTION: failover_partition=true  replay_from_checkpoint=true  alert=BSS-MEDIATION-FAIL
+infrastructure_events:
+- body: '[AzureMonitor] BillingMediationFailure: pipeline=cdr-mediation stage=rating error_rate=40% revenue_impact=EUR_45000/hr region=westeurope'
+  severity: ERROR
+  event_name: azure.monitor.BillingMediationFailure
+  service: bss-billing
+  attributes:
+    cloud.provider: azure
+    cloud.service: monitor
+    azure.health.status: Critical
+    infrastructure.source: AzureMonitor
+correlation_attr:
+  key: billing.mediation_node_config
+  value: mediation-v3.0.0-rc2
+fault_params:
+  mediation_node: {choice: [mediation-01, mediation-02, mediation-03]}
+  mediation_partition: {choice: ['P0,P1', 'P2,P3', 'P4,P5']}
+  duplicate_cdr_count: {randint: [100, 1000]}
+  checkpoint_age_min: {randint: [5, 60]}
+  cdrs_at_risk: {randint: [5000, 50000]}
+rca_clues:
+  bss-billing:
+    billing.mediation_node_status: FAILED
+    billing.duplicate_cdr_count: {randint: [100, 1000]}
+  activation-service:
+    activation.billing_validation_error: true
+    activation.new_activations_delayed: true
+  provisioning-service:
+    provisioning.billing_check_failed: true
+    provisioning.queue_depth: {randint: [100, 500]}

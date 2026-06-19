@@ -1,0 +1,54 @@
+name: Calibration Epoch Mismatch
+subsystem: validation
+vehicle_section: ground_network
+error_type: VV-EPOCH-DRIFT
+sensor_type: calibration
+affected_services:
+- sensor-validator
+cascade_services:
+- mission-control
+- fuel-system
+- navigation
+description: Sensor calibration epoch does not match expected reference
+investigation_notes: 'Root cause: clock synchronization failure between the sensor''s onboard time reference and the ground
+  NTP stratum-1 server. The sensor''s calibration table was generated at a different epoch than the current mission reference
+  time, causing all calibrated readings to apply stale correction coefficients. GPS_UTC reference clock shows LOCKED but the
+  sensor''s local RTC may have drifted during a power cycle or brown-out event. Delta between actual and expected epochs >3600s
+  indicates the sensor missed at least one calibration upload cycle. Remediation: force NTP resynchronization on the affected
+  sensor (VV_NTP_SYNC {sensor_id}), then reload the current calibration epoch table (VV_EPOCH_RELOAD {sensor_id} FROM_REFERENCE).
+  Verify the sensor''s RTC battery voltage (>2.8V required). After resync, confirm epoch delta is <1s and downstream calibrated
+  readings match cross-check sensors.'
+remediation_action: resync_calibration_epoch
+error_message: '[VV] VV-EPOCH-DRIFT: sensor={sensor_id} actual_epoch={actual_epoch} expected_epoch={expected_epoch} drift=CRITICAL'
+stack_trace: |-
+  == VALIDATION PIPELINE STATUS == EPOCH CHECKER ==
+  TIMESTAMP: MET+00:04:19.334 | FRAME: 0x4A40 | SEQ: 18459
+  ---------------------------------------------------------------
+  SENSOR        ACTUAL_EPOCH    EXPECTED_EPOCH   DELTA_SEC   STATUS
+  {sensor_id}   {actual_epoch}       {expected_epoch}        DRIFT       **MISMATCH**
+  SENS-2001     1738100800      1738100800       0           NOMINAL
+  SENS-3042     1738100800      1738100800       0           NOMINAL
+  ---------------------------------------------------------------
+  REFERENCE_CLOCK: GPS_UTC | NTP_STRATUM: 1 | SYNC_STATUS: LOCKED
+  VV-EPOCH-DRIFT: Sensor {sensor_id} epoch {actual_epoch} vs expected {expected_epoch}
+  ACTION: Re-synchronize sensor calibration tables from reference
+correlation_attr:
+  key: infra.rtc_crystal
+  value: txco-40mhz-batch-2024Q3
+fault_params:
+  sensor_id:
+    format: "SENS-{n}"
+    n: {randint: [1000, 9999]}
+  actual_epoch: {randint: [1700000000, 1760000000]}
+  expected_epoch: {randint: [1760000001, 1800000000]}
+rca_clues:
+  sensor-validator:
+    validation.epoch_delta_s: {randint: [3600, 86400]}
+    validation.rtc_battery_v: {uniform: [2.2, 2.9], round: 1}
+  mission-control:
+    upstream.degraded_subsystem: validation
+    telemetry.calibration_status: stale
+  fuel-system:
+    propulsion.calibration_confidence: low
+  navigation:
+    gnc.calibration_confidence: low

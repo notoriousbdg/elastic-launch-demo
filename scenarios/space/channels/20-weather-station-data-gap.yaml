@@ -1,0 +1,54 @@
+name: Weather Station Data Gap
+subsystem: ground
+vehicle_section: launch_pad
+error_type: GND-WEATHER-GAP
+sensor_type: weather
+affected_services:
+- ground-systems
+- sensor-validator
+cascade_services:
+- mission-control
+- range-safety
+description: Weather monitoring station reporting data gaps
+investigation_notes: 'Root cause: RS-422 serial communication link timeout between the weather station and ground data system.
+  Gap >15s violates launch commit criteria (LCC) for weather data continuity. Check RS-422 cable run for damage (common failure:
+  cable crushed by pad equipment). Verify station processor is running (LED status panel on station enclosure). If station
+  is solar-powered, check battery voltage — overcast conditions can deplete backup batteries. Compare with other stations
+  (WX-SOUTH, WX-EAST, WX-WEST) to rule out ground data system receiver failure. Remediation: dispatch field technician to
+  the affected station for physical inspection. Restart station processor via remote power cycle (GND_WX_RESET {station}).
+  If RS-422 link is down, switch to backup Ethernet path (GND_WX_LINK {station} ETH). Weather LCC waiver requires Range Safety
+  Officer approval if gap exceeds 60s.'
+remediation_action: reset_ground_systems
+error_message: '[GND] GND-WEATHER-GAP: station={station_id} gap={gap_seconds}s max_allowed={max_gap}s link=TIMEOUT'
+stack_trace: |-
+  == GROUND SYSTEM DIAGNOSTIC == WEATHER NETWORK ==
+  TIMESTAMP: MET+00:04:18.334 | FRAME: 0x4A3D | SEQ: 18456
+  ---------------------------------------------------------------
+  STATION     LAST_DATA   GAP_SEC   MAX_GAP   STATUS
+  {station_id}   {gap_seconds}s ago    {gap_seconds}s       {max_gap}s       **DATA_GAP**
+  WX-SOUTH    2s ago      2s        15s       NOMINAL
+  WX-EAST     1s ago      1s        15s       NOMINAL
+  WX-WEST     3s ago      3s        15s       NOMINAL
+  ---------------------------------------------------------------
+  NETWORK: 4 stations | PROTOCOL: METAR/SPECI | LINK: RS-422
+  GND-WEATHER-GAP: Station {station_id} no data for {gap_seconds}s, max allowed {max_gap}s
+  ACTION: Check station comm link, dispatch field technician
+correlation_attr:
+  key: deployment.wx_station_fw
+  value: davis-v3.2.1-patched
+fault_params:
+  station_id: {choice: [WX-NORTH, WX-SOUTH, WX-EAST, WX-WEST]}
+  gap_seconds: {randint: [30, 180]}
+  max_gap: 15
+rca_clues:
+  ground-systems:
+    ground.wx_link_type: RS-422
+    ground.station_battery_pct: {uniform: [15.0, 45.0], round: 0}
+  sensor-validator:
+    validation.weather_data_gap_s: {randint: [20, 120]}
+    validation.station_affected: {choice: [WX-NORTH, WX-SOUTH]}
+  mission-control:
+    upstream.degraded_subsystem: ground
+    telemetry.lcc_weather: violated
+  range-safety:
+    safety.weather_lcc_status: NO-GO

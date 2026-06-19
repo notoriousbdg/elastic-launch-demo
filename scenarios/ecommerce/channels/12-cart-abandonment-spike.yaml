@@ -1,0 +1,55 @@
+name: Cart Abandonment Spike
+subsystem: orders
+vehicle_section: checkout_funnel
+error_type: CART-ABANDON-SPIKE
+sensor_type: conversion_rate
+affected_services:
+- order-management
+- storefront-gateway
+cascade_services:
+- ad-platform
+description: Cart abandonment rate spiking abnormally — customers adding items but not completing checkout, indicating friction
+  in the checkout flow
+investigation_notes: |-
+  1. Check order-management logs for CART-ABANDON-SPIKE — abandonment_rate={abandonment_rate_pct}% vs baseline {baseline_abandonment_pct}%.
+  2. Identify the abandonment step: if most abandonment is at payment entry (step 3), payment form errors or slow gateway response are the cause.
+  3. Check for JavaScript errors in the storefront — a broken payment widget or address validation failure silently blocks checkout completion.
+  4. Review promo code validation latency: if coupon checks take >{coupon_timeout_ms}ms, customers abandon while waiting for discount confirmation.
+  5. Correlate with ad-platform metrics — if a recent ad campaign is driving high-intent but low-conversion traffic, the landing page may have a mismatch.
+  6. Trigger cart recovery emails for sessions with >2min idle time in checkout — historically recovers {recovery_rate_pct}% of abandoned carts.
+remediation_action: optimize_checkout_flow
+error_message: '[OrderManagement] CART-ABANDON-SPIKE: abandonment_rate={abandonment_rate_pct}% (baseline {baseline_abandonment_pct}%)
+  abandoned_carts={abandoned_carts} revenue_at_risk_usd={revenue_at_risk_usd} abandon_step={abandon_step}'
+stack_trace: |-
+  CartAbandonmentAlert: CART-ABANDON-SPIKE
+    at CheckoutFunnelMonitor.checkAbandonmentRate(window=5min)
+    at OrderService.trackCheckoutEvent(session_id={session_id})
+  Abandonment rate:  {abandonment_rate_pct}% (baseline: {baseline_abandonment_pct}%)
+  Abandoned carts:   {abandoned_carts}
+  Revenue at risk:   ${revenue_at_risk_usd}
+  Abandon step:      {abandon_step}
+  Coupon timeout:    {coupon_timeout_ms}ms
+  Time in funnel:    {avg_funnel_time_sec}s avg
+correlation_attr:
+  key: orders.abandonment_elevated
+  value: true
+fault_params:
+  abandonment_rate_pct: {uniform: [45, 80], round: 1}
+  baseline_abandonment_pct: 25.0
+  abandoned_carts: {randint: [500, 10000]}
+  revenue_at_risk_usd: {uniform: [50000, 500000], round: 2}
+  abandon_step: {choice: [payment_entry, address_input, shipping_selection, coupon_validation]}
+  session_id: {format: "SESS-{n}", n: {randint: [100000, 999999]}}
+  recovery_rate_pct: {randint: [8, 20]}
+  coupon_timeout_ms: {randint: [3000, 10000]}
+  avg_funnel_time_sec: {randint: [45, 180]}
+rca_clues:
+  order-management:
+    order.abandonment_rate_pct: {uniform: [40, 80], round: 1}
+    order.revenue_at_risk_usd: {randint: [10000, 500000]}
+  storefront-gateway:
+    storefront.checkout_step_drop_pct: {uniform: [30, 70], round: 1}
+    storefront.error_in_funnel: {choice: [payment_form, address_validation, coupon_check]}
+  ad-platform:
+    ads.retargeting_triggered: true
+    ads.cart_abandonment_audience_size: {randint: [1000, 50000]}

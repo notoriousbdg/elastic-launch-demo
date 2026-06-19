@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
-import importlib
 import logging
+import sys
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
+
+import yaml
+
+from scenarios.yaml_scenario import load_yaml_scenario
 
 if TYPE_CHECKING:
     from scenarios.base import BaseScenario
@@ -19,24 +23,70 @@ _loaded = False
 _SCENARIOS_DIR = Path(__file__).parent
 
 
-def _discover() -> None:
-    """Auto-discover all scenario modules under scenarios/*/scenario.py."""
-    global _loaded
-    if _loaded:
-        return
+def _evict_scenario_modules() -> None:
+    """Remove cached scenario package modules so re-import picks up disk changes."""
+    for name in list(sys.modules):
+        if not name.startswith("scenarios."):
+            continue
+        parts = name.split(".")
+        if len(parts) < 2:
+            continue
+        pkg = parts[1]
+        if pkg and pkg != "base":
+            del sys.modules[name]
 
-    for scenario_file in sorted(_SCENARIOS_DIR.glob("*/scenario.py")):
+
+def _discover_impl() -> list[dict[str, str]]:
+    """Scan scenarios/*/scenario.yaml and populate _registry. Returns load errors."""
+    errors: list[dict[str, str]] = []
+
+    for scenario_file in sorted(_SCENARIOS_DIR.glob("*/scenario.yaml")):
         pkg = scenario_file.parent.name
-        mod_path = f"scenarios.{pkg}.scenario"
         try:
-            mod = importlib.import_module(mod_path)
-            scenario = mod.scenario  # Each module exposes a `scenario` instance
+            scenario = load_yaml_scenario(scenario_file.parent)
             _registry[scenario.scenario_id] = scenario
             logger.debug("Registered scenario: %s", scenario.scenario_id)
-        except (ImportError, AttributeError) as e:
-            logger.debug("Scenario %s not available: %s", mod_path, e)
+        except (OSError, KeyError, yaml.YAMLError) as e:
+            msg = str(e)
+            logger.warning("Scenario %s not available: %s", pkg, msg)
+            errors.append({"package": pkg, "error": msg})
 
+    return errors
+
+
+def _discover(force: bool = False) -> list[dict[str, str]]:
+    """Auto-discover all scenarios under scenarios/*/scenario.yaml."""
+    global _loaded
+    if _loaded and not force:
+        return []
+
+    if force:
+        _registry.clear()
+
+    errors = _discover_impl()
     _loaded = True
+    return errors
+
+
+def reload_registry() -> dict[str, Any]:
+    """Re-scan the filesystem and reload all scenarios from disk."""
+    global _loaded
+
+    before_ids = set(_registry.keys())
+    _evict_scenario_modules()
+    _registry.clear()
+    _loaded = False
+
+    errors = _discover(force=True)
+    after_ids = set(_registry.keys())
+
+    return {
+        "scenarios": list_scenarios(),
+        "added": sorted(after_ids - before_ids),
+        "removed": sorted(before_ids - after_ids),
+        "errors": errors,
+        "count": len(_registry),
+    }
 
 
 def get_scenario(scenario_id: str) -> BaseScenario:

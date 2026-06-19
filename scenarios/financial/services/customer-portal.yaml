@@ -1,0 +1,152 @@
+service: customer-portal
+sort_order: 8
+cloud_provider: azure
+cloud_region: eastus
+cloud_platform: azure_vm
+cloud_availability_zone: eastus-2
+subsystem: client_services
+language: python
+topology:
+- - order-gateway
+  - /api/v1/orders/place
+  - POST
+- - risk-calculator
+  - /api/v1/risk/portfolio-exposure
+  - GET
+- - market-data-feed
+  - /api/v1/market/stream
+  - GET
+entry_endpoints:
+- - /api/v1/portfolio/overview
+  - GET
+- - /api/v1/portfolio/positions
+  - GET
+- - /api/v1/portfolio/pnl
+  - GET
+emit_fault_logs: true
+kpi_emitter: false
+constants:
+  ACTIONS:
+  - view_portfolio
+  - place_order
+  - check_positions
+  - view_pnl
+  - market_data_stream
+  - download_statement
+state:
+  _active_sessions:
+    init: 350
+  _last_session_report:
+    init: now
+steps:
+- sample:
+    action:
+      choice: ACTIONS
+    latency_ms:
+      randint:
+      - 20
+      - 200
+- log:
+    level: INFO
+    message: '[PORTAL] client_action action={action} latency_ms={latency_ms} http_status=200'
+    attrs:
+      operation: client_action
+      action.type:
+        var: action
+      action.latency_ms:
+        var: latency_ms
+      action.http_status: 200
+- sample:
+    portfolio_num:
+      randint:
+      - 10000
+      - 99999
+    positions:
+      randint:
+      - 10
+      - 200
+    total_value:
+      uniform:
+      - 100000.0
+      - 50000000.0
+      round: 2
+    pnl_pct:
+      uniform:
+      - -2.0
+      - 5.0
+      round: 2
+    portfolio_id:
+      expr: f'PF-{portfolio_num}'
+    fmt_value:
+      expr: f'${total_value:,.2f}'
+    fmt_pnl:
+      expr: f'{pnl_pct:+.2f}'
+- log:
+    level: INFO
+    message: '[PORTAL] portfolio_update portfolio={portfolio_id} positions={positions} value={fmt_value} pnl={fmt_pnl}%'
+    attrs:
+      operation: portfolio_update
+      portfolio.id:
+        var: portfolio_id
+      portfolio.positions:
+        var: positions
+      portfolio.total_value:
+        var: total_value
+      portfolio.pnl_pct:
+        var: pnl_pct
+- every:
+    seconds: 10
+    state_key: _last_session_report
+    steps:
+    - sample:
+        expired:
+          randint:
+          - 0
+          - 5
+    - log:
+        level: INFO
+        message: '[PORTAL] session_summary active={_active_sessions} expired={expired} status=NOMINAL'
+        attrs:
+          operation: session_summary
+          session.active:
+            var: _active_sessions
+          session.expired:
+            var: expired
+          session.status: NOMINAL
+- sample:
+    session_delta:
+      randint:
+      - -5
+      - 5
+- sample:
+    _active_sessions:
+      expr: max(100, _active_sessions + session_delta)
+- metric:
+    name: customer_portal.active_sessions
+    value:
+      var: _active_sessions
+    unit: sessions
+- metric:
+    name: customer_portal.page_load_ms
+    value:
+      randint:
+      - 50
+      - 300
+    unit: ms
+- sample:
+    api_error_rate:
+      if_active:
+        uniform:
+        - 2.0
+        - 10.0
+        round: 3
+      else:
+        uniform:
+        - 0.01
+        - 0.5
+        round: 3
+- metric:
+    name: customer_portal.api_error_rate
+    value:
+      var: api_error_rate
+    unit: '%'

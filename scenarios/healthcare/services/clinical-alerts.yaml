@@ -1,0 +1,156 @@
+service: clinical-alerts
+sort_order: 8
+cloud_provider: azure
+cloud_region: eastus
+cloud_platform: azure_vm
+cloud_availability_zone: eastus-2
+subsystem: alerting
+language: python
+topology:
+- - ehr-system
+  - /api/v1/ehr/alert-response
+  - POST
+entry_endpoints:
+- - /api/v1/alerts/evaluate
+  - POST
+emit_fault_logs: true
+kpi_emitter: false
+constants:
+  ALERT_TYPES:
+  - critical_lab
+  - vital_sign
+  - drug_interaction
+  - fall_risk
+  - sepsis_screen
+  - nurse_call
+  - code_blue
+  UNITS:
+  - ICU-3A
+  - ICU-3B
+  - MedSurg-4N
+  - ED-1
+  - NICU-2
+state:
+  _alerts_processed:
+    init: 0
+  _last_cds_report:
+    init: now
+steps:
+- sample:
+    alert_type:
+      choice: ALERT_TYPES
+    alert_patient_id:
+      expr: f'PT-{rand.randint(100000, 999999)}'
+    unit:
+      choice: UNITS
+    priority:
+      choice:
+      - low
+      - medium
+      - high
+      - critical
+    delivery_ms:
+      randint:
+      - 100
+      - 1200
+- log:
+    level: INFO
+    message: '[CDS] alert_delivered type={alert_type} priority={priority} patient={alert_patient_id} unit={unit} delivery_ms={delivery_ms}
+      status=DELIVERED'
+    attrs:
+      operation: alert_delivery
+      alert.type:
+        var: alert_type
+      alert.patient_id:
+        var: alert_patient_id
+      alert.unit:
+        var: unit
+      alert.priority:
+        var: priority
+      alert.delivery_ms:
+        var: delivery_ms
+      alert.status: DELIVERED
+- sample:
+    rules_evaluated:
+      randint:
+      - 5
+      - 30
+    triggered:
+      randint:
+      - 0
+      - 3
+    eval_ms:
+      randint:
+      - 80
+      - 600
+    rule_patient_id:
+      expr: f'PT-{rand.randint(100000, 999999)}'
+- log:
+    level: INFO
+    message: '[CDS] rule_eval patient={rule_patient_id} rules_checked={rules_evaluated} triggered={triggered} eval_ms={eval_ms}
+      status=OK'
+    attrs:
+      operation: rule_evaluation
+      cds.rules_evaluated:
+        var: rules_evaluated
+      cds.rules_triggered:
+        var: triggered
+      cds.eval_ms:
+        var: eval_ms
+      cds.patient_id:
+        var: rule_patient_id
+- every:
+    seconds: 10
+    state_key: _last_cds_report
+    steps:
+    - sample:
+        total_rules:
+          randint:
+          - 250
+          - 350
+        alerts_hour:
+          randint:
+          - 80
+          - 250
+    - log:
+        level: INFO
+        message: '[CDS] engine_summary active_rules={total_rules} alerts_per_hr={alerts_hour} total_processed={_alerts_processed}
+          engine=NOMINAL'
+        attrs:
+          operation: cds_summary
+          cds.active_rules:
+            var: total_rules
+          cds.alerts_per_hour:
+            var: alerts_hour
+          cds.total_processed:
+            var: _alerts_processed
+- counter:
+    state_key: _alerts_processed
+    by: 1
+- metric:
+    name: clinical_alerts.alerts_processed
+    value:
+      var: _alerts_processed
+    unit: alerts
+- sample:
+    eval_ms_metric:
+      if_active:
+        randint:
+        - 3000
+        - 12000
+      else:
+        randint:
+        - 50
+        - 500
+- metric:
+    name: clinical_alerts.rule_eval_ms
+    value:
+      var: eval_ms_metric
+    unit: ms
+- metric:
+    name: clinical_alerts.active_rules
+    value:
+      randint:
+      - 200
+      - 350
+    unit: rules

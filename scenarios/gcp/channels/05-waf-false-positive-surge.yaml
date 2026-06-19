@@ -1,0 +1,51 @@
+name: WAF False Positive Surge
+subsystem: security
+vehicle_section: waf_engine
+error_type: ARMOR-FALSE-POSITIVE
+sensor_type: waf_rules
+affected_services:
+- cloud-armor-waf
+- cloud-cdn-service
+cascade_services:
+- cloud-load-balancer
+description: Cloud Armor WAF rules generating excessive false positive blocks
+investigation_notes: |-
+  Root cause: Preconfigured WAF rule (OWASP ModSecurity CRS) is triggering on legitimate API traffic. Common false positives: JSON payloads matching SQLi patterns, base64-encoded data matching XSS signatures, GraphQL queries matching RCE patterns. Diagnose with:
+    gcloud compute security-policies rules describe <priority> --security-policy=<policy>
+    Console > Network Security > Cloud Armor > <policy> > Logs tab (filter by DENY action)
+  Remediation: Adjust sensitivity level from 1 (high) to 2 or 3 for the specific rule:
+    gcloud compute security-policies rules update <priority> --security-policy=<policy> --expression='evaluatePreconfiguredWaf("sqli-v33-stable", {"sensitivity": 2})'
+  Or add path-based exception rules at a higher priority (lower number) to ALLOW known-good paths before the WAF rule evaluates. Monitor false positive rate via Cloud Monitoring metrics loadbalancing.googleapis.com/https/request_count filtered by security_policy_name.
+remediation_action: update_waf_rules
+error_message: '[CloudArmor] ARMOR-FALSE-POSITIVE policy={armor_policy} rule={waf_rule_id} blocked_requests={waf_blocked_count}/m
+  false_positive_rate={waf_fp_rate}% affected_paths={waf_affected_paths} sensitivity={waf_sensitivity_level}'
+stack_trace: |-
+  Cloud Armor WAF Analysis
+  -------------------------
+  Policy:              {armor_policy}
+  Rule:                {waf_rule_id}
+  Blocked/min:         {waf_blocked_count}
+  False Positive Rate: {waf_fp_rate}%
+  Affected Paths:      {waf_affected_paths}
+  Sensitivity:         {waf_sensitivity_level}
+  Legitimate traffic pattern: API JSON payloads triggering SQLi detection
+  Action: Adjust rule sensitivity or add path exception
+correlation_attr:
+  key: deployment.waf_config_hash
+  value: cfg-ab3f91-untested
+fault_params:
+  armor_policy: {choice: [gcpnet-waf-policy, gcpnet-ddos-policy, gcpnet-edge-policy]}
+  waf_rule_id: {choice: [owasp-crs-v030301-id942100, sqli-v33-stable, xss-v33-stable, rce-v33-stable]}
+  waf_blocked_count: {randint: [100, 5000]}
+  waf_fp_rate: {uniform: [15.0, 60.0], round: 1}
+  waf_affected_paths: {choice: [/api/v2/search, /api/v1/upload, /graphql, /api/v1/webhook]}
+  waf_sensitivity_level: {choice: ["1 (High)", "2 (Medium)", "3 (Low)"]}
+rca_clues:
+  cloud-armor-waf:
+    armor.false_positive_rule: sqli-v33-stable
+    armor.sensitivity_level: 1
+  cloud-cdn-service:
+    cdn.blocked_asset_paths: /api/v2/search,/graphql
+    cdn.cache_miss_from_blocks: true
+  cloud-load-balancer:
+    lb.legitimate_traffic_dropped_pct: {uniform: [5, 25], round: 1}

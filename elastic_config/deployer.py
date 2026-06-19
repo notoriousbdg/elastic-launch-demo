@@ -11,7 +11,7 @@ from typing import Any
 
 import httpx
 
-from scenarios.base import BaseScenario
+from scenario_engine.base import BaseScenario
 
 from elastic_config.deployer_base import (
     DeployStep,
@@ -97,7 +97,7 @@ class ScenarioDeployer(
 
     # ── Public API ─────────────────────────────────────────────────────
 
-    def deploy_all(self, callback: ProgressCallback | None = None) -> DeployProgress:
+    def deploy_all(self, callback: ProgressCallback | None = None, on_otlp_ready=None) -> DeployProgress:
         """Run the full deployment pipeline.  Returns progress summary."""
         self.progress = DeployProgress(steps=[
             DeployStep("Connectivity check"),           # 0
@@ -128,9 +128,24 @@ class ScenarioDeployer(
                 self._check_connectivity(client, _notify)
                 self._report_elastic_url_step(_notify)
                 self._derive_otlp_step(client, _notify)
+                # Fire the early-start hook as soon as the OTLP endpoint is
+                # known — before the slow tail (ML, alerts, SLOs, integrations).
+                # A hook failure must never abort the rest of the deploy.
+                if on_otlp_ready is not None and self.progress.otlp_endpoint:
+                    try:
+                        on_otlp_ready(self.progress.otlp_endpoint)
+                    except Exception:
+                        logger.warning(
+                            "on_otlp_ready hook raised an exception; ignoring",
+                            exc_info=True,
+                        )
                 self._cleanup_all_scenarios_step(client, _notify)
                 self._configure_platform_settings(client, _notify)
                 self._deploy_apm_rollup(client, _notify)
+                # Start the APM ML job early so ES processes the 12h backfill
+                # server-side during the intervening steps; the catch-up poll
+                # runs at the very end via _finalize_apm_anomaly_detection.
+                self._setup_apm_anomaly_detection(client, _notify)
                 self._deploy_workflows(client, _notify)
                 self._deploy_knowledge_base(client, _notify)
                 self._deploy_tools(client, _notify)
@@ -140,10 +155,12 @@ class ScenarioDeployer(
                 self._deploy_dashboard(client, _notify)
                 self._deploy_alerting(client, _notify)
                 self._deploy_ecs_log_backfill(client, _notify)
-                self._deploy_apm_anomaly_detection(client, _notify)
                 self._deploy_logs_ml_jobs(client, _notify)
                 self._deploy_slos(client, _notify)
                 self._install_integrations(client, _notify)
+                # Block on APM datafeed catch-up now; should be near-instant
+                # since ES has been training throughout the steps above.
+                self._finalize_apm_anomaly_detection(client, _notify)
         except Exception as exc:
             self.progress.error = str(exc)
             logger.exception("Deployment failed")

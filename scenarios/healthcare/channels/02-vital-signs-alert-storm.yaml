@@ -1,0 +1,53 @@
+name: Vital Signs Alert Storm
+subsystem: vital_signs
+vehicle_section: vitals_engine
+error_type: VITAL-ALERT-STORM
+sensor_type: vital_signs_monitor
+affected_services:
+- patient-monitor
+- clinical-alerts
+cascade_services:
+- ehr-system
+description: Excessive simultaneous vital sign alerts overwhelming the alerting pipeline from bedside monitors
+investigation_notes: |-
+  Root Cause: Alert storms occur when bedside monitor thresholds are misconfigured or a genuine multi-patient event (e.g., unit-wide SpO2 probe disconnects during rounds) floods the clinical alerting pipeline. The GE/Philips central station queues alerts faster than the CDS engine can evaluate them.
+  Remediation: 1) Check the alert threshold configuration on the central monitoring station for the affected nursing unit — verify HR, SpO2, RR, and BP limits match unit acuity (ICU vs MedSurg). 2) Recalibrate monitors: `monitor-admin recalibrate --unit {nursing_unit} --params HR,SpO2,RR`. 3) Reset the vitals feed aggregator: `systemctl restart vitals-feed-aggregator`. 4) Enable alert suppression windowing (10s dedup) on the central station to prevent duplicate firings. 5) Review biomedical engineering ticket queue for known sensor hardware faults on the unit.
+remediation_action: recalibrate_monitors
+error_message: '[MONITOR] VITAL-ALERT-STORM: unit={nursing_unit} alerts={alert_count} window={window_seconds}s patient={patient_id}
+  hr={heart_rate} spo2={spo2}%'
+stack_trace: |-
+  === BEDSIDE MONITOR ALERT SUMMARY — {nursing_unit} ===
+  Interval: {window_seconds}s | Total Alerts: {alert_count} | Threshold: 10/60s
+  ------------------------------------------------------------------------
+  PATIENT     | PARAM   | VALUE   | LIMIT   | PRIORITY  | STATUS
+  ------------------------------------------------------------------------
+  {patient_id} | HR      | {heart_rate} bpm | 40-150  | CRITICAL  | UNACKED
+  {patient_id} | SpO2    | {spo2}%    | >90%    | HIGH      | UNACKED
+  {patient_id} | RR      | 28 br/m | 8-25    | MEDIUM    | UNACKED
+  PT-XXXXXX  | BP-SYS  | 185 mmHg| <180    | HIGH      | UNACKED
+  PT-XXXXXX  | TEMP    | 39.8 C  | <38.5   | MEDIUM    | ESCALATED
+  ------------------------------------------------------------------------
+  VITAL-ALERT-STORM: {alert_count} alerts in {window_seconds}s exceeds storm threshold on {nursing_unit}
+  ACTION: Alert pipeline saturated — downstream CDS rule evaluation delayed
+correlation_attr:
+  key: infra.monitor_firmware
+  value: ge-carescape-v4.1.2-rc
+fault_params:
+  nursing_unit: {choice: [ICU-3A, ICU-3B, MedSurg-4N, MedSurg-4S, ED-1, NICU-2]}
+  alert_count: {randint: [15, 120]}
+  window_seconds: {choice: [30, 60, 120]}
+  patient_id:
+    format: "PT-{n}"
+    n: {randint: [100000, 999999]}
+  heart_rate: {randint: [35, 180]}
+  spo2: {randint: [70, 100]}
+rca_clues:
+  patient-monitor:
+    vitals.threshold_config: mismatched_acuity
+    vitals.monitor_firmware: ge-carescape-v4.1.2
+  clinical-alerts:
+    alerts.storm_window_s: {randint: [30, 120]}
+    alerts.dedup_disabled: true
+  ehr-system:
+    upstream.vitals_feed_status: flooded
+    ehr.cds_queue_depth: {randint: [100, 500]}

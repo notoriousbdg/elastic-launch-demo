@@ -1,0 +1,52 @@
+name: CDN Origin Unreachable
+subsystem: content_delivery
+vehicle_section: cdn_origin
+error_type: CDN-ORIGIN-UNREACHABLE
+sensor_type: origin_health
+affected_services:
+- cloud-cdn-service
+- cloud-load-balancer
+cascade_services:
+- cloud-armor-waf
+description: Cloud CDN unable to reach origin backend, serving stale content
+investigation_notes: |-
+  Root cause: CDN edge nodes cannot reach the origin backend service. Status codes 502/503 indicate the origin is down or overloaded; 504 indicates a timeout. A status of 0 means the connection was refused or timed out at the TCP level. CDN is serving stale cached content while the stale TTL has not expired. Once stale TTL expires, clients will see errors. Diagnose:
+    gcloud compute backend-services get-health <backend> --global
+    gcloud compute health-checks describe <health-check> --format='value(httpHealthCheck)'
+    Console > Network Services > Load Balancing > <lb> > Backend details (health status)
+  Remediation: Check origin instance group health and scaling. If origin is a GKE service, verify pods are running: kubectl get pods -n <namespace> -l app=<origin-app>. Reset the CDN backend association to trigger fresh origin health checks:
+    gcloud compute backend-services update <backend> --global --enable-cdn
+  Configure connection draining timeout and increase stale TTL as a safety net:
+    gcloud compute backend-services update <backend> --global --serve-while-stale-max-age=3600
+remediation_action: reset_cdn_backend
+error_message: '[CloudCDN] CDN-ORIGIN-UNREACHABLE backend={cdn_backend} origin={cdn_origin_host} status_code={cdn_origin_status}
+  failures={cdn_origin_failures}/m serving_stale={cdn_stale_pct}% ttl_remaining={cdn_stale_ttl_sec}s'
+stack_trace: |-
+  Cloud CDN Origin Health Report
+  --------------------------------
+  Backend:       {cdn_backend}
+  Origin:        {cdn_origin_host}
+  Status Code:   {cdn_origin_status}
+  Failures/min:  {cdn_origin_failures}
+  Serving Stale: {cdn_stale_pct}%
+  Stale TTL:     {cdn_stale_ttl_sec}s remaining
+  Action: Check origin backend health and network path
+correlation_attr:
+  key: infra.origin_health_check
+  value: hc-tcp-8080-patched
+fault_params:
+  cdn_backend: {choice: [gcpnet-cdn-backend-01, gcpnet-cdn-backend-02, gcpnet-cdn-backend-03]}
+  cdn_origin_host: {choice: [origin-central1.gcpnet.internal, origin-east1.gcpnet.internal]}
+  cdn_origin_status: {choice: [502, 503, 504, 0]}
+  cdn_origin_failures: {randint: [50, 500]}
+  cdn_stale_pct: {uniform: [20.0, 80.0], round: 1}
+  cdn_stale_ttl_sec: {randint: [30, 300]}
+rca_clues:
+  cloud-cdn-service:
+    cdn.origin_status_code: {choice: [502, 503, 504]}
+    cdn.stale_ttl_remaining_sec: {randint: [30, 300]}
+  cloud-load-balancer:
+    lb.origin_health_check: FAILING
+    lb.healthy_backends: 0
+  cloud-armor-waf:
+    armor.origin_path_blocked: {choice: [true, false]}

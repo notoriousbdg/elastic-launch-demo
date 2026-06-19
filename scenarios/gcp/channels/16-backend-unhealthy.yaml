@@ -1,0 +1,57 @@
+name: Backend Unhealthy
+subsystem: traffic_management
+vehicle_section: load_balancing
+error_type: LB-BACKEND-UNHEALTHY
+sensor_type: health_check
+affected_services:
+- cloud-load-balancer
+- vpc-network-manager
+cascade_services:
+- cloud-cdn-service
+- cloud-armor-waf
+description: Load balancer backend instances failing health checks
+investigation_notes: |-
+  Root cause: Backend instances are failing consecutive health checks, causing the LB to mark them as unhealthy and stop sending traffic. Common causes: application crash/OOM, health check endpoint misconfiguration (wrong port or path), firewall rules blocking health check probes (GCP health checks come from 130.211.0.0/22 and 35.191.0.0/16). Diagnose:
+    gcloud compute backend-services get-health <backend-service> --global
+    gcloud compute health-checks describe <health-check>
+    gcloud compute firewall-rules list --filter='sourceRanges:130.211.0.0/22 OR sourceRanges:35.191.0.0/16'
+  Remediation: Verify health check configuration matches the application's actual health endpoint:
+    gcloud compute health-checks update http <hc> --port=<correct_port> --request-path=<correct_path>
+  Ensure firewall rules allow health check probes:
+    gcloud compute firewall-rules create allow-health-checks --network=<vpc> --source-ranges=130.211.0.0/22,35.191.0.0/16 --allow=tcp:<port>
+  Check instance logs for application crashes: Console > Compute Engine > <instance> > Serial port output.
+remediation_action: reconfigure_health_checks
+error_message: '[CloudLB] LB-BACKEND-UNHEALTHY forwarding_rule={lb_forwarding_rule} backend_service={lb_backend_service} unhealthy={lb_unhealthy_count}/{lb_total_backends}
+  health_check={lb_health_check} failed_checks={lb_failed_checks} region={gcp_region}'
+stack_trace: |-
+  Cloud Load Balancer Health Report
+  -----------------------------------
+  Forwarding Rule:  {lb_forwarding_rule}
+  Backend Service:  {lb_backend_service}
+  Unhealthy:        {lb_unhealthy_count}/{lb_total_backends}
+  Health Check:     {lb_health_check}
+  Failed Checks:    {lb_failed_checks} consecutive
+  Region:           {gcp_region}
+  Action: Investigate backend instance logs and health check config
+correlation_attr:
+  key: network.health_check_fw
+  value: fw-rule-missing-35-191
+fault_params:
+  lb_forwarding_rule: {choice: [gcpnet-fr-https-global, gcpnet-fr-tcp-regional, gcpnet-fr-udp-internal]}
+  lb_backend_service: {choice: [gcpnet-bs-web, gcpnet-bs-api, gcpnet-bs-grpc]}
+  lb_unhealthy_count: {randint: [2, 6]}
+  lb_total_backends: {randint: [6, 12]}
+  lb_health_check: {choice: [hc-http-8080, hc-https-443, hc-tcp-3000]}
+  lb_failed_checks: {randint: [3, 10]}
+  gcp_region: {choice: [us-central1, us-east1, europe-west1]}
+rca_clues:
+  cloud-load-balancer:
+    lb.health_check_port: {choice: [8080, 443, 3000]}
+    lb.consecutive_failures: {randint: [3, 10]}
+  vpc-network-manager:
+    vpc.health_check_fw_rule: {choice: [PRESENT, MISSING]}
+    vpc.probe_source_range: 130.211.0.0/22
+  cloud-cdn-service:
+    cdn.serving_stale_from_unhealthy: true
+  cloud-armor-waf:
+    armor.backend_protection_gap: true

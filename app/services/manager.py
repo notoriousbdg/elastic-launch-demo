@@ -44,7 +44,7 @@ class ServiceManager:
             scenario = self._ctx.scenario
         else:
             import os
-            from scenarios import get_scenario
+            from scenario_engine import get_scenario
 
             active = os.environ.get("ACTIVE_SCENARIO", ACTIVE_SCENARIO)
             scenario = get_scenario(active)

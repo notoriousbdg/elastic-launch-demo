@@ -1,0 +1,45 @@
+name: CMMS Work Order Backlog
+subsystem: maintenance
+vehicle_section: cmms_scheduler
+error_type: CMMS-WORK-ORDER-BACKLOG
+sensor_type: cmms_scheduler
+affected_services:
+- maintenance-scheduler
+cascade_services:
+- mes-controller
+- oee-analytics
+description: Preventive maintenance backlog growing across multiple critical assets; MTBF risk
+investigation_notes: |-
+  Root Cause: PM backlogs grow when scheduling priority is dominated by reactive (corrective) work, when craft labor is short, or when a parts shortage blocks a critical PM. Backlogs over 90 days for Class A assets correlate strongly with future unplanned downtime.
+  Remediation: 1) Pull backlog by criticality: `cmms-admin backlog --asset-class A --overdue-days 30`. 2) Reprioritize and approve overtime if MTBF is dropping. 3) Confirm parts availability: `cmms-admin parts-status --asset {asset_id}`. 4) Re-balance the schedule: `cmms-admin rebalance-schedule --week-of {week}`. 5) Escalate to maintenance manager if Class A backlog exceeds policy threshold.
+remediation_action: rebalance_pm_schedule
+error_message: '[CMMS] CMMS-WORK-ORDER-BACKLOG: overdue={overdue_count} class_a_overdue={class_a_overdue} oldest_days={oldest_days}'
+stack_trace: |-
+  === CMMS BACKLOG REPORT ===
+  Total overdue: {overdue_count} | Class A overdue: {class_a_overdue} | Oldest: {oldest_days}d
+  ------------------------------------------------------------------------
+  ASSET         | CLASS | TYPE       | OVERDUE (d)  | LAST PM
+  ------------------------------------------------------------------------
+  {asset_id}    | A     | preventive | {oldest_days}d           | --
+  SPN-MILL-04    | A     | preventive | 45           | 2026-01-14
+  PMP-COOL-02    | B     | preventive | 22           | 2026-02-01
+  CMP-AIR-01     | A     | predictive | 18           | 2026-02-08
+  ------------------------------------------------------------------------
+  CMMS-WORK-ORDER-BACKLOG: PM compliance trending down; MTBF risk increasing
+correlation_attr:
+  key: deployment.cmms_scheduler_config
+  value: scheduler-v4.0.0-aggressive
+fault_params:
+  overdue_count: {randint: [15, 95]}
+  class_a_overdue: {randint: [3, 18]}
+  oldest_days: {randint: [30, 120]}
+  asset_id: {choice: [MTR-CONV-01, SPN-MILL-04, PMP-COOL-02, CMP-AIR-01]}
+  week: 2026-W19
+rca_clues:
+  maintenance-scheduler:
+    cmms.class_a_overdue: {randint: [3, 18]}
+    cmms.oldest_overdue_days: {randint: [30, 120]}
+  mes-controller:
+    mes.maintenance_at_risk_lines: {randint: [1, 4]}
+  oee-analytics:
+    oee.mtbf_hours_trend: decreasing

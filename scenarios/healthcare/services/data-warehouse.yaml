@@ -1,0 +1,146 @@
+service: data-warehouse
+sort_order: 9
+cloud_provider: azure
+cloud_region: eastus
+cloud_platform: azure_vm
+cloud_availability_zone: eastus-1
+subsystem: analytics
+language: java
+entry_endpoints:
+- - /api/v1/warehouse/etl-trigger
+  - POST
+db_operations:
+- - SELECT
+  - etl_pipeline_status
+  - SELECT pipeline_id, stage, rows_processed, total_rows, started_at FROM etl_pipeline_status WHERE status = 'running'
+emit_fault_logs: true
+kpi_emitter: false
+constants:
+  PIPELINES:
+  - ETL-CLINICAL-01
+  - ETL-BILLING-02
+  - ETL-LAB-03
+  - ETL-QUALITY-04
+  STAGES:
+  - extract
+  - transform
+  - load
+  - validate
+  AUDIT_ACTIONS:
+  - PHI_ACCESS
+  - RECORD_EXPORT
+  - REPORT_GENERATE
+  - BULK_QUERY
+state:
+  _etl_runs_completed:
+    init: 0
+  _last_audit_check:
+    init: now
+steps:
+- sample:
+    pipeline:
+      choice: PIPELINES
+    stage:
+      choice: STAGES
+    rows:
+      randint:
+      - 10000
+      - 200000
+    elapsed_s:
+      randint:
+      - 30
+      - 600
+- sample:
+    total_rows:
+      expr: rows + rand.randint(50000, 500000)
+- log:
+    level: INFO
+    message: '[DW] etl_progress pipeline={pipeline} stage={stage} rows={rows}/{total_rows} elapsed={elapsed_s}s status=RUNNING'
+    attrs:
+      operation: etl_progress
+      etl.pipeline_id:
+        var: pipeline
+      etl.stage:
+        var: stage
+      etl.rows_processed:
+        var: rows
+      etl.total_rows:
+        var: total_rows
+      etl.elapsed_seconds:
+        var: elapsed_s
+      etl.status: RUNNING
+- sample:
+    audit_action:
+      choice: AUDIT_ACTIONS
+    audit_user:
+      expr: f'user-{rand.randint(1000, 9999)}@hospital.org'
+    records_accessed:
+      randint:
+      - 1
+      - 500
+- log:
+    level: INFO
+    message: '[DW] hipaa_audit action={audit_action} user={audit_user} records={records_accessed} chain_hash=VERIFIED'
+    attrs:
+      operation: audit_log
+      audit.action:
+        var: audit_action
+      audit.user:
+        var: audit_user
+      audit.records_accessed:
+        var: records_accessed
+      audit.hash_valid: true
+- every:
+    seconds: 12
+    state_key: _last_audit_check
+    steps:
+    - sample:
+        chains_verified:
+          randint:
+          - 10
+          - 25
+        total_entries:
+          randint:
+          - 500000
+          - 2000000
+    - log:
+        level: INFO
+        message: '[DW] integrity_check chains_verified={chains_verified} total_entries={total_entries} hash_chain=INTACT'
+        attrs:
+          operation: integrity_check
+          audit.chains_verified:
+            var: chains_verified
+          audit.total_entries:
+            var: total_entries
+          audit.integrity_status: VALID
+- counter:
+    state_key: _etl_runs_completed
+    by: 1
+- metric:
+    name: warehouse.etl_runs_completed
+    value:
+      var: _etl_runs_completed
+    unit: runs
+- sample:
+    rows_per_sec:
+      if_active:
+        randint:
+        - 100
+        - 2000
+      else:
+        randint:
+        - 5000
+        - 25000
+- metric:
+    name: warehouse.etl_rows_per_second
+    value:
+      var: rows_per_sec
+    unit: rows/s
+- metric:
+    name: warehouse.storage_used_tb
+    value:
+      uniform:
+      - 8.0
+      - 25.0
+      round: 1
+    unit: TB

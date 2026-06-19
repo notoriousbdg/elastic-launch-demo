@@ -1,0 +1,174 @@
+service: cloud-cdn-service
+sort_order: 3
+cloud_provider: gcp
+cloud_region: us-central1
+cloud_platform: gcp_compute_engine
+cloud_availability_zone: us-central1-c
+subsystem: content_delivery
+language: python
+topology:
+- - cloud-load-balancer
+  - /api/v1/lb/origin-fetch
+  - GET
+- - vpc-network-manager
+  - /api/v1/vpc/route-to-origin
+  - GET
+entry_endpoints:
+- - /api/v1/cdn/analytics
+  - GET
+- - /api/v1/cdn/purge
+  - POST
+db_operations:
+- - SELECT
+  - cdn_backends
+  - SELECT backend_id, origin_host, cache_mode, ttl_sec, hit_ratio FROM cdn_backends WHERE enabled = true
+- - INSERT
+  - cache_invalidations
+  - INSERT INTO cache_invalidations (backend_id, path_pattern, requested_at, status) VALUES (?, ?, NOW(), 'pending')
+emit_fault_logs: true
+kpi_emitter: true
+constants:
+  BACKENDS:
+  - gcpnet-cdn-backend-01
+  - gcpnet-cdn-backend-02
+  - gcpnet-cdn-backend-03
+  CACHE_MODES:
+  - CACHE_ALL_STATIC
+  - USE_ORIGIN_HEADERS
+  - FORCE_CACHE_ALL
+steps:
+- sample:
+    backend:
+      choice: BACKENDS
+    hit_ratio:
+      if_active:
+        uniform:
+        - 15.0
+        - 45.0
+        round: 1
+      else:
+        uniform:
+        - 80.0
+        - 98.0
+        round: 1
+    miss_rate:
+      if_active:
+        randint:
+        - 500
+        - 5000
+      else:
+        randint:
+        - 50
+        - 200
+    cache_mode:
+      choice: CACHE_MODES
+- metric:
+    name: cdn.cache_hit_ratio
+    value:
+      var: hit_ratio
+    unit: '%'
+- metric:
+    name: cdn.cache_miss_rate
+    value:
+      var: miss_rate
+    unit: req/s
+- log:
+    level: INFO
+    message: 'cloud-cdn: backend={backend} hit_ratio={hit_ratio}% miss_rate={miss_rate}/s cache_mode={cache_mode}'
+    attrs:
+      operation: cache_stats
+      cdn.backend:
+        var: backend
+      cdn.hit_ratio:
+        var: hit_ratio
+      cdn.miss_rate:
+        var: miss_rate
+- sample:
+    origin_latency:
+      if_active:
+        uniform:
+        - 200.0
+        - 2000.0
+        round: 1
+      else:
+        uniform:
+        - 10.0
+        - 50.0
+        round: 1
+    origin_errors:
+      if_active:
+        randint:
+        - 50
+        - 500
+      else:
+        randint:
+        - 0
+        - 2
+- metric:
+    name: cdn.origin_latency_ms
+    value:
+      var: origin_latency
+    unit: ms
+- metric:
+    name: cdn.origin_errors
+    value:
+      var: origin_errors
+    unit: errors
+- log:
+    level: INFO
+    message: 'cloud-cdn: origin_latency={origin_latency}ms origin_errors={origin_errors} backend={backend} interval=60s'
+    attrs:
+      operation: origin_health
+      cdn.origin_latency:
+        var: origin_latency
+      cdn.origin_errors:
+        var: origin_errors
+- sample:
+    egress_gbps:
+      uniform:
+      - 1.0
+      - 10.0
+      round: 2
+    requests_total:
+      randint:
+      - 100000
+      - 500000
+    served_from_cache:
+      expr: round(hit_ratio * requests_total / 100)
+- metric:
+    name: cdn.egress_gbps
+    value:
+      var: egress_gbps
+    unit: Gbps
+- metric:
+    name: cdn.requests_total
+    value:
+      var: requests_total
+    unit: requests
+- log:
+    level: INFO
+    message: 'cloud-cdn: egress={egress_gbps}Gbps requests={requests_total} served_from_cache={served_from_cache} interval=60s'
+    attrs:
+      operation: bandwidth_stats
+      cdn.egress_gbps:
+        var: egress_gbps
+      cdn.requests_total:
+        var: requests_total
+- sample:
+    cache_fill_pct:
+      uniform:
+      - 60.0
+      - 90.0
+      round: 1
+- metric:
+    name: cdn.cache_fill_pct
+    value:
+      var: cache_fill_pct
+    unit: '%'
+- log:
+    level: INFO
+    message: 'cloud-cdn: cache_fill={cache_fill_pct}% backend={backend} ttl_default=3600s signed_urls=enabled'
+    attrs:
+      operation: cache_fill
+      cdn.cache_fill_pct:
+        var: cache_fill_pct

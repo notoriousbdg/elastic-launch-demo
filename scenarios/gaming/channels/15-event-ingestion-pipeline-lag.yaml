@@ -1,0 +1,61 @@
+name: Event Ingestion Pipeline Lag
+subsystem: analytics
+vehicle_section: ingestion_pipeline
+error_type: ANALYTICS-INGEST-LAG
+sensor_type: pipeline_monitor
+affected_services:
+- analytics-pipeline
+- game-server
+cascade_services:
+- leaderboard-api
+description: Analytics event ingestion pipeline falls behind, causing data lag and stale dashboards for live-ops teams
+investigation_notes: |-
+  Root cause: 4 of 8 Kafka consumer group members have disconnected, halving throughput while inflow remains constant. Partition-3 is completely stalled with the highest lag (27,193 events), indicating a stuck consumer or unbalanced partition assignment.
+  1. Check consumer health: `kafka-consumer-groups --describe --group {pipeline_id}-cg` to identify which consumers are DEAD and which partitions are unassigned.
+  2. Review rebalance history: 3 rebalances in 10 minutes indicates consumer instability — check for OOMKilled pods or network timeouts causing session.timeout.ms expiration.
+  3. Inspect partition-3: if it has a hot key causing message skew, consider repartitioning the topic or adding a sub-partitioning strategy.
+  4. Remediate: issue `restart_analytics_consumers` to force a clean consumer group rejoin; scale out to 12 consumers to handle the backlog burst.
+  5. Set up consumer lag alerting at 30s threshold and configure auto-scaling for the consumer group based on per-partition lag metrics.
+remediation_action: restart_analytics_consumers
+error_message: '[Analytics] ANALYTICS-INGEST-LAG: pipeline={pipeline_id} lag={lag_seconds}s threshold={max_lag_seconds}s backlog={backlog_count}
+  throughput={throughput}/s'
+stack_trace: |-
+  === PIPELINE CONSUMER GROUP STATUS ===
+  pipeline={pipeline_id}
+  ----------- consumer lag ------------
+    current_lag     = {lag_seconds}s
+    threshold       = {max_lag_seconds}s
+    backlog         = {backlog_count} events
+    throughput      = {throughput}/s (expected {expected_throughput}/s)
+  ----------- partition status --------
+    partition-0  offset=48201847  lag=12,401
+    partition-1  offset=48193201  lag=21,047
+    partition-2  offset=48198412  lag=15,882
+    partition-3  offset=48187003  lag=27,193  (STALLED)
+  ----------- consumer group ----------
+    group_id     = {pipeline_id}-cg
+    members      = 4/8 (4 DISCONNECTED)
+    rebalance_ct = 3 (last 10min)
+    commit_lag   = 8.2s
+  ----------- action ------------------
+    RESTART stalled consumers  SCALE OUT partitions
+  ANALYTICS-INGEST-LAG: pipeline {pipeline_id} lag {lag_seconds}s with {backlog_count} backlog
+correlation_attr:
+  key: infra.kafka_broker_version
+  value: kafka-3.7.0-kraft-unstable
+fault_params:
+  pipeline_id: {choice: [events-primary, events-secondary, replay-pipeline]}
+  lag_seconds: {uniform: [30.0, 600.0], round: 1}
+  max_lag_seconds: 10.0
+  backlog_count: {randint: [50000, 5000000]}
+  throughput: {randint: [100, 2000]}
+  expected_throughput: 5000
+rca_clues:
+  analytics-pipeline:
+    analytics.kafka_consumers_dead: {randint: [2, 6]}
+    analytics.partition_stalled: {choice: [partition-0, partition-1, partition-2, partition-3]}
+  game-server:
+    game.telemetry_buffer_pct: {uniform: [70.0, 95.0], round: 1}
+    game.event_drop_rate_pct: {uniform: [1.0, 15.0], round: 1}
+  leaderboard-api:
+    leaderboard.rank_update_delay_s: {randint: [30, 300]}

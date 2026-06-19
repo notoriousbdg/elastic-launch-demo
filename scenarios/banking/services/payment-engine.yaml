@@ -1,0 +1,135 @@
+service: payment-engine
+sort_order: 3
+cloud_provider: aws
+cloud_region: us-east-1
+cloud_platform: aws_ec2
+cloud_availability_zone: us-east-1c
+subsystem: payment_processing
+language: go
+topology:
+- - fraud-sentinel
+  - /api/v1/fraud/screen-transaction
+  - POST
+- - auth-gateway
+  - /api/v1/auth/verify-payment
+  - POST
+- - document-vault
+  - /api/v1/docs/payment-receipt
+  - POST
+entry_endpoints:
+- - /api/v1/payments/ach
+  - POST
+- - /api/v1/payments/wire
+  - POST
+- - /api/v1/payments/card-auth
+  - POST
+db_operations:
+- - INSERT
+  - ach_transactions
+  - INSERT INTO ach_transactions (batch_id, entry_id, routing, amount, type, status, ts) VALUES (?, ?, ?, ?, ?, 'PENDING',
+    NOW())
+- - UPDATE
+  - account_balances
+  - UPDATE account_balances SET available = available + ?, posted = posted + ?, last_updated = NOW() WHERE account_id = ?
+emit_fault_logs: true
+kpi_emitter: false
+state:
+  _transaction_count:
+    init: 0
+  _last_summary:
+    init: now
+steps:
+- sample:
+    txn_type:
+      choice:
+      - ACH_CREDIT
+      - ACH_DEBIT
+      - WIRE_DOM
+      - WIRE_INTL
+      - CARD_AUTH
+      - BILLPAY
+      - P2P
+    txn_amount:
+      uniform:
+      - 10.0
+      - 5000.0
+      round: 2
+- counter:
+    state_key: _transaction_count
+    by: 1
+- log:
+    level: INFO
+    message: '[PAY] transaction_processed type={txn_type} amount=${txn_amount} ofac_clear=true status=SETTLED'
+    attrs:
+      operation: transaction_processed
+      txn.type:
+        var: txn_type
+      txn.amount:
+        var: txn_amount
+      txn.ofac_clear: true
+      txn.status: SETTLED
+- sample:
+    ach_entries:
+      randint:
+      - 500
+      - 5000
+    ach_total_amount:
+      uniform:
+      - 100000.0
+      - 5000000.0
+      round: 2
+- log:
+    level: INFO
+    message: '[PAY] ach_batch_status entries={ach_entries} total_amount=${ach_total_amount} nacha_valid=true window=FED_06ET
+      status=PROCESSING'
+    attrs:
+      operation: ach_batch_status
+      ach.entries:
+        var: ach_entries
+      ach.total_amount:
+        var: ach_total_amount
+      ach.nacha_valid: true
+- every:
+    seconds: 10
+    state_key: _last_summary
+    steps:
+    - log:
+        level: INFO
+        message: '[PAY] engine_summary total_txns={_transaction_count} success_rate=99.7% avg_latency_ms=45 status=NOMINAL'
+        attrs:
+          operation: engine_summary
+          engine.total_txns:
+            var: _transaction_count
+          engine.success_rate: 99.7
+- sample:
+    tps:
+      if_active:
+        uniform:
+        - 20.0
+        - 80.0
+        round: 1
+      else:
+        uniform:
+        - 120.0
+        - 450.0
+        round: 1
+- metric:
+    name: payment_engine.transactions_per_sec
+    value:
+      var: tps
+    unit: txn/s
+- metric:
+    name: payment_engine.ach_queue_depth
+    value:
+      randint:
+      - 100
+      - 2000
+    unit: entries
+- metric:
+    name: payment_engine.auth_success_rate
+    value:
+      uniform:
+      - 98.5
+      - 99.9
+      round: 2
+    unit: '%'

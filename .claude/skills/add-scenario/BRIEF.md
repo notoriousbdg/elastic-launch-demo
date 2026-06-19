@@ -77,11 +77,11 @@ Regulatory context shapes which fault channels are most compelling (and which fe
 | GDPR | Data residency violation, consent management failure, data export anomaly |
 | FCC / NERC CIP | Network availability, critical infrastructure fault isolation |
 
-### 7. Tone / theme hint
+### 7. Tone / naming hint
 
-Any color, mood, or vocabulary cue that helps set the right UITheme and wording.
+Any vocabulary or domain-register cue that helps choose good service naming style.
 
-**Examples:** "it's a very engineering-focused culture, keep it technical", "they love dashboards, make it visual", "they use the word 'node' not 'service'", "their brand is blue and gold"
+**Examples:** "they use the word 'node' not 'service'"; "this is a safety-critical ops center" → use ops/mission-oriented service names.
 
 ---
 

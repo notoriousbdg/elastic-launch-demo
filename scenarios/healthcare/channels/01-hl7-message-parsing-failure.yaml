@@ -1,0 +1,52 @@
+name: HL7 Message Parsing Failure
+subsystem: clinical_records
+vehicle_section: adt_interface
+error_type: HL7-ACK-AE
+sensor_type: hl7_parser
+affected_services:
+- ehr-system
+- lab-integration
+cascade_services:
+- patient-monitor
+- clinical-alerts
+description: HL7 v2.x message parsing fails due to malformed segments or unsupported message types in the ADT interface
+investigation_notes: |-
+  Root Cause: Malformed HL7 v2.x segments typically originate from upstream ADT/ORM source systems sending non-standard field encodings or unsupported Z-segments. Check the MSH-9 message type and MSH-12 version against the interface specification.
+  Remediation: 1) Review the ACK/NAK disposition — AE (Application Error) vs AR (Application Reject) determines retry eligibility. 2) Inspect the Mirth Connect or Rhapsody channel logs for the failing message ID. 3) Flush the dead-letter queue: `./mirth-cli queue flush --channel ADT-INBOUND --state ERROR`. 4) If messages are stuck, restart the HL7 listener: `systemctl restart mirth-hl7-listener`. 5) Verify segment encoding with: `hl7-validator --file /tmp/failed_msg.hl7 --version 2.5.1`. 6) Reconcile message control IDs in the MSA segment to ensure no duplicate deliveries after recovery.
+remediation_action: restart_hl7_interface
+error_message: '[EHR] HL7-ACK-AE: msg_type={msg_type} segment={hl7_segment} position={position} patient=MRN-{mrn}'
+stack_trace: |-
+  MSH|^~\&|EHR-CORE|FACILITY-01|LAB-LIS|LAB-01|20260217143052||{msg_type}|MSG-{mrn}.001|P|2.5.1|||AL|NE
+  EVN|A01|20260217143052|||ADMIN-SYS
+  PID|1||{mrn}^^^FACILITY-01^MR||DOE^JANE^M||19650315|F|||123 MAIN ST^^ANYTOWN^ST^12345||555-0100|||M|NON|{encounter_id}
+  {hl7_segment}|<<< PARSE ERROR at position {position} >>>
+  --- ACK ---
+  MSH|^~\&|LAB-LIS|LAB-01|EHR-CORE|FACILITY-01|20260217143052||ACK^{msg_type}|ACK-{mrn}.001|P|2.5.1
+  MSA|AE|MSG-{mrn}.001|HL7-ACK-AE: Segment {hl7_segment} at position {position} contains invalid field encoding
+  ERR|^^^207&Application internal error&HL70357|{hl7_segment}^{position}|E|||Invalid segment structure
+correlation_attr:
+  key: deployment.ehr_hl7_version
+  value: mirth-3.12.0-hotfix7
+fault_params:
+  msg_type: {choice: ["ADT^A01", "ADT^A03", "ADT^A08", "ORU^R01", "ORM^O01"]}
+  hl7_segment: {choice: [PID, PV1, OBX, OBR, MSH, NK1, DG1]}
+  position: {randint: [1, 25]}
+  mrn:
+    format: "MRN-{n}"
+    n: {randint: [1000000, 9999999]}
+  encounter_id:
+    format: "ENC-{n}"
+    n: {randint: [100000, 999999]}
+rca_clues:
+  ehr-system:
+    hl7.segment_encoding: non_standard_z_segment
+    hl7.msh_version: "2.3.1"
+  lab-integration:
+    hl7.oru_queue_depth: {randint: [200, 800]}
+    hl7.ack_disposition: AE
+  patient-monitor:
+    upstream.ehr_feed_status: degraded
+    vitals.documentation_lag_s: {randint: [30, 120]}
+  clinical-alerts:
+    alerts.ehr_integration_status: stale_data
+    alerts.suppressed_count: {randint: [5, 30]}

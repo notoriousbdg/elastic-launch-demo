@@ -1,0 +1,48 @@
+name: Client Authentication Storm
+subsystem: network_access
+vehicle_section: wireless_auth
+error_type: AUTH_FAILURE_STORM
+sensor_type: radius_auth
+affected_services:
+- wifi-controller
+- dns-dhcp-service
+cascade_services:
+- network-controller
+description: RADIUS authentication requests spiking beyond server capacity
+investigation_notes: |-
+  1. Check RADIUS server logs: `journalctl -u freeradius -f` or NPS Event Viewer — look for repeated Access-Reject with reason codes.
+  2. Identify the NAS (Network Access Server) generating the storm: the NAS IP in the logs points to a specific WLC or switch.
+  3. Common root cause: a certificate change on the RADIUS server breaks PEAP-MSCHAPv2 — all clients simultaneously retry authentication.
+  4. Check for a Group Policy update that changed supplicant settings: `netsh wlan show profiles` on affected Windows clients.
+  5. As immediate mitigation, enable RADIUS rate limiting on the WLC: set max auth requests per second per SSID.
+  6. If the RADIUS server is overloaded, temporarily switch the SSID to PSK or MAC-auth bypass for critical warehouse devices while investigating.
+remediation_action: reset_radius_service
+error_message: 'AUTH_FAILURE_STORM event_id=mist-auth-storm: rate={auth_requests_per_sec}/s (threshold {auth_threshold}/s),
+  failures={auth_failures} timeouts={auth_timeouts} nas={radius_nas_ip} server={radius_server}'
+stack_trace: '{{"type": "AUTH_FAILURE_STORM", "event_id": "mist-auth-storm", "org_id": "fanatics-org-001", "nas_ip": "{radius_nas_ip}",
+  "radius_server": "{radius_server}", "auth_rate": {auth_requests_per_sec}, "threshold": {auth_threshold}, "failures": {auth_failures},
+  "timeouts": {auth_timeouts}, "eap_type": "PEAP-MSCHAPv2", "ssid": "Fanatics-Corp", "reason_codes": ["timeout", "reject",
+  "invalid_credential"]}}'
+correlation_attr:
+  key: deployment.radius_config
+  value: nps-policy-2025q1-draft
+fault_params:
+  auth_requests_per_sec: {randint: [200, 1000]}
+  auth_threshold: 100
+  auth_failures: {randint: [50, 300]}
+  auth_timeouts: {randint: [20, 150]}
+  radius_nas_ip:
+    format: "10.1.{a}.{b}"
+    a: {randint: [1, 10]}
+    b: {randint: [1, 254]}
+  radius_server: {choice: [radius-01.fanatics.internal, radius-02.fanatics.internal]}
+rca_clues:
+  wifi-controller:
+    wifi.radius_queue_depth: {randint: [200, 1000]}
+    wifi.eap_type: PEAP-MSCHAPv2
+  dns-dhcp-service:
+    dhcp.new_lease_failures: {randint: [20, 200]}
+    dhcp.auth_dependent_scope: {choice: ["10.1.0.0/24", "10.2.0.0/24"]}
+  network-controller:
+    network.dot1x_failures_per_sec: {randint: [50, 500]}
+    network.radius_server_load_pct: {uniform: [85, 100], round: 1}

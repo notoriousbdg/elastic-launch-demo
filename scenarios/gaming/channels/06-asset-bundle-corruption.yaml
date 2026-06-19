@@ -1,0 +1,70 @@
+name: Asset Bundle Corruption
+subsystem: cdn
+vehicle_section: asset_pipeline
+error_type: CDN-ASSET-CORRUPT
+sensor_type: integrity_checker
+affected_services:
+- content-delivery
+- game-server
+cascade_services:
+- moderation-engine
+description: Game asset bundles fail integrity verification after CDN transfer, causing client crashes on load
+investigation_notes: |-
+  Root cause: chunk-level corruption during CDN edge-to-client transfer — TCP resets during large bundle downloads cause partial chunk writes that pass length checks but fail SHA-256 verification. The corrupt chunk is typically at a TCP segment boundary.
+  1. Identify the corrupt chunk offset: chunk 23 at offset 92274688 — correlate with CDN edge access logs for `tcp_resets` around the transfer timestamp.
+  2. Verify origin integrity: re-fetch the bundle directly from origin (bypassing CDN) with `curl -H 'Cache-Control: no-cache' <origin_url> | sha256sum` to rule out origin corruption vs. transit corruption.
+  3. Check edge node health: if `edge-iad-01` shows elevated tcp_resets across multiple bundles, the edge node may have a faulty NIC or be under DDoS.
+  4. Remediate: issue `reset_cdn_origin` to invalidate the corrupted cached copy on the edge node; quarantine the bad bundle hash and force re-download for affected clients.
+  5. Enable end-to-end chunk checksumming with per-chunk CRC32 verification on the client side so corrupted chunks trigger targeted re-fetch instead of full bundle re-download.
+remediation_action: reset_cdn_origin
+error_message: '[CDN] CDN-ASSET-CORRUPT: bundle={bundle_id} expected={expected_hash} actual={actual_hash} size={bundle_size_mb}MB
+  version={bundle_version}'
+stack_trace: |-
+  === ASSET INTEGRITY VERIFICATION LOG ===
+  bundle={bundle_id}  version={bundle_version}
+  ----------- checksums ---------------
+    expected  = {expected_hash}
+    actual    = {actual_hash}
+    algorithm = SHA-256
+  ----------- bundle info -------------
+    size        = {bundle_size_mb}MB
+    chunks      = 48
+    chunk_size  = 4MB
+    corrupt_chunk = 23 (offset 92274688)
+    edge_source   = edge-iad-01
+  ----------- transfer log ------------
+    started    = 2026-02-17T14:22:01.847Z
+    completed  = 2026-02-17T14:22:04.213Z
+    retries    = 1
+    tcp_resets = 2
+  CDN-ASSET-CORRUPT: bundle {bundle_id} checksum mismatch — quarantined
+correlation_attr:
+  key: infra.nic_firmware
+  value: mellanox-cx6-fw-22.39.1014
+fault_params:
+  bundle_id:
+    format: "BDL-{n}"
+    n: {randint: [10000, 99999]}
+  expected_hash:
+    format: "sha256:{a:08x}{b:08x}"
+    a: {randint: [0, 4294967295]}
+    b: {randint: [0, 4294967295]}
+  actual_hash:
+    format: "sha256:{a:08x}{b:08x}"
+    a: {randint: [0, 4294967295]}
+    b: {randint: [0, 4294967295]}
+  bundle_size_mb: {uniform: [50.0, 500.0], round: 1}
+  bundle_version:
+    format: "v{major}.{minor}.{patch}"
+    major: {randint: [1, 5]}
+    minor: {randint: [0, 9]}
+    patch: {randint: [0, 99]}
+rca_clues:
+  content-delivery:
+    cdn.corrupt_chunk_offset: {randint: [50000000, 200000000]}
+    cdn.edge_tcp_resets: {randint: [5, 30]}
+  game-server:
+    game.bundle_load_failures: {randint: [50, 500]}
+    game.client_redownloads: {randint: [20, 200]}
+  moderation-engine:
+    moderation.asset_scan_status: bypassed

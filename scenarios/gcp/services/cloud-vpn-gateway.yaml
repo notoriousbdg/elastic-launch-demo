@@ -1,0 +1,149 @@
+service: cloud-vpn-gateway
+sort_order: 8
+cloud_provider: gcp
+cloud_region: europe-west1
+cloud_platform: gcp_compute_engine
+cloud_availability_zone: europe-west1-c
+subsystem: vpn
+language: rust
+generates_traces: false
+topology:
+- - cloud-interconnect
+  - /api/v1/interconnect/backup-path
+  - GET
+- - vpc-network-manager
+  - /api/v1/vpc/tunnel-routes
+  - POST
+entry_endpoints:
+- - /api/v1/vpn/tunnels
+  - GET
+- - /api/v1/vpn/status
+  - GET
+emit_fault_logs: true
+kpi_emitter: false
+constants:
+  TUNNELS:
+  - gcpnet-vpn-tunnel-01
+  - gcpnet-vpn-tunnel-02
+  - gcpnet-vpn-tunnel-03
+  GATEWAYS:
+  - gcpnet-vpn-gw-europe1
+  - gcpnet-vpn-gw-central1
+  TUNNEL_FAULT_STATES:
+  - DOWN
+  - NEGOTIATING
+  - NO_INCOMING_PACKETS
+steps:
+- sample:
+    tunnel:
+      choice: TUNNELS
+    gateway:
+      choice: GATEWAYS
+    tunnel_status:
+      if_active:
+        choice: TUNNEL_FAULT_STATES
+      else: ESTABLISHED
+    peer_ip:
+      expr: f'203.0.113.{rand.randint(1,254)}'
+- log:
+    level: INFO
+    message: 'cloud-vpn: tunnel={tunnel} gateway={gateway} status={tunnel_status} peer={peer_ip} ike_version=IKEv2'
+    attrs:
+      operation: tunnel_status
+      vpn.tunnel:
+        var: tunnel
+      vpn.gateway:
+        var: gateway
+      vpn.status:
+        var: tunnel_status
+      vpn.peer_ip:
+        var: peer_ip
+- sample:
+    tx_bytes:
+      randint:
+      - 10000000
+      - 500000000
+    rx_bytes:
+      randint:
+      - 10000000
+      - 500000000
+- metric:
+    name: vpn.tx_bytes
+    value:
+      var: tx_bytes
+    unit: bytes
+- metric:
+    name: vpn.rx_bytes
+    value:
+      var: rx_bytes
+    unit: bytes
+- log:
+    level: INFO
+    message: 'cloud-vpn: tunnel={tunnel} tx_bytes={tx_bytes} rx_bytes={rx_bytes} max_bandwidth=3Gbps routing=DYNAMIC'
+    attrs:
+      operation: throughput
+      vpn.tunnel:
+        var: tunnel
+      vpn.tx_bytes:
+        var: tx_bytes
+      vpn.rx_bytes:
+        var: rx_bytes
+- sample:
+    ike_sa_lifetime:
+      randint:
+      - 1800
+      - 36000
+    ike_rekey_in:
+      if_active: 0
+      else:
+        randint:
+        - 0
+        - 3600
+    child_sa_count:
+      randint:
+      - 1
+      - 4
+- metric:
+    name: vpn.ike_sa_lifetime
+    value:
+      var: ike_sa_lifetime
+    unit: seconds
+- metric:
+    name: vpn.child_sa_count
+    value:
+      var: child_sa_count
+    unit: SAs
+- log:
+    level: INFO
+    message: 'cloud-vpn: tunnel={tunnel} ike_sa_lifetime={ike_sa_lifetime}s rekey_in={ike_rekey_in}s child_sas={child_sa_count}
+      cipher=AES-256-GCM auth=SHA-384'
+    attrs:
+      operation: ike_status
+      vpn.ike_sa_lifetime:
+        var: ike_sa_lifetime
+      vpn.rekey_in:
+        var: ike_rekey_in
+      vpn.child_sa_count:
+        var: child_sa_count
+- sample:
+    packets_dropped:
+      if_active:
+        randint:
+        - 100
+        - 2000
+      else:
+        randint:
+        - 0
+        - 5
+- metric:
+    name: vpn.packets_dropped
+    value:
+      var: packets_dropped
+    unit: packets
+- log:
+    level: INFO
+    message: 'cloud-vpn: tunnel={tunnel} dropped_packets={packets_dropped} replay_window=64 dead_peer_detection=ENABLED'
+    attrs:
+      operation: packet_stats
+      vpn.dropped_packets:
+        var: packets_dropped

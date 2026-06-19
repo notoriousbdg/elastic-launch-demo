@@ -1,0 +1,108 @@
+service: order-management
+sort_order: 3
+cloud_provider: aws
+cloud_region: us-east-1
+cloud_platform: aws_ec2
+cloud_availability_zone: us-east-1c
+subsystem: orders
+language: go
+topology:
+- - payment-processor
+  - /api/v1/payments/authorize
+  - POST
+- - inventory-service
+  - /api/v1/inventory/reserve
+  - POST
+- - fulfillment-orchestrator
+  - /api/v1/fulfillment/create-shipment
+  - POST
+entry_endpoints:
+- - /api/v1/orders/create
+  - POST
+- - /api/v1/orders/status
+  - GET
+- - /api/v1/orders/cart/add
+  - POST
+db_operations:
+- - INSERT
+  - orders
+  - INSERT INTO orders (user_id, cart_id, total_usd, status, created_at) VALUES (?, ?, ?, 'pending', NOW())
+- - SELECT
+  - orders
+  - SELECT id, status, total_usd, created_at FROM orders WHERE user_id = ? ORDER BY created_at DESC LIMIT 20
+- - UPDATE
+  - orders
+  - UPDATE orders SET status = ?, updated_at = NOW() WHERE id = ?
+- - SELECT
+  - cart_items
+  - SELECT ci.sku, ci.quantity, p.price, p.name FROM cart_items ci JOIN products p ON ci.sku = p.sku WHERE ci.cart_id = ?
+emit_fault_logs: true
+kpi_emitter: false
+steps:
+- sample:
+    orders_per_min:
+      uniform:
+      - 120.0
+      - 450.0
+      round: 1
+    gmv_usd:
+      uniform:
+      - 15000.0
+      - 65000.0
+      round: 2
+    avg_order_value_usd:
+      uniform:
+      - 48.0
+      - 185.0
+      round: 2
+    checkout_abandonment_pct:
+      uniform:
+      - 18.0
+      - 32.0
+      round: 2
+- metric:
+    name: orders.per_minute
+    value:
+      var: orders_per_min
+    unit: orders/min
+- metric:
+    name: orders.gmv_usd
+    value:
+      var: gmv_usd
+    unit: USD
+- metric:
+    name: orders.avg_order_value_usd
+    value:
+      var: avg_order_value_usd
+    unit: USD
+- metric:
+    name: orders.checkout_abandonment_pct
+    value:
+      var: checkout_abandonment_pct
+    unit: '%'
+- log:
+    level: INFO
+    message: orders.health orders_per_min={orders_per_min} gmv_usd={gmv_usd} avg_order_value={avg_order_value_usd} abandonment={checkout_abandonment_pct}%
+    attrs:
+      operation: orders_health
+      orders.per_minute:
+        var: orders_per_min
+      orders.gmv_usd:
+        var: gmv_usd
+      orders.avg_order_value_usd:
+        var: avg_order_value_usd
+      orders.checkout_abandonment_pct:
+        var: checkout_abandonment_pct
+- sample:
+    payment_success_rate:
+      uniform:
+      - 97.5
+      - 99.8
+      round: 2
+- log:
+    level: INFO
+    message: orders.payment_health success_rate={payment_success_rate}% orders_per_min={orders_per_min}
+    attrs:
+      operation: payment_health
+      orders.payment_success_rate_pct:
+        var: payment_success_rate

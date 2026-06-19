@@ -1,0 +1,56 @@
+name: NAT Port Exhaustion
+subsystem: network_access
+vehicle_section: nat_gateway
+error_type: NAT-PORT-EXHAUSTION
+sensor_type: nat_ports
+affected_services:
+- cloud-nat-gateway
+- vpc-network-manager
+cascade_services:
+- cloud-load-balancer
+- cloud-dns-resolver
+description: Cloud NAT gateway running out of available source ports
+investigation_notes: |-
+  Root cause: Cloud NAT allocates a minimum of 64 source ports per VM by default. With high connection rates (e.g., GKE pods making many external API calls), the 64-port-per-VM minimum is quickly exhausted. Each unique (src_ip, src_port, dst_ip, dst_port, protocol) tuple consumes one port. Check current allocation:
+    gcloud compute routers nats describe <nat> --router=<router> --region=<region>
+    Console > Network Services > Cloud NAT > <gateway> > Monitoring tab (port utilization)
+  Remediation: Increase minimum ports per VM:
+    gcloud compute routers nats update <nat> --router=<router> --region=<region> --min-ports-per-vm=2048
+  Or enable Dynamic Port Allocation (DPA) for bursty workloads:
+    gcloud compute routers nats update <nat> --router=<router> --region=<region> --enable-dynamic-port-allocation --min-ports-per-vm=64 --max-ports-per-vm=65536
+  Also add more NAT IPs to increase the total port pool.
+remediation_action: reset_nat_gateway
+error_message: 'cloudnat: NAT-PORT-EXHAUSTION gateway={nat_gateway_name} region={gcp_region} ports_used={nat_ports_used}/{nat_ports_total}
+  utilization={nat_port_util_pct}% dropped_connections={nat_dropped_conns}/s top_vm={nat_top_vm}'
+stack_trace: |-
+  Cloud NAT Port Allocation Report
+  ----------------------------------
+  Gateway:      {nat_gateway_name}
+  Region:       {gcp_region}
+  Ports Used:   {nat_ports_used}/{nat_ports_total} ({nat_port_util_pct}%)
+  Dropped/s:    {nat_dropped_conns}
+  Top Consumer: {nat_top_vm}
+  Min Ports/VM: 64
+  Action: Increase minPortsPerVm or add NAT IP addresses
+correlation_attr:
+  key: infra.nat_config_rev
+  value: nat-dpa-v1.3-experimental
+fault_params:
+  nat_gateway_name: {choice: [gcpnet-nat-central1, gcpnet-nat-east1, gcpnet-nat-europe1]}
+  gcp_region: {choice: [us-central1, us-east1, europe-west1]}
+  nat_ports_used: {randint: [60000, 64000]}
+  nat_ports_total: 64512
+  nat_port_util_pct: {uniform: [92.0, 99.5], round: 1}
+  nat_dropped_conns: {randint: [50, 500]}
+  nat_top_vm: {choice: [gke-node-pool-a-001, gke-node-pool-b-002, gke-node-pool-c-003]}
+rca_clues:
+  cloud-nat-gateway:
+    nat.min_ports_per_vm: 64
+    nat.dynamic_port_allocation: false
+  vpc-network-manager:
+    vpc.egress_failures: {randint: [50, 300]}
+    vpc.affected_vms: {randint: [3, 12]}
+  cloud-load-balancer:
+    lb.external_api_timeouts: {randint: [20, 100]}
+  cloud-dns-resolver:
+    dns.external_resolution_failures: {randint: [10, 80]}

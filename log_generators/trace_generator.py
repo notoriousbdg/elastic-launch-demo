@@ -76,7 +76,7 @@ STATUS_ERROR = 2
 
 def _load_topology():
     """Load topology data from the active scenario."""
-    from scenarios import get_scenario
+    from scenario_engine import get_scenario
     scenario = get_scenario(ACTIVE_SCENARIO)
     return scenario.service_topology, scenario.entry_endpoints, scenario.db_operations
 

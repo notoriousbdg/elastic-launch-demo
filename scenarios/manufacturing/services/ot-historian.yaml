@@ -1,0 +1,126 @@
+service: ot-historian
+sort_order: 3
+cloud_provider: aws
+cloud_region: us-east-1
+cloud_platform: aws_ec2
+cloud_availability_zone: us-east-1c
+subsystem: historian
+language: python
+topology:
+- - oee-analytics
+  - /api/v1/oee/tag-feed
+  - POST
+entry_endpoints:
+- - /api/v1/historian/query
+  - POST
+db_operations:
+- - INSERT
+  - tag_archive_writes
+  - INSERT INTO tag_archive_writes (archive_id, tag_name, value, ts, quality) VALUES (?, ?, ?, ?, ?)
+- - SELECT
+  - tag_archive
+  - SELECT tag_name, value, ts FROM tag_archive WHERE tag_name = ? AND ts BETWEEN ? AND ?
+emit_fault_logs: true
+kpi_emitter: false
+constants:
+  ARCHIVES_WRITE:
+  - AR-CURRENT
+  - AR-DAILY-01
+  - AR-DAILY-02
+  ARCHIVES_COMPACT:
+  - AR-DAILY-01
+  - AR-DAILY-02
+  - AR-DAILY-03
+state:
+  _writes_total:
+    init: 0
+  _last_archive_report:
+    init: now
+steps:
+- sample:
+    archive:
+      choice: ARCHIVES_WRITE
+    batch_size:
+      randint:
+      - 500
+      - 5000
+- log:
+    level: INFO
+    message: '[HIST] archive_write archive={archive} batch_size={batch_size} compression=LZ4 status=OK'
+    attrs:
+      operation: archive_write
+      historian.archive:
+        var: archive
+      historian.batch_size:
+        var: batch_size
+      historian.compression: LZ4
+- sample:
+    depth:
+      randint:
+      - 120
+      - 8500
+- log:
+    level: DEBUG
+    message: '[HIST] buffer_status depth={depth} watermark_high=50000 watermark_low=10000'
+    attrs:
+      operation: buffer_status
+      historian.buffer_depth:
+        var: depth
+- every:
+    seconds: 10
+    state_key: _last_archive_report
+    steps:
+    - sample:
+        compact_archive:
+          choice: ARCHIVES_COMPACT
+        ratio:
+          uniform:
+          - 3.5
+          - 9.8
+          round: 2
+        duration_s:
+          randint:
+          - 8
+          - 65
+    - log:
+        level: INFO
+        message: '[HIST] archive_compaction archive={compact_archive} compression_ratio={ratio}x duration_s={duration_s}'
+        attrs:
+          operation: archive_compaction
+          historian.archive:
+            var: compact_archive
+          historian.compression_ratio:
+            var: ratio
+- counter:
+    state_key: _writes_total
+    by:
+      randint:
+      - 800
+      - 3500
+- metric:
+    name: historian.writes_total
+    value:
+      var: _writes_total
+    unit: writes
+- metric:
+    name: historian.write_lag_seconds
+    value:
+      if_active:
+        uniform:
+        - 8.0
+        - 45.0
+        round: 2
+      else:
+        uniform:
+        - 0.05
+        - 0.8
+        round: 2
+    unit: s
+- metric:
+    name: historian.buffer_utilization_pct
+    value:
+      uniform:
+      - 8.0
+      - 65.0
+      round: 1
+    unit: '%'

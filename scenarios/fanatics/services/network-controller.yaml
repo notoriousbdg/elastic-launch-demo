@@ -1,0 +1,183 @@
+service: network-controller
+sort_order: 7
+cloud_provider: azure
+cloud_region: eastus
+cloud_platform: azure_vm
+cloud_availability_zone: eastus-1
+subsystem: network_core
+language: go
+generates_traces: false
+topology:
+- - firewall-gateway
+  - /api/v1/firewall/sessions
+  - GET
+- - firewall-gateway
+  - /api/v1/firewall/policy-push
+  - POST
+- - dns-dhcp-service
+  - /api/v1/dns/zone-status
+  - GET
+- - dns-dhcp-service
+  - /api/v1/dhcp/scope-status
+  - GET
+- - wifi-controller
+  - /api/v1/wifi/ap-status
+  - GET
+entry_endpoints:
+- - /api/v1/network/health
+  - GET
+- - /api/v1/network/topology
+  - GET
+- - /api/v1/network/config-push
+  - POST
+emit_fault_logs: true
+kpi_emitter: false
+constants:
+  INTERFACES:
+  - GigabitEthernet0/0/0
+  - GigabitEthernet0/0/1
+  - TenGigabitEthernet1/0/1
+  - TenGigabitEthernet1/0/2
+  - Vlan100
+  - Vlan200
+  - Loopback0
+state:
+  _poll_idx:
+    init: 0
+  _last_bgp_check:
+    init: now
+steps:
+- sample:
+    iface:
+      expr: INTERFACES[_poll_idx % len(INTERFACES)]
+- counter:
+    state_key: _poll_idx
+    by: 1
+- sample:
+    in_octets:
+      randint:
+      - 50000000
+      - 500000000
+    out_octets:
+      randint:
+      - 50000000
+      - 500000000
+    in_errors:
+      if_active:
+        randint:
+        - 10
+        - 100
+      else:
+        randint:
+        - 0
+        - 2
+    crc_errors:
+      if_active:
+        randint:
+        - 5
+        - 50
+      else:
+        randint:
+        - 0
+        - 1
+- metric:
+    name: network.interface.in_octets
+    value:
+      var: in_octets
+    unit: bytes
+- metric:
+    name: network.interface.out_octets
+    value:
+      var: out_octets
+    unit: bytes
+- metric:
+    name: network.interface.in_errors
+    value:
+      var: in_errors
+    unit: errors
+- log:
+    level: INFO
+    message: '%LINEPROTO-5-UPDOWN: Line protocol on Interface {iface}, changed state to up in_octets={in_octets} out_octets={out_octets}
+      in_errors={in_errors} crc_errors={crc_errors}'
+    attrs:
+      operation: interface_poll
+      network.interface:
+        var: iface
+      network.in_octets:
+        var: in_octets
+      network.out_octets:
+        var: out_octets
+      network.in_errors:
+        var: in_errors
+      network.crc_errors:
+        var: crc_errors
+- every:
+    seconds: 10
+    state_key: _last_bgp_check
+    steps:
+    - sample:
+        bgp_peers:
+          randint:
+          - 3
+          - 6
+        established:
+          if_active:
+            expr: rand.randint(1, max(1, bgp_peers - 1))
+          else:
+            var: bgp_peers
+    - metric:
+        name: network.bgp.peers_established
+        value:
+          var: established
+        unit: peers
+    - log:
+        level: INFO
+        message: '%BGP-5-ADJCHANGE: neighbor 10.0.0.1 Up, {established}/{bgp_peers} peers Established'
+        attrs:
+          operation: bgp_check
+          bgp.total_peers:
+            var: bgp_peers
+          bgp.established:
+            var: established
+- sample:
+    stp_changes:
+      if_active:
+        randint:
+        - 3
+        - 15
+      else:
+        randint:
+        - 0
+        - 1
+- metric:
+    name: network.stp.topology_changes
+    value:
+      var: stp_changes
+    unit: changes
+- log:
+    level: INFO
+    message: '%SPANTREE-6-PORT_STATE: VLAN0100 {iface} state -> forwarding, {stp_changes} topology changes this interval'
+    attrs:
+      operation: stp_check
+      stp.topology_changes:
+        var: stp_changes
+- sample:
+    mac_entries:
+      randint:
+      - 800
+      - 2500
+    mac_utilization_pct:
+      expr: round(mac_entries / 8192 * 100, 1)
+- metric:
+    name: network.mac_table.entries
+    value:
+      var: mac_entries
+    unit: entries
+- log:
+    level: INFO
+    message: '%SW_MATM-6-MACCOUNT: MAC address table entries {mac_entries}/8192 ({mac_utilization_pct}% utilization)'
+    attrs:
+      operation: mac_table_check
+      mac_table.entries:
+        var: mac_entries
+      mac_table.capacity: 8192

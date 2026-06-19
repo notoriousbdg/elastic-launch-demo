@@ -1,0 +1,49 @@
+name: ERP Windows Service Crash
+subsystem: erp
+vehicle_section: windows_service
+error_type: ERP-WIN-SERVICE-CRASH
+sensor_type: windows_event_log
+affected_services:
+- erp-bridge
+cascade_services:
+- mes-controller
+- inventory-sync
+description: Windows service on the ERP bridge stopped unexpectedly; SAP IDoc transmission halted
+investigation_notes: |-
+  Root Cause: A Windows service (e.g., SAPHostControl) terminating unexpectedly emits Event ID 7031 (Service Control Manager) in the System channel. Common causes: a Windows Update reboot during a live IDoc batch, a memory leak in a long-running RFC connection, or an expired domain service account credential.
+  Remediation: 1) Pull the System event log: `Get-WinEvent -LogName System -FilterHashtable @{ID=7031,7034} -MaxEvents 50` on `mfg-sap-bridge-01`. 2) Inspect the service account: `sc.exe qc {win_service_name}`. 3) Restart the service: `sc.exe start {win_service_name}`. 4) If credentials expired, rotate via the AD service-account workflow. 5) Replay the IDoc backlog: `sap-admin replay-idoc --since {failure_time}`. 6) Add a Watcher on Windows event log channel `System` for event ID 7031 / 7034 on this host.
+remediation_action: restart_windows_service
+error_message: '[ERP-WIN] ERP-WIN-SERVICE-CRASH: host=mfg-sap-bridge-01 service={win_service_name} event_id=7031 idoc_backlog={idoc_backlog}
+  elapsed_min={elapsed_min}'
+stack_trace: |-
+  === WINDOWS EVENT LOG — System ===
+  Source:           Service Control Manager
+  Event ID:         7031
+  Level:            Error
+  Computer:         mfg-sap-bridge-01
+  Channel:          System
+  ------------------------------------------------------------------------
+  The {win_service_name} service terminated unexpectedly. It has done this {crash_count} time(s).
+  The following corrective action will be taken in 60000 milliseconds: Restart the service.
+  ------------------------------------------------------------------------
+  Related Event ID 7034: The {win_service_name} service terminated unexpectedly.
+  Related Event ID 7036: The {win_service_name} service entered the stopped state.
+  ERP-WIN-SERVICE-CRASH: IDoc backlog={idoc_backlog}; SAP RFC unavailable for {elapsed_min}m; service stopped at {failure_time}
+correlation_attr:
+  key: infra.windows_patch_level
+  value: win2022-kb5034441-pending
+fault_params:
+  win_service_name: {choice: [SAPHostControl, SAPHostExec, MSSQLSERVER]}
+  idoc_backlog: {randint: [20, 250]}
+  elapsed_min: {randint: [5, 45]}
+  crash_count: {randint: [1, 5]}
+  failure_time: 2026-05-06T14:15:32Z
+rca_clues:
+  erp-bridge:
+    winlog.event_id: 7031
+    winlog.crash_count: {randint: [1, 5]}
+    erp.idoc_backlog: {randint: [20, 250]}
+  mes-controller:
+    mes.erp_link_status: down
+  inventory-sync:
+    inventory.erp_master_sync_lag_s: {randint: [120, 900]}

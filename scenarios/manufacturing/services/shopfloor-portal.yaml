@@ -1,0 +1,159 @@
+service: shopfloor-portal
+sort_order: 9
+cloud_provider: azure
+cloud_region: eastus
+cloud_platform: azure_vm
+cloud_availability_zone: eastus-2
+subsystem: portal
+language: nodejs
+topology:
+- - mes-controller
+  - /api/v1/mes/operator-action
+  - POST
+- - quality-inspector
+  - /api/v1/quality/operator-flag
+  - POST
+entry_endpoints:
+- - /api/v1/portal/scan
+  - POST
+db_operations:
+- - SELECT
+  - operator_sessions
+  - SELECT session_id, operator_id, kiosk_id, started_at FROM operator_sessions WHERE status = 'active'
+emit_fault_logs: true
+kpi_emitter: false
+constants:
+  KIOSKS:
+  - KIOSK-LINE01-01
+  - KIOSK-LINE02-01
+  - KIOSK-LINE03-01
+  - TABLET-MGR-01
+  ACTIONS:
+  - login
+  - scan_part
+  - submit_inspection
+  - report_issue
+  - logout
+  ENDPOINTS:
+  - /api/scan
+  - /api/work-orders
+  - /api/inspections
+  - /api/issues
+  METHODS:
+  - GET
+  - POST
+  STATUS_CODES:
+  - 200
+  - 200
+  - 200
+  - 200
+  - 201
+  - 304
+  RESTART_CHOICES:
+  - 0
+  - 0
+  - 0
+  - 0
+  - 1
+state:
+  _sessions_total:
+    init: 0
+  _last_container_report:
+    init: now
+steps:
+- sample:
+    kiosk:
+      choice: KIOSKS
+    operator:
+      expr: f'OP-{rand.randint(1000, 9999)}'
+    action:
+      choice: ACTIONS
+- log:
+    level: INFO
+    message: '[PORTAL] session kiosk={kiosk} operator={operator} action={action}'
+    attrs:
+      operation: session_event
+      portal.kiosk:
+        var: kiosk
+      portal.operator:
+        var: operator
+      portal.action:
+        var: action
+- sample:
+    endpoint:
+      choice: ENDPOINTS
+    method:
+      choice: METHODS
+    status:
+      choice: STATUS_CODES
+    req_latency:
+      randint:
+      - 15
+      - 180
+- log:
+    level: DEBUG
+    message: '[PORTAL] http_request method={method} path={endpoint} status={status} latency_ms={req_latency}'
+    attrs:
+      operation: http_request
+      http.method:
+        var: method
+      http.target:
+        var: endpoint
+      http.status_code:
+        var: status
+- every:
+    seconds: 10
+    state_key: _last_container_report
+    steps:
+    - sample:
+        restarts:
+          choice: RESTART_CHOICES
+        container_mem:
+          randint:
+          - 180
+          - 600
+        container_cpu:
+          randint:
+          - 2
+          - 28
+    - log:
+        level: INFO
+        message: '[PORTAL-K8S] container=shopfloor-portal-7c8d9f4b6-xq8jt image=registry.mfg.internal/shopfloor-portal:1.18.3
+          restarts={restarts} memory_mb={container_mem} cpu_pct={container_cpu}'
+        attrs:
+          operation: container_status
+          k8s.pod.name: shopfloor-portal-7c8d9f4b6-xq8jt
+          container.image.name: registry.mfg.internal/shopfloor-portal:1.18.3
+          container.restart_count:
+            var: restarts
+- counter:
+    state_key: _sessions_total
+    by: 1
+- metric:
+    name: portal.sessions_total
+    value:
+      var: _sessions_total
+    unit: sessions
+- metric:
+    name: portal.active_kiosks
+    value: 4
+    unit: kiosks
+- metric:
+    name: portal.request_latency_ms
+    value:
+      if_active:
+        randint:
+        - 800
+        - 5500
+      else:
+        randint:
+        - 40
+        - 220
+    unit: ms
+- metric:
+    name: portal.container_memory_mb
+    value:
+      randint:
+      - 180
+      - 750
+    unit: MB

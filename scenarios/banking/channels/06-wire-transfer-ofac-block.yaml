@@ -1,0 +1,64 @@
+name: Wire Transfer OFAC Block
+subsystem: payment_processing
+vehicle_section: wire_transfer
+error_type: PAY-OFAC-BLOCK
+sensor_type: compliance_screening
+affected_services:
+- payment-engine
+- fraud-sentinel
+cascade_services:
+- member-portal
+- auth-gateway
+description: Wire transfer held due to OFAC SDN list match requiring manual BSA review
+investigation_notes: |-
+  1. Review the OFAC match score and algorithm — JARO_WINKLER scores above 85% require BSA officer review within 24 hours per bank policy. Scores 75-85% may be false positives from common name patterns.
+  2. Check the SDN list version — if the match is against a recently added entry, verify the member's identity against the actual SDN record. Military members with common names frequently trigger false matches.
+  3. Wire destination analysis: PCS_RELOCATION and DEPLOYMENT_EXPENSE purposes to allied nations (DE, JP, KR, GB) are typically legitimate. Cross-reference with member's duty station assignment orders.
+  4. BSA/AML compliance requirements: SAR filing must be evaluated within 24h SLA. If the wire exceeds $10K, verify CTR filing status. Check 314(b) information sharing requests from FinCEN.
+  5. Do NOT release the wire without BSA officer sign-off — OFAC violations carry strict liability penalties up to $20M per violation. Escalate to BSA team: bsa-review@bankops.internal with wire reference number.
+remediation_action: escalate_bsa_review
+error_message: '[PAY] PAY-OFAC-BLOCK: wire={wire_id} amount=${wire_amount} member={member_id} match_score={ofac_score} list={ofac_list}'
+stack_trace: |-
+  === OFAC SCREENING RESULT ===
+  wire={wire_id}  member={member_id}  amount=${wire_amount}
+  --- SDN LIST MATCH ---
+    list={ofac_list}  match_score={ofac_score}%
+    match_type=NAME_SIMILARITY  algorithm=JARO_WINKLER
+    member_name='{member_name}'  sdn_entry='{ofac_match_name}'
+    country={wire_country}  program=SDGT
+  --- WIRE DETAILS ---
+    originator=RETAIL_BANK_FSB  beneficiary_bank={beneficiary_bank}
+    swift_code={swift_code}  purpose={wire_purpose}
+    fedwire_ref=FW{wire_id}
+  --- BSA REQUIREMENTS ---
+    sar_filing=PENDING  ctr_threshold=false  314b_request=false
+    bsa_officer_review=REQUIRED  sla_hours=24
+  ACTION: hold_wire=true  escalate_bsa=true  alert=PAY-OFAC-BLOCK
+correlation_attr:
+  key: infra.ofac_sdn_list_version
+  value: sdn-2026-02-15-delta
+fault_params:
+  wire_id: {format: "WR-{n}", n: {randint: [100000, 999999]}}
+  wire_amount: {uniform: [1000.0, 100000.0], round: 2}
+  member_id: {format: "{p}-{n}", p: {choice: [M, MBR, USR]}, n: {randint: [1000000, 9999999]}}
+  ofac_score: {uniform: [75.0, 98.0], round: 1}
+  ofac_list: {choice: [SDN, CONSOLIDATED, SSI, FSE]}
+  member_name: {choice: [James Wilson, Sarah Mitchell, Robert Thompson, Maria Garcia, David Chen, Jennifer Adams]}
+  ofac_match_name: {choice: [AL-RASHID Trading Co, PETROCHINA International, ROSNEFT Oil Company, BANK MELLI IRAN]}
+  wire_country: {choice: [AE, DE, JP, KR, GB, IT]}
+  beneficiary_bank: {choice: [Deutsche Bank, Barclays, MUFG Bank, Kookmin Bank, Emirates NBD, UniCredit]}
+  swift_code: {choice: [DEUTDEFF, BARCGB22, BOTKJPJT, CZNBKRSE, EABOROBI, UNCRITMM]}
+  wire_purpose: {choice: [PCS_RELOCATION, FAMILY_SUPPORT, DEPLOYMENT_EXPENSE, EDUCATION, REAL_ESTATE]}
+rca_clues:
+  payment-engine:
+    payment.wire_hold_reason: OFAC_SDN_MATCH
+    payment.bsa_review_sla_hours: 24
+  fraud-sentinel:
+    fraud.ofac_match_algorithm: JARO_WINKLER
+    fraud.match_score_pct: {uniform: [75, 95], round: 1}
+  member-portal:
+    portal.wire_status_display: HELD_FOR_REVIEW
+    portal.member_notification: PENDING
+  auth-gateway:
+    auth.wire_authorization_level: BSA_OFFICER_REQUIRED
+    auth.dual_control_status: AWAITING_SECOND

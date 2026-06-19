@@ -1,0 +1,63 @@
+name: VA Loan Rate Lock Failure
+subsystem: underwriting
+vehicle_section: va_lending
+error_type: UW-VA-RATELOCK-FAIL
+sensor_type: rate_lock
+affected_services:
+- quote-engine
+- payment-engine
+cascade_services:
+- member-portal
+- document-vault
+description: VA home loan rate lock requests failing due to secondary market pricing feed disruption
+investigation_notes: |-
+  1. Check GNMA (Ginnie Mae) MBS pricing feed status — STALE data 47min old means the secondary market pricing API is not responding. Verify connectivity to the pricing vendor feed.
+  2. Secondary market conditions: 10yr Treasury at 4.28% with HIGH volatility means MBS prices are moving rapidly. Stale pricing creates risk of locking at incorrect rates.
+  3. VA loan rate locks require current GNMA MBS pricing because VA loans are pooled into Ginnie Mae securities. Without accurate MBS pricing, the bank cannot calculate its margin correctly.
+  4. Honor the quoted rate for members who received a rate quote before the feed went down — this is both regulatory best practice and member trust policy. Queue locks for execution when feed recovers.
+  5. Check Certificate of Eligibility (COE) verification — ensure the VA eligibility service is still operational even if rate locking is paused. Members can continue applications without locking.
+  6. Monitor the VA funding fee calculation — first-time use vs subsequent use rates differ, and disabled veterans may qualify for fee exemption. These calculations don't depend on MBS pricing.
+remediation_action: restart_ratelock_service
+error_message: '[UW] UW-VA-RATELOCK-FAIL: loan={loan_id} rate={va_rate}% lock_period={lock_days}d member={member_id} error={ratelock_error}'
+stack_trace: |-
+  === VA LOAN RATE LOCK STATUS ===
+  loan={loan_id}  member={member_id}
+  --- LOAN DETAILS ---
+    product=VA_30YR_FIXED  amount=${loan_amount}
+    requested_rate={va_rate}%  lock_period={lock_days}days
+    va_funding_fee={va_funding_fee}%  coe_verified=true
+  --- PRICING PIPELINE ---
+    STEP                    STATUS      DETAIL
+    coe_validation          COMPLETE    certificate_of_eligibility=valid
+    credit_pull             COMPLETE    score=748, dti=32%
+    secondary_market_price  FAILED      {ratelock_error}  <<< FEED DOWN
+    margin_calculation      SKIPPED     ---
+    lock_confirmation       SKIPPED     ---
+  --- MARKET CONDITIONS ---
+    10yr_treasury=4.28%  spread=1.72%  volatility=HIGH
+    gnma_mbs_price=STALE  last_update=47min_ago
+  ACTION: queue_lock=true  honor_quoted_rate=true  alert=UW-VA-RATELOCK-FAIL
+correlation_attr:
+  key: infra.mbs_pricing_feed
+  value: gnma-feed-adapter-v2.0.3-patch
+fault_params:
+  loan_id: {format: "VA-{n}", n: {randint: [100000, 999999]}}
+  va_rate: {uniform: [5.5, 7.5], round: 3}
+  lock_days: {choice: [30, 45, 60]}
+  member_id: {format: "M-{n}", n: {randint: [1000000, 9999999]}}
+  ratelock_error: {choice: [GNMA_MBS_FEED_DOWN, SECONDARY_MARKET_CLOSED, PRICING_ENGINE_TIMEOUT, RATE_SHEET_EXPIRED]}
+  loan_amount: {uniform: [150000, 750000], round: 0}
+  va_funding_fee: {uniform: [1.25, 3.3], round: 2}
+rca_clues:
+  quote-engine:
+    quote.gnma_mbs_feed_age_min: {randint: [30, 120]}
+    quote.secondary_market_status: STALE
+  payment-engine:
+    payment.va_funding_fee_calc_status: OK
+    payment.escrow_setup_blocked: true
+  member-portal:
+    portal.rate_quote_display: UNAVAILABLE
+    portal.coe_verification_status: VALID
+  document-vault:
+    document.coe_document_on_file: true
+    document.loan_package_generation: BLOCKED

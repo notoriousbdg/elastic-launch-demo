@@ -1,0 +1,43 @@
+name: Risk Limit Breach
+subsystem: risk_management
+vehicle_section: risk_engine
+error_type: RISK-LIMIT-BREACH
+sensor_type: risk_threshold
+affected_services:
+- risk-calculator
+- order-gateway
+cascade_services:
+- matching-engine
+- compliance-monitor
+description: Trading desk risk exposure exceeds configured limit thresholds
+investigation_notes: ''
+remediation_action: ''
+error_message: '[RISK] RISK-LIMIT-BREACH: desk={desk_id} exposure=${exposure} limit=${risk_limit} asset_class={asset_class}'
+stack_trace: |-
+  === RISK CALCULATION REPORT ===
+  desk={desk_id}  asset_class={asset_class}
+  --- EXPOSURE BREAKDOWN ---
+    gross_long     ${exposure}
+    gross_short    $42.3M
+    net_exposure   ${exposure}
+    limit          ${risk_limit}
+    utilization    287%  <<< BREACH
+  --- VAR IMPACT ---
+    VaR_95  $18.7M   (pre-breach: $9.2M)
+    VaR_99  $28.1M   (pre-breach: $13.8M)
+    stress_loss  $41.5M  scenario=2008-LEHMAN
+  kill_switch=ARMED  new_orders_blocked=true  liquidation_queue=PENDING
+  ACTION: block_new_orders=true  notify_desk_head=true  alert=RISK-LIMIT-BREACH
+correlation_attr: {}
+fault_params:
+  desk_id:
+    format: "DESK-{t}"
+    t: {choice: [EQ-FLOW, EQ-PROP, FI-RATES, FX-SPOT, DRV-VOL]}
+  exposure:
+    format: "{n}M"
+    n: {randint: [10, 500]}
+  risk_limit:
+    format: "{n}M"
+    n: {randint: [5, 100]}
+  asset_class: {choice: [equity, fixed_income, fx, derivatives, commodities]}
+rca_clues: {}

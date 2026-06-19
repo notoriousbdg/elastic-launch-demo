@@ -1,0 +1,54 @@
+name: Insurance Eligibility Check Timeout
+subsystem: billing
+vehicle_section: eligibility_gateway
+error_type: X12-271-TIMEOUT
+sensor_type: x12_270_271
+affected_services:
+- billing-processor
+- scheduling-api
+cascade_services:
+- ehr-system
+description: Real-time insurance eligibility verification via X12 270/271 transaction times out
+investigation_notes: |-
+  Root Cause: X12 270 eligibility inquiries timeout when the payer clearinghouse connection is degraded or the payer's adjudication system is overloaded. Common during open enrollment periods or when a payer's real-time eligibility API is undergoing maintenance. The ISA/GS envelope must match the payer's expected format.
+  Remediation: 1) Test payer connectivity: `x12-admin ping --payer {payer_id} --transaction 270`. 2) Check the clearinghouse status page for the payer (Availity, Change Healthcare, or Trizetto). 3) Reset the X12 gateway connection pool: `systemctl restart x12-eligibility-gateway`. 4) For timed-out requests, resubmit in batch mode: `x12-admin resubmit --insurance {insurance_id} --mode batch`. 5) Verify the ISA qualifier (ZZ) and receiver ID match the payer's enrollment records. 6) Fall back to manual eligibility verification via payer portal if real-time remains unavailable.
+remediation_action: reset_x12_gateway
+error_message: '[CLAIMS] X12-271-TIMEOUT: payer={payer_id} insurance={insurance_id} patient={patient_id} elapsed={elapsed_ms}ms
+  timeout={timeout_ms}ms'
+stack_trace: |-
+  --- X12 270/271 TRANSACTION TRACE ---
+  >>> 270 Eligibility Inquiry
+  ISA*00*          *00*          *ZZ*FACILITY-01    *ZZ*{payer_id}        *20260217143052*^*00501*000000001*0*P*:
+  GS*HS*FACILITY-01*{payer_id}*20260217143052*0001*X*005010X279A1
+  ST*270*0001*005010X279A1
+  BHT*0022*13*{insurance_id}*20260217143052
+  HL*1**20*1
+  NM1*PR*2*{payer_id}*****PI*{payer_id}
+  HL*2*1*21*1
+  NM1*IL*1*DOE*JANE****MI*{insurance_id}
+  SE*9*0001
+  <<< 271 Response — TIMEOUT
+  X12-271-TIMEOUT: No response from {payer_id} after {elapsed_ms}ms (limit: {timeout_ms}ms)
+  Patient: {patient_id} | Insurance: {insurance_id} | Queued for retry
+correlation_attr:
+  key: infra.x12_gateway_config
+  value: availity-adapter-v4.3.0-rc2
+fault_params:
+  payer_id: {choice: [BCBS-001, AETNA-002, UHC-003, CIGNA-004, MDCR-005, MDCD-006]}
+  insurance_id:
+    format: "INS-{n}"
+    n: {randint: [100000, 999999]}
+  patient_id:
+    format: "PT-{n}"
+    n: {randint: [100000, 999999]}
+  elapsed_ms: {randint: [5000, 30000]}
+  timeout_ms: 5000
+rca_clues:
+  billing-processor:
+    x12.clearinghouse_status: degraded
+    x12.payer_response_ms: {randint: [5000, 30000]}
+  scheduling-api:
+    sched.eligibility_check_pending: {randint: [10, 40]}
+    sched.self_pay_fallback: true
+  ehr-system:
+    ehr.unverified_insurance_count: {randint: [5, 25]}

@@ -1,0 +1,60 @@
+name: ACH Direct Deposit Delay
+subsystem: payment_processing
+vehicle_section: ach_processor
+error_type: PAY-ACH-DELAY
+sensor_type: ach_processing
+affected_services:
+- payment-engine
+- mobile-gateway
+cascade_services:
+- member-portal
+- fraud-sentinel
+description: ACH direct deposit batch processing delayed affecting military pay and allotments
+investigation_notes: |-
+  1. Check account_lookup stage — this is the bottleneck. High latency here indicates the member account database is under load or replication lag is causing timeouts on lookups.
+  2. DFAS (Defense Finance and Accounting Service) military pay files arrive in the 06:00 ET Fed window. Delays past 08:00 ET affect Early Pay eligibility — members expecting funds by morning will call.
+  3. Review NACHA file parsing metrics — entry counts >30K in a single batch may overwhelm the OFAC screening step. Consider splitting large DFAS batches into sub-batches of 10K entries.
+  4. Check Aurora PostgreSQL connection pool on payment-engine: SELECT count(*) FROM pg_stat_activity WHERE state = 'active'. Connection saturation causes account_lookup stalls.
+  5. Verify OFAC screening service response times — the 45s elapsed is within SLA but leaves no headroom. If OFAC screening degrades, the entire batch pipeline will breach SLA. Monitor Treasury SDN list update status.
+remediation_action: reset_ach_processor
+error_message: '[PAY] PAY-ACH-DELAY: batch={ach_batch_id} entries={ach_entry_count} delay_min={ach_delay_min} sla_min={ach_sla_min}
+  type={ach_type}'
+stack_trace: |-
+  === ACH BATCH PROCESSING STATUS ===
+  batch={ach_batch_id}  type={ach_type}  entries={ach_entry_count}
+  --- NACHA FILE PROCESSING ---
+    STAGE                STATUS      ELAPSED
+    file_receive         COMPLETE    0.2s     (Fed window: 06:00 ET)
+    header_validate      COMPLETE    1.4s
+    entry_parse          COMPLETE    12.8s    ({ach_entry_count} entries)
+    ofac_screening       COMPLETE    45.2s
+    account_lookup       STALLED     {ach_delay_min}min  <<< BOTTLENECK
+    balance_post         PENDING     ---
+    notification         PENDING     ---
+  --- IMPACT ---
+    military_pay_entries={ach_entry_count}  total_amount=$4,247,892.00
+    dfas_originator=true  early_pay_eligible=true
+  delay={ach_delay_min}min  sla={ach_sla_min}min  breach=true
+  ACTION: escalate_ops=true  notify_dfas_liaison=true  alert=PAY-ACH-DELAY
+correlation_attr:
+  key: infra.nacha_parser_version
+  value: nacha-proc-v4.1.0-rc2
+fault_params:
+  ach_batch_id: {format: "ACH-{n}", n: {randint: [100000, 999999]}}
+  ach_entry_count: {randint: [1000, 50000]}
+  ach_delay_min: {randint: [30, 480]}
+  ach_sla_min: 15
+  ach_type: {choice: [MILITARY_PAY, ALLOTMENT, DIRECT_DEPOSIT, DFAS_RETIRED_PAY]}
+rca_clues:
+  payment-engine:
+    payment.ach_batch_stage: account_lookup_stalled
+    payment.nacha_entry_count: {randint: [20000, 40000]}
+  mobile-gateway:
+    gateway.early_pay_status: DELAYED
+    gateway.member_inquiries_spike: true
+  member-portal:
+    portal.balance_display_stale: true
+    portal.dfas_pay_eta: UNKNOWN
+  fraud-sentinel:
+    fraud.ach_screening_queue_depth: {randint: [5000, 15000]}
+    fraud.ofac_response_ms: {randint: [30000, 60000]}

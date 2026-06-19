@@ -1,0 +1,50 @@
+name: Print Queue Overflow
+subsystem: manufacturing
+vehicle_section: production_line
+error_type: MES-QUEUE-OVERFLOW
+sensor_type: print_queue
+affected_services:
+- card-printing-system
+- packaging-fulfillment
+cascade_services:
+- digital-marketplace
+description: Print job queue exceeding buffer capacity, new jobs being rejected
+investigation_notes: |-
+  1. Check printer status on the MES console: `PAPER_JAM`, `INK_LOW`, `HEAD_CLOG`, or `OFFLINE` each require different physical intervention.
+  2. Review the oldest pending job age — jobs stuck for 30+ minutes indicate the printer is not processing, not just slow.
+  3. For HP Indigo 7K: check the BID (Binary Ink Developer) levels and impression drum status via the Indigo PrintOS dashboard.
+  4. Verify the RIP (Raster Image Processor) server is not the bottleneck: high CPU on the RIP server means complex card designs are choking the pipeline.
+  5. Redistribute queued jobs to other available printers: `mes-cli reassign-queue --from <printer> --to <available_printer> --priority high`.
+  6. If the queue is critically full, pause incoming orders from the marketplace and display a 'printing delayed' banner to prevent further queue growth.
+remediation_action: drain_print_queue
+error_message: '[PrintScheduler] MES-QUEUE-OVERFLOW: queue={print_queue_depth}/{print_queue_max} ({print_queue_pct}%) job={print_job_id}
+  REJECTED, oldest_pending={print_oldest_job_min}m printer={printer_name} status={printer_status}'
+stack_trace: "com.fanatics.mes.exception.QueueOverflowException: MES-QUEUE-OVERFLOW: queue capacity exceeded {print_queue_depth}/{print_queue_max}\n\
+  \tat com.fanatics.mes.scheduler.PrintScheduler.enqueueJob(PrintScheduler.java:312)\n\tat com.fanatics.mes.scheduler.PrintScheduler.processIncoming(PrintScheduler.java:245)\n\
+  \tat com.fanatics.mes.queue.JobQueueManager.submit(JobQueueManager.java:189)\n\tat com.fanatics.mes.api.PrintJobController.submitJob(PrintJobController.java:78)\n\
+  \tat java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1136)\n\tat java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:635)\n\
+  \tat java.base/java.lang.Thread.run(Thread.java:842)\n  Printer: {printer_name} Status: {printer_status}\n  Job: {print_job_id}\
+  \ Oldest pending: {print_oldest_job_min}m"
+correlation_attr:
+  key: infra.rip_server_config
+  value: fiery-rip-v4.0.1-preview
+fault_params:
+  print_queue_depth: {randint: [450, 500]}
+  print_queue_max: 500
+  print_queue_pct: {uniform: [90.0, 100.0], round: 1}
+  print_job_id:
+    format: "PJ-{n}"
+    n: {randint: [10000, 99999]}
+  print_oldest_job_min: {randint: [30, 480]}
+  printer_name: {choice: [HP-Indigo-7K-01, HP-Indigo-7K-02, Koenig-Bauer-01, Heidelberg-XL-01]}
+  printer_status: {choice: [PAPER_JAM, INK_LOW, OFFLINE, HEAD_CLOG]}
+rca_clues:
+  card-printing-system:
+    print.printer_status: {choice: [PAPER_JAM, INK_LOW, HEAD_CLOG]}
+    print.rip_server_cpu_pct: {uniform: [85, 100], round: 1}
+  packaging-fulfillment:
+    warehouse.pending_packages_no_cards: {randint: [20, 200]}
+    warehouse.fulfillment_sla_breach: true
+  digital-marketplace:
+    marketplace.order_delay_notification_count: {randint: [50, 500]}
+    marketplace.printing_backlog_hours: {randint: [4, 48]}

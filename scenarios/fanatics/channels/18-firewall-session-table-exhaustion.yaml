@@ -1,0 +1,66 @@
+name: Firewall Session Table Exhaustion
+subsystem: security
+vehicle_section: perimeter_defense
+error_type: SYSTEM-session-threshold
+sensor_type: session_table
+affected_services:
+- firewall-gateway
+- network-controller
+cascade_services:
+- digital-marketplace
+- auction-engine
+description: Firewall session table approaching maximum capacity, new connections being dropped
+investigation_notes: |-
+  1. Run `show session all filter count yes` to confirm active session count, then `show session info` for utilization percentage.
+  2. Identify top talkers: `show session all filter source <zone> count yes` — look for a single IP consuming disproportionate sessions.
+  3. Check for a DDoS or scan: `show session all filter application unknown` — unknown apps with high session counts suggest malicious traffic.
+  4. Review session timeout settings: `show running-config | match timeout` — aggressive TCP timeout defaults (3600s) may keep stale sessions alive.
+  5. Reduce TCP session timeout for non-critical zones: `set deviceconfig setting session timeout-tcp 1800`.
+  6. If a specific source is flooding, apply a DoS Protection Profile or temporarily block via `set security-rule deny-source <ip>`.
+remediation_action: flush_session_table
+error_message: '1,2025/01/15 14:32:01,007200001234,SYSTEM,session,0,SYSTEM-session-threshold,Session table utilization critical:
+  {session_count}/{session_max} ({session_util_pct}%) in zone {fw_zone}, {session_drops} new connections dropped, top source
+  {top_source_ip}'
+stack_trace: |-
+  > show session info
+  Number of sessions supported:    {session_max}
+  Number of active sessions:       {session_count}
+  Session table utilization:       {session_util_pct}%
+  Number of sessions dropped:      {session_drops}
+    Zone: {fw_zone}
+    Top source: {top_source_ip}
+  TCP sessions:    {session_count}
+  UDP sessions:    1245
+  ICMP sessions:   89
+  Session aging:   TCP default timeout 3600s
+correlation_attr:
+  key: infra.fw_session_config
+  value: pan-os-11.1.3-hotfix2
+fault_params:
+  session_count: {randint: [58000, 63500]}
+  session_max: 64000
+  session_util_pct: {uniform: [90.0, 99.5], round: 1}
+  session_drops: {randint: [50, 500]}
+  fw_zone: {choice: [TRUST, UNTRUST, DMZ]}
+  top_source_ip:
+    format: "10.{a}.{b}.{c}"
+    a: {randint: [1, 254]}
+    b: {randint: [1, 254]}
+    c: {randint: [1, 254]}
+rca_clues:
+  firewall-gateway:
+    firewall.top_session_source:
+      format: "10.{a}.{b}.{c}"
+      a: {randint: [1, 254]}
+      b: {randint: [1, 254]}
+      c: {randint: [1, 254]}
+    firewall.tcp_timeout_config: 3600
+  network-controller:
+    network.qos_drops_increasing: true
+    network.affected_queue: {choice: [Q1-PRIORITY, Q3-BEST-EFFORT]}
+  digital-marketplace:
+    marketplace.connection_pool_exhausted: true
+    marketplace.pending_checkouts: {randint: [50, 500]}
+  auction-engine:
+    auction.websocket_failures: {randint: [20, 200]}
+    auction.bid_timeouts: {randint: [5, 50]}

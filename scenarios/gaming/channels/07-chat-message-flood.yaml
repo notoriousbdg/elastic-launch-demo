@@ -1,0 +1,58 @@
+name: Chat Message Flood
+subsystem: social
+vehicle_section: chat_gateway
+error_type: CHAT-FLOOD-DETECT
+sensor_type: rate_limiter
+affected_services:
+- chat-service
+- moderation-engine
+cascade_services:
+- auth-gateway
+description: Chat channels experiencing message floods that overwhelm rate limiters and moderation pipelines
+investigation_notes: |-
+  Root cause: coordinated bot accounts are flooding public chat channels at rates far exceeding per-user rate limits — the attack uses distributed bot networks where each bot stays just under individual limits but the aggregate overwhelms channel capacity.
+  1. Check top senders: PLR-482910 and PLR-109284 flagged as BOT_SUSPECT — verify account age, friend count, and purchase history via `player-admin lookup <player_id>`.
+  2. Review moderation queue: {pending_moderation} pending scans with 421 dropped means the automod NLP classifier is CPU-saturated; check GPU inference pod health.
+  3. Inspect rate limiter config: per-user limit may be set correctly but channel-level aggregate limit is missing — add `channel_rate_limit` to the chat gateway config.
+  4. Remediate: issue `restart_chat_service` to reset connection pools and apply updated rate limits; then `flush_message_queue` to clear the backed-up moderation pipeline.
+  5. Ban confirmed bot accounts immediately and enable CAPTCHA challenges for accounts younger than 24 hours attempting to post in public channels.
+remediation_action: restart_chat_service
+error_message: '[Chat] CHAT-FLOOD-DETECT: channel={channel_id} rate={message_rate}msg/s threshold={rate_limit}msg/s pending_mod={pending_moderation}'
+stack_trace: |-
+  === CHAT RATE LIMITER STATE DUMP ===
+  channel={channel_id}
+  ----------- rate metrics ------------
+    current_rate   = {message_rate} msg/s
+    threshold      = {rate_limit} msg/s
+    burst_window   = 5s
+    burst_peak     = {message_rate} msg/s
+  ----------- moderation queue --------
+    pending        = {pending_moderation}
+    avg_scan_ms    = 12.4
+    automod_queue  = 87% full
+    dropped_scans  = 421
+  ----------- top senders -------------
+    PLR-482910  : 47 msg/s (BOT_SUSPECT)
+    PLR-109284  : 31 msg/s (BOT_SUSPECT)
+    PLR-773201  : 28 msg/s (NORMAL)
+  ----------- action ------------------
+    THROTTLE channel to {rate_limit} msg/s  QUEUE moderation backlog
+  CHAT-FLOOD-DETECT: channel {channel_id} rate {message_rate}msg/s exceeds threshold
+correlation_attr:
+  key: network.rate_limiter_config
+  value: rl-config-v3.2-relaxed
+fault_params:
+  channel_id: {choice: [global-en, guild-12345, match-lobby, trade-market]}
+  message_rate: {randint: [500, 5000]}
+  rate_limit: 200
+  pending_moderation: {randint: [1000, 20000]}
+rca_clues:
+  chat-service:
+    chat.bot_suspect_accounts: {randint: [5, 50]}
+    chat.channel_aggregate_rate: {randint: [500, 2000]}
+  moderation-engine:
+    moderation.automod_cpu_pct: {uniform: [85.0, 99.0], round: 1}
+    moderation.dropped_scans: {randint: [100, 1000]}
+  auth-gateway:
+    auth.new_account_rate: {randint: [50, 200]}
+    auth.captcha_challenge_rate: {uniform: [0.1, 5.0], round: 1}

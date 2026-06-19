@@ -83,7 +83,7 @@ GC_HISTOGRAM_BOUNDS = [
 
 def _load_java_services():
     """Return list of (service_name, service_cfg) for Java services."""
-    from scenarios import get_scenario
+    from scenario_engine import get_scenario
 
     scenario = get_scenario(ACTIVE_SCENARIO)
     services = scenario.services

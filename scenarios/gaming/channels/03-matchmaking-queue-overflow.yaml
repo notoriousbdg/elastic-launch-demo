@@ -1,0 +1,61 @@
+name: Matchmaking Queue Overflow
+subsystem: matchmaking
+vehicle_section: matchmaker_core
+error_type: MM-QUEUE-OVERFLOW
+sensor_type: queue_monitor
+affected_services:
+- matchmaking-engine
+- game-server
+cascade_services:
+- auth-gateway
+- analytics-pipeline
+description: Matchmaking queue depth exceeds capacity causing player wait times to spike beyond acceptable thresholds
+investigation_notes: |-
+  Root cause: inflow rate (enqueue/s) far exceeds outflow (dequeue/s), typically caused by a game server allocation bottleneck — the matchmaker finds groups but cannot place them because server provisioning is lagging behind demand.
+  1. Check server pool: query `kubectl get pods -l app=game-server` on the EKS cluster to verify available game server instances; if pool is exhausted, scale the fleet.
+  2. Review per-tier breakdown: diamond+ queues with 891 waiting is normal, but bronze-silver at 4201 indicates a systemic issue, not a thin-population problem.
+  3. Inspect matchmaker logs for `EXPAND mmr_range` actions — repeated range expansions with no matches means the issue is server supply, not rating spread.
+  4. Remediate: issue `restart_matchmaker` to clear stale queue entries and reset internal timers; simultaneously scale game-server pods to increase placement capacity.
+  5. If region-locked, temporarily relax region constraints to allow cross-region placement while new servers spin up.
+remediation_action: restart_matchmaker
+error_message: '[MM] MM-QUEUE-OVERFLOW: pool={queue_name} queue={queue_depth} max={max_capacity} wait_p99={wait_time_ms}ms
+  region={region}'
+stack_trace: |-
+  === MATCHMAKING QUEUE STATE DUMP ===
+  pool={queue_name}  region={region}
+  ----------- queue metrics -----------
+    depth       = {queue_depth}  (max {max_capacity})
+    wait_p50    = 12400ms
+    wait_p95    = 87200ms
+    wait_p99    = {wait_time_ms}ms
+    enqueue/s   = 342
+    dequeue/s   = 89
+    drain_eta   = NEVER (inflow > outflow)
+  ----------- pool breakdown ----------
+    bronze-silver  : 4201 waiting
+    gold-platinum  : 2847 waiting
+    diamond+       : 891 waiting
+  ----------- action ------------------
+    EXPAND mmr_range +200  RELAX region_lock
+  MM-QUEUE-OVERFLOW: pool {queue_name} saturated at {queue_depth}/{max_capacity}
+correlation_attr:
+  key: deployment.matchmaker_config
+  value: mm-config-v4.1.0-experimental
+fault_params:
+  queue_name: {choice: [ranked-solo, ranked-duo, casual-squad, tournament-5v5]}
+  queue_depth: {randint: [5000, 50000]}
+  max_capacity: 3000
+  wait_time_ms: {randint: [30000, 300000]}
+  region: {choice: [us-east-1, us-west-2, eu-west-1, ap-southeast-1]}
+rca_clues:
+  matchmaking-engine:
+    matchmaking.enqueue_rate: {randint: [200, 500]}
+    matchmaking.dequeue_rate: {randint: [50, 100]}
+  game-server:
+    game.server_pool_available: {randint: [0, 5]}
+    game.allocation_lag_ms: {randint: [2000, 8000]}
+  auth-gateway:
+    auth.login_surge_detected: true
+    auth.concurrent_sessions: {randint: [50000, 150000]}
+  analytics-pipeline:
+    analytics.queue_depth_trend: exponential_growth

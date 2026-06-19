@@ -1,0 +1,167 @@
+service: ground-systems
+sort_order: 3
+cloud_provider: aws
+cloud_region: us-east-1
+cloud_platform: aws_ec2
+cloud_availability_zone: us-east-1c
+subsystem: ground
+language: java
+entry_endpoints:
+- - /api/v1/ground/monitor
+  - POST
+db_operations:
+- - SELECT
+  - weather_stations
+  - SELECT station_id, temp, wind_speed, visibility FROM weather_stations WHERE last_update > NOW() - INTERVAL 30 SECOND
+emit_fault_logs: true
+kpi_emitter: false
+constants:
+  PAD_SYSTEMS:
+  - umbilical_connection
+  - cryogenic_loading
+  - electrical_bus
+  - hydraulic_clamps
+  - sound_suppression
+  - flame_deflector
+  - access_arm
+  GSE_ITEMS:
+  - LOX transfer line
+  - RP-1 transfer line
+  - helium pressurization
+  - nitrogen purge
+  - fire suppression
+state:
+  _weather_cycle:
+    init: 0
+  _last_gse_summary:
+    init: now
+steps:
+- counter:
+    state_key: _weather_cycle
+    by: 1
+- sample:
+    wind_speed_val:
+      uniform:
+      - 2.0
+      - 12.0
+      round: 1
+    wind_direction_val:
+      uniform:
+      - 0.0
+      - 360.0
+      round: 1
+    temperature_val:
+      uniform:
+      - 18.0
+      - 28.0
+      round: 1
+    humidity_val:
+      uniform:
+      - 40.0
+      - 70.0
+      round: 1
+    visibility_val:
+      uniform:
+      - 8.0
+      - 15.0
+      round: 1
+    ceiling_val:
+      uniform:
+      - 5000.0
+      - 15000.0
+      round: 1
+    barometric_pressure_val:
+      uniform:
+      - 1010.0
+      - 1025.0
+      round: 1
+- metric:
+    name: ground.weather.wind_speed
+    value:
+      var: wind_speed_val
+    unit: knots
+- metric:
+    name: ground.weather.wind_direction
+    value:
+      var: wind_direction_val
+    unit: deg
+- metric:
+    name: ground.weather.temperature
+    value:
+      var: temperature_val
+    unit: C
+- metric:
+    name: ground.weather.humidity
+    value:
+      var: humidity_val
+    unit: pct
+- metric:
+    name: ground.weather.visibility
+    value:
+      var: visibility_val
+    unit: km
+- metric:
+    name: ground.weather.ceiling
+    value:
+      var: ceiling_val
+    unit: ft
+- metric:
+    name: ground.weather.barometric_pressure
+    value:
+      var: barometric_pressure_val
+    unit: hPa
+- sample:
+    wind:
+      uniform:
+      - 2.0
+      - 12.0
+      round: 1
+    vis:
+      uniform:
+      - 8.0
+      - 15.0
+      round: 1
+- metric:
+    name: ground.weather_cycle
+    value:
+      var: _weather_cycle
+    unit: cycles
+- log:
+    level: INFO
+    message: '[GND] weather_check cycle={_weather_cycle} wind={wind}kts visibility={vis}km ceiling=12000ft constraint=WITHIN
+      status=GO'
+    attrs:
+      operation: weather_check
+      weather.cycle:
+        var: _weather_cycle
+      weather.wind_speed_knots:
+        var: wind
+      weather.visibility_km:
+        var: vis
+      weather.status: GO
+- sample:
+    system:
+      choice: PAD_SYSTEMS
+- log:
+    level: INFO
+    message: '[GND] pad_check system={system} result=PASS status=NOMINAL'
+    attrs:
+      operation: pad_check
+      pad.system:
+        var: system
+      pad.status: NOMINAL
+- metric:
+    name: ground.pad_system_checks
+    value: 1.0
+    unit: checks
+- sample:
+    item:
+      choice: GSE_ITEMS
+- log:
+    level: INFO
+    message: '[GND] gse_check equipment={item} result=OPERATIONAL status=NOMINAL'
+    attrs:
+      operation: gse_check
+      gse.equipment:
+        var: item
+      gse.status: OPERATIONAL

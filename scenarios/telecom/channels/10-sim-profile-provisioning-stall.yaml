@@ -1,0 +1,71 @@
+name: SIM Profile Provisioning Stall
+subsystem: provisioning
+vehicle_section: sim_management
+error_type: PROV-SIM-STALL
+sensor_type: sim_provisioning
+affected_services:
+- provisioning-service
+- subscriber-db
+cascade_services:
+- activation-service
+- notification-service
+description: OTA SIM profile provisioning pipeline stalled due to HSS/HLR registration queue overflow
+investigation_notes: |
+  1. Check HSS registration queue depth — queue above 5000 indicates HLR is not processing registrations fast enough. Monitor: provisioning-service metrics for hlr.registration_queue_depth.
+  2. SIM OTA provisioning requires: ICCID validation → subscriber-db profile lookup → HLR registration → SIM profile download. The stall is at HLR registration step.
+  3. Review HLR processing rate — baseline 200 registrations/min should handle normal activation volume. If processing rate drops below 50/min, check HLR backend connectivity.
+  4. eSIM activations are also affected — remote SIM provisioning (RSP) uses the same HLR registration path. eSIM QR code generation succeeds but profile activation fails.
+  5. Subscriber-db writes are queuing because provisioning-service cannot complete the activation cycle. Monitor activation_log table for INSERT queue growth.
+remediation_action: restart_hlr_registration
+error_message: '[PROV] PROV-SIM-STALL: iccid={sim_iccid} msisdn={msisdn} hlr_queue={hlr_queue_depth} processing_rate={hlr_processing_rate}/min stage={sim_stage}'
+stack_trace: |
+  === SIM PROVISIONING PIPELINE ===
+  msisdn={msisdn}  iccid={sim_iccid}  type={sim_type}
+  --- PROVISIONING STAGES ---
+    STAGE                STATUS      ELAPSED_MS
+    iccid_validation     COMPLETE    45
+    subscriber_lookup    COMPLETE    120
+    profile_generation   COMPLETE    350
+    hlr_registration     STALLED     {hlr_stall_ms}  <<< QUEUE OVERFLOW
+    sim_ota_download     PENDING     ---
+    activation_confirm   PENDING     ---
+  --- HLR STATUS ---
+    queue_depth={hlr_queue_depth}  processing_rate={hlr_processing_rate}/min
+    baseline_rate=200/min  deficit={hlr_deficit}/min
+    esim_affected=true  physical_sim_affected=true
+  ACTION: scale_hlr_workers=true  drain_queue=true  alert=PROV-SIM-STALL
+infrastructure_events:
+- body: '[GCP-Monitoring] HLRProvisioningStall: queue_depth=5000 processing_rate=0/min hlr_connection=TIMEOUT target=subscriber-db region=europe-west3'
+  severity: ERROR
+  event_name: gcp.monitoring.HLRProvisioningStall
+  service: provisioning-service
+  attributes:
+    cloud.provider: gcp
+    cloud.service: monitoring
+    gcp.resource_type: gke_container
+    infrastructure.source: GCP-Monitoring
+correlation_attr:
+  key: provisioning.hlr_connector_version
+  value: hlr-conn-v6.0.1-beta
+fault_params:
+  sim_iccid: {format: "8949{n}", n: {randint: [1000000000000000, 9999999999999999]}}
+  msisdn: {choice: ['+4915110000000', '+4916010000000', '+4917010000000']}
+  hlr_queue_depth: {randint: [3000, 8000]}
+  hlr_processing_rate: {randint: [20, 80]}
+  sim_stage: {choice: [hlr_registration, profile_download, ota_activation]}
+  sim_type: {choice: [physical_sim, esim, embedded_sim]}
+  hlr_stall_ms: {randint: [10000, 60000]}
+  hlr_deficit: {randint: [100, 180]}
+rca_clues:
+  provisioning-service:
+    provisioning.hlr_queue_depth: {randint: [3000, 8000]}
+    provisioning.hlr_processing_rate: {randint: [20, 80]}
+  subscriber-db:
+    db.activation_log_insert_queue: {randint: [500, 2000]}
+    db.pending_status_updates: {randint: [200, 1000]}
+  activation-service:
+    activation.provisioning_timeout: true
+    activation.sim_activation_blocked: true
+  notification-service:
+    notification.activation_confirm_delayed: true
+    notification.queue_depth: {randint: [500, 2000]}

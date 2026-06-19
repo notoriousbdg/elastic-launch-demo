@@ -1,0 +1,109 @@
+service: cloud-inventory-scanner
+sort_order: 6
+cloud_provider: gcp
+cloud_region: us-central1
+cloud_platform: gcp_compute_engine
+cloud_availability_zone: us-central1-a
+subsystem: cloud_ops
+language: python
+topology:
+- - network-controller
+  - /api/v1/network/vpn-health
+  - GET
+- - firewall-gateway
+  - /api/v1/firewall/sg-audit
+  - GET
+entry_endpoints:
+- - /api/v1/inventory/scan
+  - POST
+- - /api/v1/inventory/compliance
+  - GET
+db_operations:
+- - SELECT
+  - cloud_resources
+  - SELECT resource_id, resource_type, provider, region, owner_tag, created_at FROM cloud_resources WHERE owner_tag IS NULL
+    AND created_at < NOW() - INTERVAL 7 DAY
+emit_fault_logs: true
+kpi_emitter: false
+constants:
+  CLOUD_PROVIDERS:
+  - aws
+  - gcp
+  - azure
+steps:
+- for_each:
+    in: CLOUD_PROVIDERS
+    as: provider
+    steps:
+    - sample:
+        resources_scanned:
+          randint:
+          - 500
+          - 2500
+        orphaned:
+          if_active:
+            randint:
+            - 5
+            - 25
+          else:
+            randint:
+            - 0
+            - 3
+        compliance_pct:
+          uniform:
+          - 97.0
+          - 100.0
+          round: 1
+    - metric:
+        name:
+          expr: f'cloud_inventory.{provider}.resources_scanned'
+        value:
+          var: resources_scanned
+        unit: resources
+    - metric:
+        name:
+          expr: f'cloud_inventory.{provider}.orphaned_count'
+        value:
+          var: orphaned
+        unit: resources
+    - metric:
+        name:
+          expr: f'cloud_inventory.{provider}.compliance_pct'
+        value:
+          var: compliance_pct
+        unit: '%'
+    - log:
+        level: INFO
+        message: cloud-inventory-scan provider={provider} resources_scanned={resources_scanned} orphaned={orphaned} compliance={compliance_pct}%
+        attrs:
+          operation: cloud_scan
+          cloud_inventory.provider:
+            var: provider
+          cloud_inventory.resources:
+            var: resources_scanned
+          cloud_inventory.orphaned:
+            var: orphaned
+          cloud_inventory.compliance:
+            var: compliance_pct
+- sample:
+    tunnels_up:
+      if_active:
+        randint:
+        - 3
+        - 5
+      else: 6
+    vpn_status:
+      expr: '''nominal'' if tunnels_up == 6 else ''degraded'''
+- metric:
+    name: cloud_inventory.vpn_tunnels_up
+    value:
+      var: tunnels_up
+    unit: tunnels
+- log:
+    level: INFO
+    message: cloud-networking vpn-health tunnels_up={tunnels_up}/6 status={vpn_status}
+    attrs:
+      operation: vpn_health
+      vpn.tunnels_total: 6
+      vpn.tunnels_up:
+        var: tunnels_up

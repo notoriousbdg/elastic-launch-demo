@@ -1,0 +1,63 @@
+name: Cross-Cloud VPN Tunnel Flapping
+subsystem: cloud_ops
+vehicle_section: vpn_connectivity
+error_type: VPN-TUNNEL-FLAP
+sensor_type: vpn_tunnel
+affected_services:
+- cloud-inventory-scanner
+- network-controller
+cascade_services:
+- dns-dhcp-service
+- firewall-gateway
+description: Site-to-site VPN tunnels between cloud providers repeatedly going up and down
+investigation_notes: |-
+  1. Check IKE Phase status: Phase 1 FAILED means pre-shared key mismatch or proposal mismatch; Phase 2 FAILED means IPSec SA negotiation issue.
+  2. Verify DPD (Dead Peer Detection) settings match on both ends — mismatched DPD intervals cause one side to tear down the tunnel while the other thinks it is up.
+  3. For AWS VPN: check `aws ec2 describe-vpn-connections --vpn-connection-id <id>` for tunnel status and CloudWatch VPN metrics.
+  4. For Azure VPN Gateway: check `az network vpn-connection show` and look for IKE SA rekey failures in the diagnostic logs.
+  5. MTU issues cause tunnel flapping under load — set TCP MSS clamping to 1360 on both VPN endpoints and test with large transfers.
+  6. If the tunnel is flapping on rekey (SA_EXPIRED), increase the IKE lifetime and IPSec SA lifetime to reduce rekey frequency during peak traffic.
+remediation_action: reset_vpn_tunnel
+error_message: cloud-networking VPN-TUNNEL-FLAP tunnel={vpn_tunnel_name} path={vpn_src_cloud}->{vpn_dst_cloud} flaps={vpn_flap_count}
+  window={vpn_flap_window}s state={vpn_current_state} ike_phase={vpn_ike_phase} ike_status={vpn_ike_status} last_dpd={vpn_last_dpd_sec}s
+stack_trace: |-
+  VPN Tunnel Diagnostic Report
+  ------------------------------
+  Tunnel:         {vpn_tunnel_name}
+  Path:           {vpn_src_cloud} -> {vpn_dst_cloud}
+  Current State:  {vpn_current_state}
+  Flap Count:     {vpn_flap_count} in {vpn_flap_window}s
+  IKE Phase:      {vpn_ike_phase}
+  IKE Status:     {vpn_ike_status}
+  Last DPD:       {vpn_last_dpd_sec}s ago
+  Local Gateway:  10.0.1.1
+  Remote Gateway: 10.2.0.1
+  MTU:            1400
+  Rekey Interval: 3600s
+  Action:         Check IPSec SA, verify gateway reachability
+correlation_attr:
+  key: network.vpn_gw_firmware
+  value: vgw-strongswan-5.9.14-rc2
+fault_params:
+  vpn_tunnel_name: {choice: [aws-to-azure-01, aws-to-gcp-01, gcp-to-azure-01]}
+  vpn_src_cloud: {choice: [aws, gcp]}
+  vpn_dst_cloud: {choice: [azure, gcp]}
+  vpn_flap_count: {randint: [5, 30]}
+  vpn_flap_window: {randint: [60, 600]}
+  vpn_current_state: {choice: [DOWN, NEGOTIATING, REKEYING]}
+  vpn_ike_phase: {choice: ["1", "2"]}
+  vpn_ike_status: {choice: [FAILED, TIMEOUT, SA_EXPIRED]}
+  vpn_last_dpd_sec: {randint: [30, 300]}
+rca_clues:
+  cloud-inventory-scanner:
+    cloud_scan.vpn_dependent_services: {randint: [3, 9]}
+    cloud_scan.cross_cloud_latency_ms: {randint: [200, 2000]}
+  network-controller:
+    network.ike_rekey_failures: {randint: [3, 20]}
+    network.mtu_mismatch_detected: {choice: [true, false]}
+  dns-dhcp-service:
+    dns.cross_cloud_resolution_broken: true
+    dns.conditional_forwarder_down: {choice: [aws-to-azure, gcp-to-azure]}
+  firewall-gateway:
+    firewall.ipsec_esp_drops: {randint: [100, 5000]}
+    firewall.dpd_timeout_count: {randint: [5, 50]}

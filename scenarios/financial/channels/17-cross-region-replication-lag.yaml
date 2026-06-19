@@ -1,0 +1,39 @@
+name: Cross-Region Replication Lag
+subsystem: audit
+vehicle_section: replication_bus
+error_type: AUDIT-REPLICATION-LAG
+sensor_type: replication_monitor
+affected_services:
+- audit-logger
+- settlement-processor
+cascade_services:
+- compliance-monitor
+- risk-calculator
+description: Cross-region audit log replication falling behind, DR site stale
+investigation_notes: ''
+remediation_action: ''
+error_message: '[AUDIT] AUDIT-REPLICATION-LAG: source={source_region} dest={dest_region} lag_ms={lag_ms} max_ms={max_lag_ms}
+  pending={pending_events}'
+stack_trace: |-
+  === REPLICATION STATUS REPORT ===
+  source={source_region}  dest={dest_region}
+  --- REPLICATION CHANNELS ---
+    CHANNEL        LAG_MS    PENDING   STATUS
+    orders         {lag_ms}     {pending_events}     BEHIND
+    trades         12,400     892       BEHIND
+    settlements    8,200      341       WARNING
+    risk-events    {lag_ms}     {pending_events}     BEHIND
+    compliance     3,100      127       OK
+  --- NETWORK ---
+    bandwidth_mbps=840  utilization=94%  packet_loss=0.02%
+    tcp_retransmits=247  rtt_ms=68
+  dr_site_staleness={lag_ms}ms  max_allowed={max_lag_ms}ms  rpo_breach=true
+  ACTION: increase_batch_size=true  failover_ready=false  alert=AUDIT-REPLICATION-LAG
+correlation_attr: {}
+fault_params:
+  source_region: {choice: [us-east-1, us-central1, eastus]}
+  dest_region: {choice: [eu-west-1, us-west-2, westus]}
+  lag_ms: {randint: [5000, 60000]}
+  max_lag_ms: 3000
+  pending_events: {randint: [100, 10000]}
+rca_clues: {}

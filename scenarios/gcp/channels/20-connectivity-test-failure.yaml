@@ -1,0 +1,73 @@
+name: Connectivity Test Failure
+subsystem: monitoring
+vehicle_section: network_intelligence
+error_type: NI-CONNECTIVITY-TEST-FAILURE
+sensor_type: connectivity_test
+affected_services:
+- network-intelligence
+- vpc-network-manager
+cascade_services:
+- cloud-vpn-gateway
+- cloud-interconnect
+description: Network Intelligence Center connectivity test detecting unreachable endpoints
+investigation_notes: |-
+  Root cause: Network Intelligence Center connectivity test is simulating the packet path and identifying a blocking resource. UNREACHABLE means a firewall or route is explicitly blocking; DROPPED means the packet is silently dropped; AMBIGUOUS means the analysis cannot determine the exact drop point. The blocking_resource field identifies the specific resource. Diagnose:
+    gcloud network-management connectivity-tests describe <test-name> --format=json
+    gcloud network-management connectivity-tests rerun <test-name>
+    Console > Network Intelligence Center > Connectivity Tests > <test> > Trace Details
+  Remediation: Based on the blocking resource type:
+    - firewall-rule: Adjust or create allow rules (see channel 3 for priority semantics)
+    - route: Add or fix routes with gcloud compute routes create <route> --network=<vpc> --destination-range=<cidr> --next-hop-instance=<instance>
+    - vpc-peering: Ensure custom route export/import is enabled on both sides of the peering
+    - cloud-nat: Verify NAT configuration covers the source subnet
+  Re-run the test after each fix to validate: gcloud network-management connectivity-tests rerun <test>
+remediation_action: reconfigure_firewall_rules
+error_message: '[NIC] NI-CONNECTIVITY-TEST-FAILURE test={ni_test_name} src={ni_src_ip} dst={ni_dst_ip} protocol={ni_protocol}
+  result={ni_test_result} hops_completed={ni_hops_completed}/{ni_hops_total} blocking_resource={ni_blocking_resource}'
+stack_trace: |-
+  Network Intelligence Connectivity Test
+  -----------------------------------------
+  Test Name:         {ni_test_name}
+  Source:            {ni_src_ip}
+  Destination:       {ni_dst_ip}
+  Protocol:          {ni_protocol}
+  Result:            {ni_test_result}
+  Hops Completed:    {ni_hops_completed}/{ni_hops_total}
+  Blocking Resource: {ni_blocking_resource}
+  Action: Review firewall rules and routing for blocking resource
+correlation_attr:
+  key: deployment.ni_agent_version
+  value: nic-agent-v3.2.0-rc1
+fault_params:
+  ni_test_name: {choice: [test-vpc-to-onprem, test-central1-to-europe1, test-nat-egress, test-vpn-connectivity]}
+  ni_src_ip:
+    format: "10.{a}.{b}.{c}"
+    a: {randint: [128, 142]}
+    b: {randint: [0, 10]}
+    c: {randint: [1, 254]}
+  ni_dst_ip:
+    format: "10.{a}.{b}.{c}"
+    a: {randint: [0, 255]}
+    b: {randint: [0, 255]}
+    c: {randint: [1, 254]}
+  ni_protocol: {choice: ["TCP:80", "TCP:443", ICMP, "UDP:53"]}
+  ni_test_result: {choice: [UNREACHABLE, DROPPED, AMBIGUOUS]}
+  ni_hops_completed: {randint: [2, 5]}
+  ni_hops_total: {randint: [6, 10]}
+  ni_blocking_resource:
+    choice:
+      - firewall-rule/deny-all-ingress
+      - route/default-internet-gateway
+      - vpc-peering/peer-to-shared-vpc
+      - cloud-nat/gcpnet-nat-east1
+rca_clues:
+  network-intelligence:
+    ni.blocking_resource_type: {choice: [firewall-rule, route, vpc-peering, cloud-nat]}
+    ni.packet_trace_hops: {randint: [2, 5]}
+  vpc-network-manager:
+    vpc.topology_anomaly_detected: true
+    vpc.unreachable_subnets: {randint: [1, 4]}
+  cloud-vpn-gateway:
+    vpn.cross_network_test: FAIL
+  cloud-interconnect:
+    interconnect.hybrid_path_test: FAIL

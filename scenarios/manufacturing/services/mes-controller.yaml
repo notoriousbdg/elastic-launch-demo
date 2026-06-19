@@ -1,0 +1,175 @@
+service: mes-controller
+sort_order: 1
+cloud_provider: aws
+cloud_region: us-east-1
+cloud_platform: aws_ec2
+cloud_availability_zone: us-east-1a
+subsystem: mes
+language: java
+topology:
+- - scada-gateway
+  - /api/v1/scada/tag-read
+  - GET
+- - ot-historian
+  - /api/v1/historian/range-query
+  - GET
+- - oee-analytics
+  - /api/v1/oee/event
+  - POST
+- - quality-inspector
+  - /api/v1/quality/result
+  - GET
+- - erp-bridge
+  - /api/v1/erp/work-order-update
+  - POST
+- - inventory-sync
+  - /api/v1/inventory/consume
+  - POST
+- - shopfloor-portal
+  - /api/v1/portal/work-order-status
+  - POST
+entry_endpoints:
+- - /api/v1/mes/work-orders
+  - POST
+- - /api/v1/mes/release-line
+  - POST
+- - /api/v1/mes/batch-genealogy
+  - GET
+db_operations:
+- - SELECT
+  - work_orders
+  - SELECT work_order_id, line_id, product_code, quantity, status FROM work_orders WHERE status IN ('RELEASED', 'IN_PROGRESS')
+- - INSERT
+  - equipment_state_history
+  - INSERT INTO equipment_state_history (line_id, equipment_id, state, started_at, operator_id) VALUES (?, ?, ?, NOW(), ?)
+- - UPDATE
+  - work_orders
+  - UPDATE work_orders SET status = ?, completed_qty = ?, last_updated = NOW() WHERE work_order_id = ?
+emit_fault_logs: true
+kpi_emitter: false
+constants:
+  LINES:
+  - LINE-01
+  - LINE-02
+  - LINE-03
+  - LINE-04
+  - LINE-05
+  PRODUCT_CODES:
+  - PRD-A100
+  - PRD-A200
+  - PRD-B450
+  - PRD-B475
+  - PRD-C901
+  EQUIPMENT_STATES:
+  - RUNNING
+  - RUNNING
+  - RUNNING
+  - IDLE
+  - CHANGEOVER
+state:
+  _work_orders_total:
+    init: 0
+  _last_batch_report:
+    init: now
+steps:
+- sample:
+    wo_id:
+      expr: f'WO-{rand.randint(100000, 999999)}'
+    line:
+      choice: LINES
+    product:
+      choice: PRODUCT_CODES
+    qty:
+      randint:
+      - 50
+      - 1200
+- log:
+    level: INFO
+    message: '[MES] work_order_dispatch wo={wo_id} line={line} product={product} qty={qty} status=RELEASED'
+    attrs:
+      operation: work_order_dispatch
+      mes.work_order_id:
+        var: wo_id
+      mes.line:
+        var: line
+      mes.product_code:
+        var: product
+      mes.quantity:
+        var: qty
+      mes.status: RELEASED
+- sample:
+    eq_line:
+      choice: LINES
+    state:
+      choice: EQUIPMENT_STATES
+    oee:
+      uniform:
+      - 72.0
+      - 94.0
+      round: 1
+    operator_id:
+      expr: f'OP-{rand.randint(1000, 9999)}'
+- log:
+    level: INFO
+    message: '[MES] equipment_state line={eq_line} state={state} oee={oee}% operator={operator_id}'
+    attrs:
+      operation: equipment_state
+      mes.line:
+        var: eq_line
+      mes.equipment_state:
+        var: state
+      mes.oee_pct:
+        var: oee
+- every:
+    seconds: 10
+    state_key: _last_batch_report
+    steps:
+    - sample:
+        batch_id:
+          expr: f'BATCH-{rand.randint(100000, 999999)}'
+        batch_product:
+          choice: PRODUCT_CODES
+        lot_count:
+          randint:
+          - 2
+          - 8
+    - log:
+        level: INFO
+        message: '[MES] batch_genealogy batch={batch_id} product={batch_product} raw_lots={lot_count} traceability=COMPLETE'
+        attrs:
+          operation: batch_genealogy
+          mes.batch_id:
+            var: batch_id
+          mes.product_code:
+            var: batch_product
+          mes.raw_material_lots:
+            var: lot_count
+          mes.traceability_status: COMPLETE
+- counter:
+    state_key: _work_orders_total
+    by: 1
+- metric:
+    name: mes.work_orders_processed
+    value:
+      var: _work_orders_total
+    unit: orders
+- metric:
+    name: mes.work_order_queue_depth
+    value:
+      if_active:
+        randint:
+        - 180
+        - 950
+      else:
+        randint:
+        - 8
+        - 40
+    unit: orders
+- metric:
+    name: mes.line_utilization_pct
+    value:
+      uniform:
+      - 72.0
+      - 96.0
+      round: 1
+    unit: '%'

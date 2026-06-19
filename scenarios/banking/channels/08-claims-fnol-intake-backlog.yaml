@@ -1,0 +1,59 @@
+name: Claims FNOL Intake Backlog
+subsystem: claims_management
+vehicle_section: fnol_intake
+error_type: CLAIMS-FNOL-BACKLOG
+sensor_type: claims_queue
+affected_services:
+- claims-processor
+- document-vault
+cascade_services:
+- payment-engine
+- member-portal
+description: First Notice of Loss intake queue backlogged after catastrophic weather event
+investigation_notes: |-
+  1. Activate CAT (catastrophe) response team — surge staffing protocol brings in adjusters from unaffected regions. Check CAT team deployment status and estimated time to field.
+  2. Monitor intake vs processing rate deficit — at 55 claims/hr deficit, the backlog grows by ~1,320 claims per day. Enable virtual adjusting and photo-based estimates to increase processing throughput.
+  3. Review claim distribution by type — auto_comp (hail/flood) claims marked HIGH severity require field inspection. Property claims marked SEVERE may need emergency mitigation services.
+  4. Enable self-service FNOL paths: mobile app photo submission, automated triage chatbot, and simplified loss reporting forms to reduce call center load and queue depth.
+  5. Check military base proximity — catastrophic events near military installations (Fort Liberty, Fort Cavazos, NAS Jacksonville) affect concentrated member populations. Coordinate with base family readiness groups for member outreach. Priority-queue SCRA-protected members.
+remediation_action: activate_cat_response
+error_message: '[CLAIMS] CLAIMS-FNOL-BACKLOG: queue_depth={claims_queue} avg_wait_min={claims_wait_min} cat_event={cat_event}
+  region={cat_region} pending={claims_pending}'
+stack_trace: |-
+  === FNOL INTAKE STATUS ===
+  cat_event={cat_event}  region={cat_region}
+  --- QUEUE METRICS ---
+    queue_depth={claims_queue}  avg_wait={claims_wait_min}min  sla=15min
+    intake_rate=142/hr  processing_rate=87/hr  deficit=55/hr
+  --- CLAIM DISTRIBUTION ---
+    TYPE              COUNT     PCT     AVG_SEVERITY
+    auto_collision    {claims_pending}     42%     MODERATE
+    auto_comp         320       28%     HIGH (hail/flood)
+    property          180       16%     SEVERE
+    renters           160       14%     LOW
+  --- ADJUSTER POOL ---
+    available=42  in_field=28  cat_team_deployed=true
+    virtual_adjusting=ENABLED  photo_estimate=ACTIVE
+  ACTION: activate_cat_response=true  deploy_surge_staff=true  alert=CLAIMS-FNOL-BACKLOG
+correlation_attr:
+  key: deployment.claims_intake_build
+  value: fnol-intake-v3.7.0-beta
+fault_params:
+  claims_queue: {randint: [200, 2000]}
+  claims_wait_min: {randint: [30, 240]}
+  cat_event: {choice: [CAT-2026-GULF-HURRICANE, CAT-2026-TX-HAILSTORM, CAT-2026-CA-WILDFIRE, CAT-2026-FL-FLOODING, CAT-2026-CO-TORNADO, CAT-2026-NC-ICE-STORM]}
+  cat_region: {choice: [Gulf Coast TX, San Antonio TX, Jacksonville FL, Virginia Beach VA, Colorado Springs CO, Fayetteville NC]}
+  claims_pending: {randint: [100, 1000]}
+rca_clues:
+  claims-processor:
+    claims.intake_rate_per_hr: {randint: [120, 180]}
+    claims.processing_rate_per_hr: {randint: [60, 95]}
+  document-vault:
+    document.fnol_image_queue: {randint: [500, 2000]}
+    document.cat_event_volume: SURGE
+  payment-engine:
+    payment.claim_advance_requests: {randint: [50, 200]}
+    payment.rental_extensions_pending: {randint: [80, 300]}
+  member-portal:
+    portal.fnol_self_service_enabled: true
+    portal.claims_status_queries_spike: {randint: [3000, 10000]}

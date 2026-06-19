@@ -260,7 +260,7 @@ def run(
         namespace = scenario_data["namespace"]
     else:
         from app.config import ACTIVE_SCENARIO
-        from scenarios import get_scenario
+        from scenario_engine import get_scenario
 
         scenario = get_scenario(ACTIVE_SCENARIO)
         namespace = scenario.namespace

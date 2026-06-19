@@ -1,0 +1,158 @@
+service: maintenance-scheduler
+sort_order: 6
+cloud_provider: gcp
+cloud_region: us-central1
+cloud_platform: gcp_compute_engine
+cloud_availability_zone: us-central1-a
+subsystem: maintenance
+language: go
+topology:
+- - mes-controller
+  - /api/v1/mes/maintenance-window
+  - POST
+- - erp-bridge
+  - /api/v1/erp/spare-parts-request
+  - POST
+entry_endpoints:
+- - /api/v1/cmms/work-order
+  - POST
+db_operations:
+- - SELECT
+  - maintenance_work_orders
+  - SELECT mwo_id, asset_id, work_type, priority, scheduled_at, status FROM maintenance_work_orders WHERE status IN ('open',
+    'scheduled')
+- - INSERT
+  - predictive_signals
+  - INSERT INTO predictive_signals (asset_id, sensor_type, value, health_score, ts) VALUES (?, ?, ?, ?, NOW())
+emit_fault_logs: true
+kpi_emitter: false
+constants:
+  ASSETS:
+  - MTR-CONV-01
+  - MTR-CONV-02
+  - SPN-MILL-04
+  - PMP-COOL-02
+  - CMP-AIR-01
+  SENSORS:
+  - vibration_rms_mm_s
+  - bearing_temp_c
+  - current_amp
+  - thermal_dt_c
+  WO_TYPES:
+  - preventive
+  - preventive
+  - corrective
+  - predictive
+  PRIORITIES:
+  - low
+  - medium
+  - high
+state:
+  _work_orders_total:
+    init: 0
+  _last_pm_report:
+    init: now
+steps:
+- sample:
+    asset:
+      choice: ASSETS
+    sensor:
+      choice: SENSORS
+    sensor_value:
+      uniform:
+      - 0.5
+      - 8.0
+      round: 2
+    health_score:
+      uniform:
+      - 0.65
+      - 0.99
+      round: 3
+- log:
+    level: INFO
+    message: '[CMMS] predictive_signal asset={asset} sensor={sensor} value={sensor_value} health_score={health_score}'
+    attrs:
+      operation: predictive_signal
+      maintenance.asset:
+        var: asset
+      maintenance.sensor:
+        var: sensor
+      maintenance.value:
+        var: sensor_value
+- sample:
+    wo_id:
+      expr: f'MWO-{rand.randint(10000, 99999)}'
+    wo_asset:
+      choice: ASSETS
+    wo_type:
+      choice: WO_TYPES
+    priority:
+      choice: PRIORITIES
+- log:
+    level: INFO
+    message: '[CMMS] mwo_status wo={wo_id} asset={wo_asset} type={wo_type} priority={priority} status=SCHEDULED'
+    attrs:
+      operation: mwo_status
+      maintenance.work_order_id:
+        var: wo_id
+      maintenance.asset:
+        var: wo_asset
+      maintenance.work_type:
+        var: wo_type
+      maintenance.priority:
+        var: priority
+- every:
+    seconds: 10
+    state_key: _last_pm_report
+    steps:
+    - sample:
+        compliance:
+          uniform:
+          - 82.0
+          - 98.0
+          round: 1
+        overdue:
+          randint:
+          - 2
+          - 18
+        mttr_min:
+          randint:
+          - 15
+          - 95
+    - log:
+        level: INFO
+        message: '[CMMS] pm_compliance pct={compliance} overdue={overdue} mttr_min={mttr_min}'
+        attrs:
+          operation: pm_compliance
+          maintenance.pm_compliance_pct:
+            var: compliance
+          maintenance.overdue_count:
+            var: overdue
+- counter:
+    state_key: _work_orders_total
+    by: 1
+- metric:
+    name: maintenance.work_orders_total
+    value:
+      var: _work_orders_total
+    unit: orders
+- metric:
+    name: maintenance.backlog_count
+    value:
+      if_active:
+        randint:
+        - 80
+        - 240
+      else:
+        randint:
+        - 8
+        - 35
+    unit: orders
+- metric:
+    name: maintenance.mtbf_hours
+    value:
+      uniform:
+      - 220.0
+      - 680.0
+      round: 1
+    unit: hours

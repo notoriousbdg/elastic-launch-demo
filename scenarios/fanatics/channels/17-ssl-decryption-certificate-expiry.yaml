@@ -1,0 +1,66 @@
+name: SSL Decryption Certificate Expiry
+subsystem: security
+vehicle_section: ssl_inspection
+error_type: SYSTEM-cert-expire
+sensor_type: certificate
+affected_services:
+- firewall-gateway
+- dns-dhcp-service
+cascade_services:
+- digital-marketplace
+- auction-engine
+description: SSL decryption forward proxy certificate expiring or expired, breaking TLS inspection
+investigation_notes: |-
+  1. Run `show system certificate detail` to check expiration dates for all installed certificates.
+  2. Identify which decryption profile references the expiring cert: `show config running | match ssl-decrypt`.
+  3. Count affected policy rules: `show rule-hit-count vsys vsys1 rule-base decryption` — each rule referencing this profile will fail.
+  4. Generate a new CSR from PAN-OS: `request certificate generate ...` or import a renewed cert from the internal CA.
+  5. After replacement, commit and verify: `request certificate info` and test with `curl -v https://<internal-url>` from a client behind the firewall.
+  6. Set up certificate expiration monitoring: configure SNMP traps or syslog alerts for certs expiring within 30 days to prevent recurrence.
+remediation_action: renew_certificate
+error_message: 1,2025/01/15 14:32:01,007200001234,SYSTEM,general,0,SYSTEM-cert-expire,Certificate '{cert_cn}' (serial {cert_serial})
+  expires in {cert_days_remaining} days, decryption profile {cert_profile}, affecting {cert_affected_rules} policy rules
+stack_trace: |-
+  > show system certificate detail
+  Certificate '{cert_cn}'
+    Serial Number: {cert_serial}
+    Issuer: CN=Fanatics-Internal-CA,O=Fanatics Inc
+    Subject: CN={cert_cn}
+    Not Before: Jan 15 00:00:00 2024 GMT
+    Not After:  Jan 18 00:00:00 2025 GMT
+    Days Remaining: {cert_days_remaining}
+    Key Size: 2048
+    Used by decryption profile: {cert_profile}
+    Policy rules referencing: {cert_affected_rules}
+    Status: EXPIRING
+correlation_attr:
+  key: infra.cert_chain_bundle
+  value: internal-ca-v2-cross-signed
+fault_params:
+  cert_cn:
+    choice:
+    - "*.fanatics.internal"
+    - forward-proxy.fanatics.com
+    - ssl-inspect.collectibles.prod
+    - tls-decrypt.warehouse.local
+  cert_serial:
+    format: "{n:X}"
+    n: {randint: [100000, 999999]}
+  cert_days_remaining: {randint: [-5, 3]}
+  cert_profile: {choice: [ssl-forward-proxy, ssl-inbound-inspection, tls-decrypt-all]}
+  cert_affected_rules: {randint: [15, 80]}
+rca_clues:
+  firewall-gateway:
+    firewall.cert_serial:
+      format: "{n:X}"
+      n: {randint: [100000, 999999]}
+    firewall.decryption_bypass_count: {randint: [100, 5000]}
+  dns-dhcp-service:
+    dns.tls_dot_failures: {randint: [10, 200]}
+    dns.fallback_to_udp: true
+  digital-marketplace:
+    marketplace.checkout_ssl_errors: {randint: [20, 300]}
+    marketplace.customer_complaints: {randint: [5, 50]}
+  auction-engine:
+    auction.wss_handshake_failures: {randint: [10, 100]}
+    auction.bidder_disconnects: {randint: [5, 80]}

@@ -1,0 +1,193 @@
+service: provisioning-service
+sort_order: 3
+cloud_provider: gcp
+cloud_region: europe-west3
+cloud_platform: gcp_compute_engine
+cloud_availability_zone: europe-west3-a
+subsystem: provisioning
+language: java
+entry_endpoints:
+- - /api/v1/provision/status
+  - GET
+db_operations:
+- - SELECT
+  - subscribers
+  - SELECT sim_profile, tariff_plan FROM subscribers WHERE msisdn = $1
+- - UPDATE
+  - subscribers
+  - UPDATE subscribers SET status = 'provisioning', updated_at = NOW() WHERE msisdn = $1
+- - INSERT
+  - activation_log
+  - INSERT INTO activation_log (msisdn, event, ts) VALUES ($1, $2, NOW())
+topology:
+- - subscriber-db
+  - /api/v1/db/subscribers/query
+  - POST
+- - network-core
+  - /api/v1/network/allocate
+  - POST
+- - notification-service
+  - /api/v1/notify/provisioning
+  - POST
+emit_fault_logs: true
+kpi_emitter: false
+state:
+  _provision_count:
+    init: 0
+  _last_summary:
+    init: now
+steps:
+- sample:
+    sim_type:
+      choice:
+      - physical_sim
+      - esim
+      - embedded_sim
+    hlr_operation:
+      choice:
+      - register
+      - update
+      - query
+    prov_status:
+      if_active:
+        choice:
+        - TIMEOUT
+        - SLOW
+      else: OK
+    prov_level:
+      if_active:
+        choice:
+        - ERROR
+        - WARN
+      else: INFO
+    db_wait_ms:
+      if_active:
+        randint:
+        - 3000
+        - 5000
+      else:
+        randint:
+        - 50
+        - 200
+- counter:
+    state_key: _provision_count
+    by: 1
+- log:
+    level:
+      var: prov_level
+    message: '[PROV] provisioning_request sim_type={sim_type} hlr_operation={hlr_operation} apn=internet.meridian.eu status={prov_status} db_wait_ms={db_wait_ms}'
+    attrs:
+      operation: provisioning_request
+      provisioning.sim_type:
+        var: sim_type
+      provisioning.hlr_operation:
+        var: hlr_operation
+      provisioning.status:
+        var: prov_status
+      provisioning.db_wait_ms:
+        var: db_wait_ms
+- sample:
+    hlr_queue:
+      if_active:
+        randint:
+        - 3000
+        - 8000
+      else:
+        randint:
+        - 10
+        - 100
+    hlr_rate:
+      if_active:
+        randint:
+        - 20
+        - 50
+      else:
+        randint:
+        - 180
+        - 220
+    hlr_status:
+      if_active: DEGRADED
+      else: NORMAL
+    hlr_level:
+      if_active: WARN
+      else: INFO
+- log:
+    level:
+      var: hlr_level
+    message: '[PROV] hlr_status queue_depth={hlr_queue} processing_rate={hlr_rate}/min status={hlr_status}'
+    attrs:
+      operation: hlr_status
+      provisioning.hlr_queue:
+        var: hlr_queue
+      provisioning.hlr_rate:
+        var: hlr_rate
+- every:
+    seconds: 10
+    state_key: _last_summary
+    steps:
+    - sample:
+        prov_success_rate:
+          if_active:
+            uniform:
+            - 40.0
+            - 60.0
+            round: 1
+          else: 99.5
+        prov_avg_latency:
+          if_active: 8000
+          else: 450
+        prov_summary_status:
+          if_active: DEGRADED
+          else: NORMAL
+        prov_summary_level:
+          if_active: WARN
+          else: INFO
+    - log:
+        level:
+          var: prov_summary_level
+        message: '[PROV] provisioning_summary total={_provision_count} success_rate={prov_success_rate}% avg_latency_ms={prov_avg_latency} status={prov_summary_status}'
+        attrs:
+          operation: provisioning_summary
+          provisioning.total:
+            var: _provision_count
+          provisioning.success_rate:
+            var: prov_success_rate
+- sample:
+    op_latency_ms:
+      if_active:
+        uniform:
+        - 3000.0
+        - 15000.0
+        round: 1
+      else:
+        uniform:
+        - 100.0
+        - 800.0
+        round: 1
+    hlr_queue_metric:
+      if_active:
+        randint:
+        - 3000
+        - 8000
+      else:
+        randint:
+        - 10
+        - 100
+- metric:
+    name: provisioning_service.operation_latency_ms
+    value:
+      var: op_latency_ms
+    unit: ms
+- metric:
+    name: provisioning_service.hlr_queue_depth
+    value:
+      var: hlr_queue_metric
+    unit: entries
+- metric:
+    name: provisioning_service.sim_activations_per_min
+    value:
+      uniform:
+      - 80.0
+      - 200.0
+      round: 1
+    unit: activations/min

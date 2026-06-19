@@ -1,0 +1,39 @@
+name: Matching Engine Latency
+subsystem: trade_execution
+vehicle_section: matching_core
+error_type: ME-LATENCY-SLA
+sensor_type: latency_monitor
+affected_services:
+- matching-engine
+- order-gateway
+cascade_services:
+- risk-calculator
+- settlement-processor
+description: Matching engine order processing latency exceeds SLA threshold
+investigation_notes: ''
+remediation_action: ''
+error_message: '[ME] ME-LATENCY-SLA: order={order_id} latency_us={latency_us} sla_us={sla_us} partition={partition_id}'
+stack_trace: |-
+  === MATCHING ENGINE PERF DUMP ===
+  order_id={order_id}  partition={partition_id}
+  phase              elapsed_us   pct
+  order_decode          12         0.1%
+  pre_trade_risk       340         2.7%
+  book_lookup           45         0.4%
+  price_time_match   11280        89.2%  <<< BOTTLENECK
+  fill_generation      310         2.5%
+  post_trade_pub       650         5.1%
+  TOTAL             {latency_us}us  SLA={sla_us}us  BREACH=true
+  queue_depth=14832  lock_contention_ns=8420  cpu_affinity=core-7
+  ACTION: throttle_inbound=true  alert=ME-LATENCY-SLA
+correlation_attr: {}
+fault_params:
+  order_id:
+    format: "ORD-{n}"
+    n: {randint: [100000, 999999]}
+  latency_us: {randint: [500, 50000]}
+  sla_us: 200
+  partition_id:
+    format: "P-{n}"
+    n: {randint: [0, 15]}
+rca_clues: {}

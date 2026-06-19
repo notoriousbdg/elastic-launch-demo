@@ -1,0 +1,47 @@
+name: Catalog Price Sync Failure
+subsystem: catalog
+vehicle_section: pricing_engine
+error_type: CATALOG-PRICE-SYNC
+sensor_type: price_replication
+affected_services:
+- product-catalog
+- inventory-service
+cascade_services:
+- order-management
+description: Product price updates failing to propagate from pricing engine to catalog and inventory — stale prices causing
+  customer disputes
+investigation_notes: |-
+  1. Check product-catalog logs for CATALOG-PRICE-SYNC — failed_updates={failed_price_updates}/{total_price_updates} shows scope.
+  2. Check the pricing event stream consumer: if the consumer is behind by {price_lag_events} events, prices are stale by {price_lag_min}min.
+  3. Verify no schema mismatch in the pricing event format — a recently deployed pricing service may be emitting events in a new format.
+  4. Cross-check: if displayed price differs from order-confirmed price by >{price_delta_threshold_pct}%, customer dispute risk is high.
+  5. Run a forced sync: `catalog-cli sync-prices --source pricing-engine --batch-size 1000` to drain the backlog.
+  6. Enable price validation at checkout: compare display price to real-time pricing API call — reject if delta exceeds tolerance.
+remediation_action: resync_catalog_prices
+error_message: '[ProductCatalog] CATALOG-PRICE-SYNC: failed_updates={failed_price_updates}/{total_price_updates} price_lag={price_lag_min}min
+  consumer_lag={price_lag_events} affected_skus={affected_price_skus}'
+stack_trace: "com.ecommerce.catalog.PriceSyncException: CATALOG-PRICE-SYNC\n\tat com.ecommerce.catalog.PriceConsumer.applyUpdate(sku={sku_id})\n\
+  \tat com.ecommerce.catalog.CatalogService.syncPrices(batch={price_batch_id})\nFailed updates:    {failed_price_updates}/{total_price_updates}\n\
+  Price lag:         {price_lag_min}min\nConsumer lag:      {price_lag_events} events\nAffected SKUs:     {affected_price_skus}"
+correlation_attr:
+  key: catalog.prices_stale
+  value: true
+fault_params:
+  failed_price_updates: {randint: [100, 5000]}
+  total_price_updates: {randint: [5000, 50000]}
+  price_lag_min: {randint: [5, 120]}
+  price_lag_events: {randint: [1000, 50000]}
+  affected_price_skus: {randint: [100, 10000]}
+  sku_id: {format: "SKU-{n}", n: {randint: [100000, 999999]}}
+  price_batch_id: {format: "PRICE-BATCH-{n}", n: {randint: [1000, 9999]}}
+  price_delta_threshold_pct: 5.0
+rca_clues:
+  product-catalog:
+    catalog.stale_price_skus: {randint: [100, 10000]}
+    catalog.price_lag_min: {randint: [5, 120]}
+  inventory-service:
+    inventory.price_mismatch_count: {randint: [50, 5000]}
+    inventory.sync_consumer_behind: true
+  order-management:
+    order.price_dispute_risk_count: {randint: [10, 200]}
+    order.price_validation_failures: {randint: [5, 100]}

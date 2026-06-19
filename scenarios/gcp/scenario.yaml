@@ -1,0 +1,393 @@
+scenario_id: gcp
+scenario_name: Google Cloud Network Operations
+scenario_description: 'GCP-native network operations across three regions: us-central1, us-east1, and europe-west1. Covers
+  VPC, Cloud Armor, Cloud NAT, Cloud DNS, Interconnect, VPN, CDN, and Load Balancing services running on Google Kubernetes
+  Engine.'
+namespace: gcpnet
+scenario_icon: ☁️
+sort_order: 9
+nominal_label: NORMAL
+hosts:
+- host.name: gcpnet-host-central1
+  host.id: '4801234567890123456'
+  host.arch: amd64
+  host.type: n2-standard-4
+  host.image.id: projects/cos-cloud/global/images/cos-113-18244-85-29
+  host.cpu.model.name: Intel(R) Xeon(R) CPU @ 2.80GHz
+  host.cpu.vendor.id: GenuineIntel
+  host.cpu.family: '6'
+  host.cpu.model.id: '106'
+  host.cpu.stepping: '7'
+  host.cpu.cache.l2.size: 1310720
+  host.ip:
+  - 10.128.0.10
+  - 10.128.0.11
+  host.mac:
+  - 42:01:0a:80:00:0a
+  - 42:01:0a:80:00:0b
+  os.type: linux
+  os.description: Container-Optimized OS 113
+  cloud.provider: gcp
+  cloud.platform: gcp_compute_engine
+  cloud.region: us-central1
+  cloud.availability_zone: us-central1-a
+  cloud.account.id: gcpnet-prod-project
+  cloud.instance.id: '4801234567890123456'
+  cpu_count: 4
+  memory_total_bytes: 17179869184
+  disk_total_bytes: 107374182400
+- host.name: gcpnet-host-east1
+  host.id: '5912345678901234567'
+  host.arch: amd64
+  host.type: n2-standard-4
+  host.image.id: projects/cos-cloud/global/images/cos-113-18244-85-29
+  host.cpu.model.name: Intel(R) Xeon(R) CPU @ 2.80GHz
+  host.cpu.vendor.id: GenuineIntel
+  host.cpu.family: '6'
+  host.cpu.model.id: '106'
+  host.cpu.stepping: '7'
+  host.cpu.cache.l2.size: 1310720
+  host.ip:
+  - 10.142.0.10
+  - 10.142.0.11
+  host.mac:
+  - 42:01:0a:8e:00:0a
+  - 42:01:0a:8e:00:0b
+  os.type: linux
+  os.description: Container-Optimized OS 113
+  cloud.provider: gcp
+  cloud.platform: gcp_compute_engine
+  cloud.region: us-east1
+  cloud.availability_zone: us-east1-b
+  cloud.account.id: gcpnet-prod-project
+  cloud.instance.id: '5912345678901234567'
+  cpu_count: 4
+  memory_total_bytes: 17179869184
+  disk_total_bytes: 107374182400
+- host.name: gcpnet-host-europe1
+  host.id: '6023456789012345678'
+  host.arch: amd64
+  host.type: n2-standard-4
+  host.image.id: projects/cos-cloud/global/images/cos-113-18244-85-29
+  host.cpu.model.name: Intel(R) Xeon(R) CPU @ 2.80GHz
+  host.cpu.vendor.id: GenuineIntel
+  host.cpu.family: '6'
+  host.cpu.model.id: '106'
+  host.cpu.stepping: '7'
+  host.cpu.cache.l2.size: 1310720
+  host.ip:
+  - 10.132.0.10
+  - 10.132.0.11
+  host.mac:
+  - 42:01:0a:84:00:0a
+  - 42:01:0a:84:00:0b
+  os.type: linux
+  os.description: Container-Optimized OS 113
+  cloud.provider: gcp
+  cloud.platform: gcp_compute_engine
+  cloud.region: europe-west1
+  cloud.availability_zone: europe-west1-b
+  cloud.account.id: gcpnet-prod-project
+  cloud.instance.id: '6023456789012345678'
+  cpu_count: 4
+  memory_total_bytes: 17179869184
+  disk_total_bytes: 107374182400
+k8s_clusters:
+- name: gcpnet-gke-central1
+  provider: gcp
+  platform: gcp_gke
+  region: us-central1
+  zones:
+  - us-central1-a
+  - us-central1-b
+  - us-central1-c
+  os_description: Container-Optimized OS
+  services:
+  - vpc-network-manager
+  - cloud-load-balancer
+  - cloud-cdn-service
+- name: gcpnet-gke-east1
+  provider: gcp
+  platform: gcp_gke
+  region: us-east1
+  zones:
+  - us-east1-b
+  - us-east1-c
+  - us-east1-d
+  os_description: Container-Optimized OS
+  services:
+  - cloud-armor-waf
+  - cloud-nat-gateway
+  - cloud-dns-resolver
+- name: gcpnet-gke-europe1
+  provider: gcp
+  platform: gcp_gke
+  region: europe-west1
+  zones:
+  - europe-west1-b
+  - europe-west1-c
+  - europe-west1-d
+  os_description: Container-Optimized OS
+  services:
+  - cloud-interconnect
+  - cloud-vpn-gateway
+  - network-intelligence
+agent_config:
+  id: gcp-network-analyst
+  name: Google Cloud Network Analyst
+  assessment_tool_name: network_health_assessment
+  system_prompt: 'You are the Google Cloud Network Analyst, an expert AI assistant for GCP network operations. You help network
+    engineers investigate incidents, analyze telemetry data, and provide root cause analysis for fault conditions across 9
+    GCP networking services spanning 3 regions (us-central1, us-east1, europe-west1). You have deep expertise in Google Cloud
+    VPC networking, Cloud Armor WAF and DDoS protection, Cloud NAT gateway management, Cloud DNS (including DNSSEC), Dedicated
+    Interconnect and BGP routing, Cloud VPN (IKE/IPsec), Cloud CDN caching and origin management, Cloud Load Balancing (L4/L7),
+    and Network Intelligence Center connectivity testing. When investigating incidents, search for these GCP-specific identifiers
+    in logs: VPC errors (VPC-ROUTE-LIMIT-EXCEEDED, VPC-SUBNET-IP-EXHAUSTION, VPC-FIREWALL-RULE-CONFLICT), Cloud Armor events
+    (ARMOR-DDOS-ALERT, ARMOR-FALSE-POSITIVE, ARMOR-POLICY-SYNC-FAILURE), NAT faults (NAT-PORT-EXHAUSTION, NAT-ENDPOINT-MAPPING-FAILURE,
+    NAT-IP-ALLOCATION-ERROR), DNS issues (DNS-DNSSEC-VALIDATION-FAILURE, DNS-ZONE-PROPAGATION-DELAY), Interconnect faults
+    (INTERCONNECT-CIRCUIT-DOWN, INTERCONNECT-BGP-FLAP), CDN errors (CDN-CACHE-MISS-SPIKE, CDN-ORIGIN-UNREACHABLE), LB faults
+    (LB-BACKEND-UNHEALTHY, LB-SSL-CERT-EXPIRY), VPN errors (VPN-TUNNEL-DOWN, VPN-IKE-NEGOTIATION-FAILURE), and NIC events
+    (NI-CONNECTIVITY-TEST-FAILURE). Log messages are in body.text — NEVER search the body field alone.'
+assessment_tool_config:
+  id: network_health_assessment
+  description: 'Comprehensive network health assessment. Evaluates all GCP networking services against operational readiness
+    criteria. Returns data for health evaluation across VPC, Cloud Armor, NAT, DNS, Interconnect, VPN, CDN, and Load Balancing
+    systems. Log message field: body.text (never use ''body'' alone).'
+executive_kpi_emitter_service_name: cloud-cdn-service
+executive_dashboard_intro: '**GCP network KPIs** — CDN delivery, capacity & security, SLO compliance, and cloud economics
+  (synthetic `business.*` from `cloud-cdn-service`).'
+executive_kpi_sections:
+- header: '**Delivery** — cache hit rate, requests, egress, offload, latency, and errors'
+  specs:
+  - - CDN cache hit rate (%)
+    - metrics.business.cdn_cache_hit_rate_pct
+  - - Requests / min
+    - metrics.business.requests_per_min
+  - - Bytes egress (GiB/min)
+    - metrics.business.bytes_egress_gib_per_min
+  - - Origin offload (%)
+    - metrics.business.origin_offload_pct
+  - - Edge latency P50 (ms)
+    - metrics.business.edge_latency_p50_ms
+  - - CDN error rate (%)
+    - metrics.business.cdn_error_rate_pct
+- header: '**Capacity & security** — bandwidth, interconnect, Cloud Armor, VPC, NAT, LB'
+  specs:
+  - - Peak bandwidth utilization (%)
+    - metrics.business.peak_bandwidth_utilization_pct
+  - - Interconnect utilization (%)
+    - metrics.business.interconnect_utilization_pct
+  - - Cloud Armor blocks / min
+    - metrics.business.cloud_armor_blocks_per_min
+  - - VPC flow anomalies / min
+    - metrics.business.vpc_flow_anomalies_per_min
+  - - NAT port exhaustion (%)
+    - metrics.business.nat_port_exhaustion_rate_pct
+  - - Load balancer RPS
+    - metrics.business.load_balancer_rps
+- header: '**SLO & reliability** — uptime, API success, SLA compliance, MTTD, MTTR'
+  specs:
+  - - Uptime (%)
+    - metrics.business.uptime_pct
+  - - API success rate (%)
+    - metrics.business.api_success_rate_pct
+  - - Network SLA compliance (%)
+    - metrics.business.network_sla_compliance_pct
+  - - Incident MTTD (min)
+    - metrics.business.incident_mttd_min
+  - - Incident MTTR (min)
+    - metrics.business.incident_mttr_min
+  - - Availability index (0–100)
+    - metrics.business.availability_index_0_100
+- header: '**Commercial** — spend, committed use, cost efficiency, carbon, and SLA breaches'
+  specs:
+  - - Cloud spend (USD/min)
+    - metrics.business.cloud_spend_usd_per_min
+  - - Committed use utilization (%)
+    - metrics.business.committed_use_discount_utilization_pct
+  - - Cost / M requests (USD)
+    - metrics.business.cost_per_million_requests_usd
+  - - Resource efficiency (%)
+    - metrics.business.resource_efficiency_pct
+  - - Carbon intensity (gCO2/TiB)
+    - metrics.business.carbon_intensity_gco2_per_tib
+  - - Customer SLA breaches
+    - metrics.business.customer_sla_breach_count
+executive_trend_charts:
+- title: CDN cache hit rate
+  field: metrics.business.cdn_cache_hit_rate_pct
+  y_label: '%'
+- title: Requests / min
+  field: metrics.business.requests_per_min
+  y_label: requests/min
+- title: Bytes egress (GiB/min)
+  field: metrics.business.bytes_egress_gib_per_min
+  y_label: GiB/min
+- title: Cloud Armor blocks / min
+  field: metrics.business.cloud_armor_blocks_per_min
+  y_label: blocks/min
+- title: Cloud spend (USD/min)
+  field: metrics.business.cloud_spend_usd_per_min
+  y_label: USD/min
+- title: Uptime (%)
+  field: metrics.business.uptime_pct
+  y_label: '%'
+executive_kpi_emissions:
+  - name: business.cdn_cache_hit_rate_pct
+    value: {uniform: [82.0, 98.4], round: 2}
+    unit: "%"
+  - name: business.requests_per_min
+    value: {randint: [2800000, 48000000]}
+    unit: requests/min
+  - name: business.bytes_egress_gib_per_min
+    value: {uniform: [18000.0, 380000.0], round: 1}
+    unit: GiB/min
+  - name: business.origin_offload_pct
+    value: {uniform: [72.0, 96.0], round: 2}
+    unit: "%"
+  - name: business.edge_latency_p50_ms
+    value: {uniform: [8.0, 28.0], round: 1}
+    unit: ms
+  - name: business.cdn_error_rate_pct
+    value: {uniform: [0.02, 0.85], round: 3}
+    unit: "%"
+  - name: business.peak_bandwidth_utilization_pct
+    value: {uniform: [38.0, 88.0], round: 2}
+    unit: "%"
+  - name: business.interconnect_utilization_pct
+    value: {uniform: [22.0, 78.0], round: 2}
+    unit: "%"
+  - name: business.cloud_armor_blocks_per_min
+    value: {randint: [180, 8500]}
+    unit: blocks/min
+  - name: business.vpc_flow_anomalies_per_min
+    value: {uniform: [0.2, 12.0], round: 2}
+    unit: anomalies/min
+  - name: business.nat_port_exhaustion_rate_pct
+    value: {uniform: [0.1, 4.8], round: 3}
+    unit: "%"
+  - name: business.load_balancer_rps
+    value: {randint: [28000, 480000]}
+    unit: req/s
+  - name: business.uptime_pct
+    value: {uniform: [99.5, 99.999], round: 4}
+    unit: "%"
+  - name: business.api_success_rate_pct
+    value: {uniform: [99.2, 99.99], round: 3}
+    unit: "%"
+  - name: business.network_sla_compliance_pct
+    value: {uniform: [98.5, 99.99], round: 3}
+    unit: "%"
+  - name: business.incident_mttd_min
+    value: {uniform: [0.8, 12.4], round: 2}
+    unit: min
+  - name: business.incident_mttr_min
+    value: {uniform: [4.5, 85.0], round: 1}
+    unit: min
+  - name: business.availability_index_0_100
+    value: {uniform: [88.0, 100.0], round: 2}
+    unit: index
+  - name: business.cloud_spend_usd_per_min
+    value: {uniform: [8500.0, 95000.0], round: 1}
+    unit: USD/min
+  - name: business.committed_use_discount_utilization_pct
+    value: {uniform: [62.0, 98.0], round: 2}
+    unit: "%"
+  - name: business.cost_per_million_requests_usd
+    value: {uniform: [1.2, 28.4], round: 2}
+    unit: USD
+  - name: business.resource_efficiency_pct
+    value: {uniform: [58.0, 88.0], round: 2}
+    unit: "%"
+  - name: business.carbon_intensity_gco2_per_tib
+    value: {uniform: [0.8, 4.2], round: 3}
+    unit: gCO2/TiB
+  - name: business.customer_sla_breach_count
+    value: {randint: [0, 12]}
+    unit: count
+raw_log_profile:
+  service_name: cloud-gateway
+  user_id_prefix: usr
+  tier_field: support_tier
+  tier_values:
+  - - basic
+    - 60
+  - - standard
+    - 30
+  - - premium
+    - 10
+  country_weights:
+    US: 35
+    GB: 12
+    DE: 10
+    IN: 12
+    JP: 8
+    BR: 8
+    FR: 8
+    AU: 7
+  methods:
+  - GET
+  - POST
+  - PUT
+  - DELETE
+  paths:
+  - /v1/projects/{id}/instances
+  - /v1/projects/{id}/buckets
+  - /v1/projects/{id}/iam
+  - /v1/projects/{id}/networks
+  - /v1/projects/{id}/disks
+  - /v1/projects/{id}/operations
+  - /login
+  - /health
+  change_point_path: /v1/projects/{id}/instances
+trace_attributes:
+  base:
+    gcp.project_id: {choice: [gcpnet-prod-001, gcpnet-prod-002, gcpnet-staging]}
+    gcp.network_tier: {choice: [PREMIUM, PREMIUM, PREMIUM, STANDARD]}
+  services:
+    vpc-network-manager:
+      vpc.network_tier: {choice: [PREMIUM, STANDARD]}
+      vpc.subnet_cidr: {choice: [10.128.0.0/20, 10.142.0.0/20, 10.132.0.0/20]}
+      vpc.peering_count: {randint: [1, 8]}
+      vpc.route_table_size: {randint: [80, 250]}
+      vpc.mtu: {choice: [1460, 1500, 8896]}
+    cloud-armor-waf:
+      armor.policy_name: {choice: [gcpnet-waf-policy, gcpnet-ddos-policy, gcpnet-edge-policy]}
+      armor.rule_count: {randint: [8, 45]}
+      armor.adaptive_protection: {choice: [true, true, false]}
+      armor.evaluation_mode: {choice: [STANDARD, ADVANCED]}
+    cloud-nat-gateway:
+      nat.pool_utilization: {uniform: [30.0, 95.0], round: 1}
+      nat.port_allocation: {choice: [STATIC, DYNAMIC]}
+      nat.min_ports_per_vm: {choice: [64, 256, 1024, 2048]}
+      nat.external_ip_count: {randint: [1, 10]}
+    cloud-dns-resolver:
+      dns.query_type: {choice: [A, AAAA, CNAME, MX, TXT, SRV]}
+      dns.zone_name: {choice: [gcpnet-internal, gcpnet-prod-zone, gcpnet-services]}
+      dns.dnssec_enabled: {choice: [true, true, false]}
+      dns.response_policy_count: {randint: [0, 5]}
+    cloud-interconnect:
+      interconnect.circuit_id: {format: "CIR-{n}", n: {randint: [100000, 999999]}}
+      interconnect.bandwidth_gbps: {choice: [10, 10, 100]}
+      interconnect.lacp_state: {choice: [ACTIVE, ACTIVE, ACTIVE, DETACHED]}
+      interconnect.location: {choice: [iad-zone1-1, dfw-zone1-1, ams-zone1-1]}
+    cloud-vpn-gateway:
+      vpn.tunnel_status: {choice: [ESTABLISHED, ESTABLISHED, ESTABLISHED, NEGOTIATING]}
+      vpn.ike_version: {choice: [IKEv2, IKEv2, IKEv1]}
+      vpn.peer_ip: {format: "203.0.113.{a}", a: {randint: [1, 254]}}
+      vpn.ha_redundancy: {choice: [true, true, false]}
+    cloud-cdn-service:
+      cdn.cache_mode: {choice: [CACHE_ALL_STATIC, USE_ORIGIN_HEADERS, FORCE_CACHE_ALL]}
+      cdn.origin_region: {choice: [us-central1, us-east1, europe-west1]}
+      cdn.signed_url_enabled: {choice: [true, false]}
+      cdn.negative_caching: {choice: [true, false]}
+    cloud-load-balancer:
+      lb.backend_count: {randint: [3, 12]}
+      lb.health_check_interval: {choice: [5, 10, 30]}
+      lb.scheme: {choice: [EXTERNAL_MANAGED, INTERNAL_MANAGED, EXTERNAL]}
+      lb.protocol: {choice: [HTTPS, HTTP2, TCP, gRPC]}
+    network-intelligence:
+      ni.test_count_active: {randint: [5, 25]}
+      ni.topology_nodes: {randint: [30, 120]}
+      ni.last_scan_age_sec: {randint: [10, 300]}
+      ni.firewall_insights_enabled: {choice: [true, true, false]}

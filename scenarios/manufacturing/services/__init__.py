@@ -1,1 +1,0 @@
-"""Manufacturing scenario service implementations."""

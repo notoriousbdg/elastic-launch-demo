@@ -1,0 +1,55 @@
+name: Inventory Sync Desync
+subsystem: inventory
+vehicle_section: inventory_replication
+error_type: INVENTORY-SYNC-LAG
+sensor_type: replication_lag
+affected_services:
+- inventory-service
+- order-management
+cascade_services:
+- fulfillment-orchestrator
+- storefront-gateway
+description: Inventory replication lag causing overselling — orders accepted for out-of-stock items, leading to cancellations
+  and customer complaints
+investigation_notes: |-
+  1. Check inventory-service logs for INVENTORY-SYNC-LAG — sync_lag_ms={sync_lag_ms} vs max acceptable {max_lag_ms}ms.
+  2. Check the replication consumer group lag: if consumer_lag={consumer_lag} messages, the inventory event stream is backed up.
+  3. Identify affected SKUs: query `inventory.stockout_rate_pct` metric — SKUs above 5% oversell risk are immediate candidates for a hold.
+  4. Review the sync writer throughput — if write_throughput_eps={write_throughput_eps} events/sec, a sudden spike in order volume exceeds replication capacity.
+  5. As an immediate fix, enable pessimistic locking on high-velocity SKUs to prevent overselling at the cost of slightly higher checkout latency.
+  6. Trigger a full inventory reconciliation: compare order-management committed stock with inventory-service available stock and cancel any excess orders.
+remediation_action: force_inventory_resync
+error_message: '[InventoryService] INVENTORY-SYNC-LAG: sync_lag={sync_lag_ms}ms (max {max_lag_ms}ms) consumer_lag={consumer_lag}
+  oversell_risk_skus={oversell_risk_skus} write_throughput={write_throughput_eps}eps'
+stack_trace: |-
+  InventorySyncException: INVENTORY-SYNC-LAG
+    at InventoryReplicator.consume(partition={kafka_partition})
+    at InventoryService.reconcile(sku_batch={sku_batch_id})
+  Sync lag:          {sync_lag_ms}ms (max: {max_lag_ms}ms)
+  Consumer lag:      {consumer_lag} messages
+  Oversell risk SKUs:{oversell_risk_skus}
+  Write throughput:  {write_throughput_eps} eps
+  Kafka partition:   {kafka_partition}
+correlation_attr:
+  key: inventory.sync_lagging
+  value: true
+fault_params:
+  sync_lag_ms: {randint: [30000, 300000]}
+  max_lag_ms: 5000
+  consumer_lag: {randint: [5000, 100000]}
+  oversell_risk_skus: {randint: [10, 500]}
+  write_throughput_eps: {randint: [500, 3000]}
+  kafka_partition: {randint: [0, 15]}
+  sku_batch_id: {format: "SKU-BATCH-{n}", n: {randint: [1000, 9999]}}
+rca_clues:
+  inventory-service:
+    inventory.consumer_lag_events: {randint: [5000, 100000]}
+    inventory.sync_lag_ms: {randint: [30000, 300000]}
+  order-management:
+    order.oversell_count: {randint: [5, 100]}
+    order.stock_check_stale_reads: {randint: [100, 2000]}
+  fulfillment-orchestrator:
+    fulfillment.cancelled_due_to_stockout: {randint: [10, 100]}
+    fulfillment.manual_review_queue: {randint: [5, 50]}
+  storefront-gateway:
+    storefront.in_stock_inaccuracy_pct: {uniform: [2, 15], round: 1}

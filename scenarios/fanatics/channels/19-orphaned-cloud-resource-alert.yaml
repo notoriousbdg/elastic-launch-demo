@@ -1,0 +1,58 @@
+name: Orphaned Cloud Resource Alert
+subsystem: cloud_ops
+vehicle_section: asset_management
+error_type: CLOUD-ORPHANED-RESOURCE
+sensor_type: cloud_asset
+affected_services:
+- cloud-inventory-scanner
+- network-controller
+cascade_services:
+- firewall-gateway
+description: Cloud resources detected without owner tags or associated workloads
+investigation_notes: |-
+  1. Query the cloud-inventory-scanner report for full orphan details: resource type, region, age, and daily cost.
+  2. Cross-reference the resource ID with Terraform state: `terraform state list | grep <resource_id>` — if present, the tag was stripped by a manual edit.
+  3. Check CloudTrail/Activity Log/Audit Log for who created the resource: `aws cloudtrail lookup-events --lookup-attributes AttributeKey=ResourceName,AttributeValue=<id>`.
+  4. If the resource has no security group rules allowing inbound traffic and no associated ENI/NIC, it is likely safe to terminate.
+  5. For resources older than 30 days with no owner, follow the governance runbook: tag as `pending-termination`, notify via Slack, terminate after 7-day grace.
+  6. Prevent recurrence by enforcing AWS SCP / Azure Policy / GCP Organization Policy that denies resource creation without required `owner` and `team` tags.
+remediation_action: tag_or_terminate_resource
+error_message: cloud-governance CLOUD-ORPHANED-RESOURCE resource_type={cloud_resource_type} resource_id={cloud_resource_id}
+  provider={cloud_resource_provider} region={cloud_resource_region} age_days={cloud_resource_age_days} cost=${cloud_resource_cost_daily}/day
+  security_group={cloud_resource_sg} owner=NONE
+stack_trace: |-
+  Cloud Governance Scan Report
+  -----------------------------
+  Resource:       {cloud_resource_type} ({cloud_resource_id})
+  Provider:       {cloud_resource_provider}
+  Region:         {cloud_resource_region}
+  Created:        {cloud_resource_age_days} days ago
+  Daily Cost:     ${cloud_resource_cost_daily}
+  Security Group: {cloud_resource_sg}
+  Owner Tag:      MISSING
+  Team Tag:       MISSING
+  Compliance:     FAIL — no owner tag after 14-day grace period
+  Action:         Schedule for termination review
+correlation_attr:
+  key: infra.cloud_policy_ver
+  value: org-policy-v2.4.0-unenforced
+fault_params:
+  cloud_resource_type: {choice: [EC2 Instance, Azure VM, GCE Instance, EBS Volume, Managed Disk, S3 Bucket]}
+  cloud_resource_id:
+    format: "res-{n}"
+    n: {randint: [10000, 99999]}
+  cloud_resource_provider: {choice: [aws, azure, gcp]}
+  cloud_resource_region: {choice: [us-east-1, eastus, us-central1]}
+  cloud_resource_age_days: {randint: [14, 180]}
+  cloud_resource_cost_daily: {uniform: [2.50, 85.00], round: 2}
+  cloud_resource_sg: {choice: [sg-0abc1234, nsg-fanatics-default, fw-rule-legacy]}
+rca_clues:
+  cloud-inventory-scanner:
+    cloud_scan.orphan_daily_cost_usd: {uniform: [50, 2000], round: 2}
+    cloud_scan.oldest_orphan_days: {randint: [14, 180]}
+  network-controller:
+    network.orphan_security_group_rules: {randint: [5, 50]}
+    network.untagged_eni_count: {randint: [3, 30]}
+  firewall-gateway:
+    firewall.orphan_nat_rules: {randint: [2, 20]}
+    firewall.stale_address_objects: {randint: [10, 100]}

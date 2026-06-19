@@ -1,0 +1,46 @@
+name: OT Protocol Drift
+subsystem: scada
+vehicle_section: protocol_parser
+error_type: PROTOCOL-DRIFT
+sensor_type: protocol_parser
+affected_services:
+- scada-gateway
+cascade_services:
+- mes-controller
+- ot-historian
+description: Modbus/EtherNet-IP frame parse failures after a PLC firmware drift introduces a non-standard register layout
+investigation_notes: |-
+  Root Cause: After a PLC firmware update, Modbus register maps (function codes 03/04/16) or EtherNet-IP CIP class objects can shift offsets, causing the gateway parser to misalign data words. The result is plausibly-shaped values that pass type checks but represent the wrong physical quantity.
+  Remediation: 1) Compare current vs. expected register map: `scada-admin diff-regmap --plc {plc_id} --baseline {firmware_baseline}`. 2) Reload the corrected register-map config: `scada-admin reload-regmap --plc {plc_id} --version {firmware_version}`. 3) Validate sample reads against the engineering reference: `scada-admin read-sample --plc {plc_id} --tag MotorSpeed`. 4) If firmware was unauthorized, open an OT change-control ticket to roll back to {firmware_baseline}. 5) Add a parser-version assertion to CI on the SCADA config repo.
+remediation_action: reload_regmap
+error_message: '[SCADA] PROTOCOL-DRIFT: plc={plc_id} protocol={protocol} firmware_current={firmware_version} expected={firmware_baseline}
+  parse_failures={parse_failure_count}'
+stack_trace: |-
+  === PROTOCOL PARSER DIAGNOSTIC — {plc_id} ===
+  Protocol: {protocol} | Firmware: {firmware_version} (baseline: {firmware_baseline})
+  ------------------------------------------------------------------------
+  FN CODE   | EXPECTED OFFSET | ACTUAL OFFSET | TAG               | STATUS
+  ------------------------------------------------------------------------
+  FC-03     | 40001           | 40001         | MotorSpeed         | OK
+  FC-03     | 40009           | 40012         | OvenTempC          | DRIFT (+3)
+  FC-04     | 30001           | 30005         | PressurePsi        | DRIFT (+4)
+  FC-16     | 41001           | 41001         | SetpointWrite      | OK
+  ------------------------------------------------------------------------
+  PROTOCOL-DRIFT: {parse_failure_count} parse failures in 60s on {plc_id}
+correlation_attr:
+  key: infra.plc_firmware_version
+  value: siemens-s7-1500-v3.1.7-unsigned
+fault_params:
+  plc_id: {choice: [PLC-LINE01-A, PLC-LINE02-A, PLC-LINE03-A, PLC-LINE03-B, PLC-PACK-01]}
+  protocol: {choice: [modbus_tcp, ethernet_ip]}
+  firmware_version: {choice: [v3.1.7, v3.2.0, v3.2.1]}
+  firmware_baseline: v3.0.4
+  parse_failure_count: {randint: [20, 200]}
+rca_clues:
+  scada-gateway:
+    scada.parse_failure_count: {randint: [20, 200]}
+    scada.firmware_diff: true
+  mes-controller:
+    mes.implausible_tag_value_count: {randint: [2, 25]}
+  ot-historian:
+    historian.tag_quality_bad_count: {randint: [5, 80]}

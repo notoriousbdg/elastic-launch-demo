@@ -1,0 +1,112 @@
+service: member-portal
+sort_order: 8
+cloud_provider: azure
+cloud_region: eastus
+cloud_platform: azure_vm
+cloud_availability_zone: eastus-2
+subsystem: member_services
+language: python
+topology:
+- - auth-gateway
+  - /api/v1/auth/session-validate
+  - POST
+- - mobile-gateway
+  - /api/v1/mobile/sync-preferences
+  - POST
+- - payment-engine
+  - /api/v1/payments/bill-pay
+  - POST
+entry_endpoints:
+- - /api/v1/portal/dashboard
+  - GET
+- - /api/v1/portal/accounts
+  - GET
+- - /api/v1/portal/documents
+  - GET
+emit_fault_logs: true
+kpi_emitter: true
+state:
+  _page_views:
+    init: 0
+  _last_summary:
+    init: now
+steps:
+- sample:
+    portal_page:
+      choice:
+      - /dashboard
+      - /accounts
+      - /insurance/auto
+      - /claims/status
+      - /payments/bill-pay
+      - /investments
+    portal_load_ms:
+      uniform:
+      - 150.0
+      - 600.0
+      round: 1
+- counter:
+    state_key: _page_views
+    by: 1
+- log:
+    level: INFO
+    message: '[PORTAL] page_view page={portal_page} load_ms={portal_load_ms} cdn_hit=true render_ms=42 status=200'
+    attrs:
+      operation: page_view
+      portal.page:
+        var: portal_page
+      portal.load_ms:
+        var: portal_load_ms
+      portal.cdn_hit: true
+- sample:
+    portal_action:
+      choice:
+      - VIEW_BALANCE
+      - DOWNLOAD_STATEMENT
+      - UPDATE_PROFILE
+      - VIEW_POLICY
+      - START_CLAIM
+      - SCHEDULE_PAYMENT
+- log:
+    level: INFO
+    message: '[PORTAL] member_action action={portal_action} auth_level=FULL session_valid=true status=COMPLETED'
+    attrs:
+      operation: member_action
+      portal.action:
+        var: portal_action
+      portal.auth_level: FULL
+- every:
+    seconds: 10
+    state_key: _last_summary
+    steps:
+    - log:
+        level: INFO
+        message: '[PORTAL] summary page_views={_page_views} avg_load_ms=340 error_rate=0.01% satisfaction=4.7/5.0 status=NOMINAL'
+        attrs:
+          operation: portal_summary
+          portal.page_views:
+            var: _page_views
+          portal.avg_load_ms: 340
+- metric:
+    name: member_portal.active_users
+    value:
+      randint:
+      - 5000
+      - 20000
+    unit: users
+- metric:
+    name: member_portal.page_load_ms
+    value:
+      uniform:
+      - 200.0
+      - 800.0
+      round: 1
+    unit: ms
+- metric:
+    name: member_portal.session_duration_min
+    value:
+      uniform:
+      - 3.0
+      - 25.0
+      round: 1
+    unit: min

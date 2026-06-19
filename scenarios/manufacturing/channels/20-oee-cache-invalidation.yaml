@@ -1,0 +1,41 @@
+name: OEE Cache Invalidation
+subsystem: oee
+vehicle_section: result_cache
+error_type: OEE-CACHE-INVALIDATION
+sensor_type: result_cache
+affected_services:
+- oee-analytics
+cascade_services:
+- shopfloor-portal
+description: OEE result cache holding stale entries after an upstream MES retroactive correction; auto-flush eligible
+investigation_notes: |-
+  Root Cause: When MES posts a retroactive correction (e.g., reclassifying downtime from unplanned to planned), already-computed OEE results in the cache become stale. The cache TTL eventually expires them, but the dashboard shows the wrong number until then. A targeted flush is safe.
+  Remediation (auto-remediate eligible): 1) Flush stale entries: `oee-admin cache-flush --since {correction_time}`. 2) Recompute the affected window: `oee-admin recompute --line {line_id} --window {affected_window}`. 3) Confirm dashboards refresh within 30s.
+remediation_action: flush_oee_cache
+error_message: '[OEE] OEE-CACHE-INVALIDATION: line={line_id} stale_entries={stale_entries} correction_time={correction_time}
+  affected_window={affected_window}'
+stack_trace: |-
+  === OEE RESULT CACHE — STALE ENTRIES ===
+  Line: {line_id} | Correction posted: {correction_time}
+  ------------------------------------------------------------------------
+  WINDOW START      | KEY                          | STALE
+  ------------------------------------------------------------------------
+  13:00–14:00       | oee:{line_id}:13:00          | YES
+  14:00–15:00       | oee:{line_id}:14:00          | YES
+  15:00–16:00       | oee:{line_id}:15:00          | YES
+  ------------------------------------------------------------------------
+  OEE-CACHE-INVALIDATION: {stale_entries} entries stale; auto-flush eligible
+correlation_attr:
+  key: deployment.oee_cache_ttl_config
+  value: ttl-aggressive-300s
+fault_params:
+  line_id: {choice: [LINE-01, LINE-02, LINE-03, LINE-04, LINE-05]}
+  stale_entries: {randint: [8, 80]}
+  correction_time: 2026-05-06T13:42:18Z
+  affected_window: "13:00–16:00"
+rca_clues:
+  oee-analytics:
+    oee.stale_cache_entries: {randint: [8, 80]}
+    oee.correction_window_min: {randint: [15, 240]}
+  shopfloor-portal:
+    portal.oee_tile_stale: true

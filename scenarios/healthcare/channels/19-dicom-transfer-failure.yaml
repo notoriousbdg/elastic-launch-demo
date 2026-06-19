@@ -1,0 +1,56 @@
+name: DICOM Transfer Failure
+subsystem: radiology
+vehicle_section: pacs_gateway
+error_type: DICOM-STORE-FAIL
+sensor_type: dicom_transfer
+affected_services:
+- imaging-service
+- ehr-system
+cascade_services:
+- clinical-alerts
+- data-warehouse
+description: DICOM C-STORE or C-MOVE operation fails during modality-to-PACS image transfer
+investigation_notes: |-
+  Root Cause: DICOM association failures (status 0xA700/0xA900) indicate either AE title mismatch, transfer syntax negotiation failure, or storage commitment refusal. The PACS SCP rejects the C-STORE when the Presentation Context (Abstract Syntax + Transfer Syntax) is not in the accepted list.
+  Remediation: 1) Verify the DICOM association: `dcm4che-tool storescu --called PACS-SCP-01 --calling {modality}-SCU --connect pacs-host:11112 --cecho`. 2) Reset the DICOM association: `pacs-admin reset-association --ae-title {modality}-SCU`. 3) Check the PACS gateway connection pool: `pacs-admin gateway-status`. 4) If persistent, restart the PACS gateway service: `systemctl restart dcm4chee-arc`. 5) Verify transfer syntax compatibility — ensure Explicit VR Little Endian (1.2.840.10008.1.2.1) is configured. 6) For C-MOVE failures, verify the destination AE title is registered in the DICOM configuration.
+remediation_action: restart_pacs_gateway
+error_message: '[PACS] DICOM-STORE-FAIL: study={dicom_study_uid} modality={modality} operation={dicom_operation} status={dicom_error_code}'
+stack_trace: |-
+  A-ASSOCIATE-RQ PDU
+    Called AE Title:  PACS-SCP-01
+    Calling AE Title: {modality}-SCU
+    Application Context: 1.2.840.10008.3.1.1.1
+    Presentation Context:
+      Abstract Syntax: 1.2.840.10008.5.1.4.1.1.2 ({modality} Image Storage)
+      Transfer Syntax: 1.2.840.10008.1.2.1 (Explicit VR Little Endian)
+  A-ASSOCIATE-AC — Association accepted
+  {dicom_operation}-RQ | Study: {dicom_study_uid} | Series: 1 of 3
+  {dicom_operation}-RSP | Status: {dicom_error_code} | FAILURE
+    Error Comment: DICOM-STORE-FAIL — Storage commitment refused, dataset mismatch
+    Affected SOP Instance: {dicom_study_uid}.1.1
+  A-RELEASE-RQ
+  A-RELEASE-RP — Association released
+correlation_attr:
+  key: infra.pacs_gateway_build
+  value: dcm4chee-5.31.1-patch3
+fault_params:
+  dicom_study_uid:
+    format: "1.2.840.{a}.{b}.{c}"
+    a: {randint: [10000, 99999]}
+    b: {randint: [1, 999]}
+    c: {randint: [1, 99]}
+  modality: {choice: [CT, MRI, XR, US, MG, NM]}
+  dicom_operation: {choice: [C-STORE, C-MOVE, C-FIND]}
+  dicom_error_code: {choice: ["0xA700", "0xA900", "0xC000", "0xA801"]}
+rca_clues:
+  imaging-service:
+    dicom.ae_title_mismatch: true
+    dicom.transfer_syntax: 1.2.840.10008.1.2.1
+  ehr-system:
+    ehr.pending_imaging_results: {randint: [5, 30]}
+    ehr.pacs_link_status: disconnected
+  clinical-alerts:
+    alerts.imaging_delay_count: {randint: [2, 10]}
+  data-warehouse:
+    etl.imaging_archive_stalled: true
+    etl.pending_studies: {randint: [20, 100]}

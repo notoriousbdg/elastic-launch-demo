@@ -1,0 +1,134 @@
+service: cloud-nat-gateway
+sort_order: 5
+cloud_provider: gcp
+cloud_region: us-east1
+cloud_platform: gcp_compute_engine
+cloud_availability_zone: us-east1-c
+subsystem: network_access
+language: go
+generates_traces: false
+topology:
+- - vpc-network-manager
+  - /api/v1/vpc/subnet-info
+  - GET
+- - cloud-dns-resolver
+  - /api/v1/dns/external-resolve
+  - POST
+entry_endpoints:
+- - /api/v1/nat/status
+  - GET
+- - /api/v1/nat/mappings
+  - GET
+emit_fault_logs: true
+kpi_emitter: false
+constants:
+  GATEWAYS:
+  - gcpnet-nat-central1
+  - gcpnet-nat-east1
+  - gcpnet-nat-europe1
+  NAT_IPS:
+  - 34.72.100.10
+  - 34.72.100.11
+  - 34.72.100.12
+  - 34.86.50.20
+  - 34.86.50.21
+steps:
+- sample:
+    gw:
+      choice: GATEWAYS
+    used_ports:
+      if_active:
+        randint:
+        - 60000
+        - 64000
+      else:
+        randint:
+        - 20000
+        - 45000
+- sample:
+    util_pct:
+      expr: round(used_ports / 64512 * 100, 1)
+- metric:
+    name: nat.ports_used
+    value:
+      var: used_ports
+    unit: ports
+- metric:
+    name: nat.ports_total
+    value: 64512
+    unit: ports
+- metric:
+    name: nat.port_utilization_pct
+    value:
+      var: util_pct
+    unit: '%'
+- log:
+    level: INFO
+    message: 'cloudnat: gateway={gw} ports_used={used_ports}/64512 utilization={util_pct}% min_ports_per_vm=64'
+    attrs:
+      operation: port_allocation
+      nat.gateway:
+        var: gw
+      nat.ports_used:
+        var: used_ports
+      nat.utilization:
+        var: util_pct
+- sample:
+    new_conns:
+      randint:
+      - 1000
+      - 10000
+    dropped_conns:
+      if_active:
+        randint:
+        - 50
+        - 500
+      else:
+        randint:
+        - 0
+        - 5
+- metric:
+    name: nat.new_connections
+    value:
+      var: new_conns
+    unit: conn/s
+- metric:
+    name: nat.dropped_connections
+    value:
+      var: dropped_conns
+    unit: conn/s
+- log:
+    level: INFO
+    message: 'cloudnat: gateway={gw} new_conns={new_conns}/s dropped={dropped_conns}/s protocol=TCP+UDP'
+    attrs:
+      operation: connection_stats
+      nat.new_connections:
+        var: new_conns
+      nat.dropped_connections:
+        var: dropped_conns
+- sample:
+    nat_ip:
+      choice: NAT_IPS
+    active_mappings:
+      randint:
+      - 5000
+      - 30000
+- metric:
+    name: nat.allocated_ips
+    value: 5
+    unit: addresses
+- metric:
+    name: nat.active_mappings
+    value:
+      var: active_mappings
+    unit: mappings
+- log:
+    level: INFO
+    message: 'cloudnat: gateway={gw} nat_ip={nat_ip} allocated_ips=5 active_mappings={active_mappings}'
+    attrs:
+      operation: ip_pool_status
+      nat.nat_ip:
+        var: nat_ip
+      nat.allocated_ips: 5
+      nat.active_mappings:
+        var: active_mappings

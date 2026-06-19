@@ -1,0 +1,64 @@
+name: Push Notification Backpressure
+subsystem: notifications
+vehicle_section: push_channel
+error_type: NOTIF-PUSH-BACKPRESSURE
+sensor_type: push_delivery
+affected_services:
+- notification-service
+cascade_services:
+- activation-service
+- provisioning-service
+description: FCM/APNs push notification delivery backpressure causing activation confirmation delays
+investigation_notes: |
+  1. Check FCM/APNs rate limit status — Firebase Cloud Messaging and Apple Push Notification service have per-app rate limits. Exceeding limits causes 429 responses and message queuing.
+  2. Backpressure source: activation volume spike (e.g., marketing campaign, device launch event) driving notification volume above normal 200/min to elevated rates.
+  3. APNs priority channels: activation confirmations should use priority=10 (immediate). Background notifications (usage alerts, marketing) should use priority=5 to avoid quota competition.
+  4. Provisioning-service waits for notification-service acknowledgment before marking activation complete. Push backpressure delays this acknowledgment, causing provisioning timeout.
+  5. Decouple notification from activation flow — make notification async so provisioning-service doesn't block on notification delivery. Queue notifications for background delivery.
+remediation_action: throttle_push_notifications
+error_message: '[NOTIF] NOTIF-PUSH-BACKPRESSURE: platform={push_platform} rate={push_current_rate}/min limit={push_rate_limit}/min queue_depth={push_queue_depth} retry_backoff_ms={push_backoff_ms}'
+stack_trace: |
+  === PUSH NOTIFICATION BACKPRESSURE ===
+  platform={push_platform}  service=notification-service
+  --- DELIVERY STATUS ---
+    PLATFORM     RATE        LIMIT       QUEUE     STATUS
+    FCM          {push_current_rate}/min  {push_rate_limit}/min  {push_queue_depth}     THROTTLED
+    APNs         {push_current_rate}/min  {push_rate_limit}/min  {push_queue_depth}     THROTTLED
+  --- BACKPRESSURE ANALYSIS ---
+    retry_backoff={push_backoff_ms}ms  max_retries=5
+    activation_confirms_delayed={activation_confirms_delayed}
+    provisioning_timeout_risk=HIGH
+    priority_10_queued={priority_high_queued}  priority_5_queued={priority_low_queued}
+  ACTION: prioritize_activation=true  defer_marketing=true  alert=NOTIF-PUSH-BACKPRESSURE
+infrastructure_events:
+- body: '[GCP-Monitoring] PushNotificationThrottled: platform=FCM rate=800/min limit=500/min queue_depth=3500 429_responses=350 region=europe-west3'
+  severity: WARN
+  event_name: gcp.monitoring.PushNotificationThrottled
+  service: notification-service
+  attributes:
+    cloud.provider: gcp
+    cloud.service: monitoring
+    gcp.resource_type: gke_container
+    infrastructure.source: GCP-Monitoring
+correlation_attr:
+  key: notification.push_sdk_version
+  value: fcm-sdk-v24.1.0-beta
+fault_params:
+  push_platform: {choice: [FCM, APNs, HMS]}
+  push_current_rate: {randint: [500, 2000]}
+  push_rate_limit: 500
+  push_queue_depth: {randint: [1000, 10000]}
+  push_backoff_ms: {randint: [1000, 8000]}
+  activation_confirms_delayed: {randint: [200, 2000]}
+  priority_high_queued: {randint: [100, 500]}
+  priority_low_queued: {randint: [500, 5000]}
+rca_clues:
+  notification-service:
+    notification.push_rate_limited: true
+    notification.fcm_429_count: {randint: [200, 2000]}
+  activation-service:
+    activation.notification_ack_delayed: true
+    activation.completion_blocked: true
+  provisioning-service:
+    provisioning.notification_dependency_timeout: true
+    provisioning.async_queue_building: true

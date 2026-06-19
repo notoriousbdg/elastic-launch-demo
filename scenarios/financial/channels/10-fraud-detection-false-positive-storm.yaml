@@ -1,0 +1,40 @@
+name: Fraud Detection False Positive Storm
+subsystem: compliance
+vehicle_section: fraud_engine
+error_type: COMPL-FRAUD-FP-STORM
+sensor_type: fraud_classifier
+affected_services:
+- fraud-detector
+- order-gateway
+cascade_services:
+- compliance-monitor
+- customer-portal
+description: Fraud detection model generating excessive false positive alerts blocking legitimate orders
+investigation_notes: ''
+remediation_action: ''
+error_message: '[COMPL] COMPL-FRAUD-FP-STORM: blocked={blocked_orders} window={window_s}s fp_rate={fp_rate}% pattern={pattern_id}'
+stack_trace: |-
+  === FRAUD DETECTION MODEL STATS ===
+  pattern={pattern_id}  window={window_s}s  model=v3.2.1
+  --- CLASSIFICATION MATRIX ---
+                  PREDICTED_FRAUD   PREDICTED_LEGIT
+    ACTUAL_FRAUD       12               2
+    ACTUAL_LEGIT      {blocked_orders}              4,210
+  --- RATES ---
+    true_positive_rate   85.7%
+    false_positive_rate  {fp_rate}%  <<< STORM THRESHOLD EXCEEDED
+    precision            2.8%
+    orders_blocked       {blocked_orders}
+    revenue_impact       $1,247,000/hr
+  feature_drift=DETECTED  top_feature=txn_velocity_5m  drift_score=0.847
+  ACTION: raise_threshold=true  queue_manual_review=true  alert=COMPL-FRAUD-FP-STORM
+correlation_attr: {}
+fault_params:
+  blocked_orders: {randint: [50, 500]}
+  window_s: {randint: [30, 300]}
+  fp_rate: {uniform: [15.0, 85.0], round: 1}
+  pattern_id:
+    format: "FRD-{t}-{n:02d}"
+    t: {choice: [VELOCITY, GEOLOC, AMOUNT, PATTERN, WASH]}
+    n: {randint: [1, 99]}
+rca_clues: {}

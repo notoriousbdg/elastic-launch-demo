@@ -1,0 +1,152 @@
+service: risk-calculator
+sort_order: 3
+cloud_provider: aws
+cloud_region: us-east-1
+cloud_platform: aws_ec2
+cloud_availability_zone: us-east-1c
+subsystem: risk_management
+language: python
+topology:
+- - market-data-feed
+  - /api/v1/market/quotes
+  - GET
+- - settlement-processor
+  - /api/v1/settlement/margin-status
+  - GET
+entry_endpoints:
+- - /api/v1/risk/evaluate
+  - POST
+- - /api/v1/risk/limits
+  - GET
+db_operations:
+- - SELECT
+  - positions
+  - SELECT instrument, net_qty, avg_price, unrealized_pnl FROM positions WHERE desk_id = ? AND asset_class = ?
+- - UPDATE
+  - risk_limits
+  - UPDATE risk_limits SET current_exposure = ?, last_checked = NOW() WHERE desk_id = ? AND limit_type = ?
+emit_fault_logs: true
+kpi_emitter: true
+constants:
+  DESKS:
+    EQ-FLOW:
+      limit_m: 200
+      asset_class: equity
+    EQ-PROP:
+      limit_m: 100
+      asset_class: equity
+    FI-RATES:
+      limit_m: 500
+      asset_class: fixed_income
+    FX-SPOT:
+      limit_m: 300
+      asset_class: fx
+    DRV-VOL:
+      limit_m: 150
+      asset_class: derivatives
+state:
+  _last_var_calc:
+    init: now
+  _risk_checks:
+    init: 0
+steps:
+- sample:
+    desk_name:
+      choice: DESKS
+    desk:
+      expr: DESKS[desk_name]
+    exposure_m:
+      expr: round(rand.uniform(10, desk['limit_m'] * 0.8), 1)
+    utilization:
+      expr: round(exposure_m / desk['limit_m'] * 100, 1)
+    asset_class:
+      expr: desk['asset_class']
+    limit_m:
+      expr: desk['limit_m']
+- log:
+    level: INFO
+    message: '[RISK] pre_trade_check desk={desk_name} exposure_m=${exposure_m} limit_m=${limit_m} utilization={utilization}%
+      asset_class={asset_class} result=PASS'
+    attrs:
+      operation: risk_check
+      risk.desk:
+        var: desk_name
+      risk.exposure_m:
+        var: exposure_m
+      risk.limit_m:
+        var: limit_m
+      risk.utilization_pct:
+        var: utilization
+      risk.result: PASS
+      risk.asset_class:
+        var: asset_class
+- sample:
+    accounts_checked:
+      randint:
+      - 100
+      - 500
+    margin_calls:
+      randint:
+      - 0
+      - 3
+- log:
+    level: INFO
+    message: '[RISK] margin_sweep accounts_checked={accounts_checked} calls_pending={margin_calls} status=OK'
+    attrs:
+      operation: margin_sweep
+      margin.accounts_checked:
+        var: accounts_checked
+      margin.calls_pending:
+        var: margin_calls
+- every:
+    seconds: 12
+    state_key: _last_var_calc
+    steps:
+    - sample:
+        var_95:
+          uniform:
+          - 5.0
+          - 25.0
+          round: 2
+        var_99:
+          expr: round(var_95 * 1.5, 2)
+        scenarios:
+          randint:
+          - 10000
+          - 50000
+    - log:
+        level: INFO
+        message: '[RISK] var_calculation var_95=${var_95}M var_99=${var_99}M scenarios={scenarios} status=WITHIN_LIMITS'
+        attrs:
+          operation: var_calculation
+          var.95_percentile_m:
+            var: var_95
+          var.99_percentile_m:
+            var: var_99
+          var.scenario_count:
+            var: scenarios
+          var.status: WITHIN_LIMITS
+- counter:
+    state_key: _risk_checks
+    by: 1
+- metric:
+    name: risk_calculator.risk_checks
+    value:
+      var: _risk_checks
+    unit: checks
+- metric:
+    name: risk_calculator.var_95
+    value:
+      uniform:
+      - 5.0
+      - 25.0
+      round: 2
+    unit: M_USD
+- metric:
+    name: risk_calculator.margin_utilization
+    value:
+      uniform:
+      - 40.0
+      - 85.0
+      round: 1
+    unit: '%'

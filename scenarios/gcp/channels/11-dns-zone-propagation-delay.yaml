@@ -1,0 +1,57 @@
+name: DNS Zone Propagation Delay
+subsystem: dns
+vehicle_section: dns_propagation
+error_type: DNS-ZONE-PROPAGATION-DELAY
+sensor_type: dns_propagation
+affected_services:
+- cloud-dns-resolver
+- cloud-load-balancer
+cascade_services:
+- cloud-cdn-service
+- network-intelligence
+description: DNS record changes taking abnormally long to propagate across Cloud DNS servers
+investigation_notes: |-
+  Root cause: Cloud DNS record changes normally propagate within 60 seconds, but delays occur when authoritative name servers are under heavy query load, when the zone has a very large record set, or when there are pending DNSSEC re-signing operations. Check change status:
+    gcloud dns record-sets changes describe <change-id> --zone=<zone>
+    gcloud dns record-sets changes list --zone=<zone> --sort-by=startTime --limit=5
+  Remediation: If change is stuck in PENDING, verify the zone is not locked by another operation. Flush local DNS caches on affected VMs:
+    sudo systemd-resolve --flush-caches (on Container-Optimized OS)
+  For external clients, reduce TTL on the record before making changes (set TTL to 60s, wait for old TTL to expire, then make the change). Check if Cloud DNS name servers are responding:
+    dig <record> @ns-cloud-a1.googledomains.com
+  If servers are unresponsive, check Cloud DNS quota and zone status in Console > Network Services > Cloud DNS.
+remediation_action: flush_dns_cache
+error_message: 'cloud-dns: DNS-ZONE-PROPAGATION-DELAY zone={dns_zone} change_id={dns_change_id} record={dns_record_name} propagation_time={dns_prop_time_sec}s
+  (SLA {dns_prop_sla_sec}s) servers_updated={dns_servers_updated}/{dns_servers_total}'
+stack_trace: |-
+  Cloud DNS Propagation Report
+  ------------------------------
+  Zone:               {dns_zone}
+  Change ID:          {dns_change_id}
+  Record:             {dns_record_name}
+  Propagation Time:   {dns_prop_time_sec}s (SLA: {dns_prop_sla_sec}s)
+  Servers Updated:    {dns_servers_updated}/{dns_servers_total}
+  Status:             PENDING
+  Action: Wait for propagation or flush DNS cache
+correlation_attr:
+  key: deployment.dns_ttl_override
+  value: ttl-60s-migration
+fault_params:
+  dns_zone: {choice: [gcpnet-internal, gcpnet-prod-zone, gcpnet-services]}
+  dns_change_id: {format: "change-{n}", n: {randint: [10000, 99999]}}
+  dns_record_name: {choice: [api.gcpnet.internal, lb.gcpnet.prod, cdn.gcpnet.internal, vpn.gcpnet.internal]}
+  dns_prop_time_sec: {randint: [120, 600]}
+  dns_prop_sla_sec: 60
+  dns_servers_updated: {randint: [1, 3]}
+  dns_servers_total: {randint: [4, 8]}
+rca_clues:
+  cloud-dns-resolver:
+    dns.propagation_lag_sec: {randint: [120, 600]}
+    dns.change_status: PENDING
+  cloud-load-balancer:
+    lb.dns_stale_ip: true
+    lb.traffic_to_old_backend: {uniform: [10, 40], round: 1}
+  cloud-cdn-service:
+    cdn.dns_cache_stale: true
+    cdn.origin_resolution_mismatch: true
+  network-intelligence:
+    ni.dns_consistency_check: INCONSISTENT

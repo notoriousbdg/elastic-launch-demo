@@ -1,0 +1,43 @@
+name: Inventory Sync Batch Failure
+subsystem: inventory
+vehicle_section: batch_sync
+error_type: INVENTORY-SYNC-BATCH-FAIL
+sensor_type: batch_sync
+affected_services:
+- inventory-sync
+cascade_services:
+- erp-bridge
+description: Hourly inventory delta batch from WMS to ERP failed; auto-retry eligible
+investigation_notes: |-
+  Root Cause: Transient batch failures in the WMS→ERP path are usually idempotent network or RFC-session timeouts. The auto-retry job is safe to invoke when the failure mode is `SOCKET_TIMEOUT` or `RFC_HANDLE_INVALID`.
+  Remediation (auto-remediate eligible): 1) Identify the failed batch: `wms-admin batch-status --last 1h --status FAILED`. 2) Retry: `wms-admin retry-batch --batch {batch_id}`. 3) Confirm reconciliation: `wms-admin reconcile --since {failure_time}`.
+remediation_action: retry_inventory_batch
+error_message: '[WMS] INVENTORY-SYNC-BATCH-FAIL: batch={batch_id} records={record_count} failure_mode={failure_mode} retry_count={retry_count}'
+stack_trace: |-
+  === INVENTORY SYNC BATCH — {batch_id} ===
+  Records: {record_count} | Started: 2026-05-06T14:00:00Z | Failed: {failure_time}
+  ------------------------------------------------------------------------
+  STAGE         | STATUS    | DURATION (s)
+  ------------------------------------------------------------------------
+  extract        | OK        | 12
+  transform      | OK        | 8
+  rfc_call       | FAILED    | 30 — {failure_mode}
+  ------------------------------------------------------------------------
+  INVENTORY-SYNC-BATCH-FAIL: idempotent failure; retry eligible (retry {retry_count}/3)
+correlation_attr:
+  key: infra.rfc_gateway_pool
+  value: rfc-pool-experimental-32conn
+fault_params:
+  batch_id:
+    format: "BATCH-{n}"
+    n: {randint: [100000, 999999]}
+  record_count: {randint: [500, 4500]}
+  failure_mode: {choice: [SOCKET_TIMEOUT, RFC_HANDLE_INVALID]}
+  retry_count: {randint: [0, 2]}
+  failure_time: 2026-05-06T14:15:32Z
+rca_clues:
+  inventory-sync:
+    wms.batch_failure_mode: {choice: [SOCKET_TIMEOUT, RFC_HANDLE_INVALID]}
+    wms.retry_count: {randint: [0, 2]}
+  erp-bridge:
+    erp.idoc_outbox_lag_s: {randint: [60, 600]}

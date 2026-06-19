@@ -1,0 +1,164 @@
+service: order-gateway
+sort_order: 1
+cloud_provider: aws
+cloud_region: us-east-1
+cloud_platform: aws_ec2
+cloud_availability_zone: us-east-1a
+subsystem: order_management
+language: java
+topology:
+- - matching-engine
+  - /api/v1/orders/submit
+  - POST
+- - matching-engine
+  - /api/v1/orders/cancel
+  - DELETE
+- - risk-calculator
+  - /api/v1/risk/pre-trade-check
+  - POST
+- - fraud-detector
+  - /api/v1/fraud/screen-order
+  - POST
+- - audit-logger
+  - /api/v1/audit/log-order
+  - POST
+entry_endpoints:
+- - /api/v1/orders/new
+  - POST
+- - /api/v1/orders/status
+  - GET
+- - /api/v1/orders/amend
+  - PUT
+db_operations:
+- - INSERT
+  - orders
+  - INSERT INTO orders (order_id, instrument, side, qty, price, status, ts) VALUES (?, ?, ?, ?, ?, 'NEW', NOW())
+- - SELECT
+  - orders
+  - SELECT order_id, status, filled_qty FROM orders WHERE account_id = ? AND status IN ('NEW', 'PARTIAL') ORDER BY ts DESC
+    LIMIT 50
+emit_fault_logs: true
+kpi_emitter: false
+constants:
+  FIX_SESSIONS:
+  - FIX-NYSE-01
+  - FIX-NSDQ-01
+  - FIX-CBOE-01
+  - FIX-CME-01
+  - FIX-BATS-01
+  ORDER_SIDES:
+  - BUY
+  - SELL
+  ORDER_SYMBOLS:
+  - AAPL
+  - GOOGL
+  - MSFT
+  - AMZN
+  - TSLA
+state:
+  _order_count:
+    init: 0
+  _last_throughput_report:
+    init: now
+steps:
+- sample:
+    side:
+      choice: ORDER_SIDES
+    symbol:
+      choice: ORDER_SYMBOLS
+    qty:
+      randint:
+      - 100
+      - 5000
+    price:
+      uniform:
+      - 100.0
+      - 400.0
+      round: 2
+    latency_us:
+      randint:
+      - 15
+      - 150
+- counter:
+    state_key: _order_count
+    by: 1
+- log:
+    level: INFO
+    message: '[OMS] order_received side={side} qty={qty} symbol={symbol} price=${price} latency_us={latency_us} status=ROUTED'
+    attrs:
+      operation: order_received
+      order.side:
+        var: side
+      order.symbol:
+        var: symbol
+      order.quantity:
+        var: qty
+      order.price:
+        var: price
+      order.latency_us:
+        var: latency_us
+      order.status: ROUTED
+- sample:
+    session:
+      choice: FIX_SESSIONS
+    heartbeat_ms:
+      uniform:
+      - 0.5
+      - 3.0
+      round: 1
+- log:
+    level: INFO
+    message: '[OMS] fix_heartbeat session={session} latency_ms={heartbeat_ms} status=ACTIVE'
+    attrs:
+      operation: fix_heartbeat
+      fix.session:
+        var: session
+      fix.heartbeat_ms:
+        var: heartbeat_ms
+      fix.status: ACTIVE
+- every:
+    seconds: 10
+    state_key: _last_throughput_report
+    steps:
+    - sample:
+        active_sessions:
+          expr: len(FIX_SESSIONS)
+    - log:
+        level: INFO
+        message: '[OMS] throughput_report total_orders={_order_count} active_sessions={active_sessions} status=NOMINAL'
+        attrs:
+          operation: throughput_report
+          throughput.total_orders:
+            var: _order_count
+          throughput.active_sessions:
+            var: active_sessions
+- metric:
+    name: order_gateway.orders_received
+    value:
+      var: _order_count
+    unit: orders
+- sample:
+    active_fix_count:
+      expr: len(FIX_SESSIONS)
+- metric:
+    name: order_gateway.active_fix_sessions
+    value:
+      var: active_fix_count
+    unit: sessions
+- sample:
+    reject_rate:
+      if_active:
+        uniform:
+        - 8.0
+        - 25.0
+        round: 2
+      else:
+        uniform:
+        - 0.1
+        - 2.5
+        round: 2
+- metric:
+    name: order_gateway.reject_rate
+    value:
+      var: reject_rate
+    unit: '%'

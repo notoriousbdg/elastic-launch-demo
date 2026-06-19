@@ -1,0 +1,51 @@
+name: Raw Material Shortage
+subsystem: inventory
+vehicle_section: wms_inventory
+error_type: RAW-MATERIAL-SHORTAGE
+sensor_type: wms_inventory
+affected_services:
+- inventory-sync
+cascade_services:
+- mes-controller
+- oee-analytics
+description: Raw material on-hand fell below reorder point; line scheduled to starve in N hours
+investigation_notes: |-
+  Root Cause: A reorder-point breach can come from a short PO from the supplier, a higher-than-forecast consumption rate due to scrap, or a delayed receipt at the dock. The MES forward-look projection is the most accurate predictor of when the line will starve.
+  Remediation: 1) Confirm the on-hand vs. system count: `wms-admin physical-vs-system --material {material_code}`. 2) Expedite an open PO: `erp-admin expedite-po --po {po_number}`. 3) If no open PO, issue an emergency PO: `erp-admin issue-po --material {material_code} --qty {emergency_qty} --priority CRITICAL`. 4) Check substitute lots: `mes-admin substitute-options --material {material_code}`. 5) Notify production planning to reschedule affected work orders. 6) Open a supplier scorecard issue.
+remediation_action: expedite_po
+error_message: '[WMS] RAW-MATERIAL-SHORTAGE: material={material_code} on_hand={on_hand} reorder_point={reorder_point} hours_to_starve={hours_to_starve}'
+stack_trace: |-
+  === INVENTORY REORDER ALERT — {material_code} ===
+  On-hand: {on_hand} | Reorder Point: {reorder_point} | Safety Stock: {safety_stock}
+  ------------------------------------------------------------------------
+  Open POs:
+    PO {po_number} | qty={po_quantity} | supplier=SUP-{supplier_id} | ETA={po_eta}
+  Forward consumption (next 8h): est {forward_consumption} units
+  Affected work orders: {affected_wo_count}
+  ------------------------------------------------------------------------
+  RAW-MATERIAL-SHORTAGE: line will starve in {hours_to_starve}h without expedite
+correlation_attr:
+  key: deployment.wms_forecast_engine
+  value: forecast-v3.0.0-tuning
+fault_params:
+  material_code: {choice: [RM-STEEL-A36, RM-ALU-6061, RM-PLASTIC-ABS, RM-COPPER-110]}
+  on_hand: {randint: [800, 1800]}
+  reorder_point: {randint: [2000, 4000]}
+  safety_stock: {randint: [500, 1500]}
+  po_number:
+    format: "PO-{n}"
+    n: {randint: [100000, 999999]}
+  po_quantity: {randint: [2000, 12000]}
+  supplier_id: {randint: [1000, 9999]}
+  po_eta: 2026-05-12T08:00:00Z
+  forward_consumption: {randint: [1500, 4500]}
+  affected_wo_count: {randint: [3, 18]}
+  hours_to_starve: {randint: [2, 14]}
+rca_clues:
+  inventory-sync:
+    inventory.material_below_reorder: true
+    inventory.hours_to_starve: {randint: [2, 14]}
+  mes-controller:
+    mes.work_orders_at_risk: {randint: [3, 18]}
+  oee-analytics:
+    oee.starvation_risk_pct: {uniform: [15.0, 65.0], round: 1}

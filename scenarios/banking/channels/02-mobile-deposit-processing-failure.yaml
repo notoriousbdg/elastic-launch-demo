@@ -1,0 +1,59 @@
+name: Mobile Deposit Processing Failure
+subsystem: digital_banking
+vehicle_section: mobile_deposit
+error_type: MOBILE-DEPOSIT-FAIL
+sensor_type: deposit_processor
+affected_services:
+- mobile-gateway
+- document-vault
+cascade_services:
+- claims-processor
+- payment-engine
+description: Mobile check deposit image capture and processing pipeline failure
+investigation_notes: |-
+  1. Check the amount_verify stage — OCR-extracted amount vs member-entered amount mismatch is the most common failure. Review image quality scores; quality <85% correlates with OCR errors.
+  2. Inspect MICR line extraction: routing and account numbers must parse correctly from the magnetic ink character recognition scan. Failed MICR reads require manual keying or re-capture.
+  3. Verify Reg CC hold policies are correctly applied — military early pay eligibility and next-business-day availability depend on correct member tier classification in the deposit rules engine.
+  4. Check document-vault connectivity — deposit images must be stored before processing continues. S3 upload failures in document-vault will block the entire deposit pipeline.
+  5. Review duplicate detection window — 90-day lookback should catch re-deposited checks. If duplicate_check passes but amount_verify fails, the issue is OCR accuracy, not fraud.
+remediation_action: restart_deposit_processor
+error_message: '[MOBILE] MOBILE-DEPOSIT-FAIL: deposit={deposit_id} amount=${deposit_amount} member={member_id} stage={deposit_stage}
+  error={deposit_error}'
+stack_trace: |-
+  === MOBILE DEPOSIT PIPELINE ===
+  deposit={deposit_id}  member={member_id}  amount=${deposit_amount}
+  --- PROCESSING STAGES ---
+    STAGE                STATUS      DETAIL
+    image_capture        COMPLETE    front+back captured, quality=92%
+    ocr_extraction       COMPLETE    MICR: routing={routing_number} acct=****{acct_last4}
+    duplicate_check      COMPLETE    no duplicates in 90-day window
+    amount_verify        FAILED      ocr_amount=${deposit_amount} entered=$0.00  <<< MISMATCH
+    fraud_screen         SKIPPED     blocked by amount_verify failure
+    funds_hold           SKIPPED     ---
+  stage={deposit_stage}  error={deposit_error}
+  hold_policy=REG-CC  availability=NEXT_BUSINESS_DAY  risk_tier=LOW
+  ACTION: reject_deposit=true  notify_member=true  alert=MOBILE-DEPOSIT-FAIL
+correlation_attr:
+  key: infra.ocr_engine_version
+  value: tesseract-v5.3.4-patch1
+fault_params:
+  deposit_id: {format: "DEP-{n}", n: {randint: [100000, 999999]}}
+  deposit_amount: {uniform: [50.0, 5000.0], round: 2}
+  member_id: {format: "{p}-{n}", p: {choice: [M, MBR, USR]}, n: {randint: [1000000, 9999999]}}
+  deposit_stage: {choice: [amount_verify, fraud_screen, funds_hold, ocr_extraction]}
+  deposit_error: {choice: [AMOUNT_MISMATCH, DUPLICATE_DETECTED, IMAGE_QUALITY_LOW, MICR_UNREADABLE, ENDORSEMENT_MISSING]}
+  routing_number: {randint: [100000000, 999999999]}
+  acct_last4: {randint: [1000, 9999]}
+rca_clues:
+  mobile-gateway:
+    gateway.deposit_ocr_quality: {uniform: [55, 84], round: 1}
+    gateway.image_capture_retries: {randint: [2, 5]}
+  document-vault:
+    document.s3_upload_status: TIMEOUT
+    document.queue_depth: {randint: [500, 2000]}
+  claims-processor:
+    claims.deposit_image_missing: true
+    claims.pipeline_blocked_by: document-vault
+  payment-engine:
+    payment.deposit_hold_policy: REG_CC_EXTENDED
+    payment.micr_parse_status: FAILED

@@ -1,0 +1,48 @@
+name: PACS Storage Capacity Warning
+subsystem: radiology
+vehicle_section: pacs_storage
+error_type: PACS-CAPACITY-CRITICAL
+sensor_type: storage_monitor
+affected_services:
+- imaging-service
+- data-warehouse
+cascade_services:
+- clinical-alerts
+- ehr-system
+description: PACS archive storage capacity approaching critical threshold, risking image loss
+investigation_notes: |-
+  Root Cause: PACS storage volumes fill when DICOM image retention policies are not enforced, modality worklists generate excessive preliminary/secondary capture images, or archive migration jobs to long-term storage (VNA) have stalled. High-resolution modalities (CT, MRI) consume 500MB-2GB per study.
+  Remediation: 1) Check the archive migration job status: `pacs-admin archive-status --volume {volume_id}`. 2) Trigger emergency archive migration to VNA: `pacs-admin migrate --volume {volume_id} --older-than 90d --destination VNA-TIER2`. 3) Identify and purge orphaned DICOM objects: `pacs-admin cleanup --volume {volume_id} --orphans-only`. 4) Expand the volume if migration is insufficient: `pacs-admin volume-expand --volume {volume_id} --add-tb 10`. 5) Review retention policies per radiology department guidelines. 6) Enable DICOM compression (JPEG2000 lossless) for new studies to reduce storage consumption.
+remediation_action: expand_pacs_storage
+error_message: '[PACS] PACS-CAPACITY-CRITICAL: volume={volume_id} usage={usage_pct}% threshold={threshold_pct}% remaining={remaining_gb}GB'
+stack_trace: |-
+  === PACS STORAGE VOLUME REPORT ===
+  ------------------------------------------------------------------------
+  VOLUME          | TOTAL TB | USED TB | FREE GB | USAGE% | STATUS
+  ------------------------------------------------------------------------
+  {volume_id:15s} | 50.0     | {usage_pct}%  | {remaining_gb}    | {usage_pct}%  | CRITICAL
+  PACS-VOL-02     | 50.0     | 72.3%   | 13850   | 72.3%  | OK
+  PACS-ARCHIVE-01 | 200.0    | 65.1%   | 69800   | 65.1%  | OK
+  ------------------------------------------------------------------------
+  PACS-CAPACITY-CRITICAL: {volume_id} at {usage_pct}% (threshold: {threshold_pct}%)
+  Remaining: {remaining_gb}GB — estimated time to full: <48 hours
+  Action required: archive migration or volume expansion
+correlation_attr:
+  key: infra.pacs_storage_controller
+  value: netapp-ontap-9.14.1-patch
+fault_params:
+  volume_id: {choice: [PACS-VOL-01, PACS-VOL-02, PACS-ARCHIVE-01]}
+  usage_pct: {uniform: [88.0, 98.5], round: 1}
+  threshold_pct: 85.0
+  remaining_gb: {randint: [50, 500]}
+rca_clues:
+  imaging-service:
+    pacs.archive_migration_stalled: true
+    pacs.volume_fill_rate_gb_day: {uniform: [50, 200], round: 0}
+  data-warehouse:
+    etl.imaging_archive_full: true
+    etl.vna_migration_pending: {randint: [500, 5000]}
+  clinical-alerts:
+    alerts.storage_critical_fired: true
+  ehr-system:
+    ehr.new_study_routing: blocked

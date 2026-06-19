@@ -1,0 +1,60 @@
+name: Member Session Timeout Cascade
+subsystem: member_services
+vehicle_section: session_manager
+error_type: PORTAL-SESSION-CASCADE
+sensor_type: session_management
+affected_services:
+- member-portal
+- auth-gateway
+cascade_services:
+- mobile-gateway
+- payment-engine
+description: Mass member session invalidation causing authentication storm and portal outage
+investigation_notes: |-
+  1. Redis cluster primary failure caused the session store to lose all active sessions. Check Redis sentinel logs: redis-cli -p 26379 SENTINEL get-master-addr-by-name banking-sessions.
+  2. Thundering herd problem: reauth rate exceeds auth-gateway capacity (rate vs 500/min). Implement token extension — issue new JWT tokens with extended TTL to surviving sessions without requiring full re-authentication.
+  3. Circuit breaker on auth-gateway opened at T+12s — this prevents total auth system collapse but blocks all new logins. Set circuit breaker to HALF_OPEN with 10% traffic sampling.
+  4. Redis cluster recovery: verify replicas 2/3 are healthy, promote a replica to primary. Command: redis-cli -p 26379 SENTINEL failover banking-sessions. Estimated recovery 5min.
+  5. Rate limit re-authentication attempts with exponential backoff on the client side — mobile app and portal should retry with jitter to prevent synchronized retry storms.
+  6. Post-incident: implement session persistence to a secondary store (DynamoDB/Elasticache Global) so Redis primary failure doesn't cascade to full session loss.
+remediation_action: reset_session_pool
+error_message: '[PORTAL] PORTAL-SESSION-CASCADE: invalidated={sessions_invalidated} active_before={sessions_active} trigger={session_trigger}
+  reauth_rate={reauth_rate}/min'
+stack_trace: |-
+  === SESSION CASCADE REPORT ===
+  trigger={session_trigger}
+  --- SESSION METRICS ---
+    active_before={sessions_active}  invalidated={sessions_invalidated}
+    reauth_attempts={reauth_rate}/min  auth_capacity=500/min
+    overflow={reauth_rate}/min vs 500/min capacity  <<< THUNDERING HERD
+  --- TIMELINE ---
+    T+0s    session_store_failover triggered
+    T+2s    redis_cluster primary failed
+    T+5s    {sessions_invalidated} sessions lost
+    T+8s    reauth storm begins ({reauth_rate}/min)
+    T+12s   auth-gateway circuit breaker OPEN
+  --- INFRASTRUCTURE ---
+    redis_cluster=DEGRADED  primary=DOWN  replicas=2/3
+    session_store=REBUILDING  estimated_recovery=5min
+  ACTION: rate_limit_auth=true  extend_tokens=true  alert=PORTAL-SESSION-CASCADE
+correlation_attr:
+  key: infra.redis_cluster_config
+  value: redis-7.2.4-sentinel-patch
+fault_params:
+  sessions_invalidated: {randint: [5000, 50000]}
+  sessions_active: {randint: [50000, 200000]}
+  session_trigger: {choice: [redis_failover, session_store_corruption, config_push_error, cert_rotation_failure]}
+  reauth_rate: {randint: [1000, 5000]}
+rca_clues:
+  member-portal:
+    portal.sessions_lost: {randint: [10000, 50000]}
+    portal.redis_cluster_status: PRIMARY_DOWN
+  auth-gateway:
+    auth.reauth_storm_rate_per_min: {randint: [2000, 8000]}
+    auth.circuit_breaker_state: OPEN
+  mobile-gateway:
+    gateway.session_recovery_attempts: {randint: [5000, 20000]}
+    gateway.jwt_extension_enabled: false
+  payment-engine:
+    payment.in_flight_txn_orphaned: {randint: [50, 300]}
+    payment.session_dependent_holds: {randint: [20, 100]}

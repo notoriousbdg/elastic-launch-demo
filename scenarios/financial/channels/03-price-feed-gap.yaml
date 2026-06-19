@@ -1,0 +1,35 @@
+name: Price Feed Gap
+subsystem: market_data
+vehicle_section: feed_handler
+error_type: MDF-PRICE-GAP
+sensor_type: feed_continuity
+affected_services:
+- market-data-feed
+- matching-engine
+cascade_services:
+- risk-calculator
+- customer-portal
+description: Market data feed missing price ticks for one or more instruments
+investigation_notes: ''
+remediation_action: ''
+error_message: '[MDF] MDF-PRICE-GAP: symbol={symbol} gap_ms={gap_ms} exchange={exchange} seq_start={seq_start} seq_end={seq_end}'
+stack_trace: |-
+  === FEED HANDLER SEQUENCE ANALYSIS ===
+  symbol={symbol}  exchange={exchange}  feed_id=MDF-PRIMARY-01
+  seq_expected={seq_start}  seq_received={seq_end}
+  gap_duration_ms={gap_ms}  max_allowed_ms=200
+  --- SEQUENCE WINDOW ---
+    seq {seq_start}  MISSING  (gap start)
+    ...  ({gap_ms}ms silence)
+    seq {seq_end}  RECEIVED  price=244.7200  qty=1500  ts=14:32:07.882
+  retransmit_requested=true  channel=FAST/FIX  multicast_grp=224.0.31.1:14310
+  handler_state=RECOVERING  stale_instruments=12  affected_books=3
+  ACTION: mark_stale=true  request_retransmit=true  alert=MDF-PRICE-GAP
+correlation_attr: {}
+fault_params:
+  symbol: {choice: [AAPL, GOOGL, MSFT, AMZN, TSLA, JPM, GS, MS, BAC, C]}
+  gap_ms: {randint: [500, 10000]}
+  exchange: {choice: [NYSE, NASDAQ, CBOE, CME, ICE, BATS, IEX]}
+  seq_start: {randint: [1000000, 9999999]}
+  seq_end: {randint: [1000000, 9999999]}
+rca_clues: {}

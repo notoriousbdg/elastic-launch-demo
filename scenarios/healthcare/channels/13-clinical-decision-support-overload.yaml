@@ -1,0 +1,55 @@
+name: Clinical Decision Support Overload
+subsystem: alerting
+vehicle_section: cds_engine
+error_type: CDS-OVERLOAD
+sensor_type: cds_rule_engine
+affected_services:
+- clinical-alerts
+- ehr-system
+cascade_services:
+- pharmacy-system
+- patient-monitor
+description: Clinical decision support rule engine overloaded, unable to evaluate rules within SLA
+investigation_notes: |-
+  Root Cause: CDS rule engine overload occurs when complex rule sets (sepsis screening, VTE prophylaxis, fall risk) are evaluated against large patient populations simultaneously, typically during shift change when nursing assessments trigger bulk re-evaluations. The Arden Syntax MLM execution pool becomes saturated.
+  Remediation: 1) Check the CDS rule engine thread pool: `cds-admin pool-status --engine RULE-EVAL`. 2) Restart the CDS evaluation service: `systemctl restart cds-rule-engine`. 3) Prioritize critical rule sets: `cds-admin prioritize --ruleset sepsis-screening --level URGENT`. 4) Temporarily disable low-priority rule sets: `cds-admin disable --ruleset fall-risk --duration 30m`. 5) Scale the rule engine worker pool: `cds-admin scale-workers --count 8 --engine RULE-EVAL`. 6) Verify the patient context cache is not stale — flush if needed: `cds-admin cache-flush --scope patient-context`.
+remediation_action: restart_cds_engine
+error_message: '[CDS] CDS-OVERLOAD: rules_queued={pending_rules} eval_ms={eval_ms} threshold={max_eval_ms}ms patient={patient_id}'
+stack_trace: |-
+  === CDS RULE ENGINE STATUS ===
+  Patient Context: {patient_id}
+  Evaluation Time: {eval_ms}ms | SLA Threshold: {max_eval_ms}ms | STATUS: BREACHED
+  ------------------------------------------------------------------------
+  RULE SET            | RULES | STATUS    | EVAL MS | RESULT
+  ------------------------------------------------------------------------
+  Sepsis Screening    | 12    | TIMEOUT   | {eval_ms}   | INCOMPLETE
+  Drug Interaction    | 8     | QUEUED    | --      | PENDING
+  Fall Risk           | 5     | QUEUED    | --      | PENDING
+  VTE Prophylaxis     | 6     | QUEUED    | --      | PENDING
+  ------------------------------------------------------------------------
+  Total Pending: {pending_rules} rules | Queue Depth: SATURATED
+  CDS-OVERLOAD: Evaluation backlog — {pending_rules} rules queued, {eval_ms}ms exceeds {max_eval_ms}ms SLA
+  Clinical alerts for {patient_id} delayed — escalation required
+correlation_attr:
+  key: deployment.cds_rule_engine
+  value: arden-mlm-v3.0.1-experimental
+fault_params:
+  pending_rules: {randint: [50, 500]}
+  eval_ms: {randint: [3000, 15000]}
+  max_eval_ms: 2000
+  patient_id:
+    format: "PT-{n}"
+    n: {randint: [100000, 999999]}
+rca_clues:
+  clinical-alerts:
+    cds.rule_eval_pool_saturated: true
+    cds.arden_mlm_queue: {randint: [50, 300]}
+  ehr-system:
+    ehr.cds_evaluation_lag_s: {randint: [30, 180]}
+    ehr.pending_cds_results: {randint: [20, 100]}
+  pharmacy-system:
+    pharmacy.ddi_screening_delayed: true
+    pharmacy.held_orders: {randint: [5, 25]}
+  patient-monitor:
+    vitals.alert_evaluation_stale: true
+    vitals.sepsis_screen_pending: {randint: [2, 10]}

@@ -1,0 +1,201 @@
+service: vpc-network-manager
+sort_order: 1
+cloud_provider: gcp
+cloud_region: us-central1
+cloud_platform: gcp_compute_engine
+cloud_availability_zone: us-central1-a
+subsystem: core_network
+language: go
+topology:
+- - cloud-load-balancer
+  - /api/v1/lb/backend-health
+  - GET
+- - cloud-load-balancer
+  - /api/v1/lb/forwarding-rules
+  - GET
+- - cloud-nat-gateway
+  - /api/v1/nat/port-allocation
+  - GET
+- - cloud-armor-waf
+  - /api/v1/armor/policy-status
+  - GET
+- - cloud-dns-resolver
+  - /api/v1/dns/zone-health
+  - GET
+entry_endpoints:
+- - /api/v1/vpc/networks
+  - GET
+- - /api/v1/vpc/subnets
+  - GET
+- - /api/v1/vpc/firewall-rules
+  - GET
+db_operations:
+- - SELECT
+  - vpc_networks
+  - SELECT network_id, name, subnet_mode, peering_count, route_count FROM vpc_networks WHERE project = ? AND status = 'ACTIVE'
+- - SELECT
+  - firewall_rules
+  - SELECT rule_id, name, priority, direction, action, target_tags FROM firewall_rules WHERE network_id = ? ORDER BY priority
+- - UPDATE
+  - vpc_routes
+  - UPDATE vpc_routes SET status = ?, updated_at = NOW() WHERE network_id = ? AND dest_range = ?
+emit_fault_logs: true
+kpi_emitter: false
+constants:
+  NETWORKS:
+  - gcpnet-vpc-prod
+  - gcpnet-vpc-staging
+  - gcpnet-vpc-shared
+  SUBNETS:
+  - gcpnet-subnet-central1
+  - gcpnet-subnet-east1
+  - gcpnet-subnet-europe1
+  - gcpnet-subnet-services
+state:
+  _poll_idx:
+    init: 0
+  _last_route_check:
+    init: now
+steps:
+- sample:
+    subnet:
+      expr: SUBNETS[_poll_idx % len(SUBNETS)]
+    used_ips:
+      if_active:
+        randint:
+        - 3900
+        - 4090
+      else:
+        randint:
+        - 1500
+        - 3200
+- counter:
+    state_key: _poll_idx
+    by: 1
+- sample:
+    util_pct:
+      expr: round(used_ips / 4094 * 100, 1)
+- metric:
+    name: vpc.subnet.ip_utilization
+    value:
+      var: util_pct
+    unit: '%'
+- metric:
+    name: vpc.subnet.used_ips
+    value:
+      var: used_ips
+    unit: addresses
+- log:
+    level: INFO
+    message: 'vpc-monitor: subnet={subnet} used_ips={used_ips}/4094 utilization={util_pct}% network=gcpnet-vpc-prod'
+    attrs:
+      operation: subnet_monitor
+      vpc.subnet:
+        var: subnet
+      vpc.used_ips:
+        var: used_ips
+      vpc.total_ips: 4094
+      vpc.utilization_pct:
+        var: util_pct
+- every:
+    seconds: 10
+    state_key: _last_route_check
+    steps:
+    - sample:
+        network:
+          choice: NETWORKS
+        route_count:
+          if_active:
+            randint:
+            - 240
+            - 250
+          else:
+            randint:
+            - 80
+            - 200
+        peering_count:
+          randint:
+          - 2
+          - 5
+    - metric:
+        name: vpc.route.count
+        value:
+          var: route_count
+        unit: routes
+    - metric:
+        name: vpc.peering.count
+        value:
+          var: peering_count
+        unit: peerings
+    - log:
+        level: INFO
+        message: 'vpc-monitor: network={network} routes={route_count}/250 peerings={peering_count} status=ACTIVE'
+        attrs:
+          operation: route_check
+          vpc.network:
+            var: network
+          vpc.route_count:
+            var: route_count
+          vpc.peering_count:
+            var: peering_count
+- sample:
+    fw_rules_evaluated:
+      randint:
+      - 10000
+      - 50000
+    fw_denied:
+      if_active:
+        randint:
+        - 500
+        - 5000
+      else:
+        randint:
+        - 10
+        - 100
+- metric:
+    name: vpc.firewall.rules_evaluated
+    value:
+      var: fw_rules_evaluated
+    unit: evaluations
+- metric:
+    name: vpc.firewall.denied_packets
+    value:
+      var: fw_denied
+    unit: packets
+- log:
+    level: INFO
+    message: 'vpc-firewall: evaluated={fw_rules_evaluated} denied={fw_denied} network=gcpnet-vpc-prod interval=60s'
+    attrs:
+      operation: firewall_eval
+      vpc.firewall.evaluated:
+        var: fw_rules_evaluated
+      vpc.firewall.denied:
+        var: fw_denied
+- sample:
+    flows_ingress:
+      randint:
+      - 50000
+      - 200000
+    flows_egress:
+      randint:
+      - 30000
+      - 150000
+- metric:
+    name: vpc.flow.ingress
+    value:
+      var: flows_ingress
+    unit: flows
+- metric:
+    name: vpc.flow.egress
+    value:
+      var: flows_egress
+    unit: flows
+- log:
+    level: INFO
+    message: 'vpc-flow-summary: ingress_flows={flows_ingress} egress_flows={flows_egress} sampling_rate=0.5 interval=60s'
+    attrs:
+      operation: flow_summary
+      vpc.flow.ingress:
+        var: flows_ingress
+      vpc.flow.egress:
+        var: flows_egress

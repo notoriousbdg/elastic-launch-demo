@@ -1,0 +1,143 @@
+service: mobile-gateway
+sort_order: 1
+cloud_provider: aws
+cloud_region: us-east-1
+cloud_platform: aws_ec2
+cloud_availability_zone: us-east-1a
+subsystem: digital_banking
+language: java
+topology:
+- - auth-gateway
+  - /api/v1/auth/verify-token
+  - POST
+- - payment-engine
+  - /api/v1/payments/initiate
+  - POST
+- - claims-processor
+  - /api/v1/claims/submit-fnol
+  - POST
+- - member-portal
+  - /api/v1/member/profile
+  - GET
+- - document-vault
+  - /api/v1/docs/upload
+  - POST
+entry_endpoints:
+- - /api/v1/mobile/login
+  - POST
+- - /api/v1/mobile/accounts
+  - GET
+- - /api/v1/mobile/deposit
+  - POST
+- - /api/v1/mobile/transfer
+  - POST
+db_operations:
+- - SELECT
+  - member_sessions
+  - SELECT session_id, member_id, device_type, last_activity FROM member_sessions WHERE member_id = ? AND status = 'ACTIVE'
+- - INSERT
+  - mobile_deposits
+  - INSERT INTO mobile_deposits (deposit_id, member_id, amount, image_front, image_back, status, ts) VALUES (?, ?, ?, ?, ?,
+    'PENDING', NOW())
+emit_fault_logs: true
+kpi_emitter: false
+constants:
+  API_ENDPOINTS:
+  - /api/v1/mobile/accounts
+  - /api/v1/mobile/transfer
+  - /api/v1/mobile/deposit
+  - /api/v1/mobile/pay-bills
+  - /api/v1/mobile/claims
+  - /api/v1/mobile/insurance
+state:
+  _request_count:
+    init: 0
+  _last_summary:
+    init: now
+steps:
+- sample:
+    api_endpoint:
+      choice: API_ENDPOINTS
+    api_device:
+      choice:
+      - iPhone_15_Pro
+      - Samsung_S24
+      - iPad_Air
+      - Pixel_8
+    api_latency_ms:
+      uniform:
+      - 20.0
+      - 200.0
+      round: 1
+- counter:
+    state_key: _request_count
+    by: 1
+- log:
+    level: INFO
+    message: '[MOBILE] api_request endpoint={api_endpoint} device={api_device} latency_ms={api_latency_ms} status=200'
+    attrs:
+      operation: api_request
+      api.endpoint:
+        var: api_endpoint
+      api.device:
+        var: api_device
+      api.latency_ms:
+        var: api_latency_ms
+      api.status: 200
+- sample:
+    session_active:
+      randint:
+      - 8000
+      - 15000
+- log:
+    level: INFO
+    message: '[MOBILE] session_health active_sessions={session_active} auth_rate=99.2% platform=iOS/Android status=NOMINAL'
+    attrs:
+      operation: session_health
+      session.active:
+        var: session_active
+      session.auth_rate: 99.2
+- every:
+    seconds: 10
+    state_key: _last_summary
+    steps:
+    - log:
+        level: INFO
+        message: '[MOBILE] gateway_summary total_requests={_request_count} error_rate=0.02% uptime=99.99% status=NOMINAL'
+        attrs:
+          operation: gateway_summary
+          gateway.total_requests:
+            var: _request_count
+          gateway.error_rate: 0.02
+- sample:
+    api_latency_metric:
+      if_active:
+        uniform:
+        - 2000.0
+        - 15000.0
+        round: 1
+      else:
+        uniform:
+        - 15.0
+        - 250.0
+        round: 1
+- metric:
+    name: mobile_gateway.api_latency_ms
+    value:
+      var: api_latency_metric
+    unit: ms
+- metric:
+    name: mobile_gateway.active_sessions
+    value:
+      randint:
+      - 8000
+      - 15000
+    unit: sessions
+- metric:
+    name: mobile_gateway.requests_per_sec
+    value:
+      uniform:
+      - 800.0
+      - 2400.0
+      round: 1
+    unit: req/s

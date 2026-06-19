@@ -1,0 +1,58 @@
+name: Payment Gateway Timeout
+subsystem: payments
+vehicle_section: checkout_pipeline
+error_type: PAYMENT-GATEWAY-TIMEOUT
+sensor_type: gateway_latency
+affected_services:
+- payment-processor
+- order-management
+cascade_services:
+- storefront-gateway
+- fulfillment-orchestrator
+description: Payment gateway connections timing out, causing checkout failures and order drop-off
+investigation_notes: |-
+  1. Check payment-processor logs for PAYMENT-GATEWAY-TIMEOUT — note which gateway provider ({payment_provider}) is affected.
+  2. Query recent error rate: FROM logs.otel.ecommerce.* | WHERE body.text LIKE "*PAYMENT-GATEWAY-TIMEOUT*" | STATS count() BY service.name.
+  3. Verify TLS handshake health — timeouts above {payment_timeout_ms}ms often indicate certificate validation delays or MTU black holes on the path to the provider.
+  4. Check the payment provider's status page and correlate timing with their reported incidents.
+  5. Review connection pool exhaustion: if pool_size={pool_size} and active={active_connections}, the pool is saturated — scale horizontally or increase pool size.
+  6. As an immediate mitigation, route traffic to the secondary gateway provider while the primary recovers.
+remediation_action: restart_payment_gateway
+error_message: '[PaymentProcessor] PAYMENT-GATEWAY-TIMEOUT: provider={payment_provider} order_id={order_id} timeout={payment_timeout_ms}ms
+  pool_size={pool_size} active={active_connections} retry={retry_count}'
+stack_trace: |-
+  System.TimeoutException: PAYMENT-GATEWAY-TIMEOUT
+     at PaymentGatewayClient.ChargeAsync(ChargeRequest request)
+     at PaymentProcessor.ProcessOrder(OrderId {order_id})
+     at CheckoutOrchestrator.CompleteCheckout(SessionId {session_id})
+  Provider:      {payment_provider}
+  Timeout (ms):  {payment_timeout_ms}
+  Pool size:     {pool_size}
+  Active conns:  {active_connections}
+  Retry count:   {retry_count}
+  Last success:  {last_success_sec}s ago
+correlation_attr:
+  key: payment.gateway_degraded
+  value: true
+fault_params:
+  payment_provider: {choice: [stripe, adyen, braintree]}
+  order_id: {format: "ORD-{n}", n: {randint: [100000, 999999]}}
+  session_id: {format: "SESS-{n}", n: {randint: [100000, 999999]}}
+  payment_timeout_ms: {randint: [3000, 15000]}
+  pool_size: {randint: [50, 200]}
+  active_connections: {randint: [48, 200]}
+  retry_count: {randint: [2, 5]}
+  last_success_sec: {randint: [30, 300]}
+rca_clues:
+  payment-processor:
+    payment.gateway_timeout_ms: {randint: [3000, 15000]}
+    payment.provider_circuit_open: true
+  order-management:
+    order.checkout_failure_rate_pct: {uniform: [15, 60], round: 1}
+    order.pending_payment_count: {randint: [50, 500]}
+  storefront-gateway:
+    storefront.checkout_error_rate_pct: {uniform: [10, 45], round: 1}
+    storefront.error_page_shown: true
+  fulfillment-orchestrator:
+    fulfillment.pending_payment_orders: {randint: [20, 200]}
+    fulfillment.hold_queue_depth: {randint: [10, 100]}

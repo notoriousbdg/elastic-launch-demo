@@ -1,0 +1,46 @@
+name: Payment Token Expiry
+subsystem: payments
+vehicle_section: tokenization
+error_type: PAYMENT-TOKEN-EXPIRY
+sensor_type: token_vault
+affected_services:
+- payment-processor
+cascade_services:
+- order-management
+description: Stored payment tokens expiring for recurring subscribers — subscription renewals and auto-reorders failing silently
+investigation_notes: |-
+  1. Check payment-processor logs for PAYMENT-TOKEN-EXPIRY — expired_tokens={expired_tokens} affecting {affected_subscriptions} subscriptions.
+  2. Identify the token age distribution: tokens older than {token_max_age_days} days are at highest risk — batch renew before they expire.
+  3. Check if the card network issued a mass BIN (Bank Identification Number) change — this can invalidate thousands of tokens simultaneously.
+  4. Trigger Account Updater API calls to the card networks — Visa and Mastercard provide automatic card number updates for expiring credentials.
+  5. For tokens that cannot be auto-renewed, send re-authorization emails to affected customers ({affected_subscriptions} contacts required).
+  6. Review token refresh policy: tokens should be refreshed 30 days before expiry, not on expiry — adjust the refresh scheduler interval.
+remediation_action: refresh_payment_tokens
+error_message: '[PaymentProcessor] PAYMENT-TOKEN-EXPIRY: expired_tokens={expired_tokens} affected_subscriptions={affected_subscriptions}
+  revenue_at_risk_usd={subscription_revenue_usd} token_age_days={token_max_age_days}'
+stack_trace: |-
+  PaymentTokenException: PAYMENT-TOKEN-EXPIRY
+     at TokenVault.validateToken(token_id={token_id})
+     at PaymentProcessor.chargeSubscription(sub_id={subscription_id})
+  Expired tokens:       {expired_tokens}
+  Affected subs:        {affected_subscriptions}
+  Revenue at risk:      ${subscription_revenue_usd}
+  Token age (max):      {token_max_age_days} days
+  Account Updater:      NOT_CONFIGURED
+correlation_attr:
+  key: payment.tokens_expiring
+  value: true
+fault_params:
+  expired_tokens: {randint: [100, 10000]}
+  affected_subscriptions: {randint: [50, 5000]}
+  subscription_revenue_usd: {uniform: [5000, 500000], round: 2}
+  token_max_age_days: {randint: [90, 365]}
+  token_id: {format: "TOK-{n}", n: {randint: [100000, 999999]}}
+  subscription_id: {format: "SUB-{n}", n: {randint: [100000, 999999]}}
+rca_clues:
+  payment-processor:
+    payment.expired_token_count: {randint: [100, 10000]}
+    payment.subscription_failure_rate_pct: {uniform: [5, 40], round: 1}
+  order-management:
+    order.subscription_renewal_failures: {randint: [50, 5000]}
+    order.churn_risk_count: {randint: [10, 1000]}

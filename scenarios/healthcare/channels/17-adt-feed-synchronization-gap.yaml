@@ -1,0 +1,58 @@
+name: ADT Feed Synchronization Gap
+subsystem: clinical_records
+vehicle_section: adt_interface
+error_type: ADT-SYNC-FAIL
+sensor_type: adt_feed
+affected_services:
+- ehr-system
+- scheduling-api
+cascade_services:
+- patient-monitor
+- billing-processor
+- lab-integration
+description: ADT (Admit-Discharge-Transfer) event feed falls behind, causing stale patient location data
+investigation_notes: |-
+  Root Cause: ADT feed synchronization gaps occur when the HL7 ADT event processor cannot keep pace with admission/discharge/transfer volume — common during high-census periods, mass casualty events, or when the receiving interface engine (Mirth/Rhapsody) has a thread pool exhaustion issue.
+  Remediation: 1) Restart the ADT feed processor: `adt-admin restart-feed --feed {feed_id}`. 2) Check the ADT event queue depth and drain rate: `adt-admin queue-status --feed {feed_id} --verbose`. 3) Run a patient index reconciliation against the ADT master: `adt-admin reconcile --feed {feed_id} --source ADT-MASTER --mode FULL`. 4) Flush the dead-letter queue for unprocessable events: `adt-admin flush-dlq --feed {feed_id} --requeue-valid`. 5) Verify downstream consumers (bed board, billing, lab) are receiving events: `adt-admin subscriber-status`. 6) Scale the ADT processor thread pool: `adt-admin scale-threads --feed {feed_id} --count 8`.
+remediation_action: restart_adt_feed
+error_message: '[EHR] ADT-SYNC-FAIL: feed={feed_id} lag={gap_seconds}s queue_depth={queue_depth} patient={patient_id} event={adt_event_type}'
+stack_trace: |-
+  === ADT FEED STATUS — {feed_id} ===
+  Feed Lag: {gap_seconds}s | Queue Depth: {queue_depth} | Threshold: 30s
+  ------------------------------------------------------------------------
+  SEQ    | EVENT | PATIENT     | TIMESTAMP   | STATUS
+  ------------------------------------------------------------------------
+  001247 | {adt_event_type}    | {patient_id}  | 20260217143052 | QUEUED
+  001246 | A08   | PT-887432   | 20260217143052 | QUEUED
+  001245 | A03   | PT-556201   | 20260217143052 | QUEUED
+  001244 | A01   | PT-334789   | 20260217143052 | DELIVERED
+  ------------------------------------------------------------------------
+  ADT-SYNC-FAIL: {feed_id} lagging {gap_seconds}s with {queue_depth} events queued
+  Patient {patient_id} event {adt_event_type} pending delivery
+  Downstream systems receiving stale location data
+correlation_attr:
+  key: deployment.adt_processor_build
+  value: mirth-adt-v3.12.0-hotfix9
+fault_params:
+  feed_id: {choice: [ADT-FEED-01, ADT-FEED-02, ADT-FEED-03]}
+  gap_seconds: {randint: [60, 600]}
+  queue_depth: {randint: [100, 5000]}
+  patient_id:
+    format: "PT-{n}"
+    n: {randint: [100000, 999999]}
+  adt_event_type: {choice: [A01, A02, A03, A04, A08]}
+rca_clues:
+  ehr-system:
+    adt.feed_processor_threads_exhausted: true
+    adt.queue_drain_rate_per_s: {uniform: [0.5, 3.0], round: 1}
+  scheduling-api:
+    sched.patient_location_stale: true
+    sched.bed_board_accuracy_pct: {uniform: [60, 85], round: 1}
+  patient-monitor:
+    vitals.patient_assignment_stale: true
+    vitals.affected_beds: {randint: [5, 20]}
+  billing-processor:
+    billing.encounter_sync_lag_s: {randint: [120, 600]}
+  lab-integration:
+    lis.specimen_routing_stale: true
+    lis.misrouted_results: {randint: [2, 10]}

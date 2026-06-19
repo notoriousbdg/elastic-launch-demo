@@ -1,0 +1,48 @@
+name: Subnet IP Exhaustion
+subsystem: core_network
+vehicle_section: vpc_subnets
+error_type: VPC-SUBNET-IP-EXHAUSTION
+sensor_type: subnet_usage
+affected_services:
+- vpc-network-manager
+- cloud-nat-gateway
+cascade_services:
+- cloud-load-balancer
+- cloud-cdn-service
+description: VPC subnet running out of available IP addresses
+investigation_notes: |-
+  Root cause: Subnet CIDR range is nearly fully allocated. GKE nodes, Cloud NAT, and internal load balancers all consume IPs from the subnet pool. Identify top consumers with:
+    gcloud compute addresses list --filter='subnetwork:<subnet>' --project=<project>
+    gcloud compute instances list --filter='networkInterfaces.subnetwork:<subnet>'
+  Remediation: Expand the subnet CIDR range in-place (GCP supports non-disruptive expansion):
+    gcloud compute networks subnets expand-ip-range <subnet> --region=<region> --prefix-length=<new_prefix>
+  Alternatively, add secondary IP ranges for GKE pods/services, or migrate workloads to a new subnet with a larger CIDR block. Check for leaked IPs from terminated GKE pods or orphaned internal load balancer forwarding rules.
+remediation_action: reconfigure_firewall_rules
+error_message: level=error ts={{timestamp}} caller=subnet_monitor.go:189 msg="VPC-SUBNET-IP-EXHAUSTION" project={gcp_project}
+  subnet={subnet_name} cidr={subnet_cidr} used={subnet_used_ips}/{subnet_total_ips} utilization={subnet_util_pct}% region={gcp_region}
+stack_trace: "goroutine 156 [running]:\ncloud.google.com/go/compute/apiv1.(*SubnetworksClient).Get(0xc000420000)\n\t/app/internal/vpc/subnet_monitor.go:189\
+  \ +0x1b8\n  Subnet: {subnet_name} ({subnet_cidr})\n  Used IPs: {subnet_used_ips}/{subnet_total_ips} ({subnet_util_pct}%)\n\
+  \  Region: {gcp_region}\n  Action: Expand CIDR range or create secondary range"
+correlation_attr:
+  key: infra.gke_node_pool
+  value: pool-spot-n2d-burst
+fault_params:
+  gcp_project: {choice: [gcpnet-prod-001, gcpnet-prod-002, gcpnet-staging]}
+  gcp_region: {choice: [us-central1, us-east1, europe-west1]}
+  subnet_name: {choice: [gcpnet-subnet-central1, gcpnet-subnet-east1, gcpnet-subnet-europe1, gcpnet-subnet-services]}
+  subnet_cidr: {choice: [10.128.0.0/20, 10.142.0.0/20, 10.132.0.0/20]}
+  subnet_used_ips: {randint: [3900, 4090]}
+  subnet_total_ips: 4094
+  subnet_util_pct: {uniform: [95.0, 100.0], round: 1}
+rca_clues:
+  vpc-network-manager:
+    vpc.subnet_util_pct: {uniform: [96, 100], round: 1}
+    vpc.secondary_range_available: false
+  cloud-nat-gateway:
+    nat.ip_allocation_failures: {randint: [10, 50]}
+    nat.affected_subnet: gcpnet-subnet-central1
+  cloud-load-balancer:
+    lb.new_backend_registration: blocked
+    lb.pending_ip_requests: {randint: [5, 20]}
+  cloud-cdn-service:
+    cdn.origin_health_check_ip: exhausted

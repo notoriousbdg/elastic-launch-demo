@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import logging
+import time
 from typing import TYPE_CHECKING
 
 import httpx
@@ -11,7 +13,7 @@ import httpx
 from elastic_config.deployer_base import _kibana_headers, _retry_http, ProgressCallback
 
 if TYPE_CHECKING:
-    from scenarios.base import BaseScenario
+    from scenario_engine.base import BaseScenario
 
 logger = logging.getLogger("deployer")
 
@@ -174,29 +176,16 @@ class AlertingMixin:
         Primary: name-based search (new-style rules named "{scenario_name} CH…").
         Fallback: tag-based search (old-style rules tagged with namespace).
 
+        IDs are collected across all search phases first, then deleted
+        concurrently so retry backoff on one rule doesn't block others.
+
         Returns ``(deleted, remaining)`` — remaining > 0 indicates rules that
         couldn't be removed (e.g. transient API errors despite retries).
         """
-        deleted = 0
-        deleted_ids: set[str] = set()
         scenario_name = self.scenario.scenario_name
+        rule_ids: set[str] = set()
 
-        def _delete_rule(rule_id: str) -> None:
-            nonlocal deleted
-            if not rule_id or rule_id in deleted_ids:
-                return
-            resp = _retry_http(
-                lambda: client.delete(
-                    f"{self.kibana_url}/api/alerting/rule/{rule_id}",
-                    headers=_kibana_headers(self.api_key),
-                ),
-                label=f"delete alert rule {rule_id}",
-            )
-            if resp is not None and (resp.status_code < 300 or resp.status_code == 404):
-                deleted_ids.add(rule_id)
-                deleted += 1
-
-        # Primary: name-based (new-style rules named "{scenario_name} CH…")
+        # Phase 1: name-based (new-style rules named "{scenario_name} CH…")
         for page in range(1, 11):
             resp = _retry_http(
                 lambda: client.get(
@@ -215,11 +204,10 @@ class AlertingMixin:
             if not rules:
                 break
             for rule in rules:
-                if scenario_name not in rule.get("name", ""):
-                    continue
-                _delete_rule(rule.get("id", ""))
+                if scenario_name in rule.get("name", "") and rule.get("id"):
+                    rule_ids.add(rule["id"])
 
-        # Fallback: tag-based (old-style rules tagged with namespace)
+        # Phase 2: tag-based (old-style rules tagged with namespace)
         for page in range(1, 11):
             resp = _retry_http(
                 lambda: client.get(
@@ -238,9 +226,10 @@ class AlertingMixin:
             if not rules:
                 break
             for rule in rules:
-                _delete_rule(rule.get("id", ""))
+                if rule.get("id"):
+                    rule_ids.add(rule["id"])
 
-        # Migration cleanup: pre-refactor rules named "Channel XX: {name}" with no scenario prefix.
+        # Phase 3: migration cleanup — pre-refactor rules named "Channel XX: {name}"
         old_names: set[str] = set()
         for ch_num, ch_data in self.scenario.channel_registry.items():
             num_str = f"{int(ch_num):02d}"
@@ -264,26 +253,51 @@ class AlertingMixin:
                 if not rules:
                     break
                 for rule in rules:
-                    if rule.get("name", "") in old_names:
-                        _delete_rule(rule.get("id", ""))
+                    if rule.get("name", "") in old_names and rule.get("id"):
+                        rule_ids.add(rule["id"])
 
-        # Verify: count any rules still matching this scenario after cleanup.
+        # Delete all collected IDs concurrently — httpx.Client connection pool is
+        # thread-safe, and concurrent deletes avoid serial retry-backoff stacking.
+        def _delete_one(rule_id: str) -> bool:
+            resp = _retry_http(
+                lambda: client.delete(
+                    f"{self.kibana_url}/api/alerting/rule/{rule_id}",
+                    headers=_kibana_headers(self.api_key),
+                ),
+                label=f"delete alert rule {rule_id}",
+            )
+            return resp is not None and (resp.status_code < 300 or resp.status_code == 404)
+
+        deleted = 0
+        if rule_ids:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+                deleted = sum(pool.map(_delete_one, rule_ids))
+
+        # Verify: count rules still matching this scenario. Kibana's saved-object
+        # index has eventual consistency so we retry a few times with backoff
+        # before reporting a non-zero remaining count.
         remaining = 0
-        verify = _retry_http(
-            lambda: client.get(
-                f"{self.kibana_url}/api/alerting/rules/_find",
-                params={"per_page": 100, "page": 1, "search_fields": "name", "search": scenario_name},
-                headers=_kibana_headers(self.api_key),
-            ),
-            label="verify alerts cleanup",
-        )
-        if verify is not None and verify.status_code < 300:
+        for attempt in range(3):
+            if attempt > 0:
+                time.sleep(2 ** attempt)  # 2s, 4s
+            verify = _retry_http(
+                lambda: client.get(
+                    f"{self.kibana_url}/api/alerting/rules/_find",
+                    params={"per_page": 100, "page": 1, "search_fields": "name", "search": scenario_name},
+                    headers=_kibana_headers(self.api_key),
+                ),
+                label="verify alerts cleanup",
+            )
+            if verify is None or verify.status_code >= 300:
+                break
             try:
                 remaining = sum(
                     1 for r in verify.json().get("data", [])
                     if scenario_name in r.get("name", "")
                 )
             except Exception:
-                pass
+                break
+            if remaining == 0:
+                break
 
         return deleted, remaining

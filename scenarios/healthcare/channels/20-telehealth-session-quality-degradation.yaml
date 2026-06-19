@@ -1,0 +1,60 @@
+name: Telehealth Session Quality Degradation
+subsystem: vital_signs
+vehicle_section: telehealth_engine
+error_type: TELEHEALTH-QOS-DEGRAD
+sensor_type: telehealth_qos
+affected_services:
+- patient-monitor
+- clinical-alerts
+cascade_services:
+- ehr-system
+- scheduling-api
+description: Telehealth video session quality degrades below clinical acceptability threshold
+investigation_notes: |-
+  Root Cause: WebRTC session quality degradation is caused by network congestion (packet loss >2%), insufficient bandwidth (<750kbps for clinical-grade video), or TURN server overload. Clinical telehealth requires higher QoS than standard video conferencing — remote physical examinations need >24fps at 720p minimum.
+  Remediation: 1) Check the TURN/STUN server status: `telehealth-admin server-status --session {session_id}`. 2) Reset the media relay for the session: `telehealth-admin reset-relay --session {session_id}`. 3) Switch to a lower-latency TURN region: `telehealth-admin switch-region --session {session_id} --region closest`. 4) If bandwidth is insufficient, downgrade to audio-only with screen share: `telehealth-admin set-mode --session {session_id} --mode audio-plus-share`. 5) Check the patient's network quality: `telehealth-admin client-diagnostics --session {session_id}`. 6) If persistent, reschedule as in-person visit: `sched-admin convert-to-inperson --session {session_id}`.
+remediation_action: reset_telehealth_relay
+error_message: '[MONITOR] TELEHEALTH-QOS-DEGRAD: session={session_id} patient={patient_id} bitrate={bitrate_kbps}kbps loss={packet_loss_pct}%
+  latency={latency_ms}ms'
+stack_trace: |-
+  === WEBRTC QUALITY METRICS — SESSION {session_id} ===
+  Patient: {patient_id} | Provider: NPI-ATTENDING
+  ------------------------------------------------------------------------
+  METRIC              | VALUE          | THRESHOLD     | STATUS
+  ------------------------------------------------------------------------
+  Video Bitrate       | {bitrate_kbps} kbps    | >750 kbps     | DEGRADED
+  Packet Loss         | {packet_loss_pct}%         | <2.0%         | CRITICAL
+  Round-Trip Latency  | {latency_ms} ms       | <300 ms       | DEGRADED
+  Jitter              | 45 ms          | <30 ms        | WARNING
+  Frame Rate          | 12 fps         | >24 fps       | DEGRADED
+  Audio MOS           | 2.8            | >3.5          | WARNING
+  ------------------------------------------------------------------------
+  TELEHEALTH-QOS-DEGRAD: Session {session_id} below clinical acceptability
+  Video quality insufficient for remote physical examination
+  Recommendation: Switch to audio-only or reschedule in-person visit
+correlation_attr:
+  key: infra.turn_server_build
+  value: coturn-4.6.2-high-concurrency
+fault_params:
+  session_id:
+    format: "TH-{n}"
+    n: {randint: [100000, 999999]}
+  patient_id:
+    format: "PT-{n}"
+    n: {randint: [100000, 999999]}
+  bitrate_kbps: {randint: [128, 512]}
+  packet_loss_pct: {uniform: [5.0, 25.0], round: 1}
+  latency_ms: {randint: [200, 2000]}
+rca_clues:
+  patient-monitor:
+    telehealth.turn_server_overloaded: true
+    telehealth.bandwidth_kbps: {randint: [128, 512]}
+  clinical-alerts:
+    alerts.session_quality_breach_count: {randint: [3, 15]}
+    alerts.provider_notified: {choice: [true, false]}
+  ehr-system:
+    ehr.visit_documentation_incomplete: true
+    ehr.telehealth_encounter_held: {randint: [1, 5]}
+  scheduling-api:
+    sched.telehealth_to_inperson_conversions: {randint: [1, 5]}
+    sched.rebooking_queue: {randint: [2, 10]}

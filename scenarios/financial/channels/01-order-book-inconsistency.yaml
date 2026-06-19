@@ -1,0 +1,39 @@
+name: Order Book Inconsistency
+subsystem: order_management
+vehicle_section: order_book
+error_type: OMS-BOOK-IMBALANCE
+sensor_type: order_book_integrity
+affected_services:
+- order-gateway
+- matching-engine
+cascade_services:
+- risk-calculator
+- audit-logger
+description: Order book bid/ask levels out of sync between primary and replica shards
+investigation_notes: ''
+remediation_action: ''
+error_message: '[OMS] OMS-BOOK-IMBALANCE: instrument={instrument} bid_ask_spread={spread}ticks max_spread={max_spread}ticks
+  book={book_id}'
+stack_trace: |-
+  === ORDER BOOK SNAPSHOT {book_id} ===
+  instrument={instrument}  status=IMBALANCED
+  --------- BID SIDE ---------  --------- ASK SIDE ---------
+    LEVEL   PRICE     QTY         LEVEL   PRICE     QTY
+    1       244.50    1200         1       244.85    800
+    2       244.48    3400         2       244.90    2100
+    3       244.45    5600         3       244.95    1500
+    4       244.40    2800         4       245.10    4200
+    5       244.35    1100         5       245.25    6700
+  spread={spread}ticks  max_allowed={max_spread}ticks
+  replica_sync=STALE  last_sync_us=48230  primary_seq=8832014  replica_seq=8831997
+  ACTION: halt_matching=true  alert=OMS-BOOK-IMBALANCE
+correlation_attr: {}
+fault_params:
+  instrument: {choice: [US.AAPL, US.GOOGL, US.MSFT, US.AMZN, US.TSLA, FX.EURUSD, FX.GBPUSD, FUT.ES, FUT.NQ, OPT.SPX]}
+  spread: {randint: [5, 50]}
+  max_spread: 3
+  book_id:
+    format: "BOOK-{t}-{n:02d}"
+    t: {choice: [EQ, FI, FX, DRV]}
+    n: {randint: [1, 50]}
+rca_clues: {}

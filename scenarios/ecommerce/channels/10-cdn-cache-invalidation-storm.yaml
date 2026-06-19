@@ -1,0 +1,52 @@
+name: CDN Cache Invalidation Storm
+subsystem: storefront
+vehicle_section: cdn_layer
+error_type: CDN-CACHE-STORM
+sensor_type: cdn_hit_rate
+affected_services:
+- storefront-gateway
+- product-catalog
+cascade_services:
+- analytics-pipeline
+description: Mass cache invalidation flooding origin servers with requests, causing latency spikes and potential origin overload
+investigation_notes: |-
+  1. Check storefront-gateway logs for CDN-CACHE-STORM — cache_hit_rate={cache_hit_rate_pct}% drop and origin_rps={origin_rps} spike are the indicators.
+  2. Identify the invalidation trigger: a bulk price update, product image refresh, or catalog deploy can invalidate thousands of cache keys simultaneously.
+  3. Check the number of unique invalidation keys: if invalidation_keys={invalidation_keys}, this is a thundering herd — stagger the invalidations.
+  4. Review origin server CPU — if origin_cpu_pct={origin_cpu_pct}%, the origin is overwhelmed by cache-bypass requests. Enable serve-stale headers to reduce load.
+  5. Set Cache-Control: stale-while-revalidate on product pages so CDN can serve stale content while revalidating in the background.
+  6. Rate-limit CDN invalidation API calls to {max_invalidations_per_min}/min to prevent accidental bulk purges from triggering origin storms.
+remediation_action: purge_cdn_cache
+error_message: '[StorefrontGateway] CDN-CACHE-STORM: cache_hit_rate={cache_hit_rate_pct}% (normal >{normal_hit_rate_pct}%)
+  origin_rps={origin_rps} invalidation_keys={invalidation_keys} origin_cpu={origin_cpu_pct}%'
+stack_trace: |-
+  CdnCacheException: CDN-CACHE-STORM
+    at CdnClient.handleCacheMiss(keys_purged={invalidation_keys})
+    at StorefrontGateway.serveProduct(path={request_path})
+  Cache hit rate:    {cache_hit_rate_pct}% (normal: {normal_hit_rate_pct}%)
+  Origin RPS:        {origin_rps}
+  Invalidation keys: {invalidation_keys}
+  Origin CPU:        {origin_cpu_pct}%
+  CDN edge nodes:    {cdn_edge_count}
+correlation_attr:
+  key: storefront.cdn_cache_cold
+  value: true
+fault_params:
+  cache_hit_rate_pct: {uniform: [5, 25], round: 1}
+  normal_hit_rate_pct: 92
+  origin_rps: {randint: [5000, 50000]}
+  invalidation_keys: {randint: [10000, 500000]}
+  origin_cpu_pct: {randint: [70, 98]}
+  max_invalidations_per_min: 1000
+  request_path: {choice: ["/p/12345", "/category/electronics", "/search?q=laptop", "/home"]}
+  cdn_edge_count: {randint: [50, 200]}
+rca_clues:
+  storefront-gateway:
+    storefront.cdn_hit_rate_pct: {uniform: [5, 30], round: 1}
+    storefront.origin_rps_spike: {randint: [5000, 50000]}
+  product-catalog:
+    catalog.origin_requests_spike: {randint: [2000, 20000]}
+    catalog.request_coalescing_failures: {randint: [100, 2000]}
+  analytics-pipeline:
+    analytics.page_view_spike_detected: true
+    analytics.ingest_backpressure: true

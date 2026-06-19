@@ -1,0 +1,150 @@
+service: analytics-pipeline
+sort_order: 8
+cloud_provider: azure
+cloud_region: eastus
+cloud_platform: azure_vm
+cloud_availability_zone: eastus-2
+subsystem: analytics
+language: python
+entry_endpoints:
+- - /api/v1/analytics/ingest
+  - POST
+emit_fault_logs: true
+kpi_emitter: true
+constants:
+  PIPELINES:
+  - events-primary
+  - events-secondary
+  - replay-pipeline
+  EVENT_TYPES:
+  - match_complete
+  - player_login
+  - item_purchased
+  - level_up
+  - achievement_unlocked
+state:
+  _events_ingested:
+    init: 0
+  _last_pipeline_report:
+    init: now
+steps:
+- counter:
+    state_key: _events_ingested
+    by:
+      randint:
+      - 50
+      - 500
+- sample:
+    pipeline:
+      choice: PIPELINES
+    event_type:
+      choice: EVENT_TYPES
+    batch_size:
+      randint:
+      - 100
+      - 1000
+    ingest_latency_ms:
+      uniform:
+      - 5.0
+      - 50.0
+      round: 1
+- log:
+    level: INFO
+    message: '[Analytics] ingest pipeline={pipeline} event_type={event_type} batch={batch_size} latency={ingest_latency_ms}ms
+      partitions=16'
+    attrs:
+      operation: event_ingested
+      analytics.pipeline:
+        var: pipeline
+      analytics.event_type:
+        var: event_type
+      analytics.batch_size:
+        var: batch_size
+      analytics.latency_ms:
+        var: ingest_latency_ms
+- sample:
+    health_pipeline:
+      choice: PIPELINES
+    consumer_lag:
+      randint:
+      - 0
+      - 500
+    partitions:
+      randint:
+      - 8
+      - 32
+- log:
+    level: INFO
+    message: '[Analytics] pipeline_health name={health_pipeline} consumer_lag={consumer_lag} partitions={partitions} throughput=4201/s'
+    attrs:
+      operation: pipeline_health
+      pipeline.name:
+        var: health_pipeline
+      pipeline.consumer_lag:
+        var: consumer_lag
+      pipeline.partitions:
+        var: partitions
+- every:
+    seconds: 10
+    state_key: _last_pipeline_report
+    steps:
+    - log:
+        level: INFO
+        message: '[Analytics] summary events_ingested={_events_ingested} pipelines=3 buffer_pct=32.1% lag_s=0.4'
+        attrs:
+          operation: pipeline_summary
+          summary.events_ingested:
+            var: _events_ingested
+          summary.pipeline_count: 3
+- sample:
+    throughput:
+      if_active:
+        randint:
+        - 100
+        - 2000
+      else:
+        randint:
+        - 3000
+        - 8000
+    lag_s:
+      if_active:
+        uniform:
+        - 30.0
+        - 600.0
+        round: 1
+      else:
+        uniform:
+        - 0.1
+        - 3.0
+        round: 1
+    buffer_pct:
+      if_active:
+        uniform:
+        - 85.0
+        - 100.0
+        round: 1
+      else:
+        uniform:
+        - 10.0
+        - 60.0
+        round: 1
+- metric:
+    name: analytics.throughput
+    value:
+      var: throughput
+    unit: events/s
+- metric:
+    name: analytics.pipeline_lag_s
+    value:
+      var: lag_s
+    unit: s
+- metric:
+    name: analytics.events_ingested
+    value:
+      var: _events_ingested
+    unit: events
+- metric:
+    name: analytics.buffer_usage_pct
+    value:
+      var: buffer_pct
+    unit: '%'

@@ -1,0 +1,58 @@
+name: Warehouse Scanner Desync
+subsystem: logistics
+vehicle_section: inventory_system
+error_type: WMS-SCANNER-DESYNC
+sensor_type: barcode_scanner
+affected_services:
+- packaging-fulfillment
+- cloud-inventory-scanner
+cascade_services:
+- digital-marketplace
+- card-printing-system
+description: Barcode scanners losing synchronization with inventory management system
+investigation_notes: |-
+  1. Check scanner WiFi signal strength: -72 dBm is marginal — scanners need at least -67 dBm for reliable real-time sync in warehouse environments.
+  2. Verify the scanner firmware version: v3.0.x has known sync bugs with the WMS REST API — upgrade to v3.2.1 which includes the keepalive fix.
+  3. Battery at 34% can cause intermittent WiFi disconnections on Zebra MC9300 scanners — swap batteries and check if sync recovers.
+  4. Missed scans create inventory deltas — run a zone reconciliation: `wms-cli reconcile --zone <zone> --source physical-count`.
+  5. If multiple scanners in the same zone are desyncing, the issue is likely the WiFi AP in that zone — check AP health (correlate with Channel 7/8).
+  6. As a workaround, switch scanners to batch/store-and-forward mode until WiFi is stable, then bulk-upload when connectivity is restored.
+remediation_action: resync_scanners
+error_message: wms.inventory WMS-SCANNER-DESYNC scanner={scanner_id} zone={scanner_zone} last_sync={scanner_last_sync_sec}s
+  (max {scanner_sync_max_sec}s) missed_scans={scanner_missed_scans} inventory_delta={inventory_delta} firmware=v{scanner_firmware}
+stack_trace: |-
+  WMS Scanner Sync Diagnostic Report
+  ------------------------------------
+  Scanner ID:     {scanner_id}
+  Zone:           {scanner_zone}
+  Last Sync:      {scanner_last_sync_sec}s ago (threshold: {scanner_sync_max_sec}s)
+  Missed Scans:   {scanner_missed_scans}
+  Inventory Delta: {inventory_delta} items
+  Firmware:       v{scanner_firmware}
+  WiFi Signal:    -72 dBm (marginal)
+  Battery Level:  34%
+  Recommended Action: Reconnect scanner, verify WiFi coverage in {scanner_zone}
+correlation_attr:
+  key: deployment.scanner_firmware
+  value: mc9300-fw-3.0.5-known-bug
+fault_params:
+  scanner_id: {choice: [SCN-WH-01, SCN-WH-02, SCN-WH-03, SCN-DOCK-01]}
+  scanner_zone: {choice: [receiving, storage-A, storage-B, packing, shipping]}
+  scanner_last_sync_sec: {randint: [120, 600]}
+  scanner_sync_max_sec: 60
+  scanner_missed_scans: {randint: [20, 200]}
+  inventory_delta: {randint: [5, 50]}
+  scanner_firmware: {choice: ["3.2.1", "3.1.8", "3.0.5"]}
+rca_clues:
+  packaging-fulfillment:
+    warehouse.inventory_drift_items: {randint: [20, 200]}
+    warehouse.scanner_firmware: {choice: ["3.0.5", "3.1.8"]}
+  cloud-inventory-scanner:
+    cloud_scan.physical_digital_mismatch: {randint: [10, 100]}
+    cloud_scan.reconciliation_failures: {randint: [5, 50]}
+  digital-marketplace:
+    marketplace.phantom_stock_skus: {randint: [5, 50]}
+    marketplace.oversold_orders: {randint: [1, 20]}
+  card-printing-system:
+    print.reprint_triggered_by_desync: {randint: [3, 30]}
+    print.inventory_hold: true

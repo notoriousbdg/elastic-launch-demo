@@ -1,0 +1,54 @@
+name: Recommendation Cache Eviction
+subsystem: personalization
+vehicle_section: inference_cache
+error_type: RECO-CACHE-EVICTION
+sensor_type: cache_hit_rate
+affected_services:
+- recommendation-engine
+cascade_services:
+- storefront-gateway
+- product-catalog
+description: Recommendation inference cache mass eviction — cold cache forces expensive model re-inference for all users,
+  spiking latency
+investigation_notes: |-
+  1. Check recommendation-engine logs for RECO-CACHE-EVICTION — cache_hit_rate={cache_hit_rate_pct}% drop and latency spike are correlated.
+  2. Identify eviction trigger: a pod restart, memory pressure OOM eviction, or TTL misconfiguration can cause mass eviction.
+  3. Check inference latency: cold cache drives p99_latency_ms={p99_latency_ms}ms vs warm cache {warm_latency_ms}ms — storefront timeout risk.
+  4. Enable a cache warm-up strategy: pre-compute recommendations for top {warm_user_count} users by traffic volume before routing traffic to the pod.
+  5. Review eviction policy: if using LRU, a cache size of {cache_size_mb}MB may be too small for the active user set — increase or switch to LFU.
+  6. Serve generic (non-personalized) trending products as a fallback while the cache warms — this prevents timeout errors at the cost of relevance.
+remediation_action: warm_recommendation_cache
+error_message: '[RecommendationEngine] RECO-CACHE-EVICTION: cache_hit_rate={cache_hit_rate_pct}% (normal >{normal_cache_hit_pct}%)
+  evicted_entries={evicted_entries} p99_latency={p99_latency_ms}ms cache_size={cache_size_mb}MB'
+stack_trace: |-
+  CacheEvictionException: RECO-CACHE-EVICTION
+    at RecommendationCache.get(user_id={user_id})
+    at RecommendationService.getRecs(user_id={user_id})
+  Cache hit rate:    {cache_hit_rate_pct}% (normal: {normal_cache_hit_pct}%)
+  Evicted entries:   {evicted_entries}
+  P99 latency:       {p99_latency_ms}ms
+  Warm cache p99:    {warm_latency_ms}ms
+  Cache size:        {cache_size_mb}MB
+  Eviction policy:   LRU
+correlation_attr:
+  key: reco.cache_cold
+  value: true
+fault_params:
+  cache_hit_rate_pct: {uniform: [2, 15], round: 1}
+  normal_cache_hit_pct: 85
+  evicted_entries: {randint: [100000, 5000000]}
+  p99_latency_ms: {randint: [3000, 15000]}
+  warm_latency_ms: {randint: [50, 200]}
+  cache_size_mb: {randint: [2048, 8192]}
+  user_id: {format: "USR-{n}", n: {randint: [100000, 999999]}}
+  warm_user_count: {randint: [10000, 100000]}
+rca_clues:
+  recommendation-engine:
+    reco.cache_hit_rate_pct: {uniform: [2, 20], round: 1}
+    reco.cold_inference_p99_ms: {randint: [3000, 15000]}
+  storefront-gateway:
+    storefront.reco_timeout_count: {randint: [100, 5000]}
+    storefront.fallback_trending_serving: true
+  product-catalog:
+    catalog.featured_request_spike: {randint: [200, 2000]}
+    catalog.trending_fallback_serving: true

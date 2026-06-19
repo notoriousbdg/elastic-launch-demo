@@ -1,0 +1,96 @@
+service: inventory-service
+sort_order: 6
+cloud_provider: gcp
+cloud_region: us-central1
+cloud_platform: gcp_compute_engine
+cloud_availability_zone: us-central1-a
+subsystem: inventory
+language: go
+topology:
+- - fulfillment-orchestrator
+  - /api/v1/fulfillment/warehouse-stock
+  - GET
+- - analytics-pipeline
+  - /api/v1/analytics/inventory-events
+  - POST
+entry_endpoints:
+- - /api/v1/inventory/availability
+  - GET
+- - /api/v1/inventory/reserve
+  - POST
+db_operations:
+- - SELECT
+  - inventory
+  - SELECT sku, available_qty, reserved_qty, warehouse_id FROM inventory WHERE sku = ? FOR SHARE
+- - UPDATE
+  - inventory
+  - UPDATE inventory SET reserved_qty = reserved_qty + ? WHERE sku = ? AND available_qty - reserved_qty >= ?
+emit_fault_logs: true
+kpi_emitter: false
+steps:
+- sample:
+    items_tracked:
+      randint:
+      - 1500000
+      - 3500000
+    sync_lag_ms:
+      uniform:
+      - 50.0
+      - 800.0
+      round: 1
+    stockout_rate_pct:
+      uniform:
+      - 0.5
+      - 3.5
+      round: 2
+    reservation_success_rate_pct:
+      uniform:
+      - 98.5
+      - 99.9
+      round: 2
+- metric:
+    name: inventory.items_tracked
+    value:
+      var: items_tracked
+    unit: items
+- metric:
+    name: inventory.sync_lag_ms
+    value:
+      var: sync_lag_ms
+    unit: ms
+- metric:
+    name: inventory.stockout_rate_pct
+    value:
+      var: stockout_rate_pct
+    unit: '%'
+- metric:
+    name: inventory.reservation_success_rate_pct
+    value:
+      var: reservation_success_rate_pct
+    unit: '%'
+- log:
+    level: INFO
+    message: inventory.health items_tracked={items_tracked} sync_lag_ms={sync_lag_ms} stockout_rate={stockout_rate_pct}% reservation_success={reservation_success_rate_pct}%
+    attrs:
+      operation: inventory_health
+      inventory.items_tracked:
+        var: items_tracked
+      inventory.sync_lag_ms:
+        var: sync_lag_ms
+      inventory.stockout_rate_pct:
+        var: stockout_rate_pct
+      inventory.reservation_success_rate_pct:
+        var: reservation_success_rate_pct
+- sample:
+    warehouse_utilization_pct:
+      uniform:
+      - 55.0
+      - 88.0
+      round: 1
+- log:
+    level: INFO
+    message: inventory.warehouse_status utilization={warehouse_utilization_pct}% items={items_tracked}
+    attrs:
+      operation: warehouse_status
+      inventory.warehouse_utilization_pct:
+        var: warehouse_utilization_pct

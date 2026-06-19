@@ -1,0 +1,50 @@
+name: Sensor Validation Pipeline Stall
+subsystem: validation
+vehicle_section: ground_network
+error_type: VV-PIPELINE-HALT
+sensor_type: pipeline_health
+affected_services:
+- sensor-validator
+cascade_services:
+- mission-control
+- telemetry-relay
+description: Sensor validation pipeline stalled, readings not being validated
+investigation_notes: 'Root cause: JVM garbage collection pressure causing stop-the-world pauses that stall the validation
+  pipeline. Heap usage at 89% with GC pause of 120ms confirms the V&V processor is thrashing between GC cycles. All 8 worker
+  threads are busy but throughput has collapsed because each thread blocks during GC pauses. Queue depth climbing rapidly
+  indicates ingest rate exceeds processing capacity during GC storms. Check for memory leaks in the calibration correlation
+  stage — retained object count should be <500K per checkpoint. Remediation: trigger manual GC compaction (VV_GC_COMPACT),
+  then increase JVM heap size (VV_HEAP_RESIZE 12G) to reduce GC frequency. If queue depth exceeds 5000, enable upstream backpressure
+  (VV_BACKPRESSURE ENABLE) to prevent data loss. For long-term fix, migrate to G1GC with -XX:MaxGCPauseMillis=20 to cap pause
+  times.'
+remediation_action: reset_validation_pipeline
+error_message: '[VV] VV-PIPELINE-HALT: stage=validation queue_depth={queue_depth} rate={rate}/s threshold={min_rate}/s'
+stack_trace: |-
+  == VALIDATION PIPELINE STATUS == V&V PROCESSOR ==
+  TIMESTAMP: MET+00:04:19.001 | FRAME: 0x4A3F | SEQ: 18458
+  ---------------------------------------------------------------
+  STAGE          QUEUE    RATE      THRESHOLD   STATUS
+  INGEST         {queue_depth}     {rate}/s    {min_rate}/s     **STALLED**
+  CALIBRATION    12       52.1/s    50.0/s      NOMINAL
+  CORRELATION    8        48.7/s    45.0/s      NOMINAL
+  OUTPUT         3        51.2/s    50.0/s      NOMINAL
+  ---------------------------------------------------------------
+  WORKER_THREADS: 8/8 busy | HEAP_USAGE: 89% | GC_PAUSE: 120ms
+  VV-PIPELINE-HALT: Processing rate {rate}/s below {min_rate}/s, queue depth {queue_depth}
+  ACTION: Scale worker pool, investigate upstream data burst
+correlation_attr:
+  key: runtime.heap_config
+  value: jvm-12g-g1gc-experimental
+fault_params:
+  queue_depth: {randint: [500, 5000]}
+  rate: {uniform: [1.0, 10.0], round: 1}
+  min_rate: 50.0
+rca_clues:
+  sensor-validator:
+    validation.heap_usage_pct: {uniform: [85.0, 97.0], round: 0}
+    validation.gc_pause_ms: {randint: [80, 250]}
+  mission-control:
+    upstream.degraded_subsystem: validation
+    telemetry.validation_status: stalled
+  telemetry-relay:
+    relay.upstream_backpressure: true

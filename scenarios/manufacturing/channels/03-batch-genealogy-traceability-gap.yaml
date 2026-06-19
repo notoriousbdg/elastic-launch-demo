@@ -1,0 +1,55 @@
+name: Batch Genealogy Traceability Gap
+subsystem: mes
+vehicle_section: genealogy_engine
+error_type: MES-BATCH-GENEALOGY-BREAK
+sensor_type: genealogy_engine
+affected_services:
+- mes-controller
+cascade_services:
+- quality-inspector
+- ot-historian
+description: Batch genealogy records lose link between raw material lots and finished goods, breaking traceability for IATF
+  16949 / FDA 21 CFR Part 11
+investigation_notes: |-
+  Root Cause: Genealogy gaps appear when the consumption event for a raw-material lot is recorded after the finished-goods batch is closed, or when a partial-substitution swap is executed without the operator scanning the new lot. The `parent_lot` foreign key on the consumption record ends up NULL for some operations.
+  Remediation: 1) Identify orphan operations: `mes-admin genealogy-gaps --batch {batch_id}`. 2) Reconcile from the historian event stream: `mes-admin reconstruct-genealogy --batch {batch_id} --from-historian`. 3) Re-link orphan operations to the correct upstream lot: `mes-admin link-lot --operation {operation_id} --lot {raw_lot_id}`. 4) Revalidate completeness: `mes-admin verify-traceability --batch {batch_id}`. 5) File a quality deviation if the batch has already shipped, per IATF 16949 7.5.3.2.1.
+remediation_action: reconstruct_genealogy
+error_message: '[MES] MES-BATCH-GENEALOGY-BREAK: batch={batch_id} product={product_code} missing_links={missing_link_count}
+  compliance_risk=HIGH'
+stack_trace: |-
+  === BATCH GENEALOGY VERIFICATION — {batch_id} ===
+  Product: {product_code} | Operations: 14 | Linked: {linked_count} | Missing: {missing_link_count}
+  ------------------------------------------------------------------------
+  OPERATION   | EQUIPMENT  | RAW LOT          | LINK STATUS
+  ------------------------------------------------------------------------
+  OP-010      | LINE-03-A  | LOT-RM-447821    | OK
+  OP-020      | LINE-03-A  | LOT-RM-447821    | OK
+  OP-030      | LINE-03-B  | NULL             | MISSING
+  OP-040      | LINE-03-B  | LOT-RM-{raw_lot_id}    | OK
+  OP-050      | PACK-01    | NULL             | MISSING
+  ------------------------------------------------------------------------
+  MES-BATCH-GENEALOGY-BREAK: {missing_link_count} operations missing parent lot — IATF 16949 risk — first orphan: {operation_id}
+correlation_attr:
+  key: deployment.mes_genealogy_engine
+  value: genealogy-v2.7.0-experimental
+fault_params:
+  batch_id:
+    format: "BATCH-{n}"
+    n: {randint: [100000, 999999]}
+  product_code: {choice: [PRD-A100, PRD-A200, PRD-B450, PRD-B475, PRD-C901]}
+  missing_link_count: {randint: [2, 14]}
+  linked_count: {randint: [8, 12]}
+  raw_lot_id:
+    format: "{n}"
+    n: {randint: [100000, 999999]}
+  operation_id:
+    format: "OP-{n}"
+    n: {choice: ['010', '020', '030', '040', '050']}
+rca_clues:
+  mes-controller:
+    mes.orphan_operations: {randint: [2, 14]}
+    mes.consumption_event_lag_s: {randint: [60, 900]}
+  quality-inspector:
+    quality.batch_under_review: true
+  ot-historian:
+    historian.consumption_event_gap: true

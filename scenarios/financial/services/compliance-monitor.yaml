@@ -1,0 +1,126 @@
+service: compliance-monitor
+sort_order: 7
+cloud_provider: azure
+cloud_region: eastus
+cloud_platform: azure_vm
+cloud_availability_zone: eastus-1
+subsystem: compliance
+language: dotnet
+topology:
+- - audit-logger
+  - /api/v1/audit/compliance-event
+  - POST
+- - fraud-detector
+  - /api/v1/fraud/alert-status
+  - GET
+entry_endpoints:
+- - /api/v1/compliance/report
+  - GET
+- - /api/v1/compliance/alerts
+  - GET
+emit_fault_logs: true
+kpi_emitter: false
+constants:
+  REGULATIONS:
+  - MiFID-II
+  - Dodd-Frank
+  - EMIR
+  - MAR
+  - SFTR
+  - CAT
+  REPORT_TYPES:
+  - EMIR-TR
+  - MiFID-II-RTS25
+  - CAT-FINRA
+  - SFTR
+  - SEC-13F
+  SCREENING_RESULTS:
+  - CLEAR
+  - CLEAR
+  - CLEAR
+  - CLEAR
+  - REVIEW
+state:
+  _last_reg_check:
+    init: now
+  _screenings_total:
+    init: 0
+steps:
+- sample:
+    screen_result:
+      choice: SCREENING_RESULTS
+    screen_latency_ms:
+      randint:
+      - 50
+      - 500
+- log:
+    level: INFO
+    message: '[COMPL] aml_screening result={screen_result} latency_ms={screen_latency_ms} sla_met=true'
+    attrs:
+      operation: aml_screening
+      screening.result:
+        var: screen_result
+      screening.latency_ms:
+        var: screen_latency_ms
+      screening.sla_met: true
+- sample:
+    entries_checked:
+      randint:
+      - 1000
+      - 10000
+    hits:
+      randint:
+      - 0
+      - 1
+    watchlist_status:
+      expr: '''REVIEW_PENDING'' if hits else ''CLEAR'''
+- log:
+    level: INFO
+    message: '[COMPL] watchlist_check entries_checked={entries_checked} hits={hits} status={watchlist_status}'
+    attrs:
+      operation: watchlist_check
+      watchlist.entries_checked:
+        var: entries_checked
+      watchlist.hits:
+        var: hits
+- every:
+    seconds: 10
+    state_key: _last_reg_check
+    steps:
+    - sample:
+        regulation:
+          choice: REGULATIONS
+        report:
+          choice: REPORT_TYPES
+    - log:
+        level: INFO
+        message: '[COMPL] regulatory_status regulation={regulation} report={report} status=COMPLIANT'
+        attrs:
+          operation: regulatory_status
+          regulation.name:
+            var: regulation
+          regulation.report:
+            var: report
+          regulation.status: COMPLIANT
+- counter:
+    state_key: _screenings_total
+    by: 1
+- metric:
+    name: compliance.screenings_total
+    value:
+      var: _screenings_total
+    unit: screenings
+- metric:
+    name: compliance.aml_latency_ms
+    value:
+      randint:
+      - 50
+      - 500
+    unit: ms
+- metric:
+    name: compliance.pending_reports
+    value:
+      randint:
+      - 0
+      - 5
+    unit: reports

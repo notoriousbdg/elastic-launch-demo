@@ -1,0 +1,54 @@
+name: S-Band Signal Degradation
+subsystem: communications
+vehicle_section: antenna_array
+error_type: COMM-SIGNAL-DEGRAD
+sensor_type: rf_signal
+affected_services:
+- comms-array
+- sensor-validator
+cascade_services:
+- mission-control
+- telemetry-relay
+description: S-band communication signal strength below minimum threshold
+investigation_notes: 'Root cause: link budget degradation from reduced EIRP (38.2dBW vs 42.0dBW nominal) combined with antenna
+  gain loss (34.1dBi vs 36.0dBi). EIRP drop indicates transmitter power amplifier (SSPA) degradation or waveguide loss. Antenna
+  gain loss suggests feed horn misalignment or reflector surface distortion. Check atmospheric loss — 0.8dB vs 0.5dB nominal
+  may indicate rain fade on the TDRSS link. Verify S-band transponder AGC levels and lock indicator. Remediation: increase
+  transmit power via COMM_TX_POWER S-BAND +4dB, switch to backup antenna feed if available (COMM_FEED_SELECT S-BAND BACKUP).
+  If rain fade suspected, request TDRSS handover to alternate ground station with clearer weather.'
+remediation_action: reset_comms_link
+error_message: '[COMM] COMM-SIGNAL-DEGRAD: link=S-band eb_no={snr_db}dB threshold={min_snr_db}dB channel={rf_channel}'
+stack_trace: |-
+  == LINK BUDGET ANALYSIS == S-BAND DOWNLINK ==
+  TIMESTAMP: MET+00:04:15.003 | FRAME: 0x4A35 | SEQ: 18448
+  ---------------------------------------------------------------
+  PARAMETER            VALUE      NOMINAL    STATUS
+  EIRP                 38.2dBW    42.0dBW    DEGRADED
+  FREE_SPACE_LOSS      -157.3dB   -157.3dB   --
+  ATMOSPHERIC_LOSS     -0.8dB     -0.5dB     MARGINAL
+  ANTENNA_GAIN         34.1dBi    36.0dBi    DEGRADED
+  Eb/No                {snr_db}dB     {min_snr_db}dB     **BELOW_THRESHOLD**
+  CHANNEL              {rf_channel}        --         --
+  ---------------------------------------------------------------
+  LINK MARGIN: -{snr_db}dB | REQUIRED: +3.0dB
+  COMM-SIGNAL-DEGRAD: S-band Eb/No below threshold on channel {rf_channel}
+  ACTION: Increase transmit power or switch to backup antenna feed
+correlation_attr:
+  key: network.proxy_config
+  value: envoy-v1.28-experimental
+fault_params:
+  snr_db: {uniform: [3.0, 8.0], round: 1}
+  min_snr_db: 12.0
+  rf_channel: {choice: [S1, S2, S3]}
+rca_clues:
+  comms-array:
+    comms.eirp_dbw: {uniform: [35.0, 39.0], round: 1}
+    comms.antenna_gain_dbi: {uniform: [32.0, 35.0], round: 1}
+  sensor-validator:
+    validation.link_margin_db: {uniform: [-3.0, 0.0], round: 1}
+    validation.rain_fade_detected: {choice: [true, false]}
+  mission-control:
+    upstream.degraded_subsystem: communications
+    telemetry.comm_status: degraded
+  telemetry-relay:
+    relay.s_band_quality: poor

@@ -1,0 +1,63 @@
+name: SMS Gateway Delivery Failure
+subsystem: notifications
+vehicle_section: sms_channel
+error_type: NOTIF-SMS-FAIL
+sensor_type: sms_delivery
+affected_services:
+- notification-service
+cascade_services:
+- activation-service
+description: SMPP gateway connection failure preventing activation confirmation SMS delivery to subscribers
+investigation_notes: |
+  1. Check SMPP connection status — SMPP bind to SMS aggregator failed or connection dropped. Verify: notification-service metrics for smpp.connection_status and smpp.bind_state.
+  2. SMS delivery is required for activation confirmation — subscribers expect an SMS within 60s of successful activation. Delayed SMS causes customer confusion and support calls.
+  3. SMPP aggregator may be throttling — check for ESME_RTHROTTLED responses. Meridian's contracted throughput is 500 SMS/min. Verify current send rate against contract.
+  4. Enable fallback delivery channels: push notification via mobile app, email notification. For Enterprise customers, also trigger webhook notification to their systems.
+  5. OTP/2FA SMS are CRITICAL — if SMS is used for authentication OTP delivery, auth-service must fall back to email OTP or TOTP. Check auth-service MFA configuration.
+remediation_action: reconnect_smpp_gateway
+error_message: '[NOTIF] NOTIF-SMS-FAIL: smpp_status={smpp_status} delivery_rate={sms_delivery_rate}% queued={sms_queued} aggregator={sms_aggregator} error={sms_error}'
+stack_trace: |
+  === SMS GATEWAY STATUS ===
+  aggregator={sms_aggregator}  protocol=SMPPv3.4
+  --- CONNECTION STATUS ---
+    bind_state={smpp_status}  last_bind_attempt=45s_ago
+    error={sms_error}
+    contracted_throughput=500/min  current_rate=0/min
+  --- DELIVERY METRICS ---
+    METRIC              VALUE       TARGET      STATUS
+    delivery_rate       {sms_delivery_rate}%       98%         DEGRADED
+    queued_messages     {sms_queued}       100         OVERFLOW
+    failed_deliveries   {sms_failed}       0           CRITICAL
+    activation_confirms_pending={activation_confirms_pending}
+  --- FALLBACK ---
+    push_notification=AVAILABLE  email=AVAILABLE
+    otp_delivery=BLOCKED  auth_impact=HIGH
+  ACTION: reconnect_smpp=true  enable_fallback=true  alert=NOTIF-SMS-FAIL
+infrastructure_events:
+- body: '[GCP-Monitoring] SMPPConnectionLost: aggregator=twilio-smpp bind_state=UNBOUND last_bind=45s_ago error=CONNECTION_REFUSED region=europe-west3'
+  severity: ERROR
+  event_name: gcp.monitoring.SMPPConnectionLost
+  service: notification-service
+  attributes:
+    cloud.provider: gcp
+    cloud.service: monitoring
+    gcp.resource_type: gke_container
+    infrastructure.source: GCP-Monitoring
+correlation_attr:
+  key: notification.smpp_gateway_version
+  value: smpp-gw-v4.2.0-hotfix
+fault_params:
+  smpp_status: {choice: [UNBOUND, BIND_FAILED, CONNECTION_LOST, THROTTLED]}
+  sms_delivery_rate: {uniform: [0.0, 60.0], round: 1}
+  sms_queued: {randint: [500, 5000]}
+  sms_aggregator: {choice: [Nexmo, Twilio, MessageBird, Infobip]}
+  sms_error: {choice: [SMPP_BIND_FAILED, CONNECTION_TIMEOUT, ESME_RTHROTTLED, DELIVERY_FAILED]}
+  sms_failed: {randint: [200, 2000]}
+  activation_confirms_pending: {randint: [100, 1000]}
+rca_clues:
+  notification-service:
+    notification.smpp_bind_state: UNBOUND
+    notification.sms_queue_depth: {randint: [500, 5000]}
+  activation-service:
+    activation.confirm_sms_pending: {randint: [100, 1000]}
+    activation.notification_timeout: true

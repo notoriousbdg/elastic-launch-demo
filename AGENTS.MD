@@ -1014,6 +1014,17 @@ POST /api/actions/connector
 
 ---
 
+## Scenario hot reload
+
+Scenarios are discovered from `scenarios/*/scenario.yaml` via [`scenarios/__init__.py`](scenarios/__init__.py). After adding or editing a scenario folder on disk, reload without restarting uvicorn:
+
+- **API:** `POST /api/scenarios/reload` — re-scans the filesystem, returns `{scenarios, added, removed, errors, count}`.
+- **UI:** Selector page **Refresh list** button (same endpoint).
+
+Reload updates the selector and the next **Launch** / deploy path (`get_scenario` → `ScenarioContext`). Already-running `ScenarioInstance`s keep their in-memory context until stop/redeploy. Module-level `app.config` (`SERVICES`, `CHANNEL_REGISTRY` for `ACTIVE_SCENARIO`) is not refreshed — multi-deployment launch uses per-instance context instead.
+
+---
+
 ## General Lessons
 
 1. **Search docs before trial-and-error** — API schemas aren't always intuitive; check official docs and GitHub issues first
@@ -1095,7 +1106,7 @@ POST /api/actions/connector
 
 43. **Scope all ES|QL queries to the namespace child stream, not the root stream** — All ES|QL queries in agent tools, workflows, dashboards, and significant events should use `FROM logs.otel.{ns},logs.otel.{ns}.*` (e.g. `logs.otel.gaming,logs.otel.gaming.*`), not `FROM logs.otel,logs.otel.*`. The child stream is created by forking `logs.otel` on deployment and contains only that scenario's logs. Querying the root stream in a multi-scenario environment returns data from all scenarios. `app/telemetry.py` remains pointed at `logs.otel` for OTLP ingestion — the fork routing is server-side and transparent to the sender. A parallel `logs.ecs.{ns}` child stream is also created for ECS-formatted logs (backfilled at deploy time by `deployer_backfill.py`); it follows the same per-namespace fork pattern.
 
-44. **All scenario-specific data belongs in the scenario's own folder** — Every property that varies by scenario (display text, KPI fields, service names, thresholds, etc.) must be defined as a property on the scenario class in `scenarios/<id>/scenario.py`, not as a lookup dict or `if/elif` block in shared code outside `scenarios/`. The base class in `scenarios/base.py` provides the default/fallback; each scenario overrides it. The dashboard generator, deployer, and agent code must call `scenario.<property>` — never key off `scenario.scenario_id` to branch on scenario-specific values. This keeps all scenario content co-located and ensures adding a new scenario requires changes only in `scenarios/<new_id>/`.
+44. **All scenario-specific data belongs in the scenario's own folder** — Every property that varies by scenario (display text, KPI fields, service names, thresholds, etc.) lives in `scenarios/<id>/scenario.yaml`, `channels/*.yaml`, and `services/*.yaml`. No Python files live inside a scenario folder. The deployer and agent code reach scenario data through `scenario.<property>` — never branch on `scenario.scenario_id` in shared code. This keeps all scenario content co-located and ensures adding a new scenario requires changes only in `scenarios/<new_id>/`.
 
 45. **Three deployer mixins at steps 14, 16, and 18** — `deployer_backfill.py` (step 14) backfills ECS-formatted logs into `logs.ecs.{ns}`. `deployer_aiops.py` (step 16) creates ML jobs for log rate analysis and message categorization on `logs.otel.{ns}`. `deployer_integrations.py` (step 18, last) installs OTel content packages from the Fleet registry after the rest of the stack is up (Fleet can take minutes on Serverless).
 
@@ -1107,8 +1118,8 @@ Two Claude Code skills are available for extending this project. Invoke with `/a
 
 | Skill | When to use | Files created/modified |
 |---|---|---|
-| `/add-scenario` | Add a new industry-vertical scenario with 9 services and 20 fault channels | Creates `scenarios/<id>/` folder (scenario.py, executive_kpis.py, 9 service files) |
-| `/add-fault-channel` | Replace one fault channel in an existing scenario | Modifies `scenarios/<id>/scenario.py` only (4 coordinated edits) |
+| `/add-scenario` | Add a new industry-vertical scenario with 9 services and 20 fault channels | Creates `scenarios/<id>/` folder (scenario.yaml, 20 channel files, 9 service files — pure YAML, no Python) |
+| `/add-fault-channel` | Replace one fault channel in an existing scenario | Replaces `scenarios/<id>/channels/NN-<slug>.yaml` and updates `agent_config.system_prompt` in `scenario.yaml` |
 
 Both skills enforce the same guardrails: scope is limited to `scenarios/<id>/`, channel 1–15 must be HITL, channels 16–20 must be plausibly auto-remediable. See `.claude/skills/add-scenario/GUARDRAILS.md` and `.claude/skills/add-fault-channel/GUARDRAILS.md` for the full rule set.
 

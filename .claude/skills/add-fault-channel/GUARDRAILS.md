@@ -4,22 +4,22 @@ These rules are non-negotiable. Hold them for the entire session.
 
 ---
 
-## 1. Scope: one scenario file only
+## 1. Scope: one scenario folder only
 
-**Only modify `scenarios/<id>/scenario.py`.**
+**Only modify files under `scenarios/<id>/`** — specifically the channel YAML file and `scenario.yaml` (for the system_prompt update).
 
 Never touch:
 - Any file in `log_generators/`, `app/`, `elastic_config/`, or `scenarios/base.py`
 - Any other scenario folder
 - Service files under `scenarios/<id>/services/`
 
-The four coordinated edits (`channel_registry`, `get_fault_params`, `get_rca_clues`, `agent_config`) all live in the single `scenario.py` file. If you think a change elsewhere is needed, stop and ask the user.
+If you think a change elsewhere is needed, stop and ask the user.
 
 ---
 
 ## 2. Channel count stays at exactly 20
 
-This is a **replace** operation, not an append. The new channel takes the same number as the one it replaces. The dict must stay keyed 1–20.
+This is a **replace** operation, not an append. The new channel takes the same number as the one it replaces. The `channels/` directory must always contain exactly 20 YAML files.
 
 Why: the deployer, dashboard generator, and ML jobs hardcode channel counts.
 
@@ -55,21 +55,21 @@ Test: "Would a well-run SRE team add this to their auto-remediation runbook?" If
 
 ## 4. Placeholder parity is mandatory
 
-Every `{placeholder}` name in `error_message` and `stack_trace` (regex `\{(\w+)\}`) must be a key in `get_fault_params(channel)` for that channel. Missing keys cause `KeyError` at runtime.
+Every `{placeholder}` name in `error_message` and `stack_trace` must be a key in `fault_params` in the same channel YAML file. Missing keys cause `KeyError` at runtime.
 
-Collect all placeholder names from both strings before writing `get_fault_params`.
+Collect all placeholder names from both strings before writing `fault_params`.
 
 ---
 
 ## 5. Service names must exist
 
-Every value in `affected_services` and `cascade_services` must be a key in the scenario's `services` dict. Verify against the actual scenario before writing.
+Every value in `affected_services` and `cascade_services` must be a filename stem under `scenarios/<id>/services/` (e.g. `payment-processor` → `services/payment-processor.yaml` must exist). Verify before writing.
 
 ---
 
 ## 6. `error_type` changes require a system_prompt update
 
-The `agent_config.system_prompt` contains an explicit list of all 20 `error_type` values grouped by subsystem. If you change or add an `error_type`, you must update the system_prompt to match.
+The `agent_config.system_prompt` in `scenario.yaml` contains an explicit list of all 20 `error_type` values grouped by subsystem. If you change or add an `error_type`, you must update the system_prompt to match.
 
 The agent will fail to find fault logs for any `error_type` not listed in its prompt.
 
@@ -77,4 +77,4 @@ The agent will fail to find fault logs for any `error_type` not listed in its pr
 
 ## 7. No invented service names or subsystems
 
-Do not introduce a `subsystem` label that doesn't already exist in `services` entries. Do not reference a service key that isn't in the scenario's `services` dict.
+Do not introduce a `subsystem` label that doesn't already exist in service files. Do not reference a service key that isn't a filename stem under `scenarios/<id>/services/`.

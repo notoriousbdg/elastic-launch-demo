@@ -1,0 +1,57 @@
+name: DHCP Lease Storm
+subsystem: network_services
+vehicle_section: address_management
+error_type: DHCPD-LEASE-EXHAUSTION
+sensor_type: dhcp_lease
+affected_services:
+- dns-dhcp-service
+- network-controller
+cascade_services:
+- wifi-controller
+- packaging-fulfillment
+description: DHCP scope exhaustion from excessive DISCOVER/REQUEST rate
+investigation_notes: |-
+  1. Run `dhcpd -T` or check `dhcpd.leases` to list all active leases and identify which scope is exhausted.
+  2. Look for a rogue DHCP server: `show ip dhcp snooping binding` on the switch, or use a packet capture to find unauthorized DHCPOFFER packets.
+  3. High DISCOVER rate with many NAKs indicates clients are not getting leases — either the pool is truly full or lease times are too long.
+  4. Reduce lease duration from the default (24h) to 4-8h for warehouse WiFi devices that frequently roam between subnets.
+  5. Check for IP address conflicts: `arping -D <ip>` on suspected duplicate IPs — a rogue server offering overlapping ranges causes scope confusion.
+  6. Expand the DHCP scope or add a secondary scope with a DHCP relay (`ip helper-address`) if the subnet legitimately needs more addresses.
+remediation_action: expand_dhcp_scope
+error_message: 'dhcpd[6789]: DHCPD-LEASE-EXHAUSTION: pool {dhcp_scope} at {dhcp_util_pct}% ({dhcp_active_leases}/{dhcp_total_leases}
+  leases), DISCOVER rate {dhcp_discover_rate}/s, {dhcp_nak_count} NAKs, rogue server detected at {dhcp_rogue_ip}'
+stack_trace: |-
+  dhcpd[6789]: info: DHCPDISCOVER from 00:11:22:33:44:55 via eth0
+  dhcpd[6789]: info: pool {dhcp_scope}: {dhcp_active_leases} of {dhcp_total_leases} leases active ({dhcp_util_pct}%)
+  dhcpd[6789]: warning: DHCPD-LEASE-EXHAUSTION: pool near capacity
+  dhcpd[6789]: warning: {dhcp_discover_rate} DHCPDISCOVER packets/sec (storm threshold: 50/s)
+  dhcpd[6789]: warning: {dhcp_nak_count} DHCPNAK sent — no available leases
+  dhcpd[6789]: alert: rogue DHCP server detected: {dhcp_rogue_ip} offering leases on {dhcp_scope}
+  dhcpd[6789]: info: lease pool statistics: free=0, backup=0, expired=3, abandoned=2
+correlation_attr:
+  key: infra.dhcp_failover_mode
+  value: dhcpd-hot-standby-v2
+fault_params:
+  dhcp_scope: {choice: ["10.1.0.0/24", "10.2.0.0/24", "172.16.0.0/22", "192.168.1.0/24"]}
+  dhcp_util_pct: {uniform: [92.0, 100.0], round: 1}
+  dhcp_active_leases: {randint: [235, 254]}
+  dhcp_total_leases: 254
+  dhcp_discover_rate: {randint: [50, 300]}
+  dhcp_nak_count: {randint: [10, 100]}
+  dhcp_rogue_ip:
+    format: "192.168.{a}.{b}"
+    a: {randint: [1, 254]}
+    b: {randint: [1, 254]}
+rca_clues:
+  dns-dhcp-service:
+    dhcp.pool_exhaustion_pct: {uniform: [95, 100], round: 1}
+    dhcp.rogue_server_detected: true
+  network-controller:
+    network.dhcp_snooping_violations: {randint: [10, 200]}
+    network.affected_vlan: {choice: [100, 200, 300]}
+  wifi-controller:
+    wifi.clients_no_ip: {randint: [20, 200]}
+    wifi.dhcp_relay_failures: {randint: [10, 100]}
+  packaging-fulfillment:
+    warehouse.device_offline_no_ip: {randint: [5, 30]}
+    warehouse.zone_affected: {choice: [receiving, packing, shipping]}

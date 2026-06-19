@@ -1,0 +1,68 @@
+name: mTLS Certificate Expiry
+subsystem: gateway
+vehicle_section: tls_termination
+error_type: GW-MTLS-EXPIRY
+sensor_type: certificate
+affected_services:
+- api-gateway
+- auth-service
+cascade_services:
+- activation-service
+description: Mutual TLS certificate approaching expiry causing service-to-service authentication failures
+investigation_notes: |
+  1. Check certificate expiry time — certificates with <24h remaining trigger WARNING, <4h triggers CRITICAL. Expired certificates cause immediate TLS handshake failures on all mTLS connections.
+  2. cert-manager auto-renewal failed — check cert-manager logs: kubectl logs -n cert-manager deploy/cert-manager. Common failure: DNS-01 challenge timeout (Route53 API permission issue).
+  3. Impact: api-gateway ↔ auth-service mTLS connection will fail when cert expires. All authentication requests will fail, blocking all API traffic including activations.
+  4. Emergency cert issuance: use AWS ACM for api-gateway or Azure Key Vault for auth-service. Manual cert installation: kubectl create secret tls meridian-mtls --cert=cert.pem --key=key.pem.
+  5. Verify full certificate chain including intermediate CA. Self-signed intermediates must be trusted by both api-gateway and auth-service trust stores.
+remediation_action: emergency_cert_renewal
+error_message: '[GW] GW-MTLS-EXPIRY: domain={cert_domain} expires_in={cert_hours_left}h serial={cert_serial} issuer={cert_issuer} services_affected={cert_svc_count}'
+stack_trace: |
+  === CERTIFICATE STATUS REPORT ===
+  domain={cert_domain}  issuer={cert_issuer}
+  --- CERTIFICATE DETAILS ---
+    serial={cert_serial}
+    not_after=2026-03-09T23:59:59Z
+    remaining={cert_hours_left}h  <<< EXPIRING
+    subject=CN={cert_domain}
+    san={cert_domain},*.{cert_domain}
+  --- SERVICE IMPACT ---
+    services_affected={cert_svc_count}
+    SERVICE              TLS_STATUS    HANDSHAKE
+    api-gateway          WARNING       last_success=2min_ago
+    auth-service         WARNING       last_success=2min_ago
+    activation-service   DEGRADED      upstream_tls_risk
+  --- AUTO-RENEWAL ---
+    cert_manager=FAILED  last_attempt=2h_ago  error=DNS_CHALLENGE_TIMEOUT
+  ACTION: emergency_cert_issue=true  manual_install=true  alert=GW-MTLS-EXPIRY
+infrastructure_events:
+- body: '[cert-manager] Certificate renewal FAILED: domain=api.meridian-telecom.eu issuer=letsencrypt-prod error=DNS-01 challenge timeout (Route53 API rate limited) last_attempt=2h_ago next_retry=1h'
+  severity: ERROR
+  event_name: cert-manager.renewal.failed
+  service: api-gateway
+  attributes:
+    k8s.namespace: cert-manager
+    k8s.component: cert-manager
+    cert.domain: api.meridian-telecom.eu
+    cert.issuer: letsencrypt-prod
+    cert.error: DNS-01 challenge timeout
+    infrastructure.source: cert-manager
+correlation_attr:
+  key: deployment.cert_manager_version
+  value: cert-manager-v1.14.5-rc1
+fault_params:
+  cert_domain: {choice: [api.meridian-telecom.eu, auth.meridian-telecom.eu, portal.meridian-telecom.eu]}
+  cert_hours_left: {uniform: [0.5, 48.0], round: 1}
+  cert_serial: {format: "{n:08X}", n: {randint: [16777216, 4294967295]}}
+  cert_issuer: {choice: [DigiCert, AWS_ACM, "Let's_Encrypt"]}
+  cert_svc_count: {randint: [2, 5]}
+rca_clues:
+  api-gateway:
+    gateway.cert_hours_remaining: {uniform: [0.5, 24.0], round: 1}
+    gateway.tls_handshake_failures: {randint: [100, 5000]}
+  auth-service:
+    auth.mtls_validation_status: WARNING
+    auth.cert_chain_valid: false
+  activation-service:
+    activation.upstream_tls_errors: {randint: [50, 500]}
+    activation.service_degraded: true
