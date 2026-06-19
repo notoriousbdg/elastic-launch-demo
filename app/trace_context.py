@@ -15,36 +15,41 @@ import threading
 
 
 class TraceContextStore:
-    """Maps service_name -> (trace_id, span_id) plus a per-channel error-trace map."""
+    """Maps (namespace, service_name) -> (trace_id, span_id) plus a per-channel error-trace map.
+
+    Namespace-scoped so that different scenarios sharing a service name (e.g.
+    "analytics-pipeline" in ecommerce and gaming) do not overwrite each other's
+    trace context. Pass namespace="" for standalone / single-scenario usage.
+    """
 
     def __init__(self):
-        self._store: dict[str, tuple[str, str]] = {}
-        self._channel_store: dict[tuple[int, str], tuple[str, str]] = {}
+        self._store: dict[tuple[str, str], tuple[str, str]] = {}
+        self._channel_store: dict[tuple[int, str, str], tuple[str, str]] = {}
         self._lock = threading.Lock()
 
-    def set(self, service_name: str, trace_id: str, span_id: str) -> None:
+    def set(self, service_name: str, trace_id: str, span_id: str, namespace: str = "") -> None:
         with self._lock:
-            self._store[service_name] = (trace_id, span_id)
+            self._store[(namespace, service_name)] = (trace_id, span_id)
 
-    def get(self, service_name: str) -> tuple[str | None, str | None]:
+    def get(self, service_name: str, namespace: str = "") -> tuple[str | None, str | None]:
         with self._lock:
-            entry = self._store.get(service_name)
+            entry = self._store.get((namespace, service_name))
             if entry is None:
                 return None, None
             return entry
 
     def set_for_channel(
-        self, channel_id: int, service_name: str, trace_id: str, span_id: str
+        self, channel_id: int, service_name: str, trace_id: str, span_id: str, namespace: str = ""
     ) -> None:
-        """Record the most recent error trace for a (channel, service) pair."""
+        """Record the most recent error trace for a (channel, namespace, service) triple."""
         with self._lock:
-            self._channel_store[(channel_id, service_name)] = (trace_id, span_id)
+            self._channel_store[(channel_id, namespace, service_name)] = (trace_id, span_id)
 
     def get_for_channel(
-        self, channel_id: int, service_name: str
+        self, channel_id: int, service_name: str, namespace: str = ""
     ) -> tuple[str | None, str | None]:
         with self._lock:
-            entry = self._channel_store.get((channel_id, service_name))
+            entry = self._channel_store.get((channel_id, namespace, service_name))
             if entry is None:
                 return None, None
             return entry

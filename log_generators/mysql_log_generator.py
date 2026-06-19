@@ -33,8 +33,6 @@ from app.trace_context import _trace_context_store
 # as slow / failing queries downstream. This permissive matching keeps the
 # trace<->log channel pivot demonstrable across every scenario.
 
-_DB_PREFIX = NAMESPACE.replace("-", "_")
-
 SPAN_KIND_CLIENT = 3
 STATUS_OK = 1
 STATUS_ERROR = 2
@@ -50,32 +48,6 @@ BATCH_INTERVAL_MIN = 2
 BATCH_INTERVAL_MAX = 5
 BATCH_SIZE_MIN = 3
 BATCH_SIZE_MAX = 12
-
-DATABASES = [
-    f"{_DB_PREFIX}_telemetry",
-    f"{_DB_PREFIX}_mission",
-    f"{_DB_PREFIX}_sensors",
-    f"{_DB_PREFIX}_audit",
-]
-
-TABLES = {
-    f"{_DB_PREFIX}_telemetry": [
-        "telemetry_readings", "sensor_data", "metric_snapshots",
-        "log_entries", "trace_spans",
-    ],
-    f"{_DB_PREFIX}_mission": [
-        "mission_events", "countdown_phases", "launch_parameters",
-        "abort_criteria", "hold_records",
-    ],
-    f"{_DB_PREFIX}_sensors": [
-        "sensor_calibrations", "sensor_registry", "calibration_epochs",
-        "sensor_thresholds", "validation_results",
-    ],
-    f"{_DB_PREFIX}_audit": [
-        "remediation_log", "escalation_log", "agent_actions",
-        "operator_decisions", "safety_assessments",
-    ],
-}
 
 QUERY_TEMPLATES = [
     ("SELECT", "SELECT * FROM telemetry_readings WHERE timestamp > NOW() - INTERVAL 5 MINUTE AND subsystem = '{subsystem}' ORDER BY timestamp DESC LIMIT 1000"),
@@ -294,7 +266,7 @@ def _generate_query_sample_event(
     span_id = None
     if active_chaos:
         for svc in active_chaos.get("affected_services", []):
-            t, s = _trace_context_store.get(svc)
+            t, s = _trace_context_store.get(svc, namespace=ns)
             if t and s:
                 trace_id, span_id = t, s
                 break
@@ -580,7 +552,7 @@ def run(
         db_prefix = ns.replace("-", "_")
     else:
         ns = NAMESPACE
-        db_prefix = _DB_PREFIX
+        db_prefix = NAMESPACE.replace("-", "_")
 
     _channel_registry: dict = scenario_data.get("channel_registry", {}) if scenario_data else {}
 

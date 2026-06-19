@@ -190,8 +190,12 @@ def _load_hosts_and_clusters():
 HOSTS, CLUSTER_BY_PROVIDER = _load_hosts_and_clusters()
 
 
-def _build_host_resource(host_cfg: dict) -> dict:
-    """Build OTLP resource for a host with all required Infrastructure UI attributes."""
+def _build_host_resource(host_cfg: dict, cluster_by_provider: dict = CLUSTER_BY_PROVIDER) -> dict:
+    """Build OTLP resource for a host with all required Infrastructure UI attributes.
+
+    cluster_by_provider: provider → cluster-name map for the active scenario.
+    Defaults to the module-level CLUSTER_BY_PROVIDER (standalone/legacy path).
+    """
     attrs = {}
     for key in [
         "host.name",
@@ -217,7 +221,7 @@ def _build_host_resource(host_cfg: dict) -> dict:
         if key in host_cfg:
             attrs[key] = host_cfg[key]
 
-    cluster_name = CLUSTER_BY_PROVIDER.get(host_cfg.get("cloud.provider"))
+    cluster_name = cluster_by_provider.get(host_cfg.get("cloud.provider"))
     if cluster_name:
         attrs["k8s.cluster.name"] = cluster_name
 
@@ -995,6 +999,11 @@ def run(
     rng = random.Random()
 
     hosts = scenario_data["hosts"] if scenario_data else HOSTS
+    # Per-deployment provider → cluster-name map; fall back to module global for standalone mode.
+    _cluster_by_provider = (
+        {c["provider"]: c["name"] for c in scenario_data.get("k8s_clusters", [])}
+        if scenario_data else CLUSTER_BY_PROVIDER
+    )
     # Build cloud_provider -> host_name mapping for targeted spikes
     _host_cloud_map: dict[str, str] = {}
     for h in hosts:
@@ -1012,7 +1021,7 @@ def run(
     host_states = []
     host_proc_states: list[list[ProcessState]] = []
     for host_idx, host_cfg in enumerate(hosts):
-        resource = _build_host_resource(host_cfg)
+        resource = _build_host_resource(host_cfg, _cluster_by_provider)
         state = HostMetricState(
             cpu_count=host_cfg["cpu_count"],
             mem_total=host_cfg["memory_total_bytes"],

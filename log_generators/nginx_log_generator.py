@@ -47,31 +47,6 @@ BATCH_INTERVAL_MAX = 5
 BATCH_SIZE_MIN = 5
 BATCH_SIZE_MAX = 20
 
-# ── Realistic nginx data pools ────────────────────────────────────────────────
-ENDPOINTS = [
-    "/api/v1/telemetry",
-    "/api/v1/health",
-    "/api/v1/metrics",
-    "/api/v1/traces",
-    "/api/v1/logs",
-    f"/api/v1/agents/{NAMESPACE}",
-    "/api/v1/channels/status",
-    "/api/v1/operations/status",
-    "/api/v1/operations/emergency",
-    "/api/v2/telemetry/stream",
-    "/static/app.js",
-    "/static/app.css",
-    "/static/dashboard.js",
-    "/static/favicon.ico",
-    "/dashboard",
-    "/dashboard/operations",
-    "/dashboard/overview",
-    "/login",
-    "/logout",
-    "/healthz",
-    "/readyz",
-]
-
 METHODS = [
     "GET",
     "GET",
@@ -130,8 +105,6 @@ USER_AGENTS = [
     "Elastic-Heartbeat/8.12.0",
     "kube-probe/1.28",
 ]
-
-SERVER_NAMES = [f"{NAMESPACE}-nginx-01", f"{NAMESPACE}-nginx-02"]
 
 ERROR_MESSAGES = [
     ("error", "upstream timed out (110: Connection timed out) while connecting to upstream"),
@@ -199,8 +172,8 @@ def _generate_access_log(
     and source trace_id/span_id from the shared trace context store so the
     access log links back to a real APM error transaction.
     """
-    _endpoints = endpoints or ENDPOINTS
-    _server_names = server_names or SERVER_NAMES
+    _endpoints = endpoints
+    _server_names = server_names
     _ns = namespace or NAMESPACE
 
     method = rng.choice(METHODS)
@@ -229,9 +202,10 @@ def _generate_access_log(
     # Trace/span IDs: prefer the affected service's last error trace from the shared store
     trace_id = None
     span_id = None
+    _ns = namespace or ""
     if active_chaos:
         for svc in active_chaos.get("affected_services", []):
-            t, s = _trace_context_store.get(svc)
+            t, s = _trace_context_store.get(svc, namespace=_ns)
             if t and s:
                 trace_id, span_id = t, s
                 break
@@ -318,9 +292,10 @@ def _generate_error_log(
     endpoints: list | None = None,
     server_names: list | None = None,
     active_chaos: dict | None = None,
+    namespace: str | None = None,
 ) -> dict:
-    _endpoints = endpoints or ENDPOINTS
-    _server_names = server_names or SERVER_NAMES
+    _endpoints = endpoints
+    _server_names = server_names
 
     if active_chaos and active_chaos.get("error_message_short"):
         log_level = "error"
@@ -359,8 +334,9 @@ def _generate_error_log(
             attrs["chaos.subsystem"] = active_chaos["subsystem"]
         if active_chaos.get("error_type"):
             attrs["error.type"] = active_chaos["error_type"]
+        _ns = namespace or ""
         for svc in active_chaos.get("affected_services", []):
-            t, s = _trace_context_store.get(svc)
+            t, s = _trace_context_store.get(svc, namespace=_ns)
             if t and s:
                 trace_id, span_id = t, s
                 break
@@ -538,6 +514,7 @@ def run(
                     _generate_error_log(
                         client, rng, endpoints, server_names,
                         active_chaos=active_chaos,
+                        namespace=ns,
                     )
                 )
             client.send_logs(error_resource, error_records)

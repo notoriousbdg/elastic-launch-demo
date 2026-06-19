@@ -18,6 +18,7 @@ import signal
 import threading
 import time
 import uuid
+import zlib
 from datetime import datetime, timezone
 
 from app.telemetry import OTLPClient, _format_attributes, SCHEMA_URL, _now_ns
@@ -51,17 +52,24 @@ CLOUD_CONFIG = {
 }
 
 
-def _init_pod_data(cluster: dict, seed_offset: int = 0) -> dict:
+def _init_pod_data(cluster: dict, seed_offset: int = 0, namespace: str = NAMESPACE) -> dict:
     """Initialize static K8s pod/node/deployment data for a cluster's services.
 
-    Uses a fixed-seed RNG so pod/node names are deterministic across restarts.
+    Uses a namespace-scoped seed so pod/node names are deterministic across restarts
+    and unique per scenario even when scenarios share the same cluster-index/region layout.
+    Seed expression mirrors infra_topology.build_topology exactly so IDs are identical
+    between the trace generator and the k8s metrics generator.
     seed_offset differentiates clusters (0, 1, 2).
     """
-    stable = random.Random(42 + seed_offset)
+    # Namespace-scoped seed: random.Random(str) uses sha512, stable across processes.
+    # Must mirror build_topology in infra_topology.py exactly.
+    stable = random.Random(f"{namespace}:{seed_offset}")
 
     region = cluster["region"]
+    # Per-namespace subnet octet — ensures node names never collide across scenarios.
+    ns_octet = zlib.crc32(namespace.encode()) % 256
     node_names = [
-        f"ip-10-0-{stable.randint(10, 200)}-{stable.randint(10, 200)}.{region}.compute.internal"
+        f"ip-10-{ns_octet}-{stable.randint(10, 200)}-{stable.randint(10, 200)}.{region}.compute.internal"
         for _ in range(3)
     ]
 
@@ -130,11 +138,11 @@ def _cumulative_sum(name: str, unit: str, value, is_int: bool = True, attributes
     }
 
 
-def _build_pod_resource(svc: str, pod_data: dict, cluster: dict) -> dict:
+def _build_pod_resource(svc: str, pod_data: dict, cluster: dict, namespace: str = NAMESPACE) -> dict:
     """Build OTLP resource for a pod (kubeletstatsreceiver)."""
     p = pod_data["pods"][svc]
     attrs = {
-        "k8s.namespace.name": NAMESPACE,
+        "k8s.namespace.name": namespace,
         "k8s.deployment.name": p["deployment_name"],
         "k8s.replicaset.name": p["replicaset_name"],
         "k8s.node.name": p["node_name"],
@@ -148,7 +156,7 @@ def _build_pod_resource(svc: str, pod_data: dict, cluster: dict) -> dict:
         "container.image.name": f"{svc}:latest",
         "k8s.container.status.last_terminated_reason": "Completed",
         "service.name": svc,
-        "service.namespace": NAMESPACE,
+        "service.namespace": namespace,
         "host.name": p["node_name"],
         "host.architecture": "amd64",
         "os.type": "linux",
@@ -194,12 +202,12 @@ def _build_node_resource(node_name: str, pod_data: dict, cluster: dict) -> dict:
     return {"attributes": _format_attributes(attrs), "schemaUrl": SCHEMA_URL}
 
 
-def _build_deployment_resource(svc: str, pod_data: dict, cluster: dict) -> dict:
+def _build_deployment_resource(svc: str, pod_data: dict, cluster: dict, namespace: str = NAMESPACE) -> dict:
     """Build OTLP resource for a deployment (k8sclusterreceiver)."""
     p = pod_data["pods"][svc]
     attrs = {
         "k8s.deployment.name": p["deployment_name"],
-        "k8s.namespace.name": NAMESPACE,
+        "k8s.namespace.name": namespace,
         "k8s.cluster.name": cluster["name"],
         "cloud.provider": cluster["provider"],
         "cloud.platform": cluster["platform"],
@@ -293,10 +301,10 @@ DAEMONSETS = [f"{NAMESPACE}-log-collector", f"{NAMESPACE}-node-exporter"]
 STATEFULSETS = [f"{NAMESPACE}-redis", f"{NAMESPACE}-postgres"]
 
 
-def _build_daemonset_resource(ds_name: str, cluster: dict) -> dict:
+def _build_daemonset_resource(ds_name: str, cluster: dict, namespace: str = NAMESPACE) -> dict:
     attrs = {
         "k8s.daemonset.name": ds_name,
-        "k8s.namespace.name": NAMESPACE,
+        "k8s.namespace.name": namespace,
         "k8s.cluster.name": cluster["name"],
         "cloud.provider": cluster["provider"],
         "cloud.platform": cluster["platform"],
@@ -318,10 +326,10 @@ def _generate_daemonset_metrics(rng: random.Random, num_nodes: int) -> list:
     ]
 
 
-def _build_statefulset_resource(ss_name: str, cluster: dict) -> dict:
+def _build_statefulset_resource(ss_name: str, cluster: dict, namespace: str = NAMESPACE) -> dict:
     attrs = {
         "k8s.statefulset.name": ss_name,
-        "k8s.namespace.name": NAMESPACE,
+        "k8s.namespace.name": namespace,
         "k8s.cluster.name": cluster["name"],
         "cloud.provider": cluster["provider"],
         "cloud.platform": cluster["platform"],
@@ -343,11 +351,11 @@ def _generate_statefulset_metrics(rng: random.Random) -> list:
     ]
 
 
-def _build_replicaset_resource(svc: str, pod_data: dict, cluster: dict) -> dict:
+def _build_replicaset_resource(svc: str, pod_data: dict, cluster: dict, namespace: str = NAMESPACE) -> dict:
     p = pod_data["pods"][svc]
     attrs = {
         "k8s.replicaset.name": p["replicaset_name"],
-        "k8s.namespace.name": NAMESPACE,
+        "k8s.namespace.name": namespace,
         "k8s.cluster.name": cluster["name"],
         "cloud.provider": cluster["provider"],
         "cloud.platform": cluster["platform"],
@@ -368,13 +376,13 @@ def _generate_replicaset_metrics(rng: random.Random) -> list:
     ]
 
 
-def _build_pod_phase_resource(svc: str, pod_data: dict, cluster: dict) -> dict:
+def _build_pod_phase_resource(svc: str, pod_data: dict, cluster: dict, namespace: str = NAMESPACE) -> dict:
     """Resource for pod-phase metrics (k8sclusterreceiver scope)."""
     p = pod_data["pods"][svc]
     attrs = {
         "k8s.pod.name": p["pod_name"],
         "k8s.pod.uid": p["pod_uid"],
-        "k8s.namespace.name": NAMESPACE,
+        "k8s.namespace.name": namespace,
         "k8s.cluster.name": cluster["name"],
         "k8s.node.name": p["node_name"],
         "cloud.provider": cluster["provider"],
@@ -407,7 +415,7 @@ WARNING_EVENTS = [
 ]
 
 
-def _generate_k8s_warning_logs(client: OTLPClient, pod_data: dict, cluster: dict, rng: random.Random) -> None:
+def _generate_k8s_warning_logs(client: OTLPClient, pod_data: dict, cluster: dict, rng: random.Random, namespace: str = NAMESPACE) -> None:
     """Generate occasional K8s Warning event logs for the dashboard's Warning Events panel."""
     # Only emit ~20% of the time
     if rng.random() > 0.20:
@@ -428,9 +436,9 @@ def _generate_k8s_warning_logs(client: OTLPClient, pod_data: dict, cluster: dict
         "object.note": evt["message"],
         "object.regarding.kind": "Pod",
         "object.regarding.name": p["pod_name"],
-        "object.regarding.namespace": NAMESPACE,
+        "object.regarding.namespace": namespace,
         "object.metadata.name": event_name,
-        "object.metadata.namespace": NAMESPACE,
+        "object.metadata.namespace": namespace,
         "object.metadata.creationTimestamp": event_time_iso,
         "object.deprecatedSource.component": rng.choice(["kubelet", "scheduler", "controller-manager"]),
         "object.deprecatedSource.host": p["node_name"],
@@ -458,14 +466,14 @@ def _generate_k8s_warning_logs(client: OTLPClient, pod_data: dict, cluster: dict
             {"key": "k8s.object.name", "value": {"stringValue": p["pod_name"]}},
             {"key": "k8s.event.object.kind", "value": {"stringValue": "Pod"}},
             {"key": "k8s.event.object.name", "value": {"stringValue": p["pod_name"]}},
-            {"key": "k8s.event.object.namespace", "value": {"stringValue": NAMESPACE}},
-            {"key": "k8s.namespace.name", "value": {"stringValue": NAMESPACE}},
+            {"key": "k8s.event.object.namespace", "value": {"stringValue": namespace}},
+            {"key": "k8s.namespace.name", "value": {"stringValue": namespace}},
         ],
     }
 
     resource_attrs = {
         "k8s.cluster.name": cluster["name"],
-        "k8s.namespace.name": NAMESPACE,
+        "k8s.namespace.name": namespace,
         "cloud.provider": cluster["provider"],
         "cloud.platform": cluster["platform"],
         "cloud.region": cluster["region"],
@@ -488,7 +496,7 @@ def _generate_k8s_warning_logs(client: OTLPClient, pod_data: dict, cluster: dict
 
 # ── Run loop ─────────────────────────────────────────────────────────────────
 
-def _generate_oom_killed_log(client: OTLPClient, svc: str, pod_data: dict, cluster: dict, rng: random.Random) -> None:
+def _generate_oom_killed_log(client: OTLPClient, svc: str, pod_data: dict, cluster: dict, rng: random.Random, namespace: str = NAMESPACE) -> None:
     """Emit an OOMKilled event log for a targeted pod."""
     p = pod_data["pods"][svc]
     now_ns = _now_ns()
@@ -502,9 +510,9 @@ def _generate_oom_killed_log(client: OTLPClient, svc: str, pod_data: dict, clust
         "object.note": f"Container {svc}-container in pod {p['pod_name']} was OOMKilled (memory limit exceeded)",
         "object.regarding.kind": "Pod",
         "object.regarding.name": p["pod_name"],
-        "object.regarding.namespace": NAMESPACE,
+        "object.regarding.namespace": namespace,
         "object.metadata.name": event_name,
-        "object.metadata.namespace": NAMESPACE,
+        "object.metadata.namespace": namespace,
         "object.metadata.creationTimestamp": event_time_iso,
         "object.deprecatedSource.component": "kubelet",
         "object.deprecatedSource.host": p["node_name"],
@@ -530,14 +538,14 @@ def _generate_oom_killed_log(client: OTLPClient, svc: str, pod_data: dict, clust
             {"key": "k8s.object.name", "value": {"stringValue": p["pod_name"]}},
             {"key": "k8s.event.object.kind", "value": {"stringValue": "Pod"}},
             {"key": "k8s.event.object.name", "value": {"stringValue": p["pod_name"]}},
-            {"key": "k8s.event.object.namespace", "value": {"stringValue": NAMESPACE}},
-            {"key": "k8s.namespace.name", "value": {"stringValue": NAMESPACE}},
+            {"key": "k8s.event.object.namespace", "value": {"stringValue": namespace}},
+            {"key": "k8s.namespace.name", "value": {"stringValue": namespace}},
         ],
     }
 
     resource_attrs = {
         "k8s.cluster.name": cluster["name"],
-        "k8s.namespace.name": NAMESPACE,
+        "k8s.namespace.name": namespace,
         "cloud.provider": cluster["provider"],
         "cloud.platform": cluster["platform"],
         "cloud.region": cluster["region"],
@@ -563,6 +571,11 @@ def run(client: OTLPClient, stop_event: threading.Event, scenario_data: dict | N
     """Run K8s metrics generator loop until stop_event is set."""
     rng = random.Random()
     clusters = scenario_data["k8s_clusters"] if scenario_data else CLUSTERS
+    # Prefer per-deployment namespace; fall back to module global for standalone mode.
+    _namespace = scenario_data["namespace"] if scenario_data else NAMESPACE
+    # Per-namespace daemonset/statefulset names (avoid frozen module-global NAMESPACE).
+    _daemonsets = [f"{_namespace}-log-collector", f"{_namespace}-node-exporter"]
+    _statefulsets = [f"{_namespace}-redis", f"{_namespace}-postgres"]
 
     # Build service -> cloud_provider mapping for targeted spikes
     _service_cloud: dict[str, str] = {}
@@ -599,7 +612,7 @@ def run(client: OTLPClient, stop_event: threading.Event, scenario_data: dict | N
         if _infra_topology is not None:
             pod_data = _to_pod_data(_infra_topology, cluster)
         else:
-            pod_data = _init_pod_data(cluster, seed_offset=idx)
+            pod_data = _init_pod_data(cluster, seed_offset=idx, namespace=_namespace)
         cluster_data.append((cluster, pod_data))
         total_services += len(cluster["services"])
         total_nodes += len(pod_data["node_names"])
@@ -635,7 +648,7 @@ def run(client: OTLPClient, stop_event: threading.Event, scenario_data: dict | N
                 # Check if this service should be OOM-spiked
                 is_spiked = oom_intensity > 0 and (not has_active_faults or svc in spiked_services)
 
-                pod_res = _build_pod_resource(svc, pod_data, cluster)
+                pod_res = _build_pod_resource(svc, pod_data, cluster, _namespace)
                 metrics = _generate_pod_metrics(svc, state, rng)
 
                 intensity_ratio = oom_intensity / 100.0
@@ -658,7 +671,7 @@ def run(client: OTLPClient, stop_event: threading.Event, scenario_data: dict | N
 
                 # Emit OOMKilled event log for spiked pods (probabilistic)
                 if is_spiked and rng.random() < 0.15 * intensity_ratio:
-                    _generate_oom_killed_log(client, svc, pod_data, cluster, rng)
+                    _generate_oom_killed_log(client, svc, pod_data, cluster, rng, _namespace)
 
             # Determine if any node in this cluster has spiked services
             cluster_has_spike = oom_intensity > 0 and (not has_active_faults or any(s in spiked_services for s in svcs))
@@ -681,7 +694,7 @@ def run(client: OTLPClient, stop_event: threading.Event, scenario_data: dict | N
 
             # Deployment-level metrics
             for svc in svcs:
-                dep_res = _build_deployment_resource(svc, pod_data, cluster)
+                dep_res = _build_deployment_resource(svc, pod_data, cluster, _namespace)
                 metrics = _generate_deployment_metrics(rng)
                 resource_metrics.append({
                     "resource": dep_res,
@@ -690,8 +703,8 @@ def run(client: OTLPClient, stop_event: threading.Event, scenario_data: dict | N
 
             # DaemonSet metrics
             num_nodes = len(pod_data["node_names"])
-            for ds_name in DAEMONSETS:
-                ds_res = _build_daemonset_resource(ds_name, cluster)
+            for ds_name in _daemonsets:
+                ds_res = _build_daemonset_resource(ds_name, cluster, _namespace)
                 metrics = _generate_daemonset_metrics(rng, num_nodes)
                 resource_metrics.append({
                     "resource": ds_res,
@@ -699,8 +712,8 @@ def run(client: OTLPClient, stop_event: threading.Event, scenario_data: dict | N
                 })
 
             # StatefulSet metrics
-            for ss_name in STATEFULSETS:
-                ss_res = _build_statefulset_resource(ss_name, cluster)
+            for ss_name in _statefulsets:
+                ss_res = _build_statefulset_resource(ss_name, cluster, _namespace)
                 metrics = _generate_statefulset_metrics(rng)
                 resource_metrics.append({
                     "resource": ss_res,
@@ -709,7 +722,7 @@ def run(client: OTLPClient, stop_event: threading.Event, scenario_data: dict | N
 
             # ReplicaSet metrics
             for svc in svcs:
-                rs_res = _build_replicaset_resource(svc, pod_data, cluster)
+                rs_res = _build_replicaset_resource(svc, pod_data, cluster, _namespace)
                 metrics = _generate_replicaset_metrics(rng)
                 resource_metrics.append({
                     "resource": rs_res,
@@ -718,7 +731,7 @@ def run(client: OTLPClient, stop_event: threading.Event, scenario_data: dict | N
 
             # Pod phase metrics
             for svc in svcs:
-                phase_res = _build_pod_phase_resource(svc, pod_data, cluster)
+                phase_res = _build_pod_phase_resource(svc, pod_data, cluster, _namespace)
                 metrics = _generate_pod_phase_metric(rng)
                 resource_metrics.append({
                     "resource": phase_res,
@@ -730,7 +743,7 @@ def run(client: OTLPClient, stop_event: threading.Event, scenario_data: dict | N
 
         # Occasional K8s warning event logs (pick a random cluster)
         cluster, pod_data = rng.choice(cluster_data)
-        _generate_k8s_warning_logs(client, pod_data, cluster, rng)
+        _generate_k8s_warning_logs(client, pod_data, cluster, rng, _namespace)
 
         scrape_count += 1
         if scrape_count % 4 == 0:

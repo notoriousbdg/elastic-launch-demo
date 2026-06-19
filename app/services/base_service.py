@@ -235,9 +235,9 @@ class BaseService(ABC):
         trace_id: str | None = None
         span_id: str | None = None
         if channel is not None:
-            trace_id, span_id = _trace_context_store.get_for_channel(channel, self.SERVICE_NAME)
+            trace_id, span_id = _trace_context_store.get_for_channel(channel, self.SERVICE_NAME, namespace=self._namespace)
         if not trace_id:
-            trace_id, span_id = _trace_context_store.get(self.SERVICE_NAME)
+            trace_id, span_id = _trace_context_store.get(self.SERVICE_NAME, namespace=self._namespace)
         record = self.otlp.build_log_record(
             severity=level,
             body=message,

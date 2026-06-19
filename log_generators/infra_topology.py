@@ -9,13 +9,17 @@ from __future__ import annotations
 
 import random
 import uuid
+import zlib
 
 
 def build_topology(scenario_data: dict) -> dict[str, dict]:
-    """Return service_name → infra attrs dict. Deterministic (seed 42 + cluster_idx).
+    """Return service_name → infra attrs dict. Deterministic per (namespace, cluster_idx).
 
-    Mirrors the RNG call sequence of k8s_metrics_generator._init_pod_data exactly so
-    pod/container IDs are identical whether read here or from the k8s metrics generator.
+    Seed is f"{namespace}:{idx}" — namespace-scoped so identifiers (node names,
+    pod/node UIDs, container IDs) are unique per scenario even when scenarios share
+    the same cluster region layout. Mirrors the RNG call sequence of
+    k8s_metrics_generator._init_pod_data exactly so pod/container IDs are identical
+    whether read here or from the k8s metrics generator.
     """
     hosts: list[dict] = scenario_data.get("hosts", [])
     k8s_clusters: list[dict] = scenario_data.get("k8s_clusters", [])
@@ -26,12 +30,19 @@ def build_topology(scenario_data: dict) -> dict[str, dict]:
     topology: dict[str, dict] = {}
 
     for idx, cluster in enumerate(k8s_clusters):
-        stable = random.Random(42 + idx)
+        # Namespace-scoped seed: random.Random(str) uses sha512, stable across processes.
+        # This ensures identifiers (node names, pod/node UIDs, container IDs) are unique
+        # per scenario even when scenarios share the same cluster-index / region layout.
+        # Must mirror _init_pod_data in k8s_metrics_generator exactly.
+        stable = random.Random(f"{namespace}:{idx}")
         region = cluster["region"]
+        # Per-namespace subnet octet derived from namespace name — structurally ensures
+        # no two scenarios produce the same node-name string (they land in different /16s).
+        ns_octet = zlib.crc32(namespace.encode()) % 256
 
         # Mirror _init_pod_data: generate 3 node names with same 2-randint-per-node sequence
         node_names = [
-            f"ip-10-0-{stable.randint(10, 200)}-{stable.randint(10, 200)}.{region}.compute.internal"
+            f"ip-10-{ns_octet}-{stable.randint(10, 200)}-{stable.randint(10, 200)}.{region}.compute.internal"
             for _ in range(3)
         ]
 

@@ -790,11 +790,11 @@ def run(client: OTLPClient, stop_event: threading.Event, chaos_controller=None,
                 batch_by_service.setdefault(svc, []).extend(spans)
                 # Publish latest trace context for log-trace correlation
                 if spans:
-                    _trace_context_store.set(svc, spans[0]["traceId"], spans[0]["spanId"])
+                    _trace_context_store.set(svc, spans[0]["traceId"], spans[0]["spanId"], namespace=_namespace)
             # Publish per-channel error trace context so fault logs can pivot to the
             # actual error trace rather than the last-seen-per-service trace.
             for ch_id, svc, t_id, s_id in error_publish:
-                _trace_context_store.set_for_channel(ch_id, svc, t_id, s_id)
+                _trace_context_store.set_for_channel(ch_id, svc, t_id, s_id, namespace=_namespace)
 
         # Send ALL services in one OTLP POST. Each service's spans become a
         # separate `resourceSpans` entry in the same request body.
