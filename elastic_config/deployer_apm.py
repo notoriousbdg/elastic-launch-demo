@@ -145,7 +145,7 @@ class ApmMixin:
         - Composite aggregation (date_histogram + transaction.type + service.name)
         - summary_count_field_name: "doc_count" (composite bucket doc_count)
         """
-        step = self._step(15)
+        step = self._step(16)
         step.status = "running"
         self._apm_ml_started = False
         notify(self.progress)
@@ -421,12 +421,12 @@ class ApmMixin:
         notify(self.progress)
 
     def _finalize_apm_anomaly_detection(self, client: httpx.Client, notify: ProgressCallback):
-        """Step 15 (tail): block until the APM datafeed catches up to real-time,
+        """Step 16 (tail): block until the APM datafeed catches up to real-time,
         then finalize the step status. The datafeed was started early in
         _setup_apm_anomaly_detection, so ES has been processing the 12h backfill
         during the intervening deploy steps — by now the catch-up poll is usually
         near-instant."""
-        step = self._step(15)
+        step = self._step(16)
         if not getattr(self, "_apm_ml_started", False):
             return  # setup failed or was skipped — leave its status as-is
         try:

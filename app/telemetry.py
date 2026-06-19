@@ -20,6 +20,7 @@ from app.config import (
     OTLP_ENDPOINT,
     SEVERITY_MAP,
 )
+from scenario_engine.runtimes import RUNTIME_BY_LANGUAGE
 
 logger = logging.getLogger("nova7.telemetry")
 
@@ -120,41 +121,15 @@ class OTLPClient:
             "data_stream.namespace": "default",
             "elasticsearch.index": "logs.otel",
         }
-        # Add process.runtime attributes so Elastic APM can identify the runtime
-        _RUNTIME_ATTRS = {
-            "java": {
-                "process.runtime.name": "OpenJDK Runtime Environment",
-                "process.runtime.version": "21.0.5+11-LTS",
-                "process.runtime.description": "Eclipse Adoptium OpenJDK 64-Bit Server VM 21.0.5+11-LTS",
-            },
-            "python": {
-                "process.runtime.name": "CPython",
-                "process.runtime.version": "3.12.3",
-                "process.runtime.description": "CPython 3.12.3",
-            },
-            "go": {
-                "process.runtime.name": "go",
-                "process.runtime.version": "go1.22.4",
-                "process.runtime.description": "go1.22.4 linux/amd64",
-            },
-            "dotnet": {
-                "process.runtime.name": ".NET",
-                "process.runtime.version": "8.0.6",
-                "process.runtime.description": ".NET 8.0.6",
-            },
-            "rust": {
-                "process.runtime.name": "rustc",
-                "process.runtime.version": "1.79.0",
-                "process.runtime.description": "rustc 1.79.0",
-            },
-            "cpp": {
-                "process.runtime.name": "gcc",
-                "process.runtime.version": "13.2.0",
-                "process.runtime.description": "GCC 13.2.0",
-            },
-        }
-        if language in _RUNTIME_ATTRS:
-            attrs.update(_RUNTIME_ATTRS[language])
+        # Add process.runtime attributes so Elastic APM can identify the runtime.
+        # Metadata is sourced from scenario_engine.runtimes.RUNTIME_BY_LANGUAGE —
+        # the same constant used to generate Streams knowledge indicators, so
+        # telemetry and indicators always stay in sync.
+        rt = RUNTIME_BY_LANGUAGE.get(language)
+        if rt:
+            attrs["process.runtime.name"] = rt["runtime_name"]
+            attrs["process.runtime.version"] = rt["process_runtime_version"]
+            attrs["process.runtime.description"] = rt["process_runtime_description"]
         return {
             "attributes": _format_attributes(attrs),
             "schemaUrl": SCHEMA_URL,

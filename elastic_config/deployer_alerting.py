@@ -28,7 +28,7 @@ class AlertingMixin:
         _workflow_ids: dict[str, str]
 
     def _deploy_alerting(self, client: httpx.Client, notify: ProgressCallback):
-        step = self._step(13)
+        step = self._step(14)
         step.status = "running"
         notify(self.progress)
 
