@@ -16,6 +16,29 @@ from app.trace_context import _trace_context_store
 
 logger = logging.getLogger("nova7.services")
 
+# Module-level topology cache — built once per scenario_id so all ~37 service
+# constructors share the same deterministic host/pod/container identifiers without
+# re-running the RNG sequence on each instantiation.
+_topology_cache: dict[str, dict] = {}
+
+
+def _scenario_topology(ctx) -> dict:
+    """Return (cached) infra_topology for the given ScenarioContext."""
+    topo = _topology_cache.get(ctx.scenario_id)
+    if topo is None:
+        from log_generators.infra_topology import build_topology
+
+        topo = build_topology(
+            {
+                "hosts": ctx.scenario.hosts,
+                "k8s_clusters": ctx.scenario.k8s_clusters,
+                "services": ctx.services,
+                "namespace": ctx.namespace,
+            }
+        )
+        _topology_cache[ctx.scenario_id] = topo
+    return topo
+
 
 def _get_scenario():
     from scenario_engine import get_scenario
@@ -64,10 +87,28 @@ class BaseService(ABC):
             self._mission_id = MISSION_ID
             self._namespace = "nova7"
 
+        # Derive topology-based infra attributes so that logs, per-service metrics,
+        # and single-span traces carry the same host.name / container.id / k8s.pod.*
+        # join keys as the trace, JVM-metrics, and k8s-metrics generators.  This is
+        # what makes APM failed-transaction correlation → Logs → Infrastructure
+        # resolve end-to-end without leaving any signal on a synthetic "{svc}-host".
+        infra_attrs: dict | None = None
+        if self._ctx:
+            from log_generators.infra_topology import get_resource_attrs
+
+            topo = _scenario_topology(self._ctx)
+            infra_attrs = dict(get_resource_attrs(topo, self.SERVICE_NAME))
+            # Mirror the trace path: for k8s services, set service.instance.id to
+            # the pod uid so APM instance grouping is consistent across all signals.
+            entry = topo.get(self.SERVICE_NAME) or {}
+            if entry.get("_service_instance_id"):
+                infra_attrs["service.instance.id"] = entry["_service_instance_id"]
+
         self.resource = OTLPClient.build_resource(
             self.SERVICE_NAME,
             self.service_cfg,
             namespace=self._namespace,
+            infra_attrs=infra_attrs,
         )
 
         # Derive nominal label from scenario (space="NOMINAL", others="NORMAL")

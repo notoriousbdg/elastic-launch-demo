@@ -96,9 +96,23 @@ class OTLPClient:
     # ── Resource helpers ───────────────────────────────────────────────
     @staticmethod
     def build_resource(
-        service_name: str, service_cfg: dict[str, Any], namespace: str = "demo"
+        service_name: str,
+        service_cfg: dict[str, Any],
+        namespace: str = "demo",
+        infra_attrs: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Build an OTLP resource object for a service."""
+        """Build an OTLP resource object for a service.
+
+        ``infra_attrs`` is an optional dict of pre-computed infrastructure resource
+        attributes (host.name, host.id, container.id, k8s.pod.*, k8s.node.*,
+        k8s.cluster.name, service.instance.id, …) sourced from
+        ``infra_topology.get_resource_attrs()``.  When supplied they override the
+        synthetic defaults so that logs, per-service metrics, and single-span traces
+        emitted by BaseService carry the same join keys as the topology-driven trace,
+        JVM-metrics, and k8s-metrics generators — enabling the full
+        trace → metric → log → infra correlation loop in APM / Infra UI.
+        When omitted the behaviour is unchanged (backward-compatible).
+        """
         language = service_cfg.get("language", "python")
         attrs = {
             "service.name": service_name,
@@ -130,6 +144,10 @@ class OTLPClient:
             attrs["process.runtime.name"] = rt["runtime_name"]
             attrs["process.runtime.version"] = rt["process_runtime_version"]
             attrs["process.runtime.description"] = rt["process_runtime_description"]
+        # Overlay topology-derived infra attributes last so they take precedence over
+        # the synthetic defaults above (host.name, host.id, service.instance.id, …).
+        if infra_attrs:
+            attrs.update(infra_attrs)
         return {
             "attributes": _format_attributes(attrs),
             "schemaUrl": SCHEMA_URL,
