@@ -1,0 +1,64 @@
+name: Season Pass Progression Sync Error
+subsystem: progression
+vehicle_section: progression_tracker
+error_type: SEASON-PASS-SYNC-FAIL
+sensor_type: sync_validator
+affected_services:
+- leaderboard-api
+- payment-processor
+cascade_services:
+- analytics-pipeline
+description: Season pass XP and tier progression fails to synchronize between game server events and the progression backend
+investigation_notes: |-
+  Root cause: the XP event pipeline uses at-most-once delivery from game servers to the progression backend — when the progression service is briefly unavailable or slow, XP events (kill_streak +350, weekly_bonus +2000) are dropped silently without retry.
+  1. Check event delivery: query `FROM logs WHERE body.text LIKE '*SEASON-PASS-SYNC-FAIL*'` and examine which XP event types are consistently marked as NOT APPLIED.
+  2. Verify progression backend health: check the leaderboard-api pods for OOMKilled or CrashLoopBackOff events that coincide with the missed XP window.
+  3. Audit the event bus: inspect Kafka consumer lag for the `xp-events` topic — if consumer group is rebalancing, events may be dropped during partition reassignment.
+  4. Remediate: issue `force_sync_season_pass` to replay missed XP events from the game server event log and recalculate tier placement for affected players.
+  5. Migrate XP event delivery from fire-and-forget HTTP to a durable message queue with at-least-once delivery guarantees and idempotent processing on the consumer side.
+remediation_action: force_sync_season_pass
+error_message: '[LB] SEASON-PASS-SYNC-FAIL: player={player_id} tier={current_tier} expected_tier={expected_tier} xp={xp_total}
+  delta={xp_delta}XP season={season_id}'
+stack_trace: |-
+  === SEASON PASS PROGRESSION STATE ===
+  player={player_id}  season={season_id}
+  ----------- current state -----------
+    tier         = {current_tier}
+    xp_total     = {xp_total}
+    xp_to_next   = 2,500
+    premium      = true
+  ----------- expected state ----------
+    expected_tier = {expected_tier}
+    xp_delta      = {xp_delta}XP (unaccounted)
+    tier_threshold = {xp_total} XP -> tier {expected_tier}
+  ----------- recent xp events --------
+    match_complete  +1,200 XP  (2min ago)
+    daily_challenge +800 XP    (4min ago)
+    kill_streak     +350 XP    (5min ago)  <-- NOT APPLIED
+    weekly_bonus    +2,000 XP  (12min ago) <-- NOT APPLIED
+  ----------- action ------------------
+    FORCE_SYNC tier to {expected_tier}  REPLAY missed events
+  SEASON-PASS-SYNC-FAIL: player {player_id} stuck at tier {current_tier}, should be {expected_tier}
+correlation_attr:
+  key: runtime.kafka_consumer_config
+  value: consumer-v2.1.0-at-most-once
+fault_params:
+  player_id:
+    format: "PLR-{n}"
+    n: {randint: [100000, 999999]}
+  current_tier: {randint: [1, 50]}
+  expected_tier: {randint: [51, 100]}
+  xp_total: {randint: [50000, 500000]}
+  xp_delta: {randint: [1000, 50000]}
+  season_id:
+    format: "S{n}"
+    n: {randint: [1, 12]}
+rca_clues:
+  leaderboard-api:
+    leaderboard.xp_event_delivery: at-most-once
+    leaderboard.missed_xp_events: {randint: [100, 2000]}
+  payment-processor:
+    payment.premium_pass_affected: true
+    payment.refund_risk: {choice: [low, medium, high]}
+  analytics-pipeline:
+    analytics.xp_pipeline_lag_s: {randint: [30, 300]}

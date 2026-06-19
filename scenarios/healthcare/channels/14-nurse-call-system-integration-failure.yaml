@@ -1,0 +1,53 @@
+name: Nurse Call System Integration Failure
+subsystem: alerting
+vehicle_section: nurse_call_bridge
+error_type: NURSE-CALL-STORM
+sensor_type: nurse_call_interface
+affected_services:
+- clinical-alerts
+- patient-monitor
+cascade_services:
+- ehr-system
+description: Integration bridge between nurse call system and EHR loses connectivity
+investigation_notes: |-
+  Root Cause: The nurse call system (Hill-Rom/Rauland) integration bridge communicates with the EHR via a middleware TCP socket. Bridge failures cause call events to queue without EHR documentation, leading to undelivered notifications and potential patient safety events. Emergency calls default to overhead paging.
+  Remediation: 1) Check the nurse call bridge connectivity: `ncs-admin bridge-status --station {station_id}`. 2) Restart the EHR-NCS bridge service: `systemctl restart ehr-nursecall-bridge`. 3) Verify the TCP socket connection to the nurse call server: `ncs-admin test-connection --host ncs-server --port 3001`. 4) Clear the undelivered call queue: `ncs-admin flush-queue --unit {nursing_unit}`. 5) Confirm overhead paging failover is active for emergency and code calls. 6) Review the call escalation timers — ensure STAT calls escalate to charge nurse after 60s unacknowledged.
+remediation_action: restart_nursecall_bridge
+error_message: '[CDS] NURSE-CALL-STORM: station={station_id} unit={nursing_unit} bed={bed_id} call_type={call_type} undelivered={undelivered_seconds}s'
+stack_trace: |-
+  === NURSE CALL SYSTEM STATUS — {nursing_unit} ===
+  Station: {station_id} | Bridge: EHR-NCS-BRIDGE-01 | Status: DEGRADED
+  ------------------------------------------------------------------------
+  BED       | CALL TYPE       | INITIATED   | DELIVERED | WAIT (s)
+  ------------------------------------------------------------------------
+  {bed_id}   | {call_type:15s} | 20260217143052 | PENDING   | {undelivered_seconds}
+  B-208     | routine         | 20260217143052 | PENDING   | 45
+  C-312     | bathroom        | 20260217143052 | YES       | 0
+  ------------------------------------------------------------------------
+  NURSE-CALL-STORM: {station_id} — {call_type} call from bed {bed_id} undelivered for {undelivered_seconds}s
+  EHR bridge connectivity degraded on {nursing_unit}
+  Failover to overhead paging initiated
+correlation_attr:
+  key: infra.nursecall_bridge_fw
+  value: hillrom-bridge-v2.4.0-rc1
+fault_params:
+  station_id:
+    format: "NCS-{unit}-{n}"
+    unit: {choice: [ICU, MEDSURG, ED, NICU]}
+    n: {randint: [1, 20]}
+  nursing_unit: {choice: [ICU-3A, ICU-3B, MedSurg-4N, MedSurg-4S, ED-1, NICU-2]}
+  bed_id:
+    format: "{ward}-{num}"
+    ward: {choice: [A, B, C, D]}
+    num: {randint: [101, 450]}
+  call_type: {choice: [emergency, routine, bathroom, pain_management]}
+  undelivered_seconds: {randint: [30, 300]}
+rca_clues:
+  clinical-alerts:
+    ncs.bridge_status: disconnected
+    ncs.undelivered_calls: {randint: [5, 30]}
+  patient-monitor:
+    vitals.nurse_response_lag_s: {randint: [60, 300]}
+    vitals.overhead_paging_active: true
+  ehr-system:
+    ehr.undocumented_calls: {randint: [3, 15]}

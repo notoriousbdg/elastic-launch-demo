@@ -1,0 +1,73 @@
+name: DB Connection Pool Exhaustion
+subsystem: database
+vehicle_section: subscriber_data
+error_type: DB-CONNPOOL-EXHAUST
+sensor_type: connection_pool
+affected_services:
+- subscriber-db
+- provisioning-service
+cascade_services:
+- activation-service
+- api-gateway
+description: PostgreSQL connection pool on subscriber-db saturated causing query timeouts across provisioning pipeline
+investigation_notes: |
+  1. Check HikariCP pool metrics on provisioning-service — pool_active near pool_max (100) indicates exhaustion. Run: kubectl exec provisioning-service -- curl localhost:8080/actuator/metrics/hikaricp.connections.active
+  2. Review pg_stat_activity on subscriber-db for long-running queries: SELECT pid, now()-query_start AS duration, query FROM pg_stat_activity WHERE state='active' ORDER BY duration DESC LIMIT 20.
+  3. Check for vacuum or reindex operations that may be holding locks on the subscribers table (45M rows). Long-running maintenance on large tables is the most common root cause of pool exhaustion.
+  4. Review CloudTrail for recent ModifyDBInstance events on subscriber-db RDS instance — automated maintenance windows can trigger vacuum operations without operator awareness.
+  5. Monitor connection wait time — if avg_wait_ms exceeds 3000ms, provisioning-service will begin returning 503s to activation-service. Check: SELECT count(*) FROM pg_stat_activity WHERE wait_event_type='Client'.
+remediation_action: restart_subscriber_db_pool
+error_message: '[DB] DB-CONNPOOL-EXHAUST: pool_active={pool_active} pool_max={pool_max} wait_queue={wait_queue} avg_wait_ms={avg_wait_ms} db_host={db_host}'
+stack_trace: |
+  === SUBSCRIBER DB CONNECTION POOL REPORT ===
+  db_host={db_host}  pool=HikariCP  table=subscribers (45M rows)
+  --- POOL STATUS ---
+    METRIC                VALUE       THRESHOLD    STATUS
+    active_connections     {pool_active}        100          EXHAUSTED
+    idle_connections       0           10           DEPLETED
+    wait_queue             {wait_queue}        50           OVERFLOW
+    avg_wait_ms            {avg_wait_ms}      3000         CRITICAL
+  --- BLOCKING QUERIES ---
+    pid=14829  duration=847s  query='VACUUM ANALYZE subscribers'
+    pid=14830  duration=612s  query='REINDEX INDEX idx_subscribers_msisdn'
+  --- CASCADE IMPACT ---
+    provisioning-service: 503 errors, timeout after 3000ms
+    activation-service: upstream timeout, retry storm (3x multiplier)
+    api-gateway: 502/503 to customers, {error_rate_pct}% error rate
+  ACTION: cancel_maintenance=true  kill_long_queries=true  alert=DB-CONNPOOL-EXHAUST
+infrastructure_events:
+- body: '[CloudWatch] RDS ConnectionPoolExhausted: instance=subscriber-db pool_active=100/100 wait_queue=350 avg_wait_ms=4200 alarm=ALARM region=eu-central-1'
+  severity: ERROR
+  event_name: aws.cloudwatch.alarm.ConnectionPoolExhausted
+  service: subscriber-db
+  attributes:
+    cloud.provider: aws
+    cloud.service: cloudwatch
+    aws.cloudwatch.alarm_name: subscriber-db-pool-exhaustion
+    aws.cloudwatch.state: ALARM
+    aws.rds.instance: subscriber-db
+    infrastructure.source: CloudWatch
+correlation_attr:
+  key: deployment.hikari_pool_config
+  value: hikari-v5.1.0-custom-patch
+fault_params:
+  pool_active: {randint: [95, 100]}
+  pool_max: 100
+  wait_queue: {randint: [200, 500]}
+  avg_wait_ms: {randint: [3000, 8000]}
+  db_host: subscriber-db.eu-central-1.rds.amazonaws.com
+  error_rate_pct: {uniform: [10.0, 55.0], round: 1}
+rca_clues:
+  subscriber-db:
+    db.pool_active: {randint: [95, 100]}
+    db.pool_max: 100
+    db.wait_queue: {randint: [200, 500]}
+  provisioning-service:
+    upstream.db_latency_ms: {randint: [3000, 5000]}
+    upstream.timeout_count: {randint: [30, 80]}
+  activation-service:
+    upstream.degraded_subsystem: database
+    activation.failure_rate_pct: {uniform: [15.0, 55.0], round: 1}
+  api-gateway:
+    upstream.degraded_subsystem: activation
+    gateway.5xx_rate: {uniform: [0.1, 0.5], round: 2}

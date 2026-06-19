@@ -1,0 +1,157 @@
+service: quality-inspector
+sort_order: 5
+cloud_provider: gcp
+cloud_region: us-central1
+cloud_platform: gcp_compute_engine
+cloud_availability_zone: us-central1-b
+subsystem: quality
+language: java
+topology:
+- - mes-controller
+  - /api/v1/mes/quality-event
+  - POST
+- - oee-analytics
+  - /api/v1/oee/quality-feed
+  - POST
+entry_endpoints:
+- - /api/v1/quality/inspect
+  - POST
+db_operations:
+- - INSERT
+  - inspection_results
+  - INSERT INTO inspection_results (station_id, part_id, characteristic, measured_value, result) VALUES (?, ?, ?, ?, ?)
+- - SELECT
+  - spc_baselines
+  - SELECT characteristic, target, usl, lsl, sigma FROM spc_baselines WHERE line_id = ? AND active = 1
+emit_fault_logs: true
+kpi_emitter: false
+constants:
+  STATIONS:
+  - VIS-01
+  - VIS-02
+  - VIS-03
+  - CMM-01
+  - TORQUE-01
+  DEFECT_CODES:
+  - SCRATCH
+  - DIMENSION_OOT
+  - MISSING_FEATURE
+  - COSMETIC
+  - ASSEMBLY
+  RESULTS:
+  - PASS
+  - PASS
+  - PASS
+  - PASS
+  - FAIL
+  CHARACTERISTICS:
+  - LENGTH_MM
+  - DIAMETER_MM
+  - TORQUE_NM
+  - WEIGHT_G
+  CPK_CHARACTERISTICS:
+  - LENGTH_MM
+  - DIAMETER_MM
+  - TORQUE_NM
+state:
+  _inspections_total:
+    init: 0
+  _last_cpk_report:
+    init: now
+steps:
+- sample:
+    station:
+      choice: STATIONS
+    part_id:
+      expr: f'PT-{rand.randint(100000, 999999)}'
+    result:
+      choice: RESULTS
+    confidence:
+      uniform:
+      - 0.92
+      - 0.999
+      round: 4
+- log:
+    level: INFO
+    message: '[QC] inspection station={station} part={part_id} result={result} confidence={confidence}'
+    attrs:
+      operation: inspection
+      quality.station:
+        var: station
+      quality.part_id:
+        var: part_id
+      quality.result:
+        var: result
+- sample:
+    characteristic:
+      choice: CHARACTERISTICS
+    measured_value:
+      uniform:
+      - 48.0
+      - 52.0
+      round: 4
+- log:
+    level: DEBUG
+    message: '[QC] spc_sample characteristic={characteristic} value={measured_value} target=50.0 usl=51.0 lsl=49.0'
+    attrs:
+      operation: spc_sample
+      quality.characteristic:
+        var: characteristic
+      quality.measured_value:
+        var: measured_value
+      quality.target: 50.0
+- every:
+    seconds: 10
+    state_key: _last_cpk_report
+    steps:
+    - sample:
+        cpk_char:
+          choice: CPK_CHARACTERISTICS
+        cpk:
+          uniform:
+          - 1.15
+          - 1.95
+          round: 3
+        sample_size:
+          randint:
+          - 30
+          - 200
+    - log:
+        level: INFO
+        message: '[QC] cpk_report characteristic={cpk_char} cpk={cpk} sample_size={sample_size} status=CAPABLE'
+        attrs:
+          operation: cpk_report
+          quality.characteristic:
+            var: cpk_char
+          quality.cpk:
+            var: cpk
+- counter:
+    state_key: _inspections_total
+    by: 1
+- metric:
+    name: quality.inspections_total
+    value:
+      var: _inspections_total
+    unit: inspections
+- metric:
+    name: quality.defect_rate_pct
+    value:
+      if_active:
+        uniform:
+        - 8.0
+        - 25.0
+        round: 2
+      else:
+        uniform:
+        - 0.4
+        - 2.5
+        round: 2
+    unit: '%'
+- metric:
+    name: quality.first_pass_yield_pct
+    value:
+      uniform:
+      - 94.0
+      - 99.2
+      round: 2
+    unit: '%'

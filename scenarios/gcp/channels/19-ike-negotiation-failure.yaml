@@ -1,0 +1,60 @@
+name: IKE Negotiation Failure
+subsystem: vpn
+vehicle_section: ike_protocol
+error_type: VPN-IKE-NEGOTIATION-FAILURE
+sensor_type: ike_session
+affected_services:
+- cloud-vpn-gateway
+- cloud-interconnect
+cascade_services:
+- cloud-nat-gateway
+description: IKE phase negotiation failing between Cloud VPN and remote peer
+investigation_notes: |-
+  Root cause: IKE negotiation failure at the indicated phase. Phase 1 failures (NO_PROPOSAL_CHOSEN, AUTHENTICATION_FAILED) indicate cipher suite or PSK mismatch. Phase 2 failures (TS_UNACCEPTABLE, INVALID_KE_PAYLOAD) indicate traffic selector or DH group mismatch. GCP Cloud VPN supports specific cipher combinations; the remote peer must match exactly. Diagnose:
+    gcloud compute vpn-tunnels describe <tunnel> --region=<region> --format='value(detailedStatus)'
+    Console > Logging > resource.type='vpn_gateway' severity>=WARNING
+  Remediation: For NO_PROPOSAL_CHOSEN, align cipher suites with GCP-supported combinations:
+    IKEv2: AES-256-CBC + SHA-256 + DH group 14 (or AES-256-GCM for combined mode)
+  For AUTHENTICATION_FAILED, verify pre-shared key matches on both sides. Rekey the session:
+    gcloud compute vpn-tunnels update <tunnel> --region=<region> --shared-secret=<new-secret>
+    (then update the same secret on the remote peer)
+  For TS_UNACCEPTABLE, ensure traffic selectors (local/remote CIDR) match: Cloud VPN uses 0.0.0.0/0 by default with route-based VPN; remote peer must also use 0.0.0.0/0.
+remediation_action: rekey_vpn_session
+error_message: '[CloudVPN] VPN-IKE-NEGOTIATION-FAILURE tunnel={vpn_tunnel_name} gateway={vpn_gateway_name} peer={vpn_peer_ip}
+  ike_phase={ike_phase} error="{ike_error}" retries={ike_retry_count}/{ike_max_retries}'
+stack_trace: |-
+  Cloud VPN IKE Negotiation Report
+  ----------------------------------
+  Tunnel:      {vpn_tunnel_name}
+  Gateway:     {vpn_gateway_name}
+  Peer IP:     {vpn_peer_ip}
+  IKE Phase:   {ike_phase}
+  Error:       {ike_error}
+  Retries:     {ike_retry_count}/{ike_max_retries}
+  Cipher:      AES-256-CBC
+  Auth:        SHA-256
+  Action: Verify pre-shared key and cipher suite compatibility
+correlation_attr:
+  key: network.ike_cipher_suite
+  value: aes256-sha384-dh20-nonstandard
+fault_params:
+  vpn_tunnel_name: {choice: [gcpnet-vpn-tunnel-01, gcpnet-vpn-tunnel-02, gcpnet-vpn-tunnel-03]}
+  vpn_gateway_name: {choice: [gcpnet-vpn-gw-europe1, gcpnet-vpn-gw-central1]}
+  vpn_peer_ip: {format: "203.0.113.{a}", a: {randint: [1, 254]}}
+  ike_phase: {choice: ["1", "2"]}
+  ike_error:
+    choice:
+      - NO_PROPOSAL_CHOSEN
+      - AUTHENTICATION_FAILED
+      - INVALID_KE_PAYLOAD
+      - TS_UNACCEPTABLE
+  ike_retry_count: {randint: [3, 10]}
+  ike_max_retries: 10
+rca_clues:
+  cloud-vpn-gateway:
+    vpn.ike_phase_failing: {choice: ["1", "2"]}
+    vpn.cipher_mismatch: {choice: [true, false]}
+  cloud-interconnect:
+    interconnect.vpn_failback_blocked: true
+  cloud-nat-gateway:
+    nat.vpn_egress_rerouted: true

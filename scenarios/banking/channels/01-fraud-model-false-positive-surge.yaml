@@ -1,0 +1,62 @@
+name: Fraud Model False Positive Surge
+subsystem: fraud_detection
+vehicle_section: fraud_engine
+error_type: FRAUD-FP-SURGE
+sensor_type: fraud_classifier
+affected_services:
+- fraud-sentinel
+- payment-engine
+cascade_services:
+- mobile-gateway
+- auth-gateway
+description: Fraud detection model generating excessive false positives blocking legitimate member transactions
+investigation_notes: |-
+  1. Root cause is PCS_SEASON — Permanent Change of Station moves cause massive geographic velocity changes that the fraud model interprets as account takeover. This is a known seasonal pattern.
+  2. Feature drift analysis: geo_velocity_feature at 0.92 drift and ip_diversity at 0.87 drift confirm the model's geographic features are firing on legitimate PCS relocations.
+  3. With 4,200 active PCS orders, the model needs a PCS whitelist — members with active PCS orders should have relaxed geo-velocity thresholds. Query: SELECT member_id FROM pcs_orders WHERE status='ACTIVE'.
+  4. Revenue impact at $892K/hr blocked is severe. Precision dropped to 3.2% means 97% of blocks are false positives. Immediately raise the fraud score threshold from current to 75/100 for PCS-flagged members.
+  5. Initiate emergency model retrain with PCS-labeled training data. Include features: has_active_pcs, days_since_pcs_order, destination_matches_new_duty_station.
+  6. Short-term fix: whitelist all members with active PCS orders in the fraud rules table. INSERT INTO fraud_whitelist SELECT member_id FROM pcs_orders WHERE status='ACTIVE' AND effective_date > CURRENT_DATE - 90.
+remediation_action: recalibrate_fraud_model
+error_message: '[FRAUD] FRAUD-FP-SURGE: blocked={fraud_blocked} window={fraud_window_s}s fp_rate={fraud_fp_rate}% model={fraud_model}
+  pattern={fraud_pattern}'
+stack_trace: |-
+  === FRAUD MODEL PERFORMANCE ===
+  model={fraud_model}  pattern={fraud_pattern}  window={fraud_window_s}s
+  --- CLASSIFICATION MATRIX ---
+                      PREDICTED_FRAUD   PREDICTED_LEGIT
+    ACTUAL_FRAUD           8               1
+    ACTUAL_LEGIT          {fraud_blocked}              3,847
+  --- METRICS ---
+    true_positive_rate    88.9%
+    false_positive_rate   {fraud_fp_rate}%  <<< SURGE THRESHOLD
+    precision             3.2%
+    blocked_txns          {fraud_blocked}
+    member_impact         $892,000/hr revenue blocked
+  --- DRIFT ANALYSIS ---
+    trigger=PCS_SEASON  (military relocation spike)
+    geo_velocity_feature=0.92_drift  ip_diversity=0.87_drift
+    pcs_orders_active=4,200  geolocation_changes=HIGH
+  ACTION: whitelist_pcs=true  retrain_model=true  alert=FRAUD-FP-SURGE
+correlation_attr:
+  key: runtime.fraud_model_weights
+  value: FraudNet-v5.3-canary-weights
+fault_params:
+  fraud_blocked: {randint: [50, 500]}
+  fraud_window_s: {randint: [60, 600]}
+  fraud_fp_rate: {uniform: [15.0, 65.0], round: 1}
+  fraud_model: {choice: [FraudNet-v5.2, DeepFraud-v3.1, RiskScore-v4.0]}
+  fraud_pattern: {choice: [PCS_GEO_VELOCITY, NEW_DEVICE_BURST, CARD_NOT_PRESENT_SPIKE, ACH_RETURN_PATTERN, ACCOUNT_TAKEOVER_SIG]}
+rca_clues:
+  fraud-sentinel:
+    fraud.false_positive_rate_pct: {uniform: [8, 18], round: 1}
+    fraud.trigger_pattern: PCS_SEASON
+  payment-engine:
+    payment.blocked_txn_revenue_per_hr: {randint: [500000, 1200000]}
+    payment.auto_decline_count: {randint: [200, 800]}
+  mobile-gateway:
+    gateway.member_block_complaints: {randint: [100, 400]}
+    gateway.txn_retry_surge: true
+  auth-gateway:
+    auth.pcs_whitelist_status: NOT_APPLIED
+    auth.geo_velocity_alerts: {randint: [500, 2000]}

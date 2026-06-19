@@ -1,0 +1,160 @@
+service: navigation
+sort_order: 4
+cloud_provider: gcp
+cloud_region: us-central1
+cloud_platform: gcp_compute_engine
+cloud_availability_zone: us-central1-a
+subsystem: guidance
+language: rust
+topology:
+- - sensor-validator
+  - /api/v1/validate/imu
+  - POST
+- - sensor-validator
+  - /api/v1/validate/gps
+  - POST
+- - sensor-validator
+  - /api/v1/validate/star-tracker
+  - POST
+entry_endpoints:
+- - /api/v1/nav/compute
+  - POST
+db_operations:
+- - SELECT
+  - calibration_epochs
+  - SELECT epoch, baseline FROM calibration_epochs WHERE sensor_type IN ('imu', 'gps', 'star_tracker')
+emit_fault_logs: true
+kpi_emitter: false
+constants:
+  IMU_AXES:
+  - X
+  - Y
+  - Z
+state:
+  _fix_count:
+    init: 0
+  _last_nav_report:
+    init: now
+steps:
+- counter:
+    state_key: _fix_count
+    by: 1
+- sample:
+    gps_drift:
+      uniform:
+      - 0.1
+      - 1.5
+      round: 3
+    gps_conf:
+      uniform:
+      - 0.95
+      - 0.999
+      round: 4
+    gps_sats:
+      randint:
+      - 8
+      - 14
+- metric:
+    name: navigation.gps.drift_ms
+    value:
+      var: gps_drift
+    unit: ms
+- metric:
+    name: navigation.gps.confidence
+    value:
+      var: gps_conf
+    unit: ratio
+- metric:
+    name: navigation.gps.satellites
+    value:
+      var: gps_sats
+    unit: count
+- metric:
+    name: navigation.fix_count
+    value:
+      var: _fix_count
+    unit: fixes
+- log:
+    level: INFO
+    message: '[GNC] gps_fix fix={_fix_count} sv_count={gps_sats} drift={gps_drift}ms confidence={gps_conf} solution=NOMINAL'
+    attrs:
+      nav.system: gps
+      nav.fix_count:
+        var: _fix_count
+      nav.drift_ms:
+        var: gps_drift
+      nav.confidence:
+        var: gps_conf
+      nav.gps_satellites:
+        var: gps_sats
+      operation: gps_fix
+- for_each:
+    in: IMU_AXES
+    as: axis
+    steps:
+    - sample:
+        drift:
+          uniform:
+          - 0.01
+          - 0.5
+          round: 4
+        conf:
+          uniform:
+          - 0.97
+          - 0.999
+          round: 4
+    - metric:
+        name:
+          expr: f'navigation.imu.drift_{axis.lower()}'
+        value:
+          var: drift
+        unit: ms
+    - log:
+        level: INFO
+        message: '[GNC] imu_reading axis={axis} drift={drift}ms confidence={conf} sync=LOCKED status=NOMINAL'
+        attrs:
+          nav.system: imu
+          nav.drift_ms:
+            var: drift
+          nav.confidence:
+            var: conf
+          nav.imu_axis:
+            var: axis
+          operation: imu_reading
+- sample:
+    alignment:
+      uniform:
+      - 0.1
+      - 3.0
+      round: 2
+    st_conf:
+      uniform:
+      - 0.96
+      - 0.999
+      round: 4
+    stars:
+      randint:
+      - 12
+      - 28
+- metric:
+    name: navigation.star_tracker.alignment_arcsec
+    value:
+      var: alignment
+    unit: arcsec
+- metric:
+    name: navigation.star_tracker.confidence
+    value:
+      var: st_conf
+    unit: ratio
+- log:
+    level: INFO
+    message: '[GNC] star_tracker catalog_matches={stars} alignment={alignment}arcsec confidence={st_conf} status=NOMINAL'
+    attrs:
+      nav.system: star_tracker
+      nav.drift_ms:
+        expr: round(alignment * 0.01, 4)
+      nav.confidence:
+        var: st_conf
+      nav.star_count:
+        var: stars
+      operation: star_tracker_reading

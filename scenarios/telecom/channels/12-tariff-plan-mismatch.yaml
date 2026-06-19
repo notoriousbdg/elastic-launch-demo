@@ -1,0 +1,65 @@
+name: Tariff Plan Mismatch
+subsystem: provisioning
+vehicle_section: tariff_engine
+error_type: PROV-TARIFF-MISMATCH
+sensor_type: tariff_validation
+affected_services:
+- provisioning-service
+- bss-billing
+cascade_services:
+- activation-service
+description: Tariff plan code mismatch between provisioning-service and bss-billing causing activation rejection
+investigation_notes: |
+  1. Check tariff plan code mapping — provisioning-service uses internal plan codes (e.g., 5G-PLUS-EU-v3) while bss-billing uses BSS product codes (e.g., PROD-5G-2024-PLUS). Mapping table sync failure causes mismatches.
+  2. Recent tariff plan update (deployment 2026-03-05) added new 5G Max tier but the BSS mapping was not updated. All 5G Max activations fail with PLAN_CODE_NOT_FOUND on bss-billing side.
+  3. Affected plans: check which plan codes return MISMATCH — if limited to new plans, hotfix the mapping table. If widespread, rollback the tariff plan deployment.
+  4. BSS-billing validates plan code before creating billing account — rejection at this stage means the subscriber is activated on the network but has no billing record. Requires manual reconciliation.
+  5. Query orphaned activations: SELECT msisdn, plan_code FROM activation_log WHERE billing_status='REJECTED' AND ts > NOW() - INTERVAL 1 HOUR. These subscribers need manual billing account creation.
+remediation_action: sync_tariff_mapping
+error_message: '[PROV] PROV-TARIFF-MISMATCH: plan_code={plan_code} bss_code={bss_code} error={tariff_error} msisdn={msisdn} tier={subscription_tier}'
+stack_trace: |
+  === TARIFF PLAN VALIDATION ===
+  msisdn={msisdn}  tier={subscription_tier}
+  --- PLAN MAPPING ---
+    provisioning_code={plan_code}
+    bss_product_code={bss_code}
+    mapping_status=NOT_FOUND  <<< MISMATCH
+  --- VALIDATION PIPELINE ---
+    STEP                    STATUS      DETAIL
+    plan_code_lookup        COMPLETE    {plan_code}
+    bss_mapping_resolve     FAILED      {tariff_error}
+    billing_account_create  SKIPPED     ---
+    activation_confirm      SKIPPED     ---
+  --- IMPACT ---
+    orphaned_activations={orphaned_count}  requires_manual_reconciliation=true
+    affected_tiers=[5G Max, eSIM Premium]  last_tariff_deploy=2026-03-05
+  ACTION: hotfix_mapping=true  reconcile_orphans=true  alert=PROV-TARIFF-MISMATCH
+infrastructure_events:
+- body: '[CloudWatch] TariffPlanSyncFailure: source=provisioning-service target=bss-billing mismatch_count=150 last_sync=45min_ago region=eu-central-1'
+  severity: WARN
+  event_name: aws.cloudwatch.alarm.TariffPlanSyncFailure
+  service: bss-billing
+  attributes:
+    cloud.provider: azure
+    cloud.service: monitoring
+    infrastructure.source: AzureMonitor
+correlation_attr:
+  key: deployment.tariff_mapping_version
+  value: tariff-map-v2026.03.05
+fault_params:
+  plan_code: {choice: [5G-BASIC-EU-v3, 5G-PLUS-EU-v3, 5G-MAX-EU-v3, ESIM-PREM-v2]}
+  bss_code: {choice: [PROD-5G-2024-BASIC, PROD-5G-2024-PLUS, PROD-5G-2024-MAX, PROD-ESIM-2024]}
+  tariff_error: {choice: [PLAN_CODE_NOT_FOUND, MAPPING_VERSION_MISMATCH, BSS_PRODUCT_DEPRECATED]}
+  msisdn: {choice: ['+4915110000000', '+4916010000000', '+4917010000000']}
+  subscription_tier: {choice: [5G Basic, 5G Plus, 5G Max, Business S, Business M, Business L]}
+  orphaned_count: {randint: [10, 100]}
+rca_clues:
+  provisioning-service:
+    provisioning.plan_code_lookup: MISMATCH
+    provisioning.affected_tiers: 5G Max, eSIM Premium
+  bss-billing:
+    billing.plan_code_not_found: true
+    billing.orphaned_activations: {randint: [10, 100]}
+  activation-service:
+    activation.billing_rejection_rate: {uniform: [0.05, 0.3], round: 2}
+    activation.manual_reconciliation_needed: true

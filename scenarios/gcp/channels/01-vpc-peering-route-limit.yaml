@@ -1,0 +1,43 @@
+name: VPC Peering Route Limit
+subsystem: core_network
+vehicle_section: vpc_routing
+error_type: VPC-ROUTE-LIMIT-EXCEEDED
+sensor_type: route_table
+affected_services:
+- vpc-network-manager
+- cloud-load-balancer
+cascade_services:
+- cloud-nat-gateway
+description: VPC peering route table exceeding maximum advertised route limit
+investigation_notes: |-
+  Root cause: VPC peering has a hard limit of 250 advertised routes per peering connection. When custom routes are exported across peerings, aggregate routes from all subnets and static/dynamic routes count toward this limit. Check current usage with:
+    gcloud compute networks peerings list-routes <peering> --network=<vpc> --region=<region> --direction=INCOMING
+  Remediation: Consolidate overlapping CIDR ranges using supernets, remove stale static routes, or switch to a Shared VPC model which avoids peering route limits. If immediate relief is needed, request a quota increase via gcloud compute project-info describe --project=<project> and file a support case referencing the PEER_ROUTES_PER_PEERING quota.
+remediation_action: reset_vpc_peering
+error_message: level=error ts={{timestamp}} caller=vpc_manager.go:312 msg="VPC-ROUTE-LIMIT-EXCEEDED" project={gcp_project}
+  peering={vpc_peering_name} routes={route_count}/{route_max} network={vpc_network} region={gcp_region} dropped_prefixes={dropped_prefixes}
+stack_trace: "goroutine 234 [running]:\nruntime/debug.Stack()\n\t/usr/local/go/src/runtime/debug/stack.go:24 +0x5e\ncloud.google.com/go/compute/apiv1.(*RoutesClient).AggregatedList(0xc000518000,\
+  \ {{0xc000a12480}}, {{0xc000a124c0}})\n\t/app/internal/vpc/route_manager.go:312 +0x3a2\n  VPC Network: {vpc_network}\n \
+  \ Peering: {vpc_peering_name}\n  Routes: {route_count}/{route_max}\n  Dropped Prefixes: {dropped_prefixes}\n  Action: Consolidate\
+  \ routes or request quota increase"
+correlation_attr:
+  key: deployment.terraform_version
+  value: tf-1.7.2-canary
+fault_params:
+  gcp_project: {choice: [gcpnet-prod-001, gcpnet-prod-002, gcpnet-staging]}
+  gcp_region: {choice: [us-central1, us-east1, europe-west1]}
+  vpc_network: {choice: [gcpnet-vpc-prod, gcpnet-vpc-staging, gcpnet-vpc-shared]}
+  vpc_peering_name: {choice: [peer-to-shared-vpc, peer-to-onprem, peer-to-partner]}
+  route_count: {randint: [240, 250]}
+  route_max: 250
+  dropped_prefixes: {randint: [5, 30]}
+rca_clues:
+  vpc-network-manager:
+    vpc.route_utilization_pct: {uniform: [96, 100], round: 1}
+    vpc.peering_name: peer-to-shared-vpc
+  cloud-load-balancer:
+    lb.route_advertisement_status: stale
+    lb.backend_reachability: partial
+  cloud-nat-gateway:
+    nat.egress_route_affected: true
+    nat.fallback_route: default-igw

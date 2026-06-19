@@ -1,0 +1,46 @@
+name: Shopfloor Portal Container Crashloop
+subsystem: portal
+vehicle_section: k8s_deployment
+error_type: PORTAL-CONTAINER-CRASHLOOP
+sensor_type: k8s_pod
+affected_services:
+- shopfloor-portal
+cascade_services:
+- mes-controller
+description: Operator portal Docker container in CrashLoopBackOff after a bad image push; auto-rollback eligible
+investigation_notes: |-
+  Root Cause: A container that exits non-zero on startup multiple times in a short window enters CrashLoopBackOff. The most common manufacturing-floor cause is a bad image push (missing config map, broken migration on the embedded SQLite, or a Node.js dependency mismatch from a hot-fix build). Auto-rollback to the prior image tag is safe when the previous tag was healthy in production.
+  Remediation (auto-remediate eligible): 1) Confirm the prior image was healthy: `kubectl rollout history deploy/shopfloor-portal -n mfg`. 2) Roll back: `kubectl rollout undo deploy/shopfloor-portal -n mfg`. 3) Verify operator kiosks recover within 60s. 4) File a build issue against {image_tag} for the dev team to investigate.
+remediation_action: rollback_container_image
+error_message: '[PORTAL-K8S] PORTAL-CONTAINER-CRASHLOOP: pod={pod_name} image={image_tag} restarts={restart_count} reason=CrashLoopBackOff
+  exit_code={exit_code}'
+stack_trace: |-
+  === KUBERNETES DEPLOYMENT — shopfloor-portal ===
+  Namespace: mfg | Replicas: 3 (desired) / 0 (ready)
+  ------------------------------------------------------------------------
+  POD                              | STATUS              | RESTARTS  | IMAGE
+  ------------------------------------------------------------------------
+  {pod_name}                       | CrashLoopBackOff    | {restart_count}        | {image_tag}
+  shopfloor-portal-7c8d9f4b6-aa1bb | CrashLoopBackOff    | {restart_count}        | {image_tag}
+  shopfloor-portal-7c8d9f4b6-cc2dd | CrashLoopBackOff    | {restart_count}        | {image_tag}
+  ------------------------------------------------------------------------
+  Last State: Terminated | Exit Code: {exit_code} | Reason: Error
+  PORTAL-CONTAINER-CRASHLOOP: rollback to prior image tag eligible
+correlation_attr:
+  key: deployment.shopfloor_portal_image
+  value: shopfloor-portal:1.18.3-broken
+fault_params:
+  pod_name:
+    format: "shopfloor-portal-{suffix}-{rand:06x}"
+    suffix: {choice: [7c8d9f4b6, 6b9c8e3d2]}
+    rand: {randint: [0, 16777215]}
+  image_tag: registry.mfg.internal/shopfloor-portal:1.18.3-broken
+  restart_count: {randint: [2, 12]}
+  exit_code: {choice: [1, 137, 139]}
+rca_clues:
+  shopfloor-portal:
+    k8s.crashloopbackoff: true
+    k8s.restart_count: {randint: [5, 25]}
+    k8s.image_tag: 1.18.3-broken
+  mes-controller:
+    mes.operator_action_lag_s: {randint: [30, 240]}

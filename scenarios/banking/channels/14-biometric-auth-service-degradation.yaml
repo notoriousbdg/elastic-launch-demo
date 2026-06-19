@@ -1,0 +1,61 @@
+name: Biometric Auth Service Degradation
+subsystem: authentication
+vehicle_section: biometric_auth
+error_type: AUTH-BIOMETRIC-DEGRADE
+sensor_type: biometric_verification
+affected_services:
+- auth-gateway
+- mobile-gateway
+cascade_services:
+- member-portal
+- fraud-sentinel
+description: Biometric authentication (Face ID, fingerprint) verification service experiencing high failure rate
+investigation_notes: |-
+  1. Analyze failure distribution by method — voice_print at 32% fail rate is worst, likely due to background noise in military environments (flight line, motor pool, barracks). Consider increasing noise tolerance thresholds for voice authentication.
+  2. Liveness check failures (42%) indicate potential issues with the anti-spoofing model, not member behavior. Check BioAuth-v3.1 model performance — last retrain was 2026-01-28, may need refresh.
+  3. Template mismatch (31%) can occur after device changes or significant appearance changes common in military (new glasses, weight change during deployment). Prompt template re-enrollment.
+  4. Monitor fallback path capacity — PIN attempts surging 340% means auth-gateway PIN verification is absorbing all biometric failures. Check auth-gateway rate limits and connection pool.
+  5. Call center overflow at 22min wait indicates members cannot self-recover. Enable temporary password-based authentication bypass for verified members: POST /api/v1/auth/temp-bypass.
+  6. Check device compatibility matrix — new iOS/Android versions may break biometric SDKs. Review crash reports from mobile-gateway for biometric SDK exceptions.
+remediation_action: reset_biometric_service
+error_message: '[AUTH] AUTH-BIOMETRIC-DEGRADE: method={bio_method} fail_rate={bio_fail_rate}% threshold={bio_threshold}% attempts={bio_attempts}
+  fallback={bio_fallback}'
+stack_trace: |-
+  === BIOMETRIC SERVICE HEALTH ===
+  method={bio_method}  window=5min
+  --- VERIFICATION STATS ---
+    METHOD           ATTEMPTS   SUCCESS    FAIL_RATE
+    face_id          {bio_attempts}      72%        28%
+    fingerprint      1,240      81%        19%
+    voice_print      420        68%        32%  <<< WORST
+  --- FAILURE ANALYSIS ---
+    liveness_check_fail=42%  template_mismatch=31%
+    timeout=18%  device_incompatible=9%
+    overall_fail_rate={bio_fail_rate}%  threshold={bio_threshold}%
+  --- FALLBACK STATUS ---
+    fallback={bio_fallback}  pin_attempts_surge=340%
+    call_center_overflow=true  wait_time=22min
+  model_version=BioAuth-v3.1  last_retrain=2026-01-28
+  ACTION: enable_fallback=true  increase_tolerance=true  alert=AUTH-BIOMETRIC-DEGRADE
+correlation_attr:
+  key: deployment.biometric_sdk
+  value: bioauth-v3.1.2-rc1
+fault_params:
+  bio_method: {choice: [FACE_ID, FINGERPRINT, VOICE_PRINT]}
+  bio_fail_rate: {uniform: [15.0, 45.0], round: 1}
+  bio_threshold: 10.0
+  bio_attempts: {randint: [500, 3000]}
+  bio_fallback: {choice: [PIN, PASSWORD, SECURITY_QUESTIONS]}
+rca_clues:
+  auth-gateway:
+    auth.biometric_fail_rate_pct: {uniform: [20, 40], round: 1}
+    auth.liveness_check_status: DEGRADED
+  mobile-gateway:
+    gateway.biometric_sdk_version: {choice: [BioAuth-v3.1, BioAuth-v3.0]}
+    gateway.fallback_pin_surge_pct: {randint: [200, 500]}
+  member-portal:
+    portal.auth_fallback_active: true
+    portal.call_center_wait_min: {randint: [15, 35]}
+  fraud-sentinel:
+    fraud.identity_verification_degraded: true
+    fraud.biometric_spoof_attempts: {randint: [0, 5]}

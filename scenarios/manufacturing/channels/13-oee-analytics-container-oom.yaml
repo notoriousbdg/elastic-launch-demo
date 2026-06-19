@@ -1,0 +1,52 @@
+name: OEE Analytics Container OOM
+subsystem: oee
+vehicle_section: k8s_pod
+error_type: ANALYTICS-CONTAINER-OOM
+sensor_type: k8s_pod
+affected_services:
+- oee-analytics
+cascade_services:
+- mes-controller
+- shopfloor-portal
+description: OEE analytics k8s pod OOM-killed when caching unprocessed events during an upstream slowdown
+investigation_notes: |-
+  Root Cause: When the SCADA / MES upstream slows or backlogs, the OEE analytics service buffers incoming events. If the per-pod memory limit is below the buffer high-watermark, the kubelet kills the pod with OOMKilled (exit 137). Because the cached state is lost, the next pod recomputes from scratch — producing a saw-tooth OEE pattern that's misleading to operators.
+  Remediation: 1) Inspect the kill: `kubectl describe pod -n mfg oee-analytics-* | grep -A 5 'Last State'`. 2) Right-size the memory request/limit: `kubectl set resources deploy/oee-analytics -n mfg --limits=memory={new_mem_limit}`. 3) Reduce buffer high-watermark in the service config and redeploy. 4) Add a memory pressure HPA. 5) Add a Watcher rule for repeated OOMKills on this deployment.
+remediation_action: resize_pod_memory
+error_message: '[OEE-K8S] ANALYTICS-CONTAINER-OOM: pod={pod_name} container={container_name} restarts={restart_count} mem_limit={mem_limit_mb}MB
+  last_exit_code=137'
+stack_trace: |-
+  === KUBERNETES POD STATE — {pod_name} ===
+  Namespace: mfg | Container: {container_name}
+  ------------------------------------------------------------------------
+  Last State:        Terminated
+    Reason:          OOMKilled
+    Exit Code:       137
+    Started:         2026-05-06T14:22:11Z
+    Finished:        2026-05-06T14:38:42Z
+  Memory Limit:      {mem_limit_mb}Mi
+  Memory Peak:       {mem_peak_mb}Mi (last sample before kill)
+  Restart Count:     {restart_count}
+  ------------------------------------------------------------------------
+  ANALYTICS-CONTAINER-OOM: pod {pod_name} OOMKilled — saw-tooth OEE pattern likely
+correlation_attr:
+  key: deployment.oee_analytics_image
+  value: oee-analytics:5.1.0-rc2
+fault_params:
+  pod_name:
+    format: "oee-analytics-{suffix}-{rand:04x}xq"
+    suffix: {choice: [7c8d9f4b6, 6b9c8e3d2]}
+    rand: {randint: [0, 65535]}
+  container_name: oee-analytics
+  restart_count: {randint: [2, 12]}
+  mem_limit_mb: 512
+  mem_peak_mb: {randint: [495, 525]}
+rca_clues:
+  oee-analytics:
+    k8s.last_oom_kill: true
+    k8s.restart_count: {randint: [2, 12]}
+    k8s.mem_limit_mi: 512
+  mes-controller:
+    mes.oee_feedback_lag_s: {randint: [15, 90]}
+  shopfloor-portal:
+    portal.oee_tile_stale: true

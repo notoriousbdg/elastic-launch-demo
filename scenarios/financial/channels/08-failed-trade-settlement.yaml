@@ -1,0 +1,45 @@
+name: Failed Trade Settlement
+subsystem: settlement
+vehicle_section: settlement_engine
+error_type: SETTLE-FAIL
+sensor_type: settlement_status
+affected_services:
+- settlement-processor
+- risk-calculator
+cascade_services:
+- compliance-monitor
+- audit-logger
+description: Trade settlement fails due to insufficient securities or funding
+investigation_notes: ''
+remediation_action: ''
+error_message: '[SETTLE] SETTLE-FAIL: trade={trade_id} instrument={instrument} qty={quantity} reason={failure_reason} counterparty={counterparty}'
+stack_trace: |-
+  === SWIFT MT548 SETTLEMENT STATUS ===
+  :16R:GENL
+  :20C::SEME//{settlement_id}
+  :23G:INST
+  :16R:STAT
+  :25D::SETT//PEND
+  :24B::PEND//LACK  (reason={failure_reason})
+  :16S:STAT
+  :16R:SETTRAN
+  :35B:ISIN US0378331005  {instrument}
+  :36B::SETT//UNIT/{quantity}
+  :97A::SAFE//DTC-{counterparty}
+  :16S:SETTRAN
+  :16S:GENL
+  trade={trade_id}  fail_code=LACK  auto_borrow=ATTEMPTED  borrow_result=UNAVAILABLE
+  ACTION: recycle_instruction=true  notify_ops=true  alert=SETTLE-FAIL
+correlation_attr: {}
+fault_params:
+  trade_id:
+    format: "TRD-{n}"
+    n: {randint: [100000, 999999]}
+  instrument: {choice: [US.AAPL, US.GOOGL, US.MSFT, US.AMZN, US.TSLA, FX.EURUSD, FX.GBPUSD, FUT.ES, FUT.NQ, OPT.SPX]}
+  quantity: {randint: [100, 50000]}
+  failure_reason: {choice: [insufficient_securities, funding_shortfall, counterparty_default, DTCC_rejection, SSI_mismatch]}
+  counterparty: {choice: [Goldman Sachs, Morgan Stanley, JP Morgan, Citadel Securities, Virtu Financial, Jane Street]}
+  settlement_id:
+    format: "STL-{n}"
+    n: {randint: [100000, 999999]}
+rca_clues: {}

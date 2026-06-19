@@ -1,0 +1,74 @@
+name: RDS Automated Maintenance Spike
+subsystem: database
+vehicle_section: subscriber_data
+error_type: DB-RDS-MAINTENANCE
+sensor_type: db_latency
+affected_services:
+- subscriber-db
+- provisioning-service
+cascade_services:
+- activation-service
+- bss-billing
+description: AWS RDS automated maintenance on subscriber-db causing 200x latency increase on query operations
+investigation_notes: |
+  1. Check CloudTrail for ModifyDBInstance events — RDS maintenance windows trigger VACUUM ANALYZE on the subscribers table (45M rows), causing 15-25 minute lock periods with 100-200x latency increase.
+  2. Monitor subscriber-db query latency: baseline 15-25ms should not exceed 500ms. Current readings above 4000ms indicate active maintenance lock on the subscribers table.
+  3. Historical pattern: 2025-08-14 (12K failed activations), 2025-11-02 (28min outage), 2026-01-18 (8min degradation). All correlated with RDS maintenance window events.
+  4. Provisioning-service HikariCP connection timeout is 3000ms — once DB latency exceeds this, all provisioning requests fail, creating a cascade to activation-service and api-gateway.
+  5. Immediate action: Cancel active maintenance via AWS CLI: aws rds modify-db-instance --db-instance-identifier subscriber-db --no-apply-immediately. Monitor latency recovery (typically 2-5min).
+remediation_action: cancel_rds_maintenance
+error_message: '[DB] DB-RDS-MAINTENANCE: latency_ms={db_latency_ms} baseline_ms={db_baseline_ms} event={rds_event} duration_min={maintenance_duration_min} table=subscribers'
+stack_trace: |
+  === RDS MAINTENANCE EVENT REPORT ===
+  instance=subscriber-db  engine=PostgreSQL 15.4  table=subscribers (45M rows)
+  --- CLOUDTRAIL EVENT ---
+    event_name=ModifyDBInstance  source=rds.amazonaws.com
+    event_time={event_time}  region=eu-central-1
+    operation=VACUUM ANALYZE  target_table=subscribers
+  --- LATENCY IMPACT ---
+    METRIC              BASELINE     CURRENT      MULTIPLIER
+    query_latency_ms    {db_baseline_ms}          {db_latency_ms}         {latency_multiplier}x
+    connections_active  45           98           2.2x
+    lock_wait_ms        0            {db_latency_ms}         ---
+  --- SUBSCRIBER IMPACT ---
+    failed_activations={failed_activations}  affected_subscribers=~{affected_subscribers}
+    duration={maintenance_duration_min}min  estimated_remaining=5-10min
+  ACTION: cancel_maintenance=true  monitor_latency_recovery=true  alert=DB-RDS-MAINTENANCE
+infrastructure_events:
+- body: '[CloudTrail] ModifyDBInstance: instance=subscriber-db engine=PostgreSQL operation=VACUUM_ANALYZE initiated_by=RDSAutoMaintenance region=eu-central-1 event_source=rds.amazonaws.com'
+  severity: WARN
+  event_name: aws.cloudtrail.ModifyDBInstance
+  service: subscriber-db
+  attributes:
+    cloud.provider: aws
+    cloud.service: rds
+    aws.cloudtrail.event_name: ModifyDBInstance
+    aws.rds.instance: subscriber-db
+    aws.rds.operation: VACUUM_ANALYZE
+    infrastructure.source: CloudTrail
+correlation_attr:
+  key: infra.rds_param_group
+  value: pg15-custom-v2.3.1
+fault_params:
+  db_latency_ms: {randint: [2000, 4500]}
+  db_baseline_ms: {randint: [15, 25]}
+  rds_event: ModifyDBInstance
+  maintenance_duration_min: {randint: [5, 25]}
+  event_time: 2026-03-08T07:12:00Z
+  latency_multiplier: {randint: [100, 210]}
+  failed_activations: {randint: [500, 5000]}
+  affected_subscribers: {randint: [5000, 15000]}
+rca_clues:
+  subscriber-db:
+    db.maintenance_active: true
+    db.vacuum_table: subscribers
+    db.latency_multiplier: {randint: [100, 210]}
+  provisioning-service:
+    upstream.db_latency_ms: {randint: [3000, 4500]}
+    upstream.connection_timeout: true
+  activation-service:
+    activation.503_count: {randint: [200, 1000]}
+    activation.retry_storm: true
+  bss-billing:
+    billing.subscriber_lookup_blocked: true
+    billing.pending_activations: {randint: [50, 300]}

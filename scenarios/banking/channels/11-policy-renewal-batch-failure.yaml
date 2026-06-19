@@ -1,0 +1,62 @@
+name: Policy Renewal Batch Failure
+subsystem: policy_administration
+vehicle_section: renewal_engine
+error_type: POLICY-RENEWAL-FAIL
+sensor_type: renewal_batch
+affected_services:
+- policy-manager
+- quote-engine
+cascade_services:
+- member-portal
+- document-vault
+description: Automated policy renewal batch processing failing causing coverage gaps
+investigation_notes: |-
+  1. Check premium_calculation failure reason: RATING_ENGINE_TIMEOUT means the actuarial rating service is degraded — verify quote-engine health and response times in APM traces.
+  2. MVR_DATA_STALE indicates driving record pulls returned cached data beyond acceptable freshness. Check the LexisNexis/TransUnion MVR feed connectivity and last successful pull timestamp.
+  3. CLUE_SERVICE_UNAVAILABLE means loss history lookups failed — CLUE (Comprehensive Loss Underwriting Exchange) outages affect all carriers. Check A-PLUS/CLUE system status with LexisNexis.
+  4. Coverage gap risk is HIGH — policies that fail renewal before effective_date create uninsured periods. Extend grace period to 30 days and notify members. State insurance departments require reporting of lapsed auto policies.
+  5. Check SCRA-protected members — 12 policies with deployment_hold cannot be non-renewed under the Servicemembers Civil Relief Act. These must be manually renewed at the prior term premium.
+  6. Run manual renewal batch for failed policies: POST /api/v1/policy/batch-renew with override flags.
+remediation_action: restart_renewal_engine
+error_message: '[POLICY] POLICY-RENEWAL-FAIL: batch={renewal_batch_id} policies={renewal_count} failed={renewal_failed} reason={renewal_reason}
+  effective={renewal_date}'
+stack_trace: |-
+  === POLICY RENEWAL BATCH STATUS ===
+  batch={renewal_batch_id}  effective_date={renewal_date}
+  --- BATCH METRICS ---
+    total_policies={renewal_count}  processed=0  failed={renewal_failed}
+    STEP                    STATUS      DETAIL
+    rating_refresh          COMPLETE    new_rates_applied
+    mvr_pull                COMPLETE    driving_records_updated
+    clue_check              COMPLETE    loss_history_verified
+    premium_calculation     FAILED      {renewal_reason}  <<< BLOCKED
+    dec_page_generate       SKIPPED     ---
+    payment_schedule        SKIPPED     ---
+  --- COVERAGE RISK ---
+    lapse_risk=HIGH  grace_period=30_days  state_reporting=REQUIRED
+    military_deployment_hold={deployment_hold}
+    scra_protected_members=12
+  ACTION: manual_renewal=true  extend_grace=true  alert=POLICY-RENEWAL-FAIL
+correlation_attr:
+  key: deployment.rating_engine_rules
+  value: actuarial-rules-CS-4827
+fault_params:
+  renewal_batch_id: {format: "RNW-{n}", n: {randint: [1000, 9999]}}
+  renewal_count: {randint: [500, 5000]}
+  renewal_failed: {randint: [50, 500]}
+  renewal_reason: {choice: [RATING_ENGINE_TIMEOUT, MVR_DATA_STALE, CLUE_SERVICE_UNAVAILABLE, PREMIUM_CALC_OVERFLOW]}
+  renewal_date: "2026-03-01"
+  deployment_hold: {choice: [true, false]}
+rca_clues:
+  policy-manager:
+    policy.renewal_batch_failure_reason: {choice: [RATING_ENGINE_TIMEOUT, MVR_DATA_STALE, CLUE_SERVICE_UNAVAILABLE]}
+    policy.scra_protected_count: {randint: [5, 20]}
+  quote-engine:
+    quote.rating_engine_response_ms: {randint: [8000, 30000]}
+    quote.actuarial_model_status: DEGRADED
+  member-portal:
+    portal.renewal_notice_generation: BLOCKED
+    portal.coverage_gap_risk_count: {randint: [100, 500]}
+  document-vault:
+    document.dec_page_generation: QUEUED
+    document.renewal_docs_pending: {randint: [200, 800]}

@@ -1,0 +1,58 @@
+name: Push Notification Storm
+subsystem: digital_banking
+vehicle_section: notification_service
+error_type: MOBILE-NOTIF-STORM
+sensor_type: notification_rate
+affected_services:
+- mobile-gateway
+- auth-gateway
+cascade_services:
+- member-portal
+- fraud-sentinel
+description: Push notification system sending duplicate or excessive alerts to members
+investigation_notes: |-
+  1. Check dedup cache status — OVERFLOW at 500K entries means the cache cannot prevent duplicate sends. Inspect Redis memory: redis-cli INFO memory | grep used_memory_human.
+  2. Identify the root_cause event_replay source — transaction_processor is re-emitting events that trigger notifications. Check transaction_processor logs for reprocessing or replay activity.
+  3. Monitor APNS throttling — Apple will rate-limit and eventually block the push certificate if abuse continues. Check APNS feedback service for unregistered device tokens.
+  4. Review member complaint volume — 200+ complaints in a notification storm triggers regulatory attention. CFPB considers excessive notifications a UDAAP (unfair practices) concern.
+  5. Flush and resize the dedup cache immediately, then identify which event types are replaying. Check: SELECT event_type, COUNT(*) FROM notification_events WHERE ts > NOW() - INTERVAL 5 MINUTE GROUP BY event_type.
+remediation_action: flush_notification_queue
+error_message: '[MOBILE] MOBILE-NOTIF-STORM: rate={notif_rate}/min max={notif_max}/min duplicates={notif_dupes} channel={notif_channel}
+  window={notif_window_s}s'
+stack_trace: |-
+  === NOTIFICATION SERVICE STATS ===
+  channel={notif_channel}  window={notif_window_s}s
+  --- DELIVERY METRICS ---
+    CHANNEL          SENT      DELIVERED   FAILED    DUPES
+    APNS             12,450    11,980      470       {notif_dupes}
+    FCM              8,320     8,140       180       {notif_dupes}
+    SMS              2,100     2,085       15        0
+    EMAIL            4,500     4,480       20        0
+  --- RATE ANALYSIS ---
+    current_rate={notif_rate}/min  max_allowed={notif_max}/min
+    dedup_cache=OVERFLOW  cache_size=500000  cache_capacity=500000
+    root_cause=event_replay  source=transaction_processor
+  member_complaints=247  unsubscribes=18  APNS_throttled=true
+  ACTION: throttle_all=true  flush_dedup_cache=true  alert=MOBILE-NOTIF-STORM
+correlation_attr:
+  key: runtime.notification_broker
+  value: rabbitmq-v3.12.14-hotfix
+fault_params:
+  notif_rate: {randint: [500, 5000]}
+  notif_max: 200
+  notif_dupes: {randint: [100, 2000]}
+  notif_channel: {choice: [APNS, FCM, SMS_GATEWAY, EMAIL_RELAY]}
+  notif_window_s: {randint: [60, 600]}
+rca_clues:
+  mobile-gateway:
+    gateway.notification_rate_per_min: {randint: [8000, 15000]}
+    gateway.dedup_cache_status: OVERFLOW
+  auth-gateway:
+    auth.notification_trigger_source: event_replay
+    auth.apns_throttle_status: RATE_LIMITED
+  member-portal:
+    portal.complaint_volume: {randint: [150, 400]}
+    portal.unsubscribe_spike: true
+  fraud-sentinel:
+    fraud.notification_anomaly_detected: true
+    fraud.alert_source: transaction_processor_replay

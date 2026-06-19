@@ -1,0 +1,57 @@
+name: Physics Simulation Overflow
+subsystem: game_engine
+vehicle_section: physics_engine
+error_type: PHYS-OVERFLOW
+sensor_type: physics_validator
+affected_services:
+- game-server
+- analytics-pipeline
+cascade_services:
+- matchmaking-engine
+description: Physics simulation accumulates floating-point errors causing object positions to overflow into NaN territory
+investigation_notes: |-
+  Root cause: the physics integrator uses single-precision floats for velocity accumulation, and repeated substep iterations without epsilon clamping allow energy injection from collision response to compound exponentially, pushing velocities past simulation limits.
+  1. Check the entity trace: look at `accel` values in the dump — acceleration >10000 indicates a collision solver feedback loop (two overlapping colliders pumping energy).
+  2. Inspect `penetration_max` — values >0.5m mean the broadphase AABB tree is stale; run `/debug physics rebuild_bvh` on the affected zone to force spatial index rebuild.
+  3. Review substep count: 4 substeps at high entity density causes frame budget overrun; reduce to 2 substeps and enable CCD (continuous collision detection) for fast movers.
+  4. Remediate: issue `reset_physics_engine` to zero all velocities, rebuild the collision world, and re-derive positions from the last valid snapshot.
+  5. Long-term: migrate velocity accumulator to double-precision and add per-substep energy conservation checks to detect and break feedback loops before overflow.
+remediation_action: reset_physics_engine
+error_message: '[Physics] PHYS-OVERFLOW: entity={entity_id} velocity={velocity} max={max_velocity} zone={zone_id} tick={tick_number}'
+stack_trace: |-
+  === PHYSICS ENGINE STATE DUMP ===
+  tick={tick_number}  zone={zone_id}  substep=4/4
+  ----------- entity {entity_id} -----------
+    pos       = (8421.7, 102.3, -3304.9)
+    vel       = ({velocity}, 0.0, 0.0)  |v|={velocity}
+    max_vel   = {max_velocity}
+    accel     = (12842.1, 0.0, -4201.3)
+    mass      = 85.0 kg
+    collider  = CAPSULE r=0.4 h=1.8
+  ----------- collision candidates --------
+    broadphase_pairs = 47
+    narrowphase_hits = 3
+    penetration_max  = 0.82m (ENT-29481 <-> ENT-30012)
+  ----------- action ----------------------
+    CLAMP velocity to {max_velocity}  REWIND substep 3
+  PHYS-OVERFLOW: entity {entity_id} velocity {velocity} exceeds simulation limit {max_velocity}
+correlation_attr:
+  key: infra.gpu_driver
+  value: nvidia-535.129.03-beta
+fault_params:
+  entity_id:
+    format: "ENT-{n}"
+    n: {randint: [10000, 99999]}
+  velocity: {uniform: [1000.0, 999999.0], round: 1}
+  max_velocity: 500.0
+  zone_id: {choice: [ZONE-A1, ZONE-B2, ZONE-C3, ZONE-D4]}
+  tick_number: {randint: [100000, 9999999]}
+rca_clues:
+  game-server:
+    physics.substep_count: 4
+    physics.penetration_max_m: {uniform: [0.5, 1.5], round: 2}
+  analytics-pipeline:
+    analytics.physics_error_events: {randint: [100, 500]}
+    analytics.entity_density: critical
+  matchmaking-engine:
+    matchmaking.affected_matches: {randint: [5, 30]}

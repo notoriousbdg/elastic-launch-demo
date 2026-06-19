@@ -1,0 +1,57 @@
+name: Appointment Scheduling Conflict
+subsystem: scheduling
+vehicle_section: scheduler_core
+error_type: SCHED-CONFLICT
+sensor_type: appointment_scheduler
+affected_services:
+- scheduling-api
+- ehr-system
+cascade_services:
+- billing-processor
+description: Double-booking or resource conflict detected in appointment scheduling engine
+investigation_notes: |-
+  Root Cause: Scheduling conflicts arise from race conditions in the appointment booking engine when multiple schedulers attempt to reserve the same provider/resource/time slot simultaneously. The optimistic locking mechanism in the scheduling database fails under high concurrency during morning booking windows.
+  Remediation: 1) Review the conflicting bookings: `sched-admin conflicts --provider {provider_id} --date today`. 2) Release the conflicting slot lock: `sched-admin release-lock --slot {time_slot} --resource {resource_type}`. 3) Restart the scheduling conflict resolver: `systemctl restart scheduling-conflict-engine`. 4) Rebook the displaced patient into the next available slot: `sched-admin rebook --patient {patient_id} --provider {provider_id} --type new-patient`. 5) Enable pessimistic locking for high-demand providers during peak booking hours. 6) Verify the scheduling database connection pool is not exhausted: `sched-admin db-pool-status`.
+remediation_action: resolve_scheduling_conflict
+error_message: '[SCHED] SCHED-CONFLICT: provider={provider_id} slot={time_slot} patient={patient_id} encounter={encounter_id}
+  resource={resource_type}'
+stack_trace: |-
+  === SCHEDULING CONFLICT DETAIL ===
+  Provider: {provider_id} | Slot: {time_slot} | Resource: {resource_type}
+  ------------------------------------------------------------------------
+  EXISTING BOOKING:
+    Patient: PT-EXISTING | Encounter: ENC-887432 | Type: follow-up
+    Booked: {time_slot} | Duration: 30min | Resource: {resource_type}
+  CONFLICTING REQUEST:
+    Patient: {patient_id} | Encounter: {encounter_id} | Type: new-patient
+    Requested: {time_slot} | Duration: 45min | Resource: {resource_type}
+  ------------------------------------------------------------------------
+  SCHED-CONFLICT: Double-booking detected for provider {provider_id} at {time_slot}
+  Resource {resource_type} unavailable — patient {patient_id} requires rescheduling
+correlation_attr:
+  key: deployment.scheduler_lock_mode
+  value: optimistic-lock-v2.1-exp
+fault_params:
+  provider_id:
+    format: "NPI-{n}"
+    n: {randint: [1000000000, 9999999999]}
+  time_slot:
+    format: "{hh:02d}:{mm}"
+    hh: {randint: [7, 17]}
+    mm: {choice: ["00", "15", "30", "45"]}
+  patient_id:
+    format: "PT-{n}"
+    n: {randint: [100000, 999999]}
+  encounter_id:
+    format: "ENC-{n}"
+    n: {randint: [100000, 999999]}
+  resource_type: {choice: [exam_room, procedure_room, consult_room]}
+rca_clues:
+  scheduling-api:
+    sched.lock_type: optimistic
+    sched.concurrent_bookings: {randint: [5, 20]}
+  ehr-system:
+    ehr.encounter_conflict_count: {randint: [2, 8]}
+  billing-processor:
+    billing.duplicate_encounter_charge: true
+    billing.held_claims: {randint: [2, 10]}

@@ -1,0 +1,189 @@
+service: cloud-load-balancer
+sort_order: 2
+cloud_provider: gcp
+cloud_region: us-central1
+cloud_platform: gcp_compute_engine
+cloud_availability_zone: us-central1-b
+subsystem: traffic_management
+language: java
+topology:
+- - cloud-cdn-service
+  - /api/v1/cdn/cache-status
+  - GET
+- - cloud-cdn-service
+  - /api/v1/cdn/invalidate
+  - POST
+- - cloud-armor-waf
+  - /api/v1/armor/request-filter
+  - POST
+- - vpc-network-manager
+  - /api/v1/vpc/health-check-config
+  - GET
+entry_endpoints:
+- - /api/v1/lb/status
+  - GET
+- - /api/v1/lb/backends
+  - GET
+- - /api/v1/lb/configure
+  - POST
+db_operations:
+- - SELECT
+  - forwarding_rules
+  - SELECT rule_id, ip_address, port_range, target, region FROM forwarding_rules WHERE project = ? AND status = 'ACTIVE'
+- - SELECT
+  - backend_services
+  - SELECT service_id, name, protocol, health_check_id, backends FROM backend_services WHERE forwarding_rule_id = ?
+- - UPDATE
+  - health_checks
+  - UPDATE health_checks SET last_check = NOW(), status = ? WHERE health_check_id = ?
+emit_fault_logs: true
+kpi_emitter: false
+constants:
+  FORWARDING_RULES:
+  - gcpnet-fr-https-global
+  - gcpnet-fr-tcp-regional
+  - gcpnet-fr-udp-internal
+  - gcpnet-fr-grpc-global
+  BACKEND_SERVICES:
+  - gcpnet-bs-web
+  - gcpnet-bs-api
+  - gcpnet-bs-grpc
+steps:
+- sample:
+    fr:
+      choice: FORWARDING_RULES
+    requests_per_sec:
+      randint:
+      - 5000
+      - 25000
+    latency_p50:
+      uniform:
+      - 5.0
+      - 25.0
+      round: 1
+    latency_p99:
+      if_active:
+        uniform:
+        - 500.0
+        - 3000.0
+        round: 1
+      else:
+        uniform:
+        - 50.0
+        - 200.0
+        round: 1
+- metric:
+    name: lb.requests_per_sec
+    value:
+      var: requests_per_sec
+    unit: req/s
+- metric:
+    name: lb.latency_p50_ms
+    value:
+      var: latency_p50
+    unit: ms
+- metric:
+    name: lb.latency_p99_ms
+    value:
+      var: latency_p99
+    unit: ms
+- log:
+    level: INFO
+    message: 'cloud-lb: forwarding_rule={fr} rps={requests_per_sec} p50={latency_p50}ms p99={latency_p99}ms status=SERVING'
+    attrs:
+      operation: request_distribution
+      lb.forwarding_rule:
+        var: fr
+      lb.rps:
+        var: requests_per_sec
+      lb.latency_p50:
+        var: latency_p50
+      lb.latency_p99:
+        var: latency_p99
+- sample:
+    bs:
+      choice: BACKEND_SERVICES
+    total_backends:
+      randint:
+      - 6
+      - 12
+- sample:
+    healthy:
+      if_active:
+        expr: rand.randint(1, max(1, total_backends - 2))
+      else:
+        var: total_backends
+- metric:
+    name: lb.backends_healthy
+    value:
+      var: healthy
+    unit: instances
+- metric:
+    name: lb.backends_total
+    value:
+      var: total_backends
+    unit: instances
+- log:
+    level: INFO
+    message: 'cloud-lb: backend_service={bs} healthy={healthy}/{total_backends} health_check=hc-http-8080 protocol=HTTP2'
+    attrs:
+      operation: backend_health
+      lb.backend_service:
+        var: bs
+      lb.healthy_backends:
+        var: healthy
+      lb.total_backends:
+        var: total_backends
+- sample:
+    ssl_connections:
+      randint:
+      - 2000
+      - 10000
+    ssl_handshake_ms:
+      uniform:
+      - 2.0
+      - 8.0
+      round: 1
+- metric:
+    name: lb.ssl_connections
+    value:
+      var: ssl_connections
+    unit: connections
+- metric:
+    name: lb.ssl_handshake_ms
+    value:
+      var: ssl_handshake_ms
+    unit: ms
+- log:
+    level: INFO
+    message: 'cloud-lb: ssl_active_connections={ssl_connections} handshake_latency={ssl_handshake_ms}ms tls_version=TLS1.3'
+    attrs:
+      operation: ssl_status
+      lb.ssl_connections:
+        var: ssl_connections
+      lb.ssl_handshake_ms:
+        var: ssl_handshake_ms
+- sample:
+    error_rate_5xx:
+      if_active:
+        uniform:
+        - 5.0
+        - 25.0
+        round: 2
+      else:
+        uniform:
+        - 0.0
+        - 0.5
+        round: 2
+- metric:
+    name: lb.error_rate_5xx_pct
+    value:
+      var: error_rate_5xx
+    unit: '%'
+- log:
+    level: INFO
+    message: 'cloud-lb: 5xx_error_rate={error_rate_5xx}% forwarding_rule={fr} interval=60s'
+    attrs:
+      operation: error_rate
+      lb.error_rate_5xx:
+        var: error_rate_5xx

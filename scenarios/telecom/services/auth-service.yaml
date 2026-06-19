@@ -1,0 +1,112 @@
+service: auth-service
+sort_order: 6
+cloud_provider: azure
+cloud_region: westeurope
+cloud_platform: azure_vm
+cloud_availability_zone: westeurope-1
+subsystem: authentication
+language: python
+entry_endpoints:
+- - /api/v1/auth/health
+  - GET
+db_operations:
+- - SELECT
+  - identities
+  - SELECT user_id, role, last_auth FROM identities WHERE token_hash = $1
+- - SELECT
+  - sessions
+  - SELECT session_id, expires_at FROM sessions WHERE user_id = $1 AND active = true
+topology:
+- - identity-db
+  - /api/v1/db/identities/query
+  - POST
+emit_fault_logs: true
+kpi_emitter: false
+state:
+  _auth_count:
+    init: 0
+  _last_summary:
+    init: now
+steps:
+- sample:
+    auth_method:
+      choice:
+      - oauth2
+      - saml
+      - api_key
+      - mtls
+    auth_provider:
+      choice:
+      - internal
+      - azure_ad
+      - mvno_partner
+- counter:
+    state_key: _auth_count
+    by: 1
+- log:
+    level: INFO
+    message: '[AUTH] token_validated method={auth_method} provider={auth_provider} scope=activation status=VALID'
+    attrs:
+      operation: token_validated
+      auth.method:
+        var: auth_method
+      auth.provider:
+        var: auth_provider
+      auth.status: VALID
+- sample:
+    sessions:
+      randint:
+      - 400000
+      - 600000
+- log:
+    level: INFO
+    message: '[AUTH] session_health active_sessions={sessions} redis_memory=62% jwks_cache_age=1200s status=NORMAL'
+    attrs:
+      operation: session_health
+      auth.sessions:
+        var: sessions
+      auth.redis_memory_pct: 62
+- every:
+    seconds: 10
+    state_key: _last_summary
+    steps:
+    - log:
+        level: INFO
+        message: '[AUTH] auth_summary validations={_auth_count} success_rate=99.8% federation_status=OK status=NORMAL'
+        attrs:
+          operation: auth_summary
+          auth.total_validations:
+            var: _auth_count
+          auth.success_rate: 99.8
+- sample:
+    auth_latency_ms:
+      if_active:
+        uniform:
+        - 1000.0
+        - 10000.0
+        round: 1
+      else:
+        uniform:
+        - 20.0
+        - 150.0
+        round: 1
+- metric:
+    name: auth_service.validation_latency_ms
+    value:
+      var: auth_latency_ms
+    unit: ms
+- metric:
+    name: auth_service.active_sessions
+    value:
+      randint:
+      - 400000
+      - 600000
+    unit: sessions
+- metric:
+    name: auth_service.token_validation_rate
+    value:
+      uniform:
+      - 98.0
+      - 99.9
+      round: 2
+    unit: '%'

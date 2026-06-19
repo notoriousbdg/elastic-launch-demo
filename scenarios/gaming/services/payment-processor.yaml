@@ -1,0 +1,176 @@
+service: payment-processor
+sort_order: 7
+cloud_provider: azure
+cloud_region: eastus
+cloud_platform: azure_vm
+cloud_availability_zone: eastus-1
+subsystem: monetization
+language: dotnet
+topology:
+- - auth-gateway
+  - /api/v1/auth/verify-identity
+  - POST
+- - leaderboard-api
+  - /api/v1/leaderboard/unlock-reward
+  - POST
+- - analytics-pipeline
+  - /api/v1/analytics/transaction
+  - POST
+entry_endpoints:
+- - /api/v1/payment/purchase
+  - POST
+db_operations:
+- - SELECT
+  - transactions
+  - SELECT txn_id, player_id, amount, currency, status FROM transactions WHERE player_id = ? AND created_at > NOW() - INTERVAL
+    24 HOUR
+- - INSERT
+  - transactions
+  - INSERT INTO transactions (txn_id, player_id, amount, currency, item_id, status, created_at) VALUES (?, ?, ?, ?, ?, 'pending',
+    NOW())
+emit_fault_logs: true
+kpi_emitter: false
+constants:
+  PROVIDERS:
+  - stripe
+  - paypal
+  - apple_iap
+  - google_play
+  CURRENCIES:
+  - USD
+  - EUR
+  - GBP
+  - JPY
+  ITEMS:
+  - battle-pass
+  - skin-legendary
+  - currency-pack-lg
+  - loot-box-10x
+  - emote-rare
+  VIRTUAL_CURRENCIES:
+  - gems
+  - coins
+  - credits
+  - tokens
+state:
+  _transactions:
+    init: 0
+  _last_ledger_report:
+    init: now
+steps:
+- counter:
+    state_key: _transactions
+    by: 1
+- sample:
+    provider:
+      choice: PROVIDERS
+    amount:
+      uniform:
+      - 0.99
+      - 99.99
+      round: 2
+    currency:
+      choice: CURRENCIES
+    item:
+      choice: ITEMS
+    pmt_player_id:
+      format: PLR-{n}
+      n:
+        randint:
+        - 100000
+        - 999999
+- log:
+    level: INFO
+    message: '[IAP] purchase_ok player={pmt_player_id} item={item} amount={amount}{currency} provider={provider} receipt=VALID'
+    attrs:
+      operation: purchase_processed
+      payment.provider:
+        var: provider
+      payment.amount:
+        var: amount
+      payment.currency:
+        var: currency
+      payment.item:
+        var: item
+      payment.player_id:
+        var: pmt_player_id
+      payment.status: COMPLETED
+- sample:
+    ledger_player_id:
+      format: PLR-{n}
+      n:
+        randint:
+        - 100000
+        - 999999
+    virtual_currency:
+      choice: VIRTUAL_CURRENCIES
+    balance:
+      randint:
+      - 100
+      - 100000
+- log:
+    level: INFO
+    message: '[IAP] ledger_check player={ledger_player_id} balance={balance} currency={virtual_currency} reconciled=true delta=0'
+    attrs:
+      operation: ledger_check
+      ledger.player_id:
+        var: ledger_player_id
+      ledger.currency:
+        var: virtual_currency
+      ledger.balance:
+        var: balance
+      ledger.status: RECONCILED
+- every:
+    seconds: 10
+    state_key: _last_ledger_report
+    steps:
+    - sample:
+        estimated_revenue:
+          expr: round(_transactions * rand.uniform(3.0, 12.0), 2)
+    - log:
+        level: INFO
+        message: '[IAP] summary txn_count={_transactions} gross_revenue={estimated_revenue} failure_rate=0.8% providers=4/4'
+        attrs:
+          operation: revenue_summary
+          summary.transactions:
+            var: _transactions
+          summary.estimated_revenue:
+            var: estimated_revenue
+- sample:
+    txn_latency:
+      if_active:
+        uniform:
+        - 1000.0
+        - 10000.0
+        round: 1
+      else:
+        uniform:
+        - 80.0
+        - 300.0
+        round: 1
+    failure_rate:
+      if_active:
+        uniform:
+        - 5.0
+        - 25.0
+        round: 2
+      else:
+        uniform:
+        - 0.1
+        - 1.5
+        round: 2
+- metric:
+    name: payment.transaction_latency_ms
+    value:
+      var: txn_latency
+    unit: ms
+- metric:
+    name: payment.transactions_total
+    value:
+      var: _transactions
+    unit: txns
+- metric:
+    name: payment.failure_rate
+    value:
+      var: failure_rate
+    unit: '%'

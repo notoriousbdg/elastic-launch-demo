@@ -1,0 +1,182 @@
+service: identity-db
+sort_order: 9
+cloud_provider: azure
+cloud_region: westeurope
+cloud_platform: azure_vm
+cloud_availability_zone: westeurope-1
+subsystem: database
+language: python
+generates_traces: false
+emit_fault_logs: true
+kpi_emitter: false
+topology:
+- - auth-service
+  - /api/v1/db/identities/query
+  - POST
+db_operations:
+- - SELECT
+  - identities
+  - SELECT user_id, role, tenant_id, last_auth_ts FROM identities WHERE token_hash = $1
+- - SELECT
+  - sessions
+  - SELECT session_id, expires_at, device_id FROM sessions WHERE user_id = $1 AND active = true
+- - SELECT
+  - federation_mappings
+  - SELECT external_id, provider, mapped_user_id FROM federation_mappings WHERE external_id = $1
+constants:
+  DB_SCHEMAS:
+  - auth
+  - identity
+  - sessions
+  REPLICATION_REGIONS:
+  - westeurope-1
+  - westeurope-2
+  - northeurope-1
+steps:
+- sample:
+    schema:
+      choice: DB_SCHEMAS
+    conn_pool_used:
+      if_active:
+        randint:
+        - 85
+        - 100
+      else:
+        randint:
+        - 20
+        - 60
+    conn_pool_max: 100
+    utilization_pct:
+      expr: round(conn_pool_used / conn_pool_max * 100, 1)
+- metric:
+    name: identity_db.connection_pool_used
+    value:
+      var: conn_pool_used
+    unit: connections
+- metric:
+    name: identity_db.connection_pool_utilization_pct
+    value:
+      var: utilization_pct
+    unit: '%'
+- log:
+    level: INFO
+    message: 'postgresql[identitydb]: schema={schema} connections_active={conn_pool_used}/100 utilization={utilization_pct}% status=OK'
+    attrs:
+      operation: connection_health
+      db.schema:
+        var: schema
+      db.connections_active:
+        var: conn_pool_used
+      db.connections_max: 100
+      db.utilization_pct:
+        var: utilization_pct
+- sample:
+    replication_region:
+      choice: REPLICATION_REGIONS
+    replication_lag_ms:
+      if_active:
+        uniform:
+        - 5000.0
+        - 60000.0
+        round: 1
+      else:
+        uniform:
+        - 1.0
+        - 50.0
+        round: 1
+- metric:
+    name: identity_db.replication_lag_ms
+    value:
+      var: replication_lag_ms
+    unit: ms
+- log:
+    level: INFO
+    message: 'postgresql[identitydb]: replication region={replication_region} lag={replication_lag_ms}ms wal_lsn_delta=0 status=STREAMING'
+    attrs:
+      operation: replication_status
+      db.replication.region:
+        var: replication_region
+      db.replication.lag_ms:
+        var: replication_lag_ms
+      db.replication.state: STREAMING
+- sample:
+    query_latency_p50_ms:
+      if_active:
+        uniform:
+        - 200.0
+        - 2000.0
+        round: 1
+      else:
+        uniform:
+        - 1.0
+        - 10.0
+        round: 1
+    query_latency_p99_ms:
+      if_active:
+        uniform:
+        - 3000.0
+        - 15000.0
+        round: 1
+      else:
+        uniform:
+        - 5.0
+        - 50.0
+        round: 1
+    queries_per_sec:
+      randint:
+      - 500
+      - 3000
+- metric:
+    name: identity_db.query_latency_p50_ms
+    value:
+      var: query_latency_p50_ms
+    unit: ms
+- metric:
+    name: identity_db.query_latency_p99_ms
+    value:
+      var: query_latency_p99_ms
+    unit: ms
+- metric:
+    name: identity_db.queries_per_sec
+    value:
+      var: queries_per_sec
+    unit: qps
+- log:
+    level: INFO
+    message: 'postgresql[identitydb]: query_stats schema={schema} qps={queries_per_sec} p50={query_latency_p50_ms}ms p99={query_latency_p99_ms}ms'
+    attrs:
+      operation: query_stats
+      db.schema:
+        var: schema
+      db.qps:
+        var: queries_per_sec
+      db.latency_p50_ms:
+        var: query_latency_p50_ms
+      db.latency_p99_ms:
+        var: query_latency_p99_ms
+- sample:
+    cache_hit_ratio:
+      if_active:
+        uniform:
+        - 0.60
+        - 0.75
+        round: 3
+      else:
+        uniform:
+        - 0.94
+        - 0.99
+        round: 3
+- metric:
+    name: identity_db.buffer_cache_hit_ratio
+    value:
+      var: cache_hit_ratio
+    unit: ratio
+- log:
+    level: INFO
+    message: 'postgresql[identitydb]: buffer_cache schema={schema} hit_ratio={cache_hit_ratio} shared_buffers=4GB status=NORMAL'
+    attrs:
+      operation: buffer_cache_health
+      db.schema:
+        var: schema
+      db.cache_hit_ratio:
+        var: cache_hit_ratio

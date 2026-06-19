@@ -1,0 +1,64 @@
+name: MAC Address Flapping
+subsystem: network_core
+vehicle_section: switching_fabric
+error_type: SW_MATM-4-MACFLAP_NOTIF
+sensor_type: mac_table
+affected_services:
+- network-controller
+- dns-dhcp-service
+cascade_services:
+- firewall-gateway
+- wifi-controller
+description: MAC address table instability causing port flapping on the switching fabric
+investigation_notes: |-
+  1. Run `show mac address-table notification mac-move` to identify the flapping MAC and involved ports.
+  2. Check for physical layer issues: `show interface status` on both source and destination ports for CRC errors, runts, or input errors.
+  3. Verify no switching loops exist: `show spanning-tree vlan <id> detail` — a flapping MAC often indicates an STP misconfiguration or a rogue switch.
+  4. Look for duplicate MAC from VM migration or HSRP/VRRP misconfiguration: `show mac address-table address <mac>`.
+  5. If caused by a NIC teaming misconfiguration on the host side, disable one NIC and confirm flapping stops.
+  6. As a short-term fix, apply `switchport port-security` to limit MAC addresses per port and contain the blast radius.
+remediation_action: clear_mac_table
+error_message: '%SW_MATM-4-MACFLAP_NOTIF: Host {mac_address} in vlan {vlan_id} is flapping between port {interface_src} and
+  port {interface_dst}, {flap_count} moves in {flap_window}s'
+stack_trace: |-
+  switch# show mac address-table notification mac-move
+  MAC Move Notification Feature is Enabled on the switch
+  VLAN  MAC Address       From Port          To Port            Move Count
+  ----  ----------------  -----------------  -----------------  ----------
+  {vlan_id}   {mac_address}     {interface_src}         {interface_dst}         {flap_count}
+
+  switch# show mac address-table count
+  Total MAC Addresses for this criterion: 3847
+  Multicast MAC Addresses:                12
+  Unicast MAC Addresses:                  3835
+  Total MAC Addresses in Use:             3847
+correlation_attr:
+  key: deployment.release_train
+  value: net-core-v2.8.1-canary
+fault_params:
+  mac_address:
+    format: "{a:02x}:{b:02x}:{c:02x}:{d:02x}:{e:02x}:{f:02x}"
+    a: {randint: [0, 255]}
+    b: {randint: [0, 255]}
+    c: {randint: [0, 255]}
+    d: {randint: [0, 255]}
+    e: {randint: [0, 255]}
+    f: {randint: [0, 255]}
+  vlan_id: {choice: [100, 200, 300, 400, 500, 1000]}
+  interface_src: {choice: [Gi0/0/1, Gi0/0/2, Gi0/0/3, Te1/0/1, Te1/0/2]}
+  interface_dst: {choice: [Gi0/0/4, Gi0/0/5, Te1/0/3, Te1/0/4]}
+  flap_count: {randint: [10, 50]}
+  flap_window: {randint: [5, 30]}
+rca_clues:
+  network-controller:
+    switching.flap_port: {choice: [Gi0/0/1, Gi0/0/3, Te1/0/2]}
+    switching.mac_table_util_pct: {uniform: [85, 98], round: 1}
+  dns-dhcp-service:
+    dhcp.arp_conflict_detected: true
+    dhcp.stale_lease_mac: "00:11:22:33:44:55"
+  firewall-gateway:
+    firewall.arp_inspection_failures: {randint: [20, 200]}
+    firewall.zone_affected: TRUST
+  wifi-controller:
+    wifi.client_roam_storm: true
+    wifi.affected_ssid: Fanatics-Warehouse

@@ -1,0 +1,159 @@
+service: billing-processor
+sort_order: 7
+cloud_provider: azure
+cloud_region: eastus
+cloud_platform: azure_vm
+cloud_availability_zone: eastus-1
+subsystem: billing
+language: dotnet
+topology:
+- - data-warehouse
+  - /api/v1/warehouse/claims
+  - POST
+entry_endpoints:
+- - /api/v1/billing/submit-claim
+  - POST
+db_operations:
+- - SELECT
+  - claim_submissions
+  - SELECT claim_id, payer_id, total_charges, status FROM claim_submissions WHERE batch_id = ? ORDER BY created_at
+- - INSERT
+  - claim_submissions
+  - INSERT INTO claim_submissions (encounter_id, payer_id, total_charges, dx_codes, cpt_codes) VALUES (?, ?, ?, ?, ?)
+emit_fault_logs: true
+kpi_emitter: true
+constants:
+  PAYERS:
+  - BCBS-001
+  - AETNA-002
+  - UHC-003
+  - CIGNA-004
+  - MDCR-005
+  - MDCD-006
+  DX_CODES:
+  - I10
+  - E11.9
+  - J18.1
+  - M54.5
+  - K21.0
+  - N39.0
+state:
+  _claims_processed:
+    init: 0
+  _last_batch_report:
+    init: now
+steps:
+- sample:
+    claim_id:
+      expr: f'CLM-{rand.randint(100000, 999999)}'
+    payer:
+      choice: PAYERS
+    charges:
+      uniform:
+      - 500.0
+      - 50000.0
+      round: 2
+    dx_code:
+      choice: DX_CODES
+- log:
+    level: INFO
+    message: '[CLAIMS] x12_837_submit claim={claim_id} payer={payer} charges=${charges:.2f} dx={dx_code} status=ACCEPTED'
+    attrs:
+      operation: claim_submission
+      billing.claim_id:
+        var: claim_id
+      billing.payer:
+        var: payer
+      billing.charges:
+        var: charges
+      billing.dx_code:
+        var: dx_code
+      billing.status: SUBMITTED
+- sample:
+    elig_payer:
+      choice: PAYERS
+    patient_id:
+      expr: f'PT-{rand.randint(100000, 999999)}'
+    response_ms:
+      randint:
+      - 200
+      - 1500
+    elig_status:
+      choice:
+      - ELIGIBLE
+      - ELIGIBLE
+      - ELIGIBLE
+      - NEEDS_AUTH
+- log:
+    level: INFO
+    message: '[CLAIMS] x12_271_response patient={patient_id} payer={elig_payer} eligibility={elig_status} response_ms={response_ms}'
+    attrs:
+      operation: eligibility_check
+      billing.payer:
+        var: elig_payer
+      billing.patient_id:
+        var: patient_id
+      billing.eligibility_status:
+        var: elig_status
+      billing.response_ms:
+        var: response_ms
+- every:
+    seconds: 10
+    state_key: _last_batch_report
+    steps:
+    - sample:
+        batch_id:
+          expr: f'BATCH-{rand.randint(1000, 9999)}'
+        batch_size:
+          randint:
+          - 50
+          - 300
+    - sample:
+        accepted:
+          expr: int(batch_size * rand.uniform(0.88, 0.98))
+    - log:
+        level: INFO
+        message: '[CLAIMS] batch_status batch={batch_id} accepted={accepted}/{batch_size} total_processed={_claims_processed}
+          rcm=ON_TRACK'
+        attrs:
+          operation: batch_status
+          billing.batch_id:
+            var: batch_id
+          billing.batch_size:
+            var: batch_size
+          billing.accepted:
+            var: accepted
+          billing.total_processed:
+            var: _claims_processed
+- counter:
+    state_key: _claims_processed
+    by: 1
+- metric:
+    name: billing.claims_processed
+    value:
+      var: _claims_processed
+    unit: claims
+- sample:
+    denial_rate:
+      if_active:
+        uniform:
+        - 15.0
+        - 40.0
+        round: 1
+      else:
+        uniform:
+        - 2.0
+        - 8.0
+        round: 1
+- metric:
+    name: billing.denial_rate_pct
+    value:
+      var: denial_rate
+    unit: '%'
+- metric:
+    name: billing.avg_reimbursement_days
+    value:
+      randint:
+      - 14
+      - 45
+    unit: days

@@ -1,0 +1,53 @@
+name: Medication Interaction Alert Overflow
+subsystem: medication
+vehicle_section: cpoe_engine
+error_type: CPOE-DDI-CRITICAL
+sensor_type: drug_interaction_checker
+affected_services:
+- pharmacy-system
+- ehr-system
+cascade_services:
+- clinical-alerts
+description: Drug interaction checking engine overwhelmed by excessive concurrent medication orders
+investigation_notes: |-
+  Root Cause: The CPOE drug-drug interaction (DDI) engine uses a real-time screening database (First Databank or Medi-Span) that becomes overloaded when discharge reconciliation generates bulk medication orders. Critical interactions (QT prolongation, renal contraindications) queue behind lower-severity checks.
+  Remediation: 1) Check the CPOE interaction queue: `cpoe-admin queue-depth --engine DDI`. 2) Reset the CPOE interface to clear stale sessions: `cpoe-admin reset-interface --service DDI-SCREENING`. 3) Restart the pharmacy queue processor: `systemctl restart pharmacy-order-queue`. 4) Verify the FDB/Medi-Span knowledge base subscription is active and the local cache is current. 5) For blocked CRITICAL interactions, escalate to attending physician for dual-sign override per pharmacy P&P. 6) Monitor the screening engine thread pool: `cpoe-admin thread-status --pool interaction-checker`.
+remediation_action: reset_cpoe_interface
+error_message: '[PHARM] CPOE-DDI-CRITICAL: patient={patient_id} med={medication_id} interactions_queued={interaction_count}
+  severity={severity_level}'
+stack_trace: |-
+  === DRUG INTERACTION SCREENING — CPOE ENGINE ===
+  Patient: {patient_id} | New Order: {medication_id}
+  Severity: {severity_level} | Queue Depth: {interaction_count}
+  ------------------------------------------------------------------------
+  DRUG-A          | DRUG-B          | TYPE     | SEVERITY  | ACTION
+  ------------------------------------------------------------------------
+  {medication_id}  | Warfarin 5mg    | PK/PD    | CRITICAL  | BLOCK
+  {medication_id}  | Amiodarone 200mg| QT-PROLONG| MAJOR    | WARN
+  {medication_id}  | Metformin 1000mg| RENAL    | MODERATE  | MONITOR
+  ------------------------------------------------------------------------
+  CPOE-DDI-CRITICAL: {interaction_count} interaction checks queued
+  Screening engine capacity exceeded — new orders held pending review
+  Override requires attending physician dual-sign authorization
+correlation_attr:
+  key: deployment.cpoe_engine_config
+  value: fdb-cache-aggressive-v2
+fault_params:
+  patient_id:
+    format: "PT-{n}"
+    n: {randint: [100000, 999999]}
+  medication_id:
+    format: "MED-{n}"
+    n: {randint: [10000, 99999]}
+  interaction_count: {randint: [50, 500]}
+  severity_level: {choice: [critical, major, moderate]}
+rca_clues:
+  pharmacy-system:
+    cpoe.ddi_queue_depth: {randint: [100, 500]}
+    cpoe.fdb_cache_stale: true
+  ehr-system:
+    ehr.medication_orders_held: {randint: [10, 50]}
+    ehr.cpoe_screening_lag_s: {randint: [30, 180]}
+  clinical-alerts:
+    alerts.drug_interaction_backlog: {randint: [20, 80]}
+    alerts.critical_block_pending: {randint: [2, 8]}

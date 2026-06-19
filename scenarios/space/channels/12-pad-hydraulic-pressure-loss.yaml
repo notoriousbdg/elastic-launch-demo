@@ -1,0 +1,48 @@
+name: Pad Hydraulic Pressure Loss
+subsystem: ground
+vehicle_section: launch_pad
+error_type: GND-HYDRAULIC-PRESS
+sensor_type: hydraulic
+affected_services:
+- ground-systems
+- sensor-validator
+cascade_services:
+- mission-control
+description: Launch pad hydraulic system pressure dropping below minimum
+investigation_notes: 'Root cause: hydraulic pump wear or external leak causing system pressure to drop below 2800PSI minimum.
+  Reservoir level at 78% (nominal >90%) confirms fluid loss. Check filter differential pressure (12PSI is borderline — >15PSI
+  indicates clogged filter starving the pump). Fluid temperature 42.1C is within limits but elevated — could indicate pump
+  working harder to compensate for internal leakage. Inspect hydraulic lines to the holddown clamps and umbilical retract
+  mechanisms for visible leaks. Remediation: switch to backup hydraulic system (GND_HYD_SELECT HYD-B), isolate the affected
+  system (GND_HYD_ISOLATE {system}). Top off reservoir and replace filter element. If pump wear suspected, check pump discharge
+  pressure vs RPM curve. Pad operations cannot proceed with hydraulic pressure below 2800PSI — holddown clamp release requires
+  3000PSI minimum.'
+remediation_action: reset_ground_systems
+error_message: '[GND] GND-HYDRAULIC-PRESS: system={system_id} pressure={pressure}PSI min_required={min_pressure}PSI status=LOW'
+stack_trace: |-
+  == GROUND SYSTEM DIAGNOSTIC == HYDRAULIC SYSTEM ==
+  TIMESTAMP: MET+00:04:18.667 | FRAME: 0x4A3E | SEQ: 18457
+  ---------------------------------------------------------------
+  SYSTEM    PRESSURE   MIN_REQ    FLOW_RATE   STATUS
+  {system_id}     {pressure}PSI  {min_pressure}PSI   12.4GPM     **LOW_PRESS**
+  HYD-B     2920PSI    2800PSI    11.8GPM     NOMINAL
+  ---------------------------------------------------------------
+  RESERVOIR_LEVEL: 78% | FLUID_TEMP: 42.1C | FILTER_DP: 12PSI
+  GND-HYDRAULIC-PRESS: System {system_id} pressure {pressure}PSI below minimum {min_pressure}PSI
+  ACTION: Check pump operation, inspect for hydraulic leaks
+correlation_attr:
+  key: infra.hyd_pump_model
+  value: parker-pvp48-rebuilt
+fault_params:
+  system_id: {choice: [HYD-A, HYD-B]}
+  pressure: {uniform: [180.0, 350.0], round: 1}
+  min_pressure: 2800
+rca_clues:
+  ground-systems:
+    ground.hyd_reservoir_pct: {uniform: [65.0, 82.0], round: 0}
+    ground.filter_dp_psi: {uniform: [10.0, 18.0], round: 1}
+  sensor-validator:
+    validation.hydraulic_pressure_status: low
+    validation.system_affected: {choice: [HYD-A, HYD-B]}
+  mission-control:
+    upstream.degraded_subsystem: ground

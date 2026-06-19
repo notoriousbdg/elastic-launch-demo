@@ -1,0 +1,117 @@
+service: policy-manager
+sort_order: 4
+cloud_provider: gcp
+cloud_region: us-central1
+cloud_platform: gcp_compute_engine
+cloud_availability_zone: us-central1-a
+subsystem: policy_administration
+language: python
+topology:
+- - quote-engine
+  - /api/v1/quote/rate-policy
+  - POST
+- - document-vault
+  - /api/v1/docs/generate-dec-page
+  - POST
+- - member-portal
+  - /api/v1/member/policy-update
+  - POST
+entry_endpoints:
+- - /api/v1/policy/renew
+  - POST
+- - /api/v1/policy/endorsement
+  - PUT
+- - /api/v1/policy/details
+  - GET
+db_operations:
+- - SELECT
+  - policies
+  - SELECT policy_id, product_type, premium, effective_date, expiry_date FROM policies WHERE member_id = ? AND status = 'ACTIVE'
+- - UPDATE
+  - policies
+  - UPDATE policies SET premium = ?, effective_date = ?, status = 'RENEWED' WHERE policy_id = ?
+emit_fault_logs: true
+kpi_emitter: false
+state:
+  _renewals_processed:
+    init: 0
+  _last_summary:
+    init: now
+steps:
+- sample:
+    policy_product:
+      choice:
+      - AUTO
+      - HOMEOWNERS
+      - RENTERS
+      - UMBRELLA
+    policy_premium:
+      uniform:
+      - 400.0
+      - 3000.0
+      round: 2
+- counter:
+    state_key: _renewals_processed
+    by: 1
+- log:
+    level: INFO
+    message: '[POLICY] renewal_processed product={policy_product} premium=${policy_premium} mvr_clear=true rating_complete=true
+      status=RENEWED'
+    attrs:
+      operation: renewal_processed
+      policy.product:
+        var: policy_product
+      policy.premium:
+        var: policy_premium
+      policy.mvr_clear: true
+- sample:
+    endorsement_type:
+      choice:
+      - ADD_VEHICLE
+      - REMOVE_DRIVER
+      - ADDRESS_CHANGE
+      - COVERAGE_INCREASE
+      - DEDUCTIBLE_CHANGE
+      - PCS_UPDATE
+- log:
+    level: INFO
+    message: '[POLICY] endorsement_applied type={endorsement_type} effective=IMMEDIATE premium_impact=+$12.40 status=APPLIED'
+    attrs:
+      operation: endorsement_applied
+      endorsement.type:
+        var: endorsement_type
+      endorsement.effective: IMMEDIATE
+- every:
+    seconds: 10
+    state_key: _last_summary
+    steps:
+    - log:
+        level: INFO
+        message: '[POLICY] admin_summary renewals={_renewals_processed} retention=95.2% scra_protected=847 status=NOMINAL'
+        attrs:
+          operation: admin_summary
+          admin.renewals:
+            var: _renewals_processed
+          admin.retention_rate: 95.2
+- metric:
+    name: policy_manager.active_policies
+    value:
+      randint:
+      - 2800000
+      - 3200000
+    unit: policies
+- metric:
+    name: policy_manager.renewal_rate
+    value:
+      uniform:
+      - 92.0
+      - 98.0
+      round: 1
+    unit: '%'
+- metric:
+    name: policy_manager.endorsement_queue
+    value:
+      randint:
+      - 10
+      - 100
+    unit: endorsements

@@ -1,0 +1,58 @@
+name: Number Portability Lookup Timeout
+subsystem: provisioning
+vehicle_section: number_mgmt
+error_type: PROV-NP-TIMEOUT
+sensor_type: number_port
+affected_services:
+- provisioning-service
+cascade_services:
+- activation-service
+description: MNP (Mobile Number Portability) database query timeout delaying ported number activations
+investigation_notes: |
+  1. Check MNP central database connectivity — the national CRDB (Central Reference Database) timeout at 5000ms indicates the external MNP service is degraded. This is outside Meridian's control.
+  2. MNP lookups are required for all ported numbers to verify the current operator. Without CRDB response, provisioning-service cannot determine if the number is eligible for activation.
+  3. Non-ported numbers (new MSISDN allocations) are NOT affected — only customers porting from another carrier experience delays. Approximately 15% of activations involve number portability.
+  4. Enable MNP cache fallback — provisioning-service maintains a 24-hour cache of recent MNP lookups. For repeat lookups (e.g., retry after initial failure), cached results can be served.
+  5. Contact CRDB operations center for status update. If prolonged outage, consider accepting activations without MNP verification and reconciling asynchronously (regulatory risk — requires approval).
+remediation_action: enable_mnp_cache_fallback
+error_message: '[PROV] PROV-NP-TIMEOUT: msisdn={msisdn} donor_operator={donor_operator} crdb_timeout_ms={crdb_timeout_ms} cache_hit={mnp_cache_hit} port_type={port_type}'
+stack_trace: |
+  === MNP LOOKUP FAILURE ===
+  msisdn={msisdn}  port_type={port_type}
+  --- PORTABILITY CHECK ---
+    STEP                    STATUS      ELAPSED_MS
+    msisdn_format_check     COMPLETE    5
+    crdb_query              TIMEOUT     {crdb_timeout_ms}  <<< EXTERNAL
+    donor_verification      SKIPPED     ---
+    port_eligibility        SKIPPED     ---
+  --- CRDB STATUS ---
+    endpoint=crdb.telecom-regulator.eu  response=TIMEOUT
+    donor_operator={donor_operator}  cache_hit={mnp_cache_hit}
+    ported_activations_affected=15%  new_msisdn_unaffected=true
+  ACTION: enable_cache_fallback=true  contact_crdb_ops=true  alert=PROV-NP-TIMEOUT
+infrastructure_events:
+- body: '[GCP-Monitoring] NumberPortabilityTimeout: npdb_endpoint=npdb.meridian.eu response_time_ms=12000 threshold_ms=3000 region=europe-west3'
+  severity: WARN
+  event_name: gcp.monitoring.NumberPortabilityTimeout
+  service: provisioning-service
+  attributes:
+    cloud.provider: gcp
+    cloud.service: monitoring
+    gcp.resource_type: gke_container
+    infrastructure.source: GCP-Monitoring
+correlation_attr:
+  key: provisioning.crdb_client_version
+  value: crdb-client-v1.8.0-rc3
+fault_params:
+  msisdn: {choice: ['+4915110000000', '+4916010000000', '+4917010000000']}
+  donor_operator: {choice: [Vodafone DE, Deutsche Telekom, 1&1, Drillisch]}
+  crdb_timeout_ms: {randint: [5000, 15000]}
+  mnp_cache_hit: {choice: [true, false]}
+  port_type: {choice: [port_in, port_out, internal_transfer]}
+rca_clues:
+  provisioning-service:
+    provisioning.crdb_timeout_ms: {randint: [5000, 15000]}
+    provisioning.mnp_cache_hit: {choice: [true, false]}
+  activation-service:
+    activation.ported_number_blocked: true
+    activation.new_msisdn_ok: true

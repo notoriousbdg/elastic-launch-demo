@@ -1,0 +1,165 @@
+service: game-server
+sort_order: 1
+cloud_provider: aws
+cloud_region: us-east-1
+cloud_platform: aws_ec2
+cloud_availability_zone: us-east-1a
+subsystem: game_engine
+language: cpp
+topology:
+- - matchmaking-engine
+  - /api/v1/matchmaking/assign
+  - POST
+- - chat-service
+  - /api/v1/chat/game-events
+  - POST
+- - leaderboard-api
+  - /api/v1/leaderboard/score
+  - POST
+- - analytics-pipeline
+  - /api/v1/analytics/event
+  - POST
+- - content-delivery
+  - /api/v1/cdn/asset
+  - GET
+- - auth-gateway
+  - /api/v1/auth/validate-session
+  - POST
+entry_endpoints:
+- - /api/v1/game/join
+  - POST
+- - /api/v1/game/state
+  - GET
+- - /api/v1/game/action
+  - POST
+db_operations:
+- - SELECT
+  - game_sessions
+  - SELECT * FROM game_sessions WHERE match_id = ? AND status = 'active' ORDER BY created_at DESC LIMIT 100
+- - INSERT
+  - game_events
+  - INSERT INTO game_events (match_id, player_id, event_type, payload, ts) VALUES (?, ?, ?, ?, NOW())
+emit_fault_logs: true
+kpi_emitter: false
+constants:
+  REGIONS:
+  - US-E
+  - US-W
+  - EU-W
+  - AP-SE
+  ACTIONS:
+  - move
+  - shoot
+  - interact
+  - ability
+  - reload
+state:
+  _tick_count:
+    init: 0
+  _last_perf_report:
+    init: now
+  _active_matches:
+    init: 140
+steps:
+- sample:
+    tick_rate:
+      if_active:
+        uniform:
+        - 18.0
+        - 45.0
+        round: 1
+      else: 64.0
+- counter:
+    state_key: _tick_count
+    by: 1
+- sample:
+    region:
+      choice: REGIONS
+    players_in_tick:
+      randint:
+      - 200
+      - 2000
+    entities:
+      randint:
+      - 500
+      - 5000
+- log:
+    level: INFO
+    message: '[Net] tick={_tick_count} players={players_in_tick} entities={entities} region={region} server_fps=62.8 status=RUNNING'
+    attrs:
+      operation: tick_cycle
+      tick.number:
+        var: _tick_count
+      tick.players:
+        var: players_in_tick
+      tick.entities:
+        var: entities
+      tick.region:
+        var: region
+- sample:
+    action:
+      choice: ACTIONS
+    latency_ms:
+      uniform:
+      - 5.0
+      - 45.0
+      round: 1
+    match_id:
+      format: MATCH-{n}
+      n:
+        randint:
+        - 100000
+        - 999999
+    input_seq:
+      randint:
+      - 10000
+      - 99999
+- log:
+    level: INFO
+    message: '[Engine] action={action} latency={latency_ms}ms match={match_id} result=ACK input_seq={input_seq}'
+    attrs:
+      operation: player_action
+      action.type:
+        var: action
+      action.latency_ms:
+        var: latency_ms
+      action.match_id:
+        var: match_id
+- every:
+    seconds: 10
+    state_key: _last_perf_report
+    steps:
+    - counter:
+        state_key: _active_matches
+        by:
+          expr: rand.randint(-10, 10)
+    - log:
+        level: INFO
+        message: '[Engine] perf_report active_matches={_active_matches} total_ticks={_tick_count} regions=4/4 gc_pause_ms=0.3
+          heap_mb=1204'
+        attrs:
+          operation: perf_report
+          perf.active_matches:
+            var: _active_matches
+          perf.total_ticks:
+            var: _tick_count
+- metric:
+    name: game_server.tick_rate
+    value:
+      var: tick_rate
+    unit: Hz
+- metric:
+    name: game_server.active_matches
+    value:
+      var: _active_matches
+    unit: matches
+- metric:
+    name: game_server.connected_players
+    value:
+      expr: _active_matches * rand.randint(4, 10)
+    unit: players
+- metric:
+    name: game_server.frame_time_ms
+    value:
+      expr: round(1000.0 / max(tick_rate, 1), 1)
+    unit: ms

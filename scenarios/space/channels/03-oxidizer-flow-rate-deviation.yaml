@@ -1,0 +1,48 @@
+name: Oxidizer Flow Rate Deviation
+subsystem: propulsion
+vehicle_section: engine_bay
+error_type: PMS-OXIDIZER-FLOW
+sensor_type: flow_rate
+affected_services:
+- fuel-system
+- sensor-validator
+cascade_services:
+- mission-control
+description: Oxidizer flow rate deviates from commanded value
+investigation_notes: 'Root cause: turbopump cavitation due to LOX inlet temperature rise or inlet pressure drop causing the
+  pump to operate off its design curve. Verify LOX inlet temp (-183C nominal) and inlet pressure (290PSI nominal). Check turbopump
+  RPM vs commanded — a 0.5% shortfall indicates bearing degradation. Inspect main oxidizer valve (MOV) position feedback for
+  actuator slop. Cross-check mixture ratio — flow deviation >3% risks engine-rich shutdown. Remediation: adjust MOV trim position
+  via PMS_FLOW_TRIM command, verify flow converges within 3% tolerance band. If turbopump RPM is low, safe the engine for
+  inspection.'
+remediation_action: recalibrate_engine
+error_message: '[PMS] PMS-OXIDIZER-FLOW: measured={measured}kg/s commanded={commanded}kg/s delta={delta}% tolerance=3.0%'
+stack_trace: |-
+  == TELEMETRY FRAME DUMP == PMS OXIDIZER FLOW CONTROLLER ==
+  TIMESTAMP: MET+00:04:13.112 | FRAME: 0x4A31 | SEQ: 18444
+  ---------------------------------------------------------------
+  PARAMETER          VALUE      COMMANDED   DELTA
+  LOX_FLOW_RATE      {measured}kg/s   {commanded}kg/s    {delta}%
+  LOX_INLET_TEMP     -182.4C    -183.0C     +0.3%
+  LOX_INLET_PRESS    287.3PSI   290.0PSI    -0.9%
+  TURBOPUMP_RPM      31420      31500       -0.3%
+  ---------------------------------------------------------------
+  FLOW TOLERANCE: 3.0% | MEASURED DELTA: {delta}%
+  PMS-OXIDIZER-FLOW: Flow deviation exceeds tolerance band
+  ACTION: Check turbopump inlet conditions and valve position feedback
+correlation_attr:
+  key: runtime.gc_policy
+  value: aggressive-g1
+fault_params:
+  measured: {uniform: [2.0, 8.0], round: 2}
+  commanded: {uniform: [4.0, 6.0], round: 2}
+  delta: {uniform: [4.0, 15.0], round: 1}
+rca_clues:
+  fuel-system:
+    propulsion.turbopump_rpm: {randint: [30800, 31200]}
+    propulsion.mov_trim_pct: {uniform: [-5, 5], round: 1}
+  sensor-validator:
+    validation.flow_delta_pct: {uniform: [3.5, 8.0], round: 1}
+    validation.sensor_type: flow_rate
+  mission-control:
+    upstream.degraded_subsystem: propulsion

@@ -1,0 +1,67 @@
+name: Virtual Currency Ledger Inconsistency
+subsystem: monetization
+vehicle_section: ledger_service
+error_type: IAP-LEDGER-INCONSIST
+sensor_type: ledger_auditor
+affected_services:
+- payment-processor
+- leaderboard-api
+cascade_services:
+- moderation-engine
+- analytics-pipeline
+description: Virtual currency ledger double-entry balances fail reconciliation, indicating potential duplication or lost transactions
+investigation_notes: |-
+  Root cause: a race condition in the ledger write path — concurrent purchase and spend operations execute without database-level serialization, allowing the cached balance to drift from the ledger transaction sum. The likely scenario is a duplicate LTXN application.
+  1. Check for duplicate transactions: query the ledger for `{last_transaction_id}` — if it appears twice, the idempotency key was not enforced during a retry after timeout.
+  2. Verify balance derivation: `cached_balance` is updated optimistically in Redis while `ledger_sum` is the authoritative SQL sum — the discrepancy of {discrepancy} units must be reconciled by replaying the ledger.
+  3. Assess fraud risk: LOW fraud risk is reassuring but any ledger inconsistency must be treated as P1 — virtual currency duplication exploits spread rapidly once discovered.
+  4. Remediate: issue `freeze_player_wallet` for affected players, then `reconcile_ledger` to recalculate balances from the transaction log source of truth.
+  5. Deploy database-level serializable isolation for all currency mutations and add real-time balance checksumming that alerts immediately on any divergence >1 unit.
+remediation_action: restart_store_service
+error_message: '[IAP] IAP-LEDGER-INCONSIST: player={player_id} balance={currency_balance} ledger_sum={ledger_sum} currency={virtual_currency}
+  discrepancy={discrepancy} last_txn={last_transaction_id}'
+stack_trace: |-
+  === LEDGER RECONCILIATION REPORT ===
+  player={player_id}  currency={virtual_currency}
+  ----------- balance check -----------
+    cached_balance  = {currency_balance}
+    ledger_sum      = {ledger_sum}
+    discrepancy     = {discrepancy}
+    tolerance       = 1
+  ----------- recent transactions -----
+    {last_transaction_id}  +500 {virtual_currency}  (purchase, 2min ago)
+    LTXN-8847201          -200 {virtual_currency}  (spend, 4min ago)
+    LTXN-8847102          +100 {virtual_currency}  (daily reward, 8min ago)
+    LTXN-8846990          -50 {virtual_currency}   (spend, 12min ago)
+  ----------- audit flags -------------
+    duplicate_txn   = POSSIBLE ({last_transaction_id} applied twice?)
+    race_condition  = LIKELY (concurrent write detected)
+    fraud_risk      = LOW
+  ----------- action ------------------
+    FREEZE player wallet  RECONCILE from ledger source of truth
+  IAP-LEDGER-INCONSIST: player {player_id} balance {currency_balance} != ledger {ledger_sum}
+correlation_attr:
+  key: runtime.db_isolation_level
+  value: read-committed-optimistic
+fault_params:
+  player_id:
+    format: "PLR-{n}"
+    n: {randint: [100000, 999999]}
+  currency_balance: {randint: [100, 100000]}
+  ledger_sum: {randint: [100, 100000]}
+  virtual_currency: {choice: [gems, coins, credits, tokens]}
+  discrepancy: {randint: [1, 5000]}
+  last_transaction_id:
+    format: "LTXN-{n}"
+    n: {randint: [1000000, 9999999]}
+rca_clues:
+  payment-processor:
+    payment.ledger_race_condition: true
+    payment.duplicate_txn_suspected: true
+  leaderboard-api:
+    leaderboard.reward_delivery_stalled: true
+    leaderboard.affected_players: {randint: [10, 500]}
+  moderation-engine:
+    moderation.fraud_investigation_queued: true
+  analytics-pipeline:
+    analytics.ledger_discrepancy_count: {randint: [10, 200]}

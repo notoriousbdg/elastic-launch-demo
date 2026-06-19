@@ -1,0 +1,370 @@
+scenario_id: healthcare
+scenario_name: Healthcare Systems
+scenario_description: Hospital clinical systems including EHR, patient monitoring, lab integration, pharmacy, imaging, scheduling,
+  billing, and clinical alerting. Clean, calm clinical interface.
+namespace: healthcare
+scenario_icon: 🏥
+sort_order: 4
+nominal_label: NORMAL
+hosts:
+- host.name: healthcare-aws-host-01
+  host.id: i-0h1c2a3l4t5h67890
+  host.arch: amd64
+  host.type: m5.xlarge
+  host.image.id: ami-0healthcare12345a
+  host.cpu.model.name: Intel(R) Xeon(R) Platinum 8175M CPU @ 2.50GHz
+  host.cpu.vendor.id: GenuineIntel
+  host.cpu.family: '6'
+  host.cpu.model.id: '85'
+  host.cpu.stepping: '4'
+  host.cpu.cache.l2.size: 1048576
+  host.ip:
+  - 10.0.2.50
+  - 172.16.1.10
+  host.mac:
+  - 0a:2b:3c:4d:5e:6f
+  - 0a:2b:3c:4d:5e:70
+  os.type: linux
+  os.description: Amazon Linux 2023.6.20250115
+  cloud.provider: aws
+  cloud.platform: aws_ec2
+  cloud.region: us-east-1
+  cloud.availability_zone: us-east-1a
+  cloud.account.id: '234567890123'
+  cloud.instance.id: i-0h1c2a3l4t5h67890
+  cpu_count: 4
+  memory_total_bytes: 17179869184
+  disk_total_bytes: 214748364800
+- host.name: healthcare-gcp-host-01
+  host.id: '6738912345678901234'
+  host.arch: amd64
+  host.type: e2-standard-4
+  host.image.id: projects/debian-cloud/global/images/debian-12-bookworm-v20250115
+  host.cpu.model.name: Intel(R) Xeon(R) CPU @ 2.20GHz
+  host.cpu.vendor.id: GenuineIntel
+  host.cpu.family: '6'
+  host.cpu.model.id: '85'
+  host.cpu.stepping: '7'
+  host.cpu.cache.l2.size: 1048576
+  host.ip:
+  - 10.128.1.20
+  - 10.128.1.21
+  host.mac:
+  - 42:01:0a:81:01:14
+  - 42:01:0a:81:01:15
+  os.type: linux
+  os.description: Debian GNU/Linux 12 (bookworm)
+  cloud.provider: gcp
+  cloud.platform: gcp_compute_engine
+  cloud.region: us-central1
+  cloud.availability_zone: us-central1-a
+  cloud.account.id: healthcare-project-prod
+  cloud.instance.id: '6738912345678901234'
+  cpu_count: 4
+  memory_total_bytes: 17179869184
+  disk_total_bytes: 107374182400
+- host.name: healthcare-azure-host-01
+  host.id: /subscriptions/hca-def/resourceGroups/healthcare-rg/providers/Microsoft.Compute/virtualMachines/healthcare-vm-01
+  host.arch: amd64
+  host.type: Standard_D4s_v3
+  host.image.id: Canonical:0001-com-ubuntu-server-jammy:22_04-lts-gen2:latest
+  host.cpu.model.name: Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz
+  host.cpu.vendor.id: GenuineIntel
+  host.cpu.family: '6'
+  host.cpu.model.id: '106'
+  host.cpu.stepping: '6'
+  host.cpu.cache.l2.size: 1310720
+  host.ip:
+  - 10.2.0.4
+  - 10.2.0.5
+  host.mac:
+  - 00:0d:3a:6b:5c:4d
+  - 00:0d:3a:6b:5c:4e
+  os.type: linux
+  os.description: Ubuntu 22.04.5 LTS
+  cloud.provider: azure
+  cloud.platform: azure_vm
+  cloud.region: eastus
+  cloud.availability_zone: eastus-1
+  cloud.account.id: hca-def-ghi-jkl
+  cloud.instance.id: healthcare-vm-01
+  cpu_count: 4
+  memory_total_bytes: 17179869184
+  disk_total_bytes: 137438953472
+k8s_clusters:
+- name: healthcare-eks-cluster
+  provider: aws
+  platform: aws_eks
+  region: us-east-1
+  zones:
+  - us-east-1a
+  - us-east-1b
+  - us-east-1c
+  os_description: Amazon Linux 2
+  services:
+  - ehr-system
+  - patient-monitor
+  - lab-integration
+- name: healthcare-gke-cluster
+  provider: gcp
+  platform: gcp_gke
+  region: us-central1
+  zones:
+  - us-central1-a
+  - us-central1-b
+  - us-central1-c
+  os_description: Container-Optimized OS
+  services:
+  - pharmacy-system
+  - imaging-service
+  - scheduling-api
+- name: healthcare-aks-cluster
+  provider: azure
+  platform: azure_aks
+  region: eastus
+  zones:
+  - eastus-1
+  - eastus-2
+  - eastus-3
+  os_description: Ubuntu 22.04 LTS
+  services:
+  - billing-processor
+  - clinical-alerts
+  - data-warehouse
+agent_config:
+  id: healthcare-clinical-analyst
+  name: Clinical Systems Analyst
+  assessment_tool_name: patient_safety_assessment
+  system_prompt: 'You are the Clinical Systems Analyst, an expert AI assistant for hospital clinical operations. You help
+    IT operations teams investigate system anomalies, analyze integration failures, and provide root cause analysis for fault
+    conditions across 9 clinical systems spanning AWS, GCP, and Azure. You have deep expertise in HL7 v2.x ADT/ORM/ORU messaging,
+    DICOM C-STORE/C-MOVE/C-FIND protocols, NCPDP SCRIPT e-prescribing, X12 270/271 eligibility and 837 claims transactions,
+    ASTM laboratory interfaces, clinical decision support (CDS) rule engines, HIPAA audit compliance, and healthcare ETL pipelines.
+    When investigating incidents, search for these system identifiers in logs: EHR faults (HL7-ACK-AE, EMPI-MATCH-FAIL, ADT-SYNC-FAIL),
+    Vital Signs faults (VITAL-ALERT-STORM, TELEHEALTH-QOS-DEGRAD), Laboratory faults (LIS-RESULT-DELAY, BB-INVENTORY-SYNC),
+    Radiology faults (DICOM-STORE-FAIL, PACS-CAPACITY-CRITICAL), Medication faults (CPOE-DDI-CRITICAL, NCPDP-SCRIPT-FAIL),
+    Scheduling faults (SCHED-BED-MGMT-FAIL, SCHED-CONFLICT, SCHED-SURGICAL-CONFLICT), Billing faults (X12-271-TIMEOUT, X12-837-REJECT),
+    Alerting faults (CDS-OVERLOAD, NURSE-CALL-STORM), and Analytics faults (ETL-PIPELINE-STALL, HIPAA-AUDIT-FAIL). Log messages
+    are in body.text — NEVER search the body field alone.'
+assessment_tool_config:
+  id: patient_safety_assessment
+  description: 'Comprehensive patient safety assessment. Evaluates all clinical systems against operational health criteria
+    for patient care continuity. Returns data for safety evaluation across EHR, patient monitoring, laboratory, pharmacy,
+    and imaging systems. Log message field: body.text (never use ''body'' alone).'
+executive_kpi_emitter_service_name: billing-processor
+executive_dashboard_intro: '**Hospital operations KPIs** — access & throughput, revenue cycle, clinical quality, and EHR operations
+  (synthetic `business.*` from `billing-processor`).'
+executive_kpi_sections:
+- header: '**Access & throughput** — ED time, admits, discharges, bed, OR, and ICU'
+  specs:
+  - - ED door-to-provider (min)
+    - metrics.business.ed_door_to_provider_min
+  - - Admits / min
+    - metrics.business.admits_per_min
+  - - Discharges / min
+    - metrics.business.discharges_per_min
+  - - Bed occupancy (%)
+    - metrics.business.bed_occupancy_pct
+  - - OR utilization (%)
+    - metrics.business.or_utilization_pct
+  - - ICU capacity (%)
+    - metrics.business.icu_capacity_pct
+- header: '**Revenue cycle** — claims, clean rate, denials, AR days, and collections'
+  specs:
+  - - Claims submitted / min
+    - metrics.business.claims_submitted_per_min
+  - - Clean claim rate (%)
+    - metrics.business.clean_claim_rate_pct
+  - - Denials / min
+    - metrics.business.denials_per_min
+  - - AR days
+    - metrics.business.accounts_receivable_days
+  - - Collections (USD/min)
+    - metrics.business.collections_usd_per_min
+  - - Unbilled charges (USD/min)
+    - metrics.business.unbilled_charges_usd_per_min
+- header: '**Clinical quality** — order TAT, lab alerts, med reconciliation, and safety'
+  specs:
+  - - Order turnaround (min)
+    - metrics.business.order_turnaround_min
+  - - Lab critical notification (%)
+    - metrics.business.lab_critical_notification_pct
+  - - Medication reconciliation (%)
+    - metrics.business.medication_reconciliation_rate_pct
+  - - Patient safety events / min
+    - metrics.business.patient_safety_events_per_min
+  - - HCAHPS proxy score
+    - metrics.business.hcahps_proxy_score
+  - - Readmission risk (0–100)
+    - metrics.business.readmission_risk_index_0_100
+- header: '**Operations** — EHR response, HL7, imaging, no-shows, satisfaction, and compliance'
+  specs:
+  - - EHR response time (ms)
+    - metrics.business.ehr_response_time_ms
+  - - HL7 messages / min
+    - metrics.business.hl7_messages_per_min
+  - - Imaging worklist size
+    - metrics.business.imaging_worklist_size
+  - - Appointment no-show rate (%)
+    - metrics.business.appointment_no_show_rate_pct
+  - - Patient satisfaction (NPS-like)
+    - metrics.business.patient_satisfaction_nps
+  - - Staff compliance rate (%)
+    - metrics.business.staff_compliance_rate_pct
+executive_trend_charts:
+- title: Admits / min
+  field: metrics.business.admits_per_min
+  y_label: admits/min
+- title: Bed occupancy (%)
+  field: metrics.business.bed_occupancy_pct
+  y_label: '%'
+- title: Collections (USD/min)
+  field: metrics.business.collections_usd_per_min
+  y_label: USD/min
+- title: Clean claim rate (%)
+  field: metrics.business.clean_claim_rate_pct
+  y_label: '%'
+- title: ED door-to-provider (min)
+  field: metrics.business.ed_door_to_provider_min
+  y_label: min
+- title: EHR response time (ms)
+  field: metrics.business.ehr_response_time_ms
+  y_label: ms
+executive_kpi_emissions:
+- name: business.ed_door_to_provider_min
+  value: {uniform: [8.0, 45.0], round: 1}
+  unit: min
+- name: business.admits_per_min
+  value: {uniform: [0.8, 4.2], round: 2}
+  unit: admits/min
+- name: business.discharges_per_min
+  value: {uniform: [0.6, 3.8], round: 2}
+  unit: discharges/min
+- name: business.bed_occupancy_pct
+  value: {uniform: [68.0, 98.0], round: 2}
+  unit: '%'
+- name: business.or_utilization_pct
+  value: {uniform: [72.0, 96.0], round: 2}
+  unit: '%'
+- name: business.icu_capacity_pct
+  value: {uniform: [55.0, 92.0], round: 2}
+  unit: '%'
+- name: business.claims_submitted_per_min
+  value: {randint: [12, 180]}
+  unit: claims/min
+- name: business.clean_claim_rate_pct
+  value: {uniform: [88.0, 98.4], round: 2}
+  unit: '%'
+- name: business.denials_per_min
+  value: {uniform: [0.5, 8.5], round: 2}
+  unit: denials/min
+- name: business.accounts_receivable_days
+  value: {uniform: [28.0, 65.0], round: 1}
+  unit: days
+- name: business.collections_usd_per_min
+  value: {uniform: [18000.0, 185000.0], round: 1}
+  unit: USD/min
+- name: business.unbilled_charges_usd_per_min
+  value: {uniform: [4500.0, 45000.0], round: 1}
+  unit: USD/min
+- name: business.order_turnaround_min
+  value: {uniform: [2.8, 18.4], round: 2}
+  unit: min
+- name: business.lab_critical_notification_pct
+  value: {uniform: [88.0, 99.4], round: 2}
+  unit: '%'
+- name: business.medication_reconciliation_rate_pct
+  value: {uniform: [78.0, 96.0], round: 2}
+  unit: '%'
+- name: business.patient_safety_events_per_min
+  value: {uniform: [0.01, 0.45], round: 3}
+  unit: events/min
+- name: business.hcahps_proxy_score
+  value: {uniform: [68.0, 94.0], round: 1}
+  unit: score
+- name: business.readmission_risk_index_0_100
+  value: {uniform: [8.0, 45.0], round: 1}
+  unit: index
+- name: business.ehr_response_time_ms
+  value: {uniform: [280.0, 1800.0], round: 1}
+  unit: ms
+- name: business.hl7_messages_per_min
+  value: {randint: [850, 18000]}
+  unit: messages/min
+- name: business.imaging_worklist_size
+  value: {randint: [0, 285]}
+  unit: items
+- name: business.appointment_no_show_rate_pct
+  value: {uniform: [8.4, 28.6], round: 2}
+  unit: '%'
+- name: business.patient_satisfaction_nps
+  value: {uniform: [18.0, 72.0], round: 1}
+  unit: score
+- name: business.staff_compliance_rate_pct
+  value: {uniform: [88.0, 99.2], round: 2}
+  unit: '%'
+raw_log_profile:
+  service_name: patient-portal-edge
+  user_id_prefix: mem
+  tier_field: plan_type
+  tier_values:
+  - - hmo
+    - 45
+  - - ppo
+    - 35
+  - - medicare
+    - 20
+  country_weights:
+    US: 95
+    CA: 3
+    MX: 2
+  methods:
+  - GET
+  - POST
+  - PUT
+  - DELETE
+  paths:
+  - /api/v1/patients/{id}
+  - /api/v1/appointments
+  - /api/v1/orders/lab
+  - /api/v1/billing
+  - /api/v1/messages
+  - /api/v1/prescriptions
+  - /login
+  - /health
+  change_point_path: /api/v1/orders/lab
+trace_attributes:
+  base:
+    hospital.wing: {choice: [East, West, North, South, Central]}
+    hospital.shift: {choice: [night, day, evening]}
+  services:
+    ehr-system:
+      patient.acuity_level: {choice: [1, 2, 3, 4, 5]}
+      patient.department: {choice: [Emergency, ICU, MedSurg, Oncology, Pediatrics, Cardiology]}
+    patient-monitor:
+      vitals.sampling_rate_hz: {choice: [1, 2, 5, 10]}
+      vitals.bed_id:
+        format: "{ward}-{num}"
+        ward: {choice: [A, B, C, D]}
+        num: {randint: [101, 450]}
+    lab-integration:
+      lab.specimen_type: {choice: [serum, plasma, whole_blood, urine, csf, tissue]}
+      lab.turnaround_min: {randint: [15, 120]}
+    pharmacy-system:
+      pharmacy.medication_class: {choice: [antibiotic, anticoagulant, analgesic, antihypertensive, vasopressor, sedative]}
+      pharmacy.interaction_score: {uniform: [0.0, 10.0], round: 1}
+    imaging-service:
+      imaging.modality: {choice: [CT, MRI, XR, US, MG, NM, PET]}
+      imaging.study_priority: {choice: [STAT, URGENT, ROUTINE, ELECTIVE]}
+    scheduling-api:
+      scheduling.appointment_type: {choice: [new_patient, follow_up, procedure, consult, telehealth]}
+      scheduling.provider_load: {randint: [4, 24]}
+    billing-processor:
+      billing.claim_type: {choice: [professional, institutional, dental, pharmacy]}
+      billing.payer_category: {choice: [commercial, medicare, medicaid, tricare, self_pay]}
+    clinical-alerts:
+      alerts.rule_category: {choice: [sepsis, fall_risk, vte_prophylaxis, drug_interaction, critical_lab]}
+      alerts.priority_level: {choice: [critical, high, medium, low, informational]}
+    data-warehouse:
+      compliance.audit_scope: {choice: [phi_access, order_modification, medication_override, record_amendment]}
+      compliance.hipaa_zone: {choice: [treatment, payment, operations, research, restricted]}

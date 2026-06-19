@@ -1,0 +1,107 @@
+service: fulfillment-orchestrator
+sort_order: 8
+cloud_provider: azure
+cloud_region: eastus
+cloud_platform: azure_vm
+cloud_availability_zone: eastus-2
+subsystem: fulfillment
+language: java
+topology:
+- - inventory-service
+  - /api/v1/inventory/update-stock
+  - POST
+- - analytics-pipeline
+  - /api/v1/analytics/fulfillment-events
+  - POST
+entry_endpoints:
+- - /api/v1/fulfillment/create-shipment
+  - POST
+- - /api/v1/fulfillment/tracking
+  - GET
+db_operations:
+- - INSERT
+  - shipments
+  - INSERT INTO shipments (order_id, warehouse_id, carrier, tracking_number, status, created_at) VALUES (?, ?, ?, ?, 'label_created',
+    NOW())
+- - SELECT
+  - shipments
+  - SELECT order_id, tracking_number, carrier, status, estimated_delivery FROM shipments WHERE order_id = ?
+emit_fault_logs: true
+kpi_emitter: false
+constants:
+  CARRIERS:
+  - fedex
+  - ups
+  - usps
+  - dhl
+steps:
+- sample:
+    orders_queued:
+      randint:
+      - 200
+      - 3500
+    avg_ship_time_hrs:
+      uniform:
+      - 18.0
+      - 48.0
+      round: 1
+    on_time_delivery_pct:
+      uniform:
+      - 91.0
+      - 98.5
+      round: 2
+    label_creation_success_rate_pct:
+      uniform:
+      - 98.0
+      - 99.9
+      round: 2
+- metric:
+    name: fulfillment.orders_queued
+    value:
+      var: orders_queued
+    unit: orders
+- metric:
+    name: fulfillment.avg_ship_time_hrs
+    value:
+      var: avg_ship_time_hrs
+    unit: hrs
+- metric:
+    name: fulfillment.on_time_delivery_pct
+    value:
+      var: on_time_delivery_pct
+    unit: '%'
+- metric:
+    name: fulfillment.label_creation_success_rate_pct
+    value:
+      var: label_creation_success_rate_pct
+    unit: '%'
+- log:
+    level: INFO
+    message: fulfillment.health orders_queued={orders_queued} avg_ship_time={avg_ship_time_hrs}hrs on_time={on_time_delivery_pct}%
+      label_success={label_creation_success_rate_pct}%
+    attrs:
+      operation: fulfillment_health
+      fulfillment.orders_queued:
+        var: orders_queued
+      fulfillment.avg_ship_time_hrs:
+        var: avg_ship_time_hrs
+      fulfillment.on_time_delivery_pct:
+        var: on_time_delivery_pct
+      fulfillment.label_creation_success_rate_pct:
+        var: label_creation_success_rate_pct
+- sample:
+    carrier:
+      choice: CARRIERS
+    carrier_api_calls:
+      randint:
+      - 500
+      - 4000
+- log:
+    level: INFO
+    message: fulfillment.carrier_health carrier={carrier} api_calls={carrier_api_calls} status=NOMINAL
+    attrs:
+      operation: carrier_health
+      fulfillment.active_carrier:
+        var: carrier
+      fulfillment.carrier_api_calls:
+        var: carrier_api_calls

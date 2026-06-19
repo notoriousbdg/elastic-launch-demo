@@ -1,0 +1,175 @@
+service: cloud-interconnect
+sort_order: 7
+cloud_provider: gcp
+cloud_region: europe-west1
+cloud_platform: gcp_compute_engine
+cloud_availability_zone: europe-west1-b
+subsystem: connectivity
+language: java
+topology:
+- - vpc-network-manager
+  - /api/v1/vpc/route-advertise
+  - POST
+- - cloud-vpn-gateway
+  - /api/v1/vpn/failover-status
+  - GET
+- - network-intelligence
+  - /api/v1/ni/latency-report
+  - GET
+entry_endpoints:
+- - /api/v1/interconnect/attachments
+  - GET
+- - /api/v1/interconnect/diagnostics
+  - GET
+db_operations:
+- - SELECT
+  - interconnect_attachments
+  - SELECT attachment_id, name, region, bandwidth, vlan_tag, state FROM interconnect_attachments WHERE interconnect_id = ?
+emit_fault_logs: true
+kpi_emitter: false
+constants:
+  ATTACHMENTS:
+  - gcpnet-interconnect-primary
+  - gcpnet-interconnect-secondary
+  LOCATIONS:
+  - iad-zone1-1
+  - dfw-zone1-1
+  - ams-zone1-1
+  BANDWIDTH_OPTIONS:
+  - 10
+  - 100
+  BGP_STATES:
+  - IDLE
+  - ACTIVE
+  - CONNECT
+  PEER_ASNS:
+  - 16550
+  - 64512
+  - 64513
+  LINK_FAULT_STATES:
+  - DOWN
+  - FLAPPING
+state:
+  _last_bgp_check:
+    init: now
+steps:
+- sample:
+    attachment:
+      choice: ATTACHMENTS
+    link_status:
+      if_active:
+        choice: LINK_FAULT_STATES
+      else: UP
+    bandwidth_gbps:
+      choice: BANDWIDTH_OPTIONS
+    utilization_pct:
+      if_active:
+        uniform:
+        - 85.0
+        - 99.0
+        round: 1
+      else:
+        uniform:
+        - 20.0
+        - 70.0
+        round: 1
+    location:
+      choice: LOCATIONS
+- metric:
+    name: interconnect.bandwidth_gbps
+    value:
+      var: bandwidth_gbps
+    unit: Gbps
+- metric:
+    name: interconnect.utilization_pct
+    value:
+      var: utilization_pct
+    unit: '%'
+- log:
+    level: INFO
+    message: 'cloud-interconnect: attachment={attachment} link={link_status} bandwidth={bandwidth_gbps}Gbps utilization={utilization_pct}%
+      location={location}'
+    attrs:
+      operation: circuit_status
+      interconnect.attachment:
+        var: attachment
+      interconnect.link_status:
+        var: link_status
+      interconnect.bandwidth:
+        var: bandwidth_gbps
+      interconnect.utilization:
+        var: utilization_pct
+- every:
+    seconds: 10
+    state_key: _last_bgp_check
+    steps:
+    - sample:
+        peer_ip:
+          expr: f'169.254.{rand.randint(0,255)}.{rand.randint(1,254)}'
+        peer_asn:
+          choice: PEER_ASNS
+        bgp_state:
+          if_active:
+            choice: BGP_STATES
+          else: ESTABLISHED
+        advertised_routes:
+          if_active:
+            randint:
+            - 0
+            - 5
+          else:
+            randint:
+            - 20
+            - 100
+    - metric:
+        name: interconnect.bgp_advertised_routes
+        value:
+          var: advertised_routes
+        unit: routes
+    - log:
+        level: INFO
+        message: 'cloud-router: peer={peer_ip} asn={peer_asn} state={bgp_state} advertised={advertised_routes} bfd=ENABLED
+          attachment={attachment}'
+        attrs:
+          operation: bgp_check
+          interconnect.bgp_peer:
+            var: peer_ip
+          interconnect.bgp_state:
+            var: bgp_state
+          interconnect.advertised_routes:
+            var: advertised_routes
+- sample:
+    vlan_tag:
+      randint:
+      - 100
+      - 4094
+    packets_in:
+      randint:
+      - 1000000
+      - 10000000
+    packets_out:
+      randint:
+      - 1000000
+      - 10000000
+- metric:
+    name: interconnect.vlan_packets_in
+    value:
+      var: packets_in
+    unit: packets
+- metric:
+    name: interconnect.vlan_packets_out
+    value:
+      var: packets_out
+    unit: packets
+- log:
+    level: INFO
+    message: 'cloud-interconnect: attachment={attachment} vlan_tag={vlan_tag} packets_in={packets_in} packets_out={packets_out}
+      mtu=1500 encryption=MACsec'
+    attrs:
+      operation: vlan_health
+      interconnect.vlan_tag:
+        var: vlan_tag
+      interconnect.packets_in:
+        var: packets_in
+      interconnect.packets_out:
+        var: packets_out

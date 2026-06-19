@@ -1,0 +1,174 @@
+service: subscriber-db
+sort_order: 8
+cloud_provider: aws
+cloud_region: eu-central-1
+cloud_platform: aws_ec2
+cloud_availability_zone: eu-central-1a
+subsystem: database
+language: python
+generates_traces: false
+emit_fault_logs: true
+kpi_emitter: false
+topology:
+- - provisioning-service
+  - /api/v1/db/subscribers/query
+  - POST
+- - bss-billing
+  - /api/v1/db/subscribers/profile
+  - GET
+db_operations:
+- - SELECT
+  - subscriber_profiles
+  - SELECT msisdn, segment, subscription_tier, sim_iccid FROM subscriber_profiles WHERE msisdn = $1
+- - SELECT
+  - subscriber_profiles
+  - SELECT msisdn, account_id, plan_code, data_quota_gb, voice_quota_min FROM subscriber_profiles WHERE account_id = $1
+- - SELECT
+  - number_inventory
+  - SELECT msisdn, portability_status, carrier_id, port_date FROM number_inventory WHERE msisdn = $1
+constants:
+  DB_TABLES:
+  - subscriber_profiles
+  - number_inventory
+  - sim_inventory
+  - data_usage
+  SUBSCRIBER_SEGMENTS:
+  - consumer_prepaid
+  - consumer_postpaid
+  - enterprise
+  - mvno
+steps:
+- sample:
+    table:
+      choice: DB_TABLES
+    conn_pool_used:
+      if_active:
+        randint:
+        - 175
+        - 200
+      else:
+        randint:
+        - 40
+        - 120
+    conn_pool_max: 200
+    conn_utilization_pct:
+      expr: round(conn_pool_used / conn_pool_max * 100, 1)
+- metric:
+    name: subscriber_db.connection_pool_used
+    value:
+      var: conn_pool_used
+    unit: connections
+- metric:
+    name: subscriber_db.connection_pool_utilization_pct
+    value:
+      var: conn_utilization_pct
+    unit: '%'
+- log:
+    level: INFO
+    message: 'postgresql[subscriberdb]: connections_active={conn_pool_used}/200 utilization={conn_utilization_pct}% status=OK'
+    attrs:
+      operation: connection_health
+      db.connections_active:
+        var: conn_pool_used
+      db.connections_max: 200
+      db.utilization_pct:
+        var: conn_utilization_pct
+- sample:
+    segment:
+      choice: SUBSCRIBER_SEGMENTS
+    query_latency_p50_ms:
+      if_active:
+        uniform:
+        - 500.0
+        - 5000.0
+        round: 1
+      else:
+        uniform:
+        - 2.0
+        - 15.0
+        round: 1
+    query_latency_p99_ms:
+      if_active:
+        uniform:
+        - 5000.0
+        - 30000.0
+        round: 1
+      else:
+        uniform:
+        - 10.0
+        - 80.0
+        round: 1
+    throughput_qps:
+      randint:
+      - 1000
+      - 8000
+- metric:
+    name: subscriber_db.query_latency_p50_ms
+    value:
+      var: query_latency_p50_ms
+    unit: ms
+- metric:
+    name: subscriber_db.query_latency_p99_ms
+    value:
+      var: query_latency_p99_ms
+    unit: ms
+- metric:
+    name: subscriber_db.throughput_qps
+    value:
+      var: throughput_qps
+    unit: qps
+- log:
+    level: INFO
+    message: 'postgresql[subscriberdb]: query_stats table={table} segment={segment} qps={throughput_qps} p50={query_latency_p50_ms}ms p99={query_latency_p99_ms}ms'
+    attrs:
+      operation: query_stats
+      db.table:
+        var: table
+      db.segment:
+        var: segment
+      db.qps:
+        var: throughput_qps
+      db.latency_p50_ms:
+        var: query_latency_p50_ms
+      db.latency_p99_ms:
+        var: query_latency_p99_ms
+- sample:
+    cache_hit_ratio:
+      if_active:
+        uniform:
+        - 0.65
+        - 0.80
+        round: 3
+      else:
+        uniform:
+        - 0.93
+        - 0.98
+        round: 3
+    slow_queries:
+      if_active:
+        randint:
+        - 20
+        - 100
+      else:
+        randint:
+        - 0
+        - 3
+- metric:
+    name: subscriber_db.buffer_cache_hit_ratio
+    value:
+      var: cache_hit_ratio
+    unit: ratio
+- metric:
+    name: subscriber_db.slow_query_count
+    value:
+      var: slow_queries
+    unit: queries
+- log:
+    level: INFO
+    message: 'postgresql[subscriberdb]: perf_health cache_hit={cache_hit_ratio} slow_queries={slow_queries}/min rds_status=available'
+    attrs:
+      operation: perf_health
+      db.cache_hit_ratio:
+        var: cache_hit_ratio
+      db.slow_queries:
+        var: slow_queries

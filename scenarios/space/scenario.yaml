@@ -1,0 +1,369 @@
+scenario_id: space
+scenario_name: NOVA-7 Space Mission
+scenario_description: Orbital insertion mission with rocket propulsion, guidance, communications, and range safety systems.
+  NASA-style Mission Control with countdown clock and 20 fault channels across 9 space systems.
+namespace: nova7
+scenario_icon: 🚀
+sort_order: 1
+nominal_label: NOMINAL
+hosts:
+- host.name: nova7-aws-host-01
+  host.id: i-0a1b2c3d4e5f67890
+  host.arch: amd64
+  host.type: m5.xlarge
+  host.image.id: ami-0abcdef1234567890
+  host.cpu.model.name: Intel(R) Xeon(R) Platinum 8175M CPU @ 2.50GHz
+  host.cpu.vendor.id: GenuineIntel
+  host.cpu.family: '6'
+  host.cpu.model.id: '85'
+  host.cpu.stepping: '4'
+  host.cpu.cache.l2.size: 1048576
+  host.ip:
+  - 10.0.1.42
+  - 172.16.0.10
+  host.mac:
+  - 0a:1b:2c:3d:4e:5f
+  - 0a:1b:2c:3d:4e:60
+  os.type: linux
+  os.description: Amazon Linux 2023.6.20250115
+  cloud.provider: aws
+  cloud.platform: aws_ec2
+  cloud.region: us-east-1
+  cloud.availability_zone: us-east-1a
+  cloud.account.id: '123456789012'
+  cloud.instance.id: i-0a1b2c3d4e5f67890
+  cpu_count: 4
+  memory_total_bytes: 17179869184
+  disk_total_bytes: 214748364800
+- host.name: nova7-gcp-host-01
+  host.id: '5649812345678901234'
+  host.arch: amd64
+  host.type: e2-standard-4
+  host.image.id: projects/debian-cloud/global/images/debian-12-bookworm-v20250115
+  host.cpu.model.name: Intel(R) Xeon(R) CPU @ 2.20GHz
+  host.cpu.vendor.id: GenuineIntel
+  host.cpu.family: '6'
+  host.cpu.model.id: '85'
+  host.cpu.stepping: '7'
+  host.cpu.cache.l2.size: 1048576
+  host.ip:
+  - 10.128.0.15
+  - 10.128.0.16
+  host.mac:
+  - 42:01:0a:80:00:0f
+  - 42:01:0a:80:00:10
+  os.type: linux
+  os.description: Debian GNU/Linux 12 (bookworm)
+  cloud.provider: gcp
+  cloud.platform: gcp_compute_engine
+  cloud.region: us-central1
+  cloud.availability_zone: us-central1-a
+  cloud.account.id: nova7-project-prod
+  cloud.instance.id: '5649812345678901234'
+  cpu_count: 4
+  memory_total_bytes: 17179869184
+  disk_total_bytes: 107374182400
+- host.name: nova7-azure-host-01
+  host.id: /subscriptions/abc-def/resourceGroups/nova7-rg/providers/Microsoft.Compute/virtualMachines/nova7-vm-01
+  host.arch: amd64
+  host.type: Standard_D4s_v3
+  host.image.id: Canonical:0001-com-ubuntu-server-jammy:22_04-lts-gen2:latest
+  host.cpu.model.name: Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz
+  host.cpu.vendor.id: GenuineIntel
+  host.cpu.family: '6'
+  host.cpu.model.id: '106'
+  host.cpu.stepping: '6'
+  host.cpu.cache.l2.size: 1310720
+  host.ip:
+  - 10.1.0.4
+  - 10.1.0.5
+  host.mac:
+  - 00:0d:3a:5a:4b:3c
+  - 00:0d:3a:5a:4b:3d
+  os.type: linux
+  os.description: Ubuntu 22.04.5 LTS
+  cloud.provider: azure
+  cloud.platform: azure_vm
+  cloud.region: eastus
+  cloud.availability_zone: eastus-1
+  cloud.account.id: abc-def-ghi-jkl
+  cloud.instance.id: nova7-vm-01
+  cpu_count: 4
+  memory_total_bytes: 17179869184
+  disk_total_bytes: 137438953472
+k8s_clusters:
+- name: nova7-eks-cluster
+  provider: aws
+  platform: aws_eks
+  region: us-east-1
+  zones:
+  - us-east-1a
+  - us-east-1b
+  - us-east-1c
+  os_description: Amazon Linux 2
+  services:
+  - mission-control
+  - fuel-system
+  - ground-systems
+- name: nova7-gke-cluster
+  provider: gcp
+  platform: gcp_gke
+  region: us-central1
+  zones:
+  - us-central1-a
+  - us-central1-b
+  - us-central1-c
+  os_description: Container-Optimized OS
+  services:
+  - navigation
+  - comms-array
+  - payload-monitor
+- name: nova7-aks-cluster
+  provider: azure
+  platform: azure_aks
+  region: eastus
+  zones:
+  - eastus-1
+  - eastus-2
+  - eastus-3
+  os_description: Ubuntu 22.04 LTS
+  services:
+  - sensor-validator
+  - telemetry-relay
+  - range-safety
+agent_config:
+  id: nova7-launch-analyst
+  name: Launch Anomaly Analyst
+  assessment_tool_name: launch_safety_assessment
+  system_prompt: 'You are the NOVA-7 Launch Anomaly Analyst, an expert AI assistant for space launch mission operations. You
+    help mission controllers investigate anomalies, analyze telemetry data, and provide root cause analysis for fault conditions
+    across 9 space systems. You have deep expertise in spacecraft propulsion telemetry, GN&C systems, TDRSS/S-band/X-band
+    communications, payload environmental control, cross-cloud relay networks, ground support equipment, sensor validation
+    pipelines, and range safety systems. When investigating incidents, search for these subsystem identifiers in logs: Propulsion
+    faults (TCS-DRIFT-CRITICAL, PMS-PRESS-ANOMALY, PMS-OXIDIZER-FLOW), GN&C faults (GNC-GPS-MULTIPATH, GNC-IMU-SYNC-LOSS,
+    GNC-STAR-TRACKER-ALIGN), Communications faults (COMM-SIGNAL-DEGRAD, COMM-PACKET-LOSS, COMM-ANTENNA-POINTING), Payload
+    faults (PLD-THERMAL-EXCURSION, PLD-VIBRATION-LIMIT), Relay faults (RLY-LATENCY-CRITICAL, RLY-PACKET-CORRUPT), Ground faults
+    (GND-POWER-BUS-FAULT, GND-WEATHER-GAP, GND-HYDRAULIC-PRESS), Validation faults (VV-PIPELINE-HALT, VV-EPOCH-DRIFT), and
+    Range Safety faults (RSO-FTS-CHECK-FAIL, RSO-TRACKING-LOSS). Log messages are in body.text — NEVER search the body field
+    alone.'
+assessment_tool_config:
+  id: launch_safety_assessment
+  description: 'Comprehensive launch safety assessment. Evaluates all services against launch readiness criteria. Returns
+    data for GO/NO-GO evaluation. Log message field: body.text (never use ''body'' alone).'
+executive_kpi_emitter_service_name: mission-control
+executive_dashboard_intro: '**NOVA-7 program view** — mission assurance, orbital mechanics, ground communications, and program
+  health KPIs (synthetic `business.*` streams from `mission-control`).'
+executive_kpi_sections:
+- header: '**Mission assurance** — success probability, uptime, faults, recovery, and health'
+  specs:
+  - - Mission success probability (%)
+    - metrics.business.mission_success_probability_pct
+  - - Critical system uptime (%)
+    - metrics.business.critical_system_uptime_pct
+  - - Fault events / min
+    - metrics.business.fault_events_per_min
+  - - Autonomous recovery rate (%)
+    - metrics.business.autonomous_recovery_rate_pct
+  - - Telemetry coverage (%)
+    - metrics.business.telemetry_coverage_pct
+  - - Spacecraft health index (0–100)
+    - metrics.business.spacecraft_health_index_0_100
+- header: '**Orbital mechanics** — trajectory, delta-V, drift, accuracy, fuel, and altitude'
+  specs:
+  - - Trajectory deviation (m)
+    - metrics.business.trajectory_deviation_meters
+  - - Delta-V remaining (m/s)
+    - metrics.business.delta_v_budget_remaining_mps
+  - - Orbital period drift (ms)
+    - metrics.business.orbital_period_drift_ms
+  - - Maneuver accuracy (%)
+    - metrics.business.maneuver_accuracy_pct
+  - - Station-keeping fuel (%)
+    - metrics.business.station_keeping_fuel_remaining_pct
+  - - Perigee altitude (km)
+    - metrics.business.perigee_altitude_km
+- header: '**Communications** — downlink rate, uplink latency, contacts, packet loss, and ground'
+  specs:
+  - - Downlink data rate (Mbps)
+    - metrics.business.downlink_data_rate_mbps
+  - - Uplink latency (ms)
+    - metrics.business.uplink_latency_ms
+  - - Contact window utilization (%)
+    - metrics.business.contact_window_utilization_pct
+  - - Packet loss rate (%)
+    - metrics.business.packet_loss_rate_pct
+  - - Command acceptance rate (%)
+    - metrics.business.command_acceptance_rate_pct
+  - - Ground station availability (%)
+    - metrics.business.ground_station_availability_pct
+- header: '**Program health** — schedule, readiness, SLA, cost variance, risk, and NPS'
+  specs:
+  - - Schedule variance (days)
+    - metrics.business.schedule_variance_days
+  - - Launch readiness index (0–100)
+    - metrics.business.launch_readiness_index_0_100
+  - - Contractor SLA compliance (%)
+    - metrics.business.contractor_sla_compliance_pct
+  - - Cost variance (%)
+    - metrics.business.cost_variance_pct
+  - - Risk burn-down rate
+    - metrics.business.risk_burn_down_rate
+  - - Program satisfaction (NPS-like)
+    - metrics.business.program_net_satisfaction_proxy_nps
+executive_trend_charts:
+- title: Mission success probability
+  field: metrics.business.mission_success_probability_pct
+  y_label: '%'
+- title: Trajectory deviation (m)
+  field: metrics.business.trajectory_deviation_meters
+  y_label: m
+- title: Downlink data rate (Mbps)
+  field: metrics.business.downlink_data_rate_mbps
+  y_label: Mbps
+- title: Spacecraft health index
+  field: metrics.business.spacecraft_health_index_0_100
+  y_label: index
+- title: Delta-V remaining (m/s)
+  field: metrics.business.delta_v_budget_remaining_mps
+  y_label: m/s
+- title: Fault events / min
+  field: metrics.business.fault_events_per_min
+  y_label: events/min
+executive_kpi_emissions:
+- name: business.mission_success_probability_pct
+  value: {uniform: [92.0, 99.8], round: 2}
+  unit: "%"
+- name: business.critical_system_uptime_pct
+  value: {uniform: [99.2, 99.999], round: 4}
+  unit: "%"
+- name: business.fault_events_per_min
+  value: {uniform: [0.01, 2.8], round: 3}
+  unit: events/min
+- name: business.autonomous_recovery_rate_pct
+  value: {uniform: [82.0, 99.0], round: 2}
+  unit: "%"
+- name: business.telemetry_coverage_pct
+  value: {uniform: [88.0, 99.4], round: 2}
+  unit: "%"
+- name: business.spacecraft_health_index_0_100
+  value: {uniform: [72.0, 99.0], round: 1}
+  unit: index
+- name: business.trajectory_deviation_meters
+  value: {uniform: [0.1, 850.0], round: 1}
+  unit: m
+- name: business.delta_v_budget_remaining_mps
+  value: {uniform: [12.0, 285.0], round: 1}
+  unit: m/s
+- name: business.orbital_period_drift_ms
+  value: {uniform: [0.0, 18.4], round: 2}
+  unit: ms
+- name: business.maneuver_accuracy_pct
+  value: {uniform: [96.0, 99.98], round: 3}
+  unit: "%"
+- name: business.station_keeping_fuel_remaining_pct
+  value: {uniform: [28.0, 92.0], round: 2}
+  unit: "%"
+- name: business.perigee_altitude_km
+  value: {uniform: [380.0, 420.0], round: 1}
+  unit: km
+- name: business.downlink_data_rate_mbps
+  value: {uniform: [125.0, 1200.0], round: 1}
+  unit: Mbps
+- name: business.uplink_latency_ms
+  value: {uniform: [28.0, 450.0], round: 1}
+  unit: ms
+- name: business.contact_window_utilization_pct
+  value: {uniform: [72.0, 98.0], round: 2}
+  unit: "%"
+- name: business.packet_loss_rate_pct
+  value: {uniform: [0.01, 1.2], round: 3}
+  unit: "%"
+- name: business.command_acceptance_rate_pct
+  value: {uniform: [98.5, 99.99], round: 3}
+  unit: "%"
+- name: business.ground_station_availability_pct
+  value: {uniform: [92.0, 99.8], round: 2}
+  unit: "%"
+- name: business.schedule_variance_days
+  value: {uniform: [-8.0, 18.0], round: 1}
+  unit: days
+- name: business.launch_readiness_index_0_100
+  value: {uniform: [72.0, 98.0], round: 1}
+  unit: index
+- name: business.contractor_sla_compliance_pct
+  value: {uniform: [88.0, 99.2], round: 2}
+  unit: "%"
+- name: business.cost_variance_pct
+  value: {uniform: [-4.8, 12.4], round: 2}
+  unit: "%"
+- name: business.risk_burn_down_rate
+  value: {uniform: [0.8, 4.8], round: 2}
+  unit: rate
+- name: business.program_net_satisfaction_proxy_nps
+  value: {uniform: [32.0, 85.0], round: 1}
+  unit: score
+raw_log_profile:
+  service_name: mission-control-api
+  user_id_prefix: gs
+  tier_field: mission_class
+  tier_values:
+  - - cubesat
+    - 55
+  - - geo
+    - 30
+  - - deep-space
+    - 15
+  country_weights:
+    US: 50
+    DE: 12
+    JP: 10
+    GB: 8
+    FR: 8
+    IN: 6
+    AU: 6
+  methods:
+  - GET
+  - POST
+  - PUT
+  - DELETE
+  paths:
+  - /api/v1/telemetry
+  - /api/v1/orbits/{satellite}
+  - /api/v1/commands
+  - /api/v1/groundstations
+  - /api/v1/passes
+  - /api/v1/ephemeris
+  - /health
+  change_point_path: /api/v1/commands
+trace_attributes:
+  base:
+    mission.phase: {choice: [pre-launch, countdown, ascent, orbital-insertion]}
+    mission.elapsed_time_s: {randint: [0, 86399]}
+  services:
+    fuel-system:
+      propulsion.engine_id: {choice: [E1-MAIN, E2-MAIN, E3-VERNIER]}
+      propulsion.chamber_pressure_psi: {uniform: [2400, 2650], round: 1}
+    navigation:
+      gnc.nav_mode: {choice: [GPS_PRIMARY, IMU_PRIMARY, STAR_TRACKER, BLENDED]}
+      orbit.altitude_km: {uniform: [180, 420], round: 1}
+    comms-array:
+      comms.link_type: {choice: [S-BAND, X-BAND, UHF]}
+      comms.signal_margin_db: {uniform: [2.0, 12.0], round: 1}
+    mission-control:
+      mcc.operator_console: {choice: [FLIGHT, CAPCOM, GNC, PROP, EECOM]}
+      mcc.telemetry_rate_hz: {choice: [1, 5, 10, 25]}
+    ground-systems:
+      ground.pad_id: {choice: [LC-39A, LC-39B, SLC-40]}
+      ground.weather_go: {choice: [true, true, true, false]}
+    payload-monitor:
+      payload.bay_temp_c: {uniform: [18.0, 28.0], round: 1}
+      payload.vibration_grms: {uniform: [0.1, 1.2], round: 2}
+    sensor-validator:
+      validation.pipeline_stage: {choice: [ingest, calibration, correlation, output]}
+      validation.queue_depth: {randint: [0, 200]}
+    telemetry-relay:
+      relay.hop_count: {randint: [1, 4]}
+      relay.buffer_pct: {uniform: [10.0, 85.0], round: 1}
+    range-safety:
+      safety.fts_arm_state: {choice: [SAFED, SAFED, SAFED, ARMED]}
+      safety.tracking_radars_active: {randint: [2, 3]}

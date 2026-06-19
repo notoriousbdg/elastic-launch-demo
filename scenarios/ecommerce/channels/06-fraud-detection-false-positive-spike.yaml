@@ -1,0 +1,57 @@
+name: Fraud Detection False Positive Spike
+subsystem: payments
+vehicle_section: risk_engine
+error_type: FRAUD-FALSE-POSITIVE
+sensor_type: fraud_score
+affected_services:
+- payment-processor
+cascade_services:
+- order-management
+- storefront-gateway
+description: Fraud model generating excessive false positives, blocking legitimate transactions and degrading conversion rate
+investigation_notes: |-
+  1. Check payment-processor logs for FRAUD-FALSE-POSITIVE — false_positive_rate={false_positive_pct}% vs expected <{fp_threshold_pct}%.
+  2. Review the fraud model version — a recent model update or feature drift (e.g., new geographic pattern) often causes false positive spikes.
+  3. Identify the common false positive pattern: `show fraud_blocks | group by block_reason` — velocity_check and new_device_fingerprint are the most common.
+  4. Check if a specific feature is stuck: avg_order_value metric spike or unusual geolocation cluster can push legitimate orders above the fraud threshold.
+  5. Temporarily raise the fraud score threshold from {fraud_score_threshold} to {fraud_score_threshold_relaxed} to unblock legitimate traffic.
+  6. Trigger a manual review queue for blocked orders above ${min_manual_review_usd} — these are likely legitimate high-value orders that were incorrectly blocked.
+remediation_action: retune_fraud_model
+error_message: '[PaymentProcessor] FRAUD-FALSE-POSITIVE: blocked_orders={blocked_orders} false_positive_rate={false_positive_pct}%
+  threshold={fp_threshold_pct}% fraud_score={fraud_score}/{fraud_score_threshold} block_reason={block_reason} revenue_held_usd={revenue_held_usd}'
+stack_trace: |-
+  FraudBlockException: FRAUD-FALSE-POSITIVE
+     at FraudEngine.evaluate(OrderId {order_id}, Score={fraud_score})
+     at PaymentProcessor.preAuthorize(CheckoutId {checkout_id})
+  Blocked orders:      {blocked_orders}
+  False positive rate: {false_positive_pct}%
+  Fraud score:         {fraud_score}/{fraud_score_threshold}
+  Block reason:        {block_reason}
+  Revenue held:        ${revenue_held_usd}
+  Model version:       fraud-model-v{fraud_model_version}
+correlation_attr:
+  key: payment.fraud_model_misfiring
+  value: true
+fault_params:
+  blocked_orders: {randint: [50, 1000]}
+  false_positive_pct: {uniform: [8, 25], round: 1}
+  fp_threshold_pct: 2.0
+  fraud_score: {randint: [75, 95]}
+  fraud_score_threshold: 70
+  fraud_score_threshold_relaxed: 80
+  block_reason: {choice: [velocity_check, new_device_fingerprint, high_value_new_account, geo_mismatch]}
+  revenue_held_usd: {uniform: [5000, 100000], round: 2}
+  order_id: {format: "ORD-{n}", n: {randint: [100000, 999999]}}
+  checkout_id: {format: "CHK-{n}", n: {randint: [100000, 999999]}}
+  fraud_model_version: {randint: [10, 20]}
+  min_manual_review_usd: 500
+rca_clues:
+  payment-processor:
+    payment.fraud_score_threshold_active: true
+    payment.false_positive_rate_pct: {uniform: [8, 25], round: 1}
+  order-management:
+    order.payment_decline_rate_pct: {uniform: [10, 35], round: 1}
+    order.legitimate_orders_blocked: {randint: [50, 500]}
+  storefront-gateway:
+    storefront.checkout_decline_shown: true
+    storefront.retry_rate_pct: {uniform: [20, 60], round: 1}

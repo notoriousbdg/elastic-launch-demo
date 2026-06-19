@@ -1,0 +1,390 @@
+scenario_id: telecom
+scenario_name: Meridian Telecom 5G Platform
+scenario_description: 5G subscriber activation platform serving 45M subscribers across Consumer, Enterprise, and MVNO
+  segments. European multi-cloud deployment spanning AWS Frankfurt, GCP Frankfurt, and Azure Netherlands.
+namespace: meridian
+scenario_icon: "🗼"
+sort_order: 5
+nominal_label: ONLINE
+apm_ml_bucket_span: 1m
+hosts:
+- host.name: meridian-aws-host-01
+  host.id: i-0e1f2a3b4c5d67890
+  host.arch: amd64
+  host.type: m5.2xlarge
+  host.image.id: ami-0abcdef1234567890
+  host.cpu.model.name: Intel(R) Xeon(R) Platinum 8259CL CPU @ 2.50GHz
+  host.cpu.vendor.id: GenuineIntel
+  host.cpu.family: '6'
+  host.cpu.model.id: '85'
+  host.cpu.stepping: '7'
+  host.cpu.cache.l2.size: 1310720
+  host.ip:
+  - 10.0.4.50
+  - 172.16.3.10
+  host.mac:
+  - 0a:4b:5c:6d:7e:8f
+  - 0a:4b:5c:6d:7e:90
+  os.type: linux
+  os.description: Amazon Linux 2023.6.20250115
+  cloud.provider: aws
+  cloud.platform: aws_ec2
+  cloud.region: eu-central-1
+  cloud.availability_zone: eu-central-1a
+  cloud.account.id: '223344556677'
+  cloud.instance.id: i-0e1f2a3b4c5d67890
+  cpu_count: 8
+  memory_total_bytes: 34359738368
+  disk_total_bytes: 536870912000
+- host.name: meridian-gcp-host-01
+  host.id: '5678901234567890123'
+  host.arch: amd64
+  host.type: n2-standard-8
+  host.image.id: projects/debian-cloud/global/images/debian-12-bookworm-v20250115
+  host.cpu.model.name: Intel(R) Xeon(R) CPU @ 2.80GHz
+  host.cpu.vendor.id: GenuineIntel
+  host.cpu.family: '6'
+  host.cpu.model.id: '85'
+  host.cpu.stepping: '7'
+  host.cpu.cache.l2.size: 1048576
+  host.ip:
+  - 10.128.3.40
+  - 10.128.3.41
+  host.mac:
+  - 42:01:0a:80:03:28
+  - 42:01:0a:80:03:29
+  os.type: linux
+  os.description: Debian GNU/Linux 12 (bookworm)
+  cloud.provider: gcp
+  cloud.platform: gcp_compute_engine
+  cloud.region: europe-west3
+  cloud.availability_zone: europe-west3-a
+  cloud.account.id: meridian-telecom-prod
+  cloud.instance.id: '5678901234567890123'
+  cpu_count: 8
+  memory_total_bytes: 34359738368
+  disk_total_bytes: 274877906944
+- host.name: meridian-azure-host-01
+  host.id: /subscriptions/def-456/resourceGroups/meridian-rg/providers/Microsoft.Compute/virtualMachines/meridian-vm-01
+  host.arch: amd64
+  host.type: Standard_D4s_v3
+  host.image.id: Canonical:0001-com-ubuntu-server-jammy:22_04-lts-gen2:latest
+  host.cpu.model.name: Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz
+  host.cpu.vendor.id: GenuineIntel
+  host.cpu.family: '6'
+  host.cpu.model.id: '106'
+  host.cpu.stepping: '6'
+  host.cpu.cache.l2.size: 1310720
+  host.ip:
+  - 10.4.0.30
+  - 10.4.0.31
+  host.mac:
+  - 00:0d:3a:8c:7d:6e
+  - 00:0d:3a:8c:7d:6f
+  os.type: linux
+  os.description: Ubuntu 22.04.5 LTS
+  cloud.provider: azure
+  cloud.platform: azure_vm
+  cloud.region: westeurope
+  cloud.availability_zone: westeurope-1
+  cloud.account.id: def-456-ghi-789
+  cloud.instance.id: meridian-vm-01
+  cpu_count: 4
+  memory_total_bytes: 17179869184
+  disk_total_bytes: 274877906944
+k8s_clusters:
+- name: meridian-eks-cluster
+  provider: aws
+  platform: aws_eks
+  region: eu-central-1
+  zones:
+  - eu-central-1a
+  - eu-central-1b
+  - eu-central-1c
+  os_description: Amazon Linux 2
+  services:
+  - api-gateway
+  - activation-service
+- name: meridian-gke-cluster
+  provider: gcp
+  platform: gcp_gke
+  region: europe-west3
+  zones:
+  - europe-west3-a
+  - europe-west3-b
+  - europe-west3-c
+  os_description: Container-Optimized OS
+  services:
+  - provisioning-service
+  - network-core
+  - notification-service
+- name: meridian-aks-cluster
+  provider: azure
+  platform: azure_aks
+  region: westeurope
+  zones:
+  - westeurope-1
+  - westeurope-2
+  - westeurope-3
+  os_description: Ubuntu 22.04 LTS
+  services:
+  - auth-service
+  - bss-billing
+agent_config:
+  id: meridian-noc-analyst
+  name: 5G Network Operations Analyst
+  assessment_tool_name: network_health_assessment
+  system_prompt: |
+    You are the 5G Network Operations Analyst, an expert AI assistant for the Meridian Telecom 5G activation platform. You help NOC engineers investigate incidents, analyze telemetry data, and provide root cause analysis across 9 services spanning AWS Frankfurt, GCP Frankfurt, and Azure Netherlands. You have deep expertise in 5G network architecture (bearers, S1-MME, GTP tunnels), subscriber database management (45M subscribers, connection pool sizing), BSS/billing systems (CDR processing, mediation, SLA monitoring), authentication infrastructure (Azure AD federation, OAuth, session management), and notification delivery (SMS, push, MVNO webhooks). The platform serves three customer segments: Consumer (70%), Enterprise (20%), and MVNO (10%). Enterprise customers have strict SLA commitments (99.5% activation success, 30s max activation time). MVNO partners (Lycamobile, Lebara) depend on webhook notifications for activation confirmations. When investigating incidents, search for these error identifiers in logs: Database faults (DB-CONNPOOL-EXHAUST, DB-RDS-MAINTENANCE, DB-REPLICATION-LAG), Network faults (NET-BEARER-TIMEOUT, NET-S1MME-CONGEST, NET-GTP-TUNNEL-FAIL), Auth faults (AUTH-TOKEN-INVALID, AUTH-FEDERATION-TIMEOUT, AUTH-SESSION-SATURATE), Provisioning faults (PROV-SIM-STALL, PROV-NP-TIMEOUT, PROV-TARIFF-MISMATCH), Billing faults (BSS-CDR-BACKLOG, BSS-MEDIATION-FAIL, BSS-SLA-BREACH), Gateway faults (GW-RATE-LIMIT-CASCADE, GW-MTLS-EXPIRY), Notification faults (NOTIF-SMS-FAIL, NOTIF-PUSH-BACKPRESSURE, NOTIF-MVNO-WEBHOOK-TIMEOUT). Log messages are in body.text — NEVER search the body field alone.
+assessment_tool_config:
+  id: network_health_assessment
+  description: 'Comprehensive 5G platform health assessment. Evaluates all services against operational readiness criteria
+    for subscriber activation, network core, provisioning, billing, and authentication. Returns data for impact analysis
+    across Consumer, Enterprise, and MVNO customer segments. Log message field: body.text (never use ''body'' alone).'
+executive_kpi_emitter_service_name: bss-billing
+executive_dashboard_intro: '**Meridian Telecom 5G subscriber platform KPIs** — subscriber growth, revenue & ARPU, network
+  quality of experience, and retention. Synthetic `business.*` OTLP gauges from `bss-billing`.'
+executive_kpi_sections:
+- header: '**Subscriber growth** — activations, MVNO, ports, eSIM'
+  specs:
+  - - Activations / min
+    - metrics.business.activations_per_min
+  - - MVNO net-adds / min
+    - metrics.business.mvno_net_adds_per_min
+  - - Port-ins / min
+    - metrics.business.port_ins_per_min
+  - - Port-outs / min
+    - metrics.business.port_outs_per_min
+  - - eSIM provisions / min
+    - metrics.business.esim_provisions_per_min
+  - - Active subscribers (M)
+    - metrics.business.active_subscribers_m
+- header: '**Revenue & ARPU** — total revenue, by-tier, overage, roaming'
+  specs:
+  - - Total revenue (USD/min)
+    - metrics.business.revenue_usd_per_min
+  - - Consumer ARPU (USD)
+    - metrics.business.consumer_arpu_usd
+  - - Enterprise ARPU (USD)
+    - metrics.business.enterprise_arpu_usd
+  - - MVNO partner revenue (USD/min)
+    - metrics.business.mvno_partner_revenue_usd_per_min
+  - - Data overage charges (USD/min)
+    - metrics.business.data_overage_charges_usd_per_min
+  - - Roaming revenue (USD/min)
+    - metrics.business.roaming_revenue_usd_per_min
+- header: '**Network & QoE** — handover, latency, voice, throughput'
+  specs:
+  - - 5G handover success (%)
+    - metrics.business.handover_success_pct
+  - - RAN latency p95 (ms)
+    - metrics.business.ran_latency_p95_ms
+  - - Voice MOS
+    - metrics.business.voice_mos
+  - - Data session est. success (%)
+    - metrics.business.data_session_success_pct
+  - - VoLTE call setup success (%)
+    - metrics.business.volte_call_setup_success_pct
+  - - Throughput p50 (Mbps)
+    - metrics.business.throughput_p50_mbps
+- header: '**Retention & support** — churn, NPS, tickets'
+  specs:
+  - - Voluntary churn rate (%)
+    - metrics.business.voluntary_churn_rate_pct
+  - - NPS
+    - metrics.business.nps
+  - - Support tickets / min
+    - metrics.business.support_tickets_per_min
+  - - Avg ticket resolution (min)
+    - metrics.business.avg_ticket_resolution_min
+  - - First-call resolution (%)
+    - metrics.business.first_call_resolution_pct
+  - - Trouble-to-billing ratio (%)
+    - metrics.business.trouble_to_billing_ratio_pct
+executive_trend_charts:
+- title: Total revenue (USD/min)
+  field: metrics.business.revenue_usd_per_min
+  y_label: USD/min
+- title: Activations / min
+  field: metrics.business.activations_per_min
+  y_label: activations/min
+- title: Active subscribers (M)
+  field: metrics.business.active_subscribers_m
+  y_label: subscribers (M)
+- title: Voluntary churn rate (%)
+  field: metrics.business.voluntary_churn_rate_pct
+  y_label: '%'
+- title: RAN p95 latency (ms)
+  field: metrics.business.ran_latency_p95_ms
+  y_label: ms
+- title: NPS
+  field: metrics.business.nps
+  y_label: NPS
+executive_kpi_emissions:
+- name: business.activations_per_min
+  value: {randint: [380, 1850]}
+  unit: activations/min
+- name: business.mvno_net_adds_per_min
+  value: {randint: [45, 280]}
+  unit: net-adds/min
+- name: business.port_ins_per_min
+  value: {randint: [120, 420]}
+  unit: port-ins/min
+- name: business.port_outs_per_min
+  value: {randint: [90, 380]}
+  unit: port-outs/min
+- name: business.esim_provisions_per_min
+  value: {randint: [200, 1100]}
+  unit: provisions/min
+- name: business.active_subscribers_m
+  value: {uniform: [18.4, 19.2], round: 3}
+  unit: subscribers (M)
+- name: business.revenue_usd_per_min
+  value: {uniform: [82000.0, 145000.0], round: 1}
+  unit: USD/min
+- name: business.consumer_arpu_usd
+  value: {uniform: [38.2, 52.6], round: 2}
+  unit: USD
+- name: business.enterprise_arpu_usd
+  value: {uniform: [285.0, 480.0], round: 2}
+  unit: USD
+- name: business.mvno_partner_revenue_usd_per_min
+  value: {uniform: [4500.0, 12800.0], round: 1}
+  unit: USD/min
+- name: business.data_overage_charges_usd_per_min
+  value: {uniform: [1800.0, 8500.0], round: 1}
+  unit: USD/min
+- name: business.roaming_revenue_usd_per_min
+  value: {uniform: [2200.0, 9400.0], round: 1}
+  unit: USD/min
+- name: business.handover_success_pct
+  value: {uniform: [98.2, 99.8], round: 3}
+  unit: '%'
+- name: business.ran_latency_p95_ms
+  value: {uniform: [18.0, 38.0], round: 1}
+  unit: ms
+- name: business.voice_mos
+  value: {uniform: [3.9, 4.4], round: 2}
+  unit: MOS
+- name: business.data_session_success_pct
+  value: {uniform: [97.5, 99.6], round: 3}
+  unit: '%'
+- name: business.volte_call_setup_success_pct
+  value: {uniform: [98.1, 99.7], round: 3}
+  unit: '%'
+- name: business.throughput_p50_mbps
+  value: {uniform: [85.0, 220.0], round: 1}
+  unit: Mbps
+- name: business.voluntary_churn_rate_pct
+  value: {uniform: [0.8, 2.4], round: 3}
+  unit: '%'
+- name: business.nps
+  value: {randint: [32, 58]}
+  unit: NPS
+- name: business.support_tickets_per_min
+  value: {randint: [28, 180]}
+  unit: tickets/min
+- name: business.avg_ticket_resolution_min
+  value: {uniform: [8.0, 42.0], round: 1}
+  unit: min
+- name: business.first_call_resolution_pct
+  value: {uniform: [62.0, 84.0], round: 2}
+  unit: '%'
+- name: business.trouble_to_billing_ratio_pct
+  value: {uniform: [1.2, 4.8], round: 3}
+  unit: '%'
+raw_log_profile:
+  service_name: meridian-gateway
+  user_id_prefix: sub
+  tier_field: subscription_tier
+  tier_values:
+  - - consumer
+    - 70
+  - - enterprise
+    - 20
+  - - mvno
+    - 10
+  country_weights:
+    DE: 40
+    AT: 10
+    CH: 8
+    NL: 12
+    FR: 8
+    PL: 7
+    BE: 5
+    GB: 5
+    SE: 5
+  methods:
+  - GET
+  - POST
+  - PUT
+  - DELETE
+  paths:
+  - /api/v1/activate
+  - /api/v1/provision
+  - /api/v1/auth/validate
+  - /api/v1/billing/status
+  - /api/v1/network/status
+  - /api/v1/notify/activation
+  - /health
+  change_point_path: /api/v1/activate
+trace_attributes:
+  base:
+    customer.segment: {choice: [Consumer, Enterprise, MVNO]}
+    customer.subscription_tier: {choice: [5G Basic, 5G Plus, 5G Max, Business S, Business M, Business L, Wholesale Standard, Wholesale Premium]}
+    activation.type: {choice: [new_sim, sim_swap, plan_upgrade, 5g_activation, esim_activation]}
+  services:
+    api-gateway:
+      gateway.protocol: {choice: [HTTP/2, HTTP/1.1, gRPC]}
+      gateway.api_version: {choice: [v1.4.0, v1.5.0-beta, v1.3.2]}
+      gateway.client_type: {choice: [mobile_app, web_portal, partner_api, internal]}
+    activation-service:
+      activation.workflow_id: {format: "WF-{n}", n: {randint: [100000, 999999]}}
+      activation.step_count: {randint: [4, 8]}
+      activation.retry_count: {randint: [0, 3]}
+    subscriber-db:
+      db.query_type: {choice: [SELECT, UPDATE, INSERT]}
+      db.table: {choice: [subscribers, activation_log, subscriber_profiles]}
+      db.pool_utilization_pct: {randint: [30, 95]}
+    provisioning-service:
+      provisioning.sim_type: {choice: [physical_sim, esim, embedded_sim]}
+      provisioning.hlr_operation: {choice: [register, update, deregister, query]}
+      provisioning.apn: {choice: [internet.meridian.eu, enterprise.meridian.eu, iot.meridian.eu]}
+    network-core:
+      network.bearer_type: {choice: [5G_NR, LTE, LTE-A, NR-DC]}
+      network.qos_class: {choice: [QCI-1, QCI-5, QCI-9, 5QI-1, 5QI-9]}
+      network.cell_sector: {randint: [1, 3]}
+    notification-service:
+      notification.channel: {choice: [sms, push, email, webhook]}
+      notification.template: {choice: [activation_confirm, plan_change, usage_alert, partner_callback]}
+      notification.priority: {choice: [high, normal, low]}
+    auth-service:
+      auth.method: {choice: [oauth2, saml, api_key, mtls]}
+      auth.provider: {choice: [internal, azure_ad, mvno_partner]}
+      auth.scope: {choice: [activation, provisioning, billing, admin]}
+    bss-billing:
+      billing.operation: {choice: [account_create, cdr_rate, invoice_generate, credit_apply]}
+      billing.plan_code: {choice: [5G-BASIC-EU-v3, 5G-PLUS-EU-v3, 5G-MAX-EU-v3, ENT-BUS-L-v2]}
+      billing.currency: EUR
+    identity-db:
+      db.query_type: {choice: [SELECT, INSERT]}
+      db.table: {choice: [identities, sessions, tokens]}
+      db.replication_role: {choice: [primary, replica]}
+theme:
+  bg_primary: '#0a0e1a'
+  bg_secondary: '#111827'
+  bg_tertiary: '#1e293b'
+  accent_primary: '#0066FF'
+  accent_secondary: '#00C7B1'
+  text_primary: '#e2e8f0'
+  text_secondary: '#94a3b8'
+  text_accent: '#0066FF'
+  status_nominal: '#22c55e'
+  status_warning: '#eab308'
+  status_critical: '#ef4444'
+  status_info: '#3b82f6'
+  font_family: '''Inter'', ''Segoe UI'', system-ui, sans-serif'
+  font_mono: '''JetBrains Mono'', ''Fira Code'', monospace'
+  chaos_title: Incident Simulator
+  service_label: Service
+  channel_label: Incident

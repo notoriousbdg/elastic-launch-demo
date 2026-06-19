@@ -1,0 +1,53 @@
+name: Ground Power Bus Fault
+subsystem: ground
+vehicle_section: launch_pad
+error_type: GND-POWER-BUS-FAULT
+sensor_type: electrical
+affected_services:
+- ground-systems
+- sensor-validator
+cascade_services:
+- mission-control
+- fuel-system
+description: Launch pad power bus voltage irregularity detected
+investigation_notes: 'Root cause: transformer tap setting drift or load imbalance on the affected power bus. Voltage deviation
+  >8% from 120V nominal can cause sensitive avionics to trip undervoltage lockout. Check breaker panel for tripped breakers
+  or loose connections — thermal imaging recommended on the distribution panel. Verify UPS is online (not on bypass) and generator
+  auto-transfer switch is in AUTO mode. Compare bus current draw with other buses — 42.3A vs 38.7A/41.1A on B/C suggests possible
+  ground fault or excessive load on bus A. Remediation: adjust transformer tap setting (GND_TAP_SELECT {bus} +2), reset tripped
+  breakers after verifying no short circuit. If persistent, switch critical loads to backup bus (GND_BUS_TRANSFER {bus} BACKUP)
+  and dispatch electrical technician to the pad.'
+remediation_action: reset_ground_power
+error_message: '[GND] GND-POWER-BUS-FAULT: bus={bus_id} voltage={voltage}V nominal={nominal_v}V deviation={deviation_pct}%'
+stack_trace: |-
+  == GROUND SYSTEM DIAGNOSTIC == POWER DISTRIBUTION ==
+  TIMESTAMP: MET+00:04:18.002 | FRAME: 0x4A3C | SEQ: 18455
+  ---------------------------------------------------------------
+  BUS      VOLTAGE   NOMINAL   DEVIATION   CURRENT   STATUS
+  {bus_id}    {voltage}V   {nominal_v}V   {deviation_pct}%       42.3A     **FAULT**
+  PWR-B    119.8V    120.0V    0.2%        38.7A     NOMINAL
+  PWR-C    120.1V    120.0V    0.1%        41.1A     NOMINAL
+  ---------------------------------------------------------------
+  UPS_STATUS: ONLINE | GENERATOR: STANDBY | TRANSFER_SW: AUTO
+  GND-POWER-BUS-FAULT: Bus {bus_id} voltage {voltage}V deviates {deviation_pct}% from nominal
+  ACTION: Check breaker panel, verify transformer tap settings
+correlation_attr:
+  key: infra.ups_firmware
+  value: apc-smart-ups-v4.1.2
+fault_params:
+  bus_id: {choice: [PWR-A, PWR-B, PWR-C]}
+  voltage: {uniform: [105.0, 135.0], round: 1}
+  nominal_v: 120.0
+  deviation_pct: {uniform: [8.0, 20.0], round: 1}
+rca_clues:
+  ground-systems:
+    ground.bus_current_a: {uniform: [38.0, 48.0], round: 1}
+    ground.ups_mode: {choice: [ONLINE, BYPASS]}
+  sensor-validator:
+    validation.power_quality: degraded
+    validation.affected_bus: {choice: [PWR-A, PWR-B]}
+  mission-control:
+    upstream.degraded_subsystem: ground
+    telemetry.pad_status: caution
+  fuel-system:
+    propulsion.ground_power_status: unstable

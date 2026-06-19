@@ -1,0 +1,46 @@
+name: Fulfillment Carrier API Rate Limit
+subsystem: fulfillment
+vehicle_section: carrier_integration
+error_type: CARRIER-RATE-LIMIT
+sensor_type: api_quota
+affected_services:
+- fulfillment-orchestrator
+cascade_services:
+- order-management
+- analytics-pipeline
+description: Carrier API rate limit hit, causing shipping label creation to fail and orders to stall in fulfillment queue
+investigation_notes: |-
+  1. Check fulfillment-orchestrator logs for CARRIER-RATE-LIMIT — which carrier ({carrier_name}) and what quota ({api_quota_used}/{api_quota_max}) is affected.
+  2. Check rate limit reset time: `X-RateLimit-Reset: {rate_limit_reset_epoch}` — the quota resets at that epoch; plan a burst recovery strategy.
+  3. Review API call distribution: if calls are concentrated in a short window, implement exponential backoff with jitter across the burst.
+  4. Switch eligible shipments to secondary carrier — if {secondary_carrier} has capacity, reroute to avoid further queue buildup.
+  5. Check if an upstream order spike is driving the API volume — correlate fulfillment_orders_queued with orders.per_minute metric for causality.
+  6. Rotate the API key: some carriers bind rate limits per API key — using a second key doubles effective quota until the primary key resets.
+remediation_action: rotate_carrier_api_key
+error_message: '[FulfillmentOrchestrator] CARRIER-RATE-LIMIT: carrier={carrier_name} quota={api_quota_used}/{api_quota_max}
+  reset_in={reset_in_sec}s queued_labels={queued_labels} secondary_carrier={secondary_carrier}'
+stack_trace: "com.ecommerce.fulfillment.CarrierApiException: CARRIER-RATE-LIMIT\n\tat com.ecommerce.fulfillment.CarrierClient.createLabel(carrier={carrier_name})\n\
+  \tat com.ecommerce.fulfillment.FulfillmentOrchestrator.shipOrder(order_id={order_id})\nCarrier:          {carrier_name}\n\
+  Quota used:       {api_quota_used}/{api_quota_max}\nReset in:         {reset_in_sec}s\nQueued labels:    {queued_labels}\n\
+  Secondary:        {secondary_carrier}\nHTTP Status:      429 Too Many Requests"
+correlation_attr:
+  key: fulfillment.carrier_throttled
+  value: true
+fault_params:
+  carrier_name: {choice: [FedEx, UPS, DHL]}
+  api_quota_used: {randint: [9800, 10000]}
+  api_quota_max: 10000
+  reset_in_sec: {randint: [60, 3600]}
+  queued_labels: {randint: [200, 5000]}
+  secondary_carrier: {choice: [USPS, OnTrac, LSO]}
+  order_id: {format: "ORD-{n}", n: {randint: [100000, 999999]}}
+rca_clues:
+  fulfillment-orchestrator:
+    fulfillment.carrier_429_count: {randint: [100, 2000]}
+    fulfillment.label_creation_queue_depth: {randint: [200, 5000]}
+  order-management:
+    order.in_fulfillment_stuck_count: {randint: [50, 500]}
+    order.sla_breach_risk_count: {randint: [10, 100]}
+  analytics-pipeline:
+    analytics.fulfillment_event_lag: true
+    analytics.on_time_metric_stale: true

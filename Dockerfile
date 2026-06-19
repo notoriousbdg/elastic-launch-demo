@@ -55,8 +55,12 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
-RUN chmod +x /app/entrypoint.sh
+# Move entrypoint outside /app so it survives the /app PVC mount on first boot.
+# Also snapshot the full app tree to /app-seed for PVC initialization.
+RUN cp /app/entrypoint.sh /entrypoint.sh \
+    && chmod +x /entrypoint.sh \
+    && cp -rp /app /app-seed
 
 EXPOSE 8080 8443
 
-ENTRYPOINT ["tini", "--", "/app/entrypoint.sh"]
+ENTRYPOINT ["tini", "--", "/entrypoint.sh"]

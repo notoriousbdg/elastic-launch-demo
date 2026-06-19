@@ -1,0 +1,52 @@
+name: WiFi Channel Interference
+subsystem: network_access
+vehicle_section: wireless_lan
+error_type: INTERFERENCE_DETECTED
+sensor_type: rf_spectrum
+affected_services:
+- wifi-controller
+- network-controller
+cascade_services:
+- packaging-fulfillment
+description: Co-channel and adjacent-channel interference degrading wireless performance
+investigation_notes: |-
+  1. Check the Mist RRM (Radio Resource Management) dashboard for channel utilization heatmaps and neighbor AP counts.
+  2. High co-channel interference with many neighbor APs indicates over-deployment — reduce AP transmit power or disable radios on overlapping APs.
+  3. Verify channel assignments: in dense warehouse environments, use only non-overlapping 5GHz channels (36, 40, 44, 48 for UNII-1; 149, 153, 157, 161 for UNII-3).
+  4. Check for non-WiFi interference sources (microwave ovens, Bluetooth, cordless phones) using a spectrum analyzer or Mist's built-in spectrum analysis.
+  5. Enable Mist Auto-RRM to dynamically adjust channel and power assignments based on real-time RF conditions.
+  6. For persistent interference in warehouse environments, consider deploying directional antennas to reduce signal bleed between aisles.
+remediation_action: optimize_channels
+error_message: 'INTERFERENCE_DETECTED event_id=mist-rf-{channel_number}: ap_name={ap_name} channel={channel_number} co_channel_interference={interference_pct}%
+  noise_floor={noise_floor_dbm}dBm retransmit_rate={retransmit_pct}% neighbor_aps={neighbor_ap_count}'
+stack_trace: '{{"type": "INTERFERENCE_DETECTED", "event_id": "mist-rf-{channel_number}", "ap_name": "{ap_name}", "band": "5GHz",
+  "channel": {channel_number}, "bandwidth": 40, "co_channel_interference": {interference_pct}, "adjacent_channel_interference":
+  8.2, "noise_floor": {noise_floor_dbm}, "retransmit_rate": {retransmit_pct}, "neighbor_aps": {neighbor_ap_count}, "recommended_channel":
+  36, "rrm_action": "pending"}}'
+correlation_attr:
+  key: infra.rrm_algorithm
+  value: auto-rrm-v3.1-aggressive
+fault_params:
+  channel_number: {choice: [1, 6, 11, 36, 40, 44, 48, 149, 153, 157, 161]}
+  ap_name:
+    choice:
+    - AP-WAREHOUSE-01
+    - AP-WAREHOUSE-02
+    - AP-PRINT-FLOOR-01
+    - AP-OFFICE-01
+    - AP-SHIPPING-01
+    - AP-DOCK-01
+  interference_pct: {uniform: [25.0, 75.0], round: 1}
+  noise_floor_dbm: {uniform: [-80.0, -60.0], round: 1}
+  retransmit_pct: {uniform: [10.0, 40.0], round: 1}
+  neighbor_ap_count: {randint: [5, 20]}
+rca_clues:
+  wifi-controller:
+    wifi.co_channel_aps: {randint: [5, 15]}
+    wifi.rrm_auto_channel_change: {choice: [true, false]}
+  network-controller:
+    network.wlan_vlan_util_pct: {uniform: [70, 95], round: 1}
+    network.broadcast_domain_size: {randint: [200, 800]}
+  packaging-fulfillment:
+    warehouse.scanner_retry_rate_pct: {uniform: [15, 50], round: 1}
+    warehouse.throughput_degraded: true

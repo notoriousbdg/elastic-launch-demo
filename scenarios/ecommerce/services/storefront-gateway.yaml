@@ -1,0 +1,120 @@
+service: storefront-gateway
+sort_order: 1
+cloud_provider: aws
+cloud_region: us-east-1
+cloud_platform: aws_ec2
+cloud_availability_zone: us-east-1a
+subsystem: storefront
+language: python
+topology:
+- - product-catalog
+  - /api/v1/catalog/search
+  - GET
+- - product-catalog
+  - /api/v1/catalog/product
+  - GET
+- - recommendation-engine
+  - /api/v1/recommendations/user
+  - GET
+- - order-management
+  - /api/v1/orders/cart
+  - POST
+- - ad-platform
+  - /api/v1/ads/placements
+  - GET
+entry_endpoints:
+- - /api/v1/storefront/home
+  - GET
+- - /api/v1/storefront/search
+  - GET
+- - /api/v1/storefront/checkout
+  - POST
+- - /api/v1/storefront/product
+  - GET
+db_operations:
+- - SELECT
+  - sessions
+  - SELECT session_id, user_id, cart_id, created_at FROM sessions WHERE session_id = ? AND expires_at > NOW()
+- - INSERT
+  - page_views
+  - INSERT INTO page_views (session_id, page_type, product_id, timestamp) VALUES (?, ?, ?, NOW())
+emit_fault_logs: true
+kpi_emitter: false
+steps:
+- sample:
+    active_sessions:
+      randint:
+      - 8000
+      - 45000
+    page_load_ms:
+      uniform:
+      - 180.0
+      - 650.0
+      round: 1
+    bounce_rate:
+      uniform:
+      - 18.0
+      - 35.0
+      round: 2
+    requests_per_sec:
+      uniform:
+      - 800.0
+      - 3500.0
+      round: 1
+- metric:
+    name: storefront.active_sessions
+    value:
+      var: active_sessions
+    unit: sessions
+- metric:
+    name: storefront.page_load_ms
+    value:
+      var: page_load_ms
+    unit: ms
+- metric:
+    name: storefront.bounce_rate_pct
+    value:
+      var: bounce_rate
+    unit: '%'
+- metric:
+    name: storefront.requests_per_sec
+    value:
+      var: requests_per_sec
+    unit: rps
+- log:
+    level: INFO
+    message: storefront.health active_sessions={active_sessions} page_load_ms={page_load_ms} bounce_rate={bounce_rate}% rps={requests_per_sec}
+    attrs:
+      operation: storefront_health
+      storefront.active_sessions:
+        var: active_sessions
+      storefront.page_load_ms:
+        var: page_load_ms
+      storefront.bounce_rate_pct:
+        var: bounce_rate
+      storefront.rps:
+        var: requests_per_sec
+- sample:
+    device_mobile:
+      randint:
+      - 45
+      - 60
+    device_desktop:
+      randint:
+      - 30
+      - 45
+    device_app:
+      randint:
+      - 5
+      - 15
+- log:
+    level: INFO
+    message: storefront.device_split mobile={device_mobile}% desktop={device_desktop}% app={device_app}%
+    attrs:
+      operation: device_split
+      storefront.device_mobile_pct:
+        var: device_mobile
+      storefront.device_desktop_pct:
+        var: device_desktop
+      storefront.device_app_pct:
+        var: device_app

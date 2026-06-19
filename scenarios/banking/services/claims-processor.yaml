@@ -1,0 +1,129 @@
+service: claims-processor
+sort_order: 2
+cloud_provider: aws
+cloud_region: us-east-1
+cloud_platform: aws_ec2
+cloud_availability_zone: us-east-1b
+subsystem: claims_management
+language: java
+topology:
+- - document-vault
+  - /api/v1/docs/attach-claim
+  - POST
+- - payment-engine
+  - /api/v1/payments/disburse
+  - POST
+- - policy-manager
+  - /api/v1/policy/coverage-check
+  - GET
+entry_endpoints:
+- - /api/v1/claims/fnol
+  - POST
+- - /api/v1/claims/status
+  - GET
+- - /api/v1/claims/estimate
+  - POST
+db_operations:
+- - INSERT
+  - claims
+  - INSERT INTO claims (claim_id, policy_id, member_id, loss_type, loss_date, status, ts) VALUES (?, ?, ?, ?, ?, 'FNOL', NOW())
+- - SELECT
+  - claims
+  - SELECT claim_id, status, assigned_adjuster, estimate_amount FROM claims WHERE member_id = ? ORDER BY ts DESC LIMIT 20
+emit_fault_logs: true
+kpi_emitter: false
+state:
+  _claims_processed:
+    init: 0
+  _last_summary:
+    init: now
+steps:
+- sample:
+    claim_type:
+      choice:
+      - auto_collision
+      - auto_comp
+      - property
+      - renters
+    claim_severity:
+      choice:
+      - LOW
+      - MODERATE
+      - HIGH
+      - SEVERE
+- counter:
+    state_key: _claims_processed
+    by: 1
+- log:
+    level: INFO
+    message: '[CLAIMS] fnol_received claim_type={claim_type} severity={claim_severity} channel=MOBILE_APP status=INTAKE'
+    attrs:
+      operation: fnol_received
+      claim.type:
+        var: claim_type
+      claim.severity:
+        var: claim_severity
+      claim.channel: MOBILE_APP
+- sample:
+    estimate_method:
+      choice:
+      - AI_PHOTO
+      - FIELD_ADJUSTER
+      - VIRTUAL_INSPECT
+    estimate_amount:
+      uniform:
+      - 500.0
+      - 15000.0
+      round: 2
+- log:
+    level: INFO
+    message: '[CLAIMS] estimate_complete method={estimate_method} amount=${estimate_amount} confidence=87% status=APPROVED'
+    attrs:
+      operation: estimate_complete
+      estimate.method:
+        var: estimate_method
+      estimate.amount:
+        var: estimate_amount
+      estimate.confidence: 87
+- every:
+    seconds: 10
+    state_key: _last_summary
+    steps:
+    - log:
+        level: INFO
+        message: '[CLAIMS] pipeline_summary processed={_claims_processed} avg_cycle=7.2d satisfaction=4.6/5.0 status=NOMINAL'
+        attrs:
+          operation: pipeline_summary
+          pipeline.processed:
+            var: _claims_processed
+          pipeline.avg_cycle_days: 7.2
+- sample:
+    queue_depth:
+      if_active:
+        randint:
+        - 200
+        - 2000
+      else:
+        randint:
+        - 5
+        - 50
+- metric:
+    name: claims_processor.queue_depth
+    value:
+      var: queue_depth
+    unit: claims
+- metric:
+    name: claims_processor.avg_cycle_time_days
+    value:
+      uniform:
+      - 3.0
+      - 12.0
+      round: 1
+    unit: days
+- metric:
+    name: claims_processor.photo_estimates_pending
+    value:
+      randint:
+      - 2
+      - 30
+    unit: estimates

@@ -1,0 +1,55 @@
+name: PLC Communication Loss
+subsystem: scada
+vehicle_section: opcua_gateway
+error_type: PLC-COMM-LOSS
+sensor_type: opcua_subscription
+affected_services:
+- scada-gateway
+- mes-controller
+cascade_services:
+- oee-analytics
+- shopfloor-portal
+- ot-historian
+description: OPC-UA subscription to a critical line PLC drops; tag updates stop flowing to MES and historian
+investigation_notes: |-
+  Root Cause: OPC-UA secure channel failures usually indicate either certificate trust chain issues, network segmentation changes (VLAN/firewall) between the SCADA gateway and the PLC, or aggressive watchdog timeouts when the PLC scan rate is at capacity. Status code 0x80AC0000 (BadSecureChannelClosed) and 0x80820000 (BadConnectionClosed) are the most common.
+  Remediation: 1) Verify network reachability: `ping {plc_host}` and `tcptraceroute {plc_host} 4840`. 2) Check the OPC-UA endpoint discovery: `opc-ua-cli discover --endpoint opc.tcp://{plc_host}:4840`. 3) Renegotiate the secure channel: `scada-admin reconnect --plc {plc_id} --renew-channel`. 4) If certs are the issue, push a fresh app instance cert: `scada-admin push-cert --plc {plc_id}`. 5) Restart the gateway subscription manager if needed: `systemctl restart scada-opcua-gateway`. 6) Confirm tag updates resume by watching `scada.tag_update_rate_per_s` return to baseline.
+remediation_action: reconnect_plc
+error_message: '[SCADA] PLC-COMM-LOSS: plc={plc_id} endpoint=opc.tcp://{plc_host}:4840 status_code={opcua_status} subscription={subscription_id}
+  elapsed_s={comm_loss_seconds}'
+stack_trace: |-
+  OPC-UA Secure Channel Trace
+    Endpoint:           opc.tcp://{plc_host}:4840
+    PLC:                {plc_id}
+    Subscription:       {subscription_id}
+    Last keepalive:     {comm_loss_seconds}s ago (timeout: 10s)
+    Status code:        {opcua_status} (BadSecureChannelClosed)
+    Affected tags:      MotorSpeed, OvenTempC, ConveyorRPM, PartsCounter
+    Watchdog:           CHANNEL TIMEOUT — reconnect deferred
+  PLC-COMM-LOSS: {plc_id} unreachable for {comm_loss_seconds}s; MES queue blocked
+correlation_attr:
+  key: infra.opcua_gateway_build
+  value: scada-gateway-v4.2.1-rc3
+fault_params:
+  plc_id: {choice: [PLC-LINE01-A, PLC-LINE02-A, PLC-LINE03-A, PLC-LINE03-B, PLC-PACK-01]}
+  plc_host:
+    format: "plc-{n}.ot.internal"
+    n: {randint: [10, 99]}
+  opcua_status: {choice: ['0x80AC0000', '0x80820000', '0x80130000']}
+  subscription_id:
+    format: "sub-{n}"
+    n: {randint: [1000, 9999]}
+  comm_loss_seconds: {randint: [15, 600]}
+rca_clues:
+  scada-gateway:
+    opcua.last_keepalive_s: {randint: [15, 600]}
+    opcua.secure_channel_status: BadSecureChannelClosed
+  mes-controller:
+    mes.work_order_blocked_count: {randint: [8, 60]}
+    mes.upstream_tag_age_s: {randint: [30, 600]}
+  ot-historian:
+    historian.tag_drop_count: {randint: [50, 800]}
+  oee-analytics:
+    oee.stale_window_count: {randint: [2, 12]}
+  shopfloor-portal:
+    portal.work_order_status_stale: true

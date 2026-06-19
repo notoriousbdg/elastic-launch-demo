@@ -1,0 +1,132 @@
+service: erp-bridge
+sort_order: 7
+cloud_provider: azure
+cloud_region: eastus
+cloud_platform: azure_vm
+cloud_availability_zone: eastus-1
+subsystem: erp
+language: dotnet
+topology:
+- - inventory-sync
+  - /api/v1/inventory/material-master
+  - POST
+entry_endpoints:
+- - /api/v1/erp/idoc
+  - POST
+db_operations:
+- - SELECT
+  - idoc_outbox
+  - SELECT idoc_id, idoc_type, payload, retries FROM idoc_outbox WHERE status = 'pending' ORDER BY created_at LIMIT 100
+emit_fault_logs: true
+kpi_emitter: false
+constants:
+  IDOC_TYPES:
+  - ORDERS05
+  - DELVRY07
+  - MATMAS05
+  - INVOIC02
+  STATUS_CODES:
+  - '53'
+  - '53'
+  - '53'
+  - '51'
+  WIN_SERVICES:
+  - SAPHostControl
+  - SAPHostExec
+  - MSSQLSERVER
+  - MSExchangeIS
+  EVENT_IDS:
+  - 7036
+  - 7036
+  - 7036
+  - 4672
+  - 4624
+state:
+  _idoc_total:
+    init: 0
+  _last_health_report:
+    init: now
+steps:
+- sample:
+    idoc_type:
+      choice: IDOC_TYPES
+    idoc_id:
+      expr: f'IDOC-{rand.randint(1000000, 9999999)}'
+    status:
+      choice: STATUS_CODES
+- log:
+    level: INFO
+    message: '[ERP] idoc_processed type={idoc_type} idoc={idoc_id} status_code={status} system=SAP-PRD'
+    attrs:
+      operation: idoc_processed
+      erp.idoc_type:
+        var: idoc_type
+      erp.idoc_id:
+        var: idoc_id
+      erp.status_code:
+        var: status
+- sample:
+    svc:
+      choice: WIN_SERVICES
+    event_id:
+      choice: EVENT_IDS
+- log:
+    level: DEBUG
+    message: '[ERP-WIN] event_id={event_id} source=''Service Control Manager'' channel=System service={svc} message=''The
+      {svc} service entered the running state.'''
+    attrs:
+      operation: windows_event_log
+      winlog.event_id:
+        var: event_id
+      winlog.source: Service Control Manager
+      winlog.channel: System
+      winlog.service_name:
+        var: svc
+- every:
+    seconds: 10
+    state_key: _last_health_report
+    steps:
+    - sample:
+        uptime_h:
+          randint:
+          - 120
+          - 8500
+        cpu_pct:
+          randint:
+          - 8
+          - 45
+    - log:
+        level: INFO
+        message: '[ERP] host_health host=mfg-sap-bridge-01 os=''Windows Server 2022'' uptime_h={uptime_h} cpu_pct={cpu_pct}
+          status=NOMINAL'
+        attrs:
+          operation: host_health
+          erp.host: mfg-sap-bridge-01
+          erp.os: Windows Server 2022
+- counter:
+    state_key: _idoc_total
+    by: 1
+- metric:
+    name: erp.idocs_processed
+    value:
+      var: _idoc_total
+    unit: idocs
+- metric:
+    name: erp.queue_depth
+    value:
+      randint:
+      - 2
+      - 35
+    unit: messages
+- metric:
+    name: erp.transaction_latency_ms
+    value:
+      if_active:
+        randint:
+        - 2000
+        - 18000
+      else:
+        randint:
+        - 80
+        - 450
+    unit: ms

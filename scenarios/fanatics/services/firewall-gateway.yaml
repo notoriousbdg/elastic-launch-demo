@@ -1,0 +1,158 @@
+service: firewall-gateway
+sort_order: 8
+cloud_provider: azure
+cloud_region: eastus
+cloud_platform: azure_vm
+cloud_availability_zone: eastus-2
+subsystem: security
+language: rust
+generates_traces: false
+topology:
+- - dns-dhcp-service
+  - /api/v1/dns/resolve
+  - POST
+- - network-controller
+  - /api/v1/network/route-table
+  - GET
+entry_endpoints:
+- - /api/v1/firewall/status
+  - GET
+- - /api/v1/firewall/threat-log
+  - GET
+emit_fault_logs: true
+kpi_emitter: false
+steps:
+- sample:
+    session_count:
+      if_active:
+        randint:
+        - 55000
+        - 64000
+      else:
+        randint:
+        - 15000
+        - 45000
+    session_rate:
+      randint:
+      - 500
+      - 2000
+    session_utilization_pct:
+      expr: round(session_count / 64000 * 100, 1)
+- metric:
+    name: firewall.session_count
+    value:
+      var: session_count
+    unit: sessions
+- metric:
+    name: firewall.session_rate
+    value:
+      var: session_rate
+    unit: sessions/s
+- metric:
+    name: firewall.session_utilization_pct
+    value:
+      var: session_utilization_pct
+    unit: '%'
+- log:
+    level: INFO
+    message: 1,2025/01/15 14:32:01,PA-5260,SYSTEM,session,0,session-info,sessions={session_count}/64000 ({session_utilization_pct}%)
+      rate={session_rate}/s
+    attrs:
+      operation: session_table
+      firewall.sessions:
+        var: session_count
+      firewall.max_sessions: 64000
+      firewall.session_rate:
+        var: session_rate
+- sample:
+    threats_blocked:
+      randint:
+      - 0
+      - 15
+    ssl_decrypted:
+      randint:
+      - 200
+      - 800
+- metric:
+    name: firewall.threats_blocked
+    value:
+      var: threats_blocked
+    unit: threats
+- metric:
+    name: firewall.ssl_decrypted
+    value:
+      var: ssl_decrypted
+    unit: flows
+- log:
+    level: INFO
+    message: 1,2025/01/15 14:32:01,PA-5260,THREAT,summary,0,threat-stats,threats_blocked={threats_blocked} ssl_decrypted={ssl_decrypted}
+    attrs:
+      operation: threat_prevention
+      firewall.threats:
+        var: threats_blocked
+      firewall.ssl_flows:
+        var: ssl_decrypted
+- sample:
+    cpu_mgmt:
+      if_active:
+        uniform:
+        - 75.0
+        - 98.0
+        round: 1
+      else:
+        uniform:
+        - 15.0
+        - 40.0
+        round: 1
+    cpu_dp:
+      if_active:
+        uniform:
+        - 80.0
+        - 99.0
+        round: 1
+      else:
+        uniform:
+        - 20.0
+        - 50.0
+        round: 1
+- metric:
+    name: firewall.cpu_mgmt_pct
+    value:
+      var: cpu_mgmt
+    unit: '%'
+- metric:
+    name: firewall.cpu_dataplane_pct
+    value:
+      var: cpu_dp
+    unit: '%'
+- log:
+    level: INFO
+    message: 1,2025/01/15 14:32:01,PA-5260,SYSTEM,general,0,resource-monitor,mgmt_cpu={cpu_mgmt}% dp_cpu={cpu_dp}%
+    attrs:
+      operation: cpu_check
+      firewall.cpu_mgmt:
+        var: cpu_mgmt
+      firewall.cpu_dp:
+        var: cpu_dp
+- sample:
+    cert_days_remaining:
+      if_active:
+        randint:
+        - 0
+        - 5
+      else:
+        randint:
+        - 30
+        - 365
+- metric:
+    name: firewall.cert_days_remaining
+    value:
+      var: cert_days_remaining
+    unit: days
+- log:
+    level: INFO
+    message: 1,2025/01/15 14:32:01,PA-5260,SYSTEM,general,0,cert-status,ssl_inspect_cert days_remaining={cert_days_remaining}
+    attrs:
+      operation: cert_check
+      firewall.cert_expiry_days:
+        var: cert_days_remaining

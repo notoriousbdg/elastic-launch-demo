@@ -1,0 +1,43 @@
+name: Dark Pool Routing Failure
+subsystem: trade_execution
+vehicle_section: smart_router
+error_type: ME-DARKPOOL-REJECT
+sensor_type: routing_engine
+affected_services:
+- matching-engine
+- order-gateway
+cascade_services:
+- risk-calculator
+- audit-logger
+- compliance-monitor
+description: Smart order router fails to route block orders to dark pool venues
+investigation_notes: ''
+remediation_action: ''
+error_message: '[ME] ME-DARKPOOL-REJECT: order={order_id} symbol={symbol} qty={quantity} venue={venue} reason={rejection_reason}'
+stack_trace: |-
+  === DARK POOL REJECTION DETAILS ===
+  order={order_id}  symbol={symbol}  qty={quantity}
+  --- ROUTING ATTEMPT ---
+    venue={venue}  protocol=FIX-4.4  order_type=IOI
+    min_size=10,000  submitted_qty={quantity}
+    rejection_reason={rejection_reason}
+  --- VENUE SCORECARD ---
+    VENUE            FILL_RATE   AVG_SIZE    STATUS
+    SIGMA-X          67.2%       45,000      AVAILABLE
+    CROSSFINDER      72.1%       38,000      AVAILABLE
+    SUPERX           58.4%       52,000      RESTRICTED
+    LIQUIDNET        81.3%       120,000     AVAILABLE
+  --- FALLBACK ---
+    next_venue=CROSSFINDER  algo=TWAP-4h  urgency=LOW
+    lit_market_impact_est=12bps
+  ACTION: try_next_venue=true  update_venue_score=true  alert=ME-DARKPOOL-REJECT
+correlation_attr: {}
+fault_params:
+  order_id:
+    format: "ORD-{n}"
+    n: {randint: [100000, 999999]}
+  symbol: {choice: [AAPL, GOOGL, MSFT, AMZN, TSLA, JPM, GS, MS, BAC, C]}
+  quantity: {randint: [100, 50000]}
+  venue: {choice: [SIGMA-X, CROSSFINDER, SUPERX, POSIT, LIQUIDNET, INSTINET]}
+  rejection_reason: {choice: [minimum_size_not_met, price_outside_band, venue_capacity, symbol_restricted, IOI_expired]}
+rca_clues: {}

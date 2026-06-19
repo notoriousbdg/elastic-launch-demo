@@ -1,0 +1,62 @@
+name: Surgical Schedule Conflict
+subsystem: scheduling
+vehicle_section: or_scheduler
+error_type: SCHED-SURGICAL-CONFLICT
+sensor_type: surgical_scheduler
+affected_services:
+- scheduling-api
+- ehr-system
+cascade_services:
+- billing-processor
+- clinical-alerts
+description: Operating room scheduling conflict detected between overlapping surgical cases
+investigation_notes: |-
+  Root Cause: OR scheduling conflicts occur when the block schedule management system allows overlapping case bookings due to stale cache data, surgeon preference card changes, or emergency add-on cases that override the time-slot validation. Turnover time buffers may also be insufficient between consecutive cases.
+  Remediation: 1) Review the OR block schedule: `sched-admin or-blocks --room {or_number} --date today`. 2) Identify the conflict and reassign: `sched-admin or-reassign --case {case_id} --to-room NEXT-AVAILABLE`. 3) Verify surgeon block time ownership: `sched-admin surgeon-blocks --npi {surgeon_id}`. 4) Restart the OR scheduling engine: `systemctl restart or-scheduling-engine`. 5) Update turnover time buffers if consecutive cases are too tightly packed: `sched-admin set-turnover --room {or_number} --minutes 45`. 6) Notify the surgical coordinator and anesthesia scheduling of the change.
+remediation_action: reassign_or_schedule
+error_message: '[SCHED] SCHED-SURGICAL-CONFLICT: or={or_number} case={case_id} surgeon={surgeon_id} conflict_time={conflict_time}
+  patient={patient_id}'
+stack_trace: |-
+  === OR SCHEDULE BLOCK — {or_number} ===
+  ------------------------------------------------------------------------
+  TIME      | CASE       | SURGEON         | PATIENT     | STATUS
+  ------------------------------------------------------------------------
+  07:00     | SURG-44821 | NPI-1234567890  | PT-332145   | COMPLETED
+  09:30     | SURG-44822 | NPI-9876543210  | PT-445678   | IN-PROGRESS
+  {conflict_time}     | {case_id} | {surgeon_id} | {patient_id}  | CONFLICT
+  {conflict_time}     | SURG-EXIST | NPI-EXISTING   | PT-EXISTING | BOOKED
+  ------------------------------------------------------------------------
+  SCHED-SURGICAL-CONFLICT: {or_number} at {conflict_time} — double-booked
+  Case {case_id} for surgeon {surgeon_id} overlaps with existing booking
+  Patient {patient_id} requires OR reassignment or time shift
+correlation_attr:
+  key: infra.or_scheduler_config
+  value: block-mgmt-v3.2.0-beta
+fault_params:
+  or_number:
+    format: "OR-{n}"
+    n: {randint: [1, 12]}
+  case_id:
+    format: "SURG-{n}"
+    n: {randint: [10000, 99999]}
+  surgeon_id:
+    format: "NPI-{n}"
+    n: {randint: [1000000000, 9999999999]}
+  conflict_time:
+    format: "{hh:02d}:{mm}"
+    hh: {randint: [7, 17]}
+    mm: {choice: ["00", "30"]}
+  patient_id:
+    format: "PT-{n}"
+    n: {randint: [100000, 999999]}
+rca_clues:
+  scheduling-api:
+    sched.or_block_cache_stale: true
+    sched.turnover_buffer_min: {randint: [15, 30]}
+  ehr-system:
+    ehr.surgical_consent_pending: {randint: [1, 5]}
+    ehr.or_preference_card_stale: true
+  billing-processor:
+    billing.surgical_pre_auth_pending: {randint: [1, 3]}
+  clinical-alerts:
+    alerts.or_schedule_conflict_count: {randint: [1, 4]}

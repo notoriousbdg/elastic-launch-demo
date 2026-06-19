@@ -1,0 +1,54 @@
+name: NAT Endpoint Mapping Failure
+subsystem: network_access
+vehicle_section: nat_gateway
+error_type: NAT-ENDPOINT-MAPPING-FAILURE
+sensor_type: nat_mapping
+affected_services:
+- cloud-nat-gateway
+- cloud-load-balancer
+cascade_services:
+- cloud-cdn-service
+description: Cloud NAT endpoint-independent mapping failing for new connections
+investigation_notes: |-
+  Root cause: NAT mapping type determines how source ports are reused. ENDPOINT_INDEPENDENT mapping reuses the same external IP:port for all destinations from a given VM, which is required for protocols like STUN/TURN but consumes ports faster. ADDRESS_DEPENDENT mapping allows port reuse per destination IP. Mapping failures occur when port pool is exhausted for the configured mapping type. Diagnose with:
+    gcloud compute routers nats describe <nat> --router=<router> --region=<region> --format='value(natIpAllocateOption,sourceSubnetworkIpRangesToNat,endpointTypes)'
+  Remediation for static NAT (manual IP assignment): add more NAT IPs:
+    gcloud compute routers nats update <nat> --router=<router> --region=<region> --nat-external-ip-pool=<ip1>,<ip2>,<ip3>
+  For dynamic NAT (auto-allocated): switch to manual allocation with a larger pool. If ENDPOINT_INDEPENDENT is not required, switch to ADDRESS_DEPENDENT to reduce port pressure. Review Cloud NAT logs: Console > Logging > resource.type='nat_gateway'.
+remediation_action: reconfigure_nat_mapping
+error_message: 'cloudnat: NAT-ENDPOINT-MAPPING-FAILURE gateway={nat_gateway_name} mapping_type={nat_mapping_type} failures={nat_mapping_failures}/m
+  nat_ip={nat_external_ip} subnet={subnet_name} protocol={nat_protocol}'
+stack_trace: |-
+  Cloud NAT Mapping Diagnostic
+  ------------------------------
+  Gateway:      {nat_gateway_name}
+  Mapping Type: {nat_mapping_type}
+  Failures/min: {nat_mapping_failures}
+  NAT IP:       {nat_external_ip}
+  Subnet:       {subnet_name}
+  Protocol:     {nat_protocol}
+  Action: Check NAT IP allocation and endpoint mapping config
+correlation_attr:
+  key: deployment.nat_mapping_mode
+  value: endpoint-independent-v2
+fault_params:
+  nat_gateway_name: {choice: [gcpnet-nat-central1, gcpnet-nat-east1, gcpnet-nat-europe1]}
+  nat_mapping_type: {choice: [ENDPOINT_INDEPENDENT, ADDRESS_DEPENDENT]}
+  nat_mapping_failures: {randint: [100, 2000]}
+  nat_external_ip:
+    format: "34.{a}.{b}.{c}"
+    a: {randint: [64, 127]}
+    b: {randint: [0, 255]}
+    c: {randint: [1, 254]}
+  subnet_name: {choice: [gcpnet-subnet-central1, gcpnet-subnet-east1, gcpnet-subnet-europe1, gcpnet-subnet-services]}
+  nat_protocol: {choice: [TCP, UDP, "TCP+UDP"]}
+rca_clues:
+  cloud-nat-gateway:
+    nat.mapping_type_current: ENDPOINT_INDEPENDENT
+    nat.port_reuse_blocked: true
+  cloud-load-balancer:
+    lb.nat_path_affected: true
+    lb.connection_draining_stuck: {choice: [true, false]}
+  cloud-cdn-service:
+    cdn.origin_fetch_via_nat: failing
+    cdn.stale_content_served: true

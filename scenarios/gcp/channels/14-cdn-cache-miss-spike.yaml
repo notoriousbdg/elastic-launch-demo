@@ -1,0 +1,52 @@
+name: CDN Cache Miss Spike
+subsystem: content_delivery
+vehicle_section: cdn_cache
+error_type: CDN-CACHE-MISS-SPIKE
+sensor_type: cache_hit_ratio
+affected_services:
+- cloud-cdn-service
+- cloud-load-balancer
+cascade_services:
+- vpc-network-manager
+description: Cloud CDN cache hit ratio dropping significantly, overwhelming origin servers
+investigation_notes: |-
+  Root cause: Cache miss spike indicates CDN edge nodes are not serving cached content. Common causes: cache key policy includes query strings or headers that create too many unique keys, origin setting Cache-Control: no-store or private headers, recent cache invalidation flushing popular content, or signed URL expiration causing cache bypass. Diagnose by path:
+    Console > Network Services > Cloud CDN > <backend> > Cache Performance tab
+    gcloud compute backend-services describe <backend> --global --format='value(cdnPolicy)'
+  Remediation for path-specific cache misses: invalidate stale cached content by specific path:
+    gcloud compute url-maps invalidate-cdn-cache <url-map> --path='/api/v2/assets/*'
+  Fix cache key policy to exclude unnecessary query params:
+    gcloud compute backend-services update <backend> --global --cache-key-include-query-string=false
+  Increase cache TTL for static assets. Verify origin is returning proper Cache-Control headers with max-age. Check origin health since 5xx responses are not cached.
+remediation_action: invalidate_cdn_cache
+error_message: '[CloudCDN] CDN-CACHE-MISS-SPIKE backend={cdn_backend} hit_ratio={cdn_hit_ratio}% (SLA {cdn_hit_sla}%) miss_rate={cdn_miss_rate}/s
+  origin_latency={cdn_origin_latency_ms}ms cache_fill={cdn_cache_fill_pct}%'
+stack_trace: |-
+  Cloud CDN Cache Analysis
+  --------------------------
+  Backend:          {cdn_backend}
+  Hit Ratio:        {cdn_hit_ratio}% (SLA: {cdn_hit_sla}%)
+  Miss Rate:        {cdn_miss_rate}/s
+  Origin Latency:   {cdn_origin_latency_ms}ms
+  Cache Fill:       {cdn_cache_fill_pct}%
+  Top Missed Paths: /api/v2/assets, /media/images
+  Action: Review cache key policy and TTL configuration
+correlation_attr:
+  key: deployment.cdn_cache_key
+  value: include-all-query-params
+fault_params:
+  cdn_backend: {choice: [gcpnet-cdn-backend-01, gcpnet-cdn-backend-02, gcpnet-cdn-backend-03]}
+  cdn_hit_ratio: {uniform: [15.0, 45.0], round: 1}
+  cdn_hit_sla: 85
+  cdn_miss_rate: {randint: [500, 5000]}
+  cdn_origin_latency_ms: {randint: [200, 2000]}
+  cdn_cache_fill_pct: {uniform: [30.0, 60.0], round: 1}
+rca_clues:
+  cloud-cdn-service:
+    cdn.cache_key_policy: includes_query_strings
+    cdn.unique_cache_keys: {randint: [50000, 200000]}
+  cloud-load-balancer:
+    lb.origin_request_surge: {uniform: [300, 800], round: 0}
+    lb.backend_cpu_spike: true
+  vpc-network-manager:
+    vpc.egress_bandwidth_spike: true

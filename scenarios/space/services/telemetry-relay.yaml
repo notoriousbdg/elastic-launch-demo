@@ -1,0 +1,139 @@
+service: telemetry-relay
+sort_order: 8
+cloud_provider: azure
+cloud_region: eastus
+cloud_platform: azure_vm
+cloud_availability_zone: eastus-2
+subsystem: relay
+language: go
+topology:
+- - comms-array
+  - /api/v1/comms/relay
+  - POST
+entry_endpoints:
+- - /api/v1/relay/forward
+  - POST
+emit_fault_logs: true
+kpi_emitter: false
+constants:
+  ROUTES:
+  - - aws
+    - gcp
+  - - aws
+    - azure
+  - - gcp
+    - aws
+  - - gcp
+    - azure
+  - - azure
+    - aws
+  - - azure
+    - gcp
+state:
+  _frame_count:
+    init: 0
+  _total_packets:
+    init: 0
+  _last_relay_summary:
+    init: now
+steps:
+- counter:
+    state_key: _frame_count
+    by: 1
+- sample:
+    sampled_routes:
+      sample:
+        from: ROUTES
+        k: 3
+- for_each:
+    in: sampled_routes
+    as:
+    - source
+    - dest
+    steps:
+    - sample:
+        latency:
+          uniform:
+          - 5.0
+          - 45.0
+          round: 1
+        packets:
+          randint:
+          - 100
+          - 500
+        dropped:
+          randint:
+          - 0
+          - 2
+    - metric:
+        name:
+          expr: f'relay.latency_{source}_{dest}'
+        value:
+          var: latency
+        unit: ms
+    - log:
+        level: INFO
+        message: '[RLY] route={source}->{dest} packets={packets} latency={latency}ms dropped={dropped} status=NOMINAL'
+        attrs:
+          relay.source_cloud:
+            var: source
+          relay.dest_cloud:
+            var: dest
+          relay.latency_ms:
+            var: latency
+          relay.packets:
+            var: packets
+          relay.dropped:
+            var: dropped
+          operation: relay_route
+    - counter:
+        state_key: _total_packets
+        by:
+          var: packets
+- sample:
+    total_throughput:
+      uniform:
+      - 800.0
+      - 1200.0
+      round: 0
+- metric:
+    name: relay.total_throughput
+    value:
+      var: total_throughput
+    unit: packets/s
+- metric:
+    name: relay.frame_count
+    value:
+      var: _frame_count
+    unit: frames
+- metric:
+    name: relay.total_packets
+    value:
+      var: _total_packets
+    unit: packets
+- every:
+    seconds: 10
+    state_key: _last_relay_summary
+    steps:
+    - log:
+        level: INFO
+        message: '[RLY] aggregate throughput={total_throughput}pkt/s routes=6 frames={_frame_count} total_packets={_total_packets}
+          buffer_util=34% status=NOMINAL'
+        attrs:
+          operation: relay_summary
+          relay.total_throughput:
+            var: total_throughput
+          relay.frame_count:
+            var: _frame_count
+          relay.total_packets:
+            var: _total_packets
+          relay.status: NOMINAL
+    else:
+    - log:
+        level: INFO
+        message: '[RLY] aggregate throughput={total_throughput}pkt/s routes=6 buffer_util=34% status=NOMINAL'
+        attrs:
+          operation: relay_summary
+          relay.total_throughput:
+            var: total_throughput
+          relay.status: NOMINAL

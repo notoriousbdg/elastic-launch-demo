@@ -1,0 +1,41 @@
+name: Trade Confirmation Delay
+subsystem: client_services
+vehicle_section: confirmation_service
+error_type: PORTAL-CONFIRM-DELAY
+sensor_type: confirmation_timer
+affected_services:
+- customer-portal
+- settlement-processor
+cascade_services:
+- audit-logger
+- compliance-monitor
+description: Trade confirmation messages delayed beyond regulatory reporting window
+investigation_notes: ''
+remediation_action: ''
+error_message: '[PORTAL] PORTAL-CONFIRM-DELAY: trade={trade_id} delay_s={delay_s} reg_max_s={reg_max_s} instrument={instrument}
+  qty={quantity}'
+stack_trace: |-
+  === CONFIRMATION PIPELINE STATUS ===
+  trade={trade_id}  instrument={instrument}  qty={quantity}
+  STAGE                STATUS      ELAPSED
+  trade_capture        COMPLETE    0.2s
+  enrichment           COMPLETE    1.4s
+  template_render      COMPLETE    0.8s
+  compliance_check     COMPLETE    3.2s
+  delivery_queue       STUCK       {delay_s}s  <<< BACKLOG
+  client_ack           PENDING     ---
+  --- DELIVERY STATS ---
+    queue_depth=4,217  consumers=2  consumer_lag=3,890
+    format=FIX-Confirmation(AH)  protocol=SWIFT-MT515
+    reg_window={reg_max_s}s  elapsed={delay_s}s  breach=true
+  ACTION: scale_consumers=true  reg_exception_report=true  alert=PORTAL-CONFIRM-DELAY
+correlation_attr: {}
+fault_params:
+  trade_id:
+    format: "TRD-{n}"
+    n: {randint: [100000, 999999]}
+  delay_s: {uniform: [600, 7200], round: 1}
+  reg_max_s: 300
+  instrument: {choice: [US.AAPL, US.GOOGL, US.MSFT, US.AMZN, US.TSLA, FX.EURUSD, FX.GBPUSD, FUT.ES, FUT.NQ, OPT.SPX]}
+  quantity: {randint: [100, 50000]}
+rca_clues: {}

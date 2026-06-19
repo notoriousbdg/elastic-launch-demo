@@ -1,0 +1,115 @@
+service: wifi-controller
+sort_order: 5
+cloud_provider: gcp
+cloud_region: us-central1
+cloud_platform: gcp_compute_engine
+cloud_availability_zone: us-central1-b
+subsystem: network_access
+language: cpp
+generates_traces: false
+topology:
+- - dns-dhcp-service
+  - /api/v1/dhcp/client-lease
+  - GET
+- - network-controller
+  - /api/v1/network/vlan-map
+  - GET
+entry_endpoints:
+- - /api/v1/wifi/dashboard
+  - GET
+emit_fault_logs: true
+kpi_emitter: false
+constants:
+  AP_NAMES:
+  - AP-WAREHOUSE-01
+  - AP-WAREHOUSE-02
+  - AP-PRINT-FLOOR-01
+  - AP-OFFICE-01
+  - AP-OFFICE-02
+  - AP-SHIPPING-01
+  WIFI_CHANNELS:
+  - 1
+  - 6
+  - 11
+  - 36
+  - 40
+  - 44
+  - 48
+  - 149
+  - 153
+  - 157
+  - 161
+steps:
+- sample:
+    sampled_aps:
+      sample:
+        from: AP_NAMES
+        k: 3
+- for_each:
+    in: sampled_aps
+    as: ap
+    steps:
+    - sample:
+        clients:
+          randint:
+          - 5
+          - 45
+        channel:
+          choice: WIFI_CHANNELS
+        signal_dbm:
+          uniform:
+          - -65.0
+          - -30.0
+          round: 1
+        noise_dbm:
+          uniform:
+          - -95.0
+          - -85.0
+          round: 1
+        ap_key:
+          expr: ap.lower().replace('-', '_')
+    - metric:
+        name:
+          expr: f'wifi.ap.{ap_key}.clients'
+        value:
+          var: clients
+        unit: clients
+    - metric:
+        name:
+          expr: f'wifi.ap.{ap_key}.signal_dbm'
+        value:
+          var: signal_dbm
+        unit: dBm
+    - log:
+        level: INFO
+        message: mist-event type=AP_STATS ap_name={ap} clients={clients} channel={channel} signal={signal_dbm}dBm noise={noise_dbm}dBm
+        attrs:
+          operation: ap_poll
+          wifi.ap_name:
+            var: ap
+          wifi.clients:
+            var: clients
+          wifi.channel:
+            var: channel
+          wifi.signal_dbm:
+            var: signal_dbm
+          wifi.noise_dbm:
+            var: noise_dbm
+- sample:
+    total_clients:
+      randint:
+      - 80
+      - 200
+- metric:
+    name: wifi.total_clients
+    value:
+      var: total_clients
+    unit: clients
+- log:
+    level: INFO
+    message: mist-event type=WLC_HEALTH aps_online=6 total_clients={total_clients} status=nominal
+    attrs:
+      operation: controller_health
+      wifi.ap_count: 6
+      wifi.total_clients:
+        var: total_clients

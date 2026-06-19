@@ -1,0 +1,36 @@
+name: Market Data Stale Quote
+subsystem: market_data
+vehicle_section: quote_cache
+error_type: MDF-STALE-QUOTE
+sensor_type: quote_freshness
+affected_services:
+- market-data-feed
+- risk-calculator
+cascade_services:
+- matching-engine
+- customer-portal
+description: Cached market quotes exceeding staleness threshold affecting pricing
+investigation_notes: ''
+remediation_action: ''
+error_message: '[MDF] MDF-STALE-QUOTE: symbol={symbol} stale_ms={stale_ms} max_age_ms={quote_max_age_ms} source={data_source}'
+stack_trace: |-
+  === QUOTE CACHE STATS ===
+  symbol={symbol}  source={data_source}
+  --- CACHE ENTRY ---
+    last_bid=244.50  last_ask=244.55  last_trade=244.52
+    update_ts=14:31:42.112  age_ms={stale_ms}  max_age_ms={quote_max_age_ms}
+    cache_hits=14,230  cache_misses=0  evictions=0
+  --- FEED STATUS ---
+    primary_feed={data_source}  status=CONNECTED  last_msg=14:31:42.112
+    backup_feed=Reuters-Elektron  status=CONNECTED  last_msg=14:31:41.890
+    failover_triggered=false
+  --- IMPACT ---
+    dependent_books=4  stale_risk_calcs=12  client_views_affected=89
+  ACTION: mark_indicative=true  trigger_failover=PENDING  alert=MDF-STALE-QUOTE
+correlation_attr: {}
+fault_params:
+  symbol: {choice: [AAPL, GOOGL, MSFT, AMZN, TSLA, JPM, GS, MS, BAC, C]}
+  stale_ms: {randint: [5000, 60000]}
+  quote_max_age_ms: 3000
+  data_source: {choice: [Bloomberg-B-PIPE, Reuters-Elektron, CQS-SIP, OPRA, CME-MDP3]}
+rca_clues: {}

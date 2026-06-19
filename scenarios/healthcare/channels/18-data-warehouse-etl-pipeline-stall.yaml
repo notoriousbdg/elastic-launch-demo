@@ -1,0 +1,48 @@
+name: Data Warehouse ETL Pipeline Stall
+subsystem: analytics
+vehicle_section: etl_pipeline
+error_type: ETL-PIPELINE-STALL
+sensor_type: etl_monitor
+affected_services:
+- data-warehouse
+- billing-processor
+cascade_services:
+- ehr-system
+description: Clinical data warehouse ETL pipeline stalls during extraction or transformation phase
+investigation_notes: |-
+  Root Cause: ETL pipeline stalls are caused by source database connection pool exhaustion, long-running transformation queries locking clinical tables, or target warehouse staging area disk full conditions. Extract-phase stalls often indicate the source EHR database is under heavy OLTP load during clinical hours.
+  Remediation: 1) Check the ETL job status: `etl-admin pipeline-status --pipeline {pipeline_id}`. 2) Restart the stalled pipeline stage: `etl-admin restart-stage --pipeline {pipeline_id} --stage {etl_stage}`. 3) Verify source database connectivity: `etl-admin test-source --pipeline {pipeline_id}`. 4) Check for blocking queries on the source: `etl-admin blocking-queries --pipeline {pipeline_id}`. 5) If the target staging area is full, expand or purge: `etl-admin staging-cleanup --pipeline {pipeline_id} --older-than 7d`. 6) Reschedule extract-phase jobs to off-peak hours (02:00-05:00) to avoid OLTP contention.
+remediation_action: restart_etl_pipeline
+error_message: '[DW] ETL-PIPELINE-STALL: pipeline={pipeline_id} stage={etl_stage} rows={rows_processed}/{total_rows} stalled={stall_seconds}s'
+stack_trace: |-
+  === ETL PIPELINE STATUS REPORT ===
+  ------------------------------------------------------------------------
+  PIPELINE        | STAGE     | ROWS DONE   | TOTAL ROWS  | STALL(s) | STATUS
+  ------------------------------------------------------------------------
+  {pipeline_id} | {etl_stage:9s} | {rows_processed:11d} | {total_rows:11d} | {stall_seconds:8d} | STALLED
+  ETL-BILLING-02  | load      | 1200000     | 1200000     | 0        | COMPLETE
+  ETL-LAB-03      | transform | 450000      | 800000      | 0        | RUNNING
+  ETL-QUALITY-04  | extract   | 0           | 500000      | 0        | QUEUED
+  ------------------------------------------------------------------------
+  ETL-PIPELINE-STALL: {pipeline_id} stalled at {etl_stage} for {stall_seconds}s
+  Progress: {rows_processed}/{total_rows} rows — no advancement detected
+  Source connection pool may be exhausted — DBA review recommended
+correlation_attr:
+  key: infra.etl_db_pool_config
+  value: hikari-pool-experimental-64conn
+fault_params:
+  pipeline_id: {choice: [ETL-CLINICAL-01, ETL-BILLING-02, ETL-LAB-03, ETL-QUALITY-04]}
+  etl_stage: {choice: [extract, transform, load, validate]}
+  rows_processed: {randint: [10000, 500000]}
+  total_rows: {randint: [500000, 2000000]}
+  stall_seconds: {randint: [120, 1800]}
+rca_clues:
+  data-warehouse:
+    etl.source_db_pool_exhausted: true
+    etl.blocking_query_count: {randint: [3, 12]}
+  billing-processor:
+    billing.revenue_cycle_report_stale: true
+    billing.days_behind: {randint: [1, 5]}
+  ehr-system:
+    ehr.oltp_contention_detected: true
+    ehr.query_timeout_count: {randint: [5, 30]}

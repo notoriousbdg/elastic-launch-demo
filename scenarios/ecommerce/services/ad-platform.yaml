@@ -1,0 +1,122 @@
+service: ad-platform
+sort_order: 4
+cloud_provider: gcp
+cloud_region: us-central1
+cloud_platform: gcp_compute_engine
+cloud_availability_zone: us-central1-a
+subsystem: advertising
+language: python
+topology:
+- - recommendation-engine
+  - /api/v1/recommendations/targeting
+  - GET
+- - analytics-pipeline
+  - /api/v1/analytics/ad-events
+  - POST
+entry_endpoints:
+- - /api/v1/ads/serve
+  - GET
+- - /api/v1/ads/click
+  - POST
+- - /api/v1/ads/impression
+  - POST
+db_operations:
+- - SELECT
+  - ad_campaigns
+  - SELECT campaign_id, ad_unit_id, bid_amount, targeting_rules, daily_budget FROM ad_campaigns WHERE status = 'active' AND
+    daily_spend < daily_budget
+- - INSERT
+  - ad_impressions
+  - INSERT INTO ad_impressions (campaign_id, user_id, ad_unit_id, placement, timestamp) VALUES (?, ?, ?, ?, NOW())
+- - UPDATE
+  - ad_campaigns
+  - UPDATE ad_campaigns SET daily_spend = daily_spend + ?, impressions = impressions + 1 WHERE campaign_id = ?
+emit_fault_logs: true
+kpi_emitter: true
+steps:
+- sample:
+    revenue_per_minute_usd:
+      uniform:
+      - 850.0
+      - 3200.0
+      round: 2
+    impressions_per_sec:
+      uniform:
+      - 8000.0
+      - 28000.0
+      round: 1
+    fill_rate_pct:
+      uniform:
+      - 82.0
+      - 96.0
+      round: 2
+    cpm_usd:
+      uniform:
+      - 1.8
+      - 7.5
+      round: 2
+    click_through_rate_pct:
+      uniform:
+      - 0.8
+      - 3.5
+      round: 3
+- metric:
+    name: ads.revenue_per_minute_usd
+    value:
+      var: revenue_per_minute_usd
+    unit: USD/min
+- metric:
+    name: ads.impressions_per_sec
+    value:
+      var: impressions_per_sec
+    unit: imp/s
+- metric:
+    name: ads.fill_rate_pct
+    value:
+      var: fill_rate_pct
+    unit: '%'
+- metric:
+    name: ads.cpm_usd
+    value:
+      var: cpm_usd
+    unit: USD
+- metric:
+    name: ads.click_through_rate_pct
+    value:
+      var: click_through_rate_pct
+    unit: '%'
+- log:
+    level: INFO
+    message: ads.health fill_rate={fill_rate_pct}% revenue/min=${revenue_per_minute_usd} impressions/sec={impressions_per_sec}
+      cpm=${cpm_usd} ctr={click_through_rate_pct}%
+    attrs:
+      operation: ads_health
+      ads.revenue_per_minute_usd:
+        var: revenue_per_minute_usd
+      ads.impressions_per_sec:
+        var: impressions_per_sec
+      ads.fill_rate_pct:
+        var: fill_rate_pct
+      ads.cpm_usd:
+        var: cpm_usd
+      ads.click_through_rate_pct:
+        var: click_through_rate_pct
+- sample:
+    active_campaigns:
+      randint:
+      - 45
+      - 280
+    budget_utilization_pct:
+      uniform:
+      - 35.0
+      - 85.0
+      round: 1
+- log:
+    level: INFO
+    message: ads.campaign_health active_campaigns={active_campaigns} budget_utilization={budget_utilization_pct}%
+    attrs:
+      operation: campaign_health
+      ads.active_campaigns:
+        var: active_campaigns
+      ads.budget_utilization_pct:
+        var: budget_utilization_pct

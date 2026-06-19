@@ -1,0 +1,114 @@
+service: quote-engine
+sort_order: 7
+cloud_provider: azure
+cloud_region: eastus
+cloud_platform: azure_vm
+cloud_availability_zone: eastus-1
+subsystem: underwriting
+language: java
+entry_endpoints:
+- - /api/v1/quote/auto
+  - POST
+- - /api/v1/quote/property
+  - POST
+- - /api/v1/quote/va-loan
+  - POST
+emit_fault_logs: true
+kpi_emitter: false
+state:
+  _quotes_generated:
+    init: 0
+  _last_summary:
+    init: now
+steps:
+- sample:
+    quote_product:
+      choice:
+      - AUTO
+      - HOMEOWNERS
+      - RENTERS
+      - UMBRELLA
+      - VA_LOAN
+    quote_premium:
+      uniform:
+      - 200.0
+      - 4000.0
+      round: 2
+- counter:
+    state_key: _quotes_generated
+    by: 1
+- log:
+    level: INFO
+    message: '[UW] quote_generated product={quote_product} premium=${quote_premium} rules_evaluated=247 tier=PREFERRED status=QUOTED'
+    attrs:
+      operation: quote_generated
+      quote.product:
+        var: quote_product
+      quote.premium:
+        var: quote_premium
+      quote.tier: PREFERRED
+- sample:
+    loan_rate:
+      uniform:
+      - 5.5
+      - 7.0
+      round: 3
+    loan_amount:
+      randint:
+      - 200000
+      - 600000
+- log:
+    level: INFO
+    message: '[UW] va_loan_prequal rate={loan_rate}% amount=${loan_amount} coe_valid=true dti=28% status=PRE_APPROVED'
+    attrs:
+      operation: va_loan_prequal
+      loan.rate:
+        var: loan_rate
+      loan.amount:
+        var: loan_amount
+      loan.coe_valid: true
+- every:
+    seconds: 10
+    state_key: _last_summary
+    steps:
+    - log:
+        level: INFO
+        message: '[UW] engine_summary quotes={_quotes_generated} bind_rate=34% avg_premium=$1,842 military_discount_applied=92%
+          status=NOMINAL'
+        attrs:
+          operation: engine_summary
+          engine.quotes:
+            var: _quotes_generated
+          engine.bind_rate: 34
+- sample:
+    quote_latency:
+      if_active:
+        uniform:
+        - 3000.0
+        - 15000.0
+        round: 1
+      else:
+        uniform:
+        - 200.0
+        - 800.0
+        round: 1
+- metric:
+    name: quote_engine.response_time_ms
+    value:
+      var: quote_latency
+    unit: ms
+- metric:
+    name: quote_engine.quotes_per_hour
+    value:
+      randint:
+      - 400
+      - 1200
+    unit: quotes/hr
+- metric:
+    name: quote_engine.bind_rate
+    value:
+      uniform:
+      - 28.0
+      - 45.0
+      round: 1
+    unit: '%'

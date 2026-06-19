@@ -1,0 +1,52 @@
+name: Fuel Pressure Anomaly
+subsystem: propulsion
+vehicle_section: fuel_tanks
+error_type: PMS-PRESS-ANOMALY
+sensor_type: pressure
+affected_services:
+- fuel-system
+- sensor-validator
+cascade_services:
+- mission-control
+- range-safety
+description: Fuel tank pressure readings outside nominal range
+investigation_notes: 'Root cause: helium pressurization regulator malfunction or cryogenic propellant boil-off exceeding bleed
+  valve capacity. Check He supply bottle pressure (nominal 2840PSI) and regulator outlet (nominal 42PSI). If both LOX and
+  RP-1 tanks are affected, suspect common-mode regulator failure; if single tank, check individual fill/drain valve seat integrity.
+  Review CCTV for visible frost patterns indicating external leak. Remediation: switch to backup pressurization regulator
+  (REG-B), verify tank pressure stabilizes within 60s, then safe the primary regulator for post-flight inspection.'
+remediation_action: reset_fuel_system
+error_message: '[PMS] PMS-PRESS-ANOMALY: tank={tank_id} pressure={pressure}PSI nominal={expected_min}-{expected_max}PSI status=OUT_OF_BOUNDS'
+stack_trace: |-
+  == TELEMETRY FRAME DUMP == PMS PROPULSION MGMT SYSTEM ==
+  TIMESTAMP: MET+00:04:12.891 | FRAME: 0x4A30 | SEQ: 18443
+  ---------------------------------------------------------------
+  TANK      PRESSURE   NOM_MIN    NOM_MAX    STATUS
+  {tank_id}    {pressure}PSI   {expected_min}PSI     {expected_max}PSI     **ANOMALY**
+  LOX-2     265.3PSI   200PSI     310PSI     NOMINAL
+  RP1-1     248.7PSI   200PSI     310PSI     NOMINAL
+  RP1-2     251.2PSI   200PSI     310PSI     NOMINAL
+  ---------------------------------------------------------------
+  PRESSURIZATION SYSTEM: He supply=2840PSI | reg_outlet=42PSI
+  PMS-PRESS-ANOMALY: Tank {tank_id} reading {pressure}PSI outside bounds
+  ACTION: Verify pressurization regulator and check for leak indications
+correlation_attr:
+  key: infra.firmware_rev
+  value: fw-4.2.0-rc1
+fault_params:
+  tank_id: {choice: [LOX-1, LOX-2, RP1-1, RP1-2]}
+  pressure: {uniform: [180, 350], round: 1}
+  expected_min: 200
+  expected_max: 310
+rca_clues:
+  fuel-system:
+    propulsion.regulator_mode: REG-A-PRIMARY
+    propulsion.he_supply_psi: {uniform: [2700, 2840], round: 0}
+  sensor-validator:
+    validation.pressure_outlier: true
+    validation.tank_id: {choice: [LOX-1, RP1-1]}
+  mission-control:
+    upstream.degraded_subsystem: propulsion
+    telemetry.alert_class: pressure
+  range-safety:
+    safety.propulsion_status: anomalous

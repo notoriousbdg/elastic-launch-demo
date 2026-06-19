@@ -1,0 +1,57 @@
+name: Ad Serving Failure
+subsystem: advertising
+vehicle_section: ad_server
+error_type: ADS-SERVING-FAILURE
+sensor_type: ad_fill_rate
+affected_services:
+- ad-platform
+cascade_services:
+- storefront-gateway
+- analytics-pipeline
+description: Ad serving pipeline failing — impressions drop to zero, causing direct revenue loss reportable to senior leadership
+investigation_notes: |-
+  1. Check ad-platform logs for ADS-SERVING-FAILURE — ads.fill_rate_pct near zero is the primary revenue impact signal.
+  2. Quantify revenue impact: multiply ads.impressions_per_sec (expected ~{expected_impressions}) by ads.cpm_usd ({cpm_usd}) / 1000 to get $/sec loss.
+  3. Verify the ad decision service is reachable: check for CONNECTION_REFUSED or DNS_RESOLUTION_FAILURE in ad-platform logs.
+  4. Check ad server process health — OOM kills or core dumps under /var/log/ads/ indicate memory pressure from the creative cache.
+  5. Review ad targeting index freshness: a stale targeting index (>30min) causes bid requests to return empty, driving fill rate to zero.
+  6. If the ad server is healthy but fill_rate is low, check demand-side platform (DSP) integrations — a DSP outage reduces available bid inventory.
+remediation_action: restart_ad_server
+error_message: '[AdPlatform] ADS-SERVING-FAILURE: fill_rate={fill_rate_pct}% (expected >{expected_fill_pct}%) impressions_lost={impressions_lost}
+  revenue_impact_usd={revenue_impact_usd} ad_unit={ad_unit_id} error={ad_error_detail}'
+stack_trace: |-
+  AdServingException: ADS-SERVING-FAILURE
+    at AdDecisionService.serve_ad(placement={ad_unit_id})
+    at AdPlatform.handle_bid_request(request_id={bid_request_id})
+  Fill Rate:       {fill_rate_pct}% (threshold: {expected_fill_pct}%)
+  Impressions Lost:{impressions_lost}
+  Revenue Impact:  ${revenue_impact_usd}
+  Ad Unit:         {ad_unit_id}
+  Error Detail:    {ad_error_detail}
+  DSP Status:      DEGRADED
+  Targeting Index: STALE ({targeting_staleness_min}min)
+correlation_attr:
+  key: ads.serving_degraded
+  value: true
+fault_params:
+  fill_rate_pct: {uniform: [0, 4], round: 1}
+  expected_fill_pct: 85
+  impressions_lost: {randint: [10000, 500000]}
+  revenue_impact_usd: {uniform: [500, 50000], round: 2}
+  ad_unit_id: {format: "AU-{n}", n: {randint: [1000, 9999]}}
+  bid_request_id: {format: "BID-{n}", n: {randint: [100000, 999999]}}
+  ad_error_detail: {choice: [DSP_UNREACHABLE, TARGETING_INDEX_STALE, AD_DECISION_TIMEOUT]}
+  expected_impressions: {randint: [5000, 20000]}
+  cpm_usd: {uniform: [1.5, 8.0], round: 2}
+  targeting_staleness_min: {randint: [30, 120]}
+rca_clues:
+  ad-platform:
+    ads.fill_rate_pct: {uniform: [0, 5], round: 1}
+    ads.ad_server_healthy: false
+    ads.dsp_connected: false
+  storefront-gateway:
+    storefront.ad_slots_empty: {randint: [3, 8]}
+    storefront.fallback_content_served: true
+  analytics-pipeline:
+    analytics.ad_event_backlog: {randint: [1000, 50000]}
+    analytics.attribution_lag_min: {randint: [5, 60]}

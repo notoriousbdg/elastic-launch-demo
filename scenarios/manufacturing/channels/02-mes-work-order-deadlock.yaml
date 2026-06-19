@@ -1,0 +1,50 @@
+name: MES Work Order Deadlock
+subsystem: mes
+vehicle_section: work_order_engine
+error_type: MES-WORK-ORDER-DEADLOCK
+sensor_type: work_order_engine
+affected_services:
+- mes-controller
+cascade_services:
+- oee-analytics
+- shopfloor-portal
+- scada-gateway
+description: MES routing engine deadlocks; work orders stuck in IN_PROGRESS, blocking line releases
+investigation_notes: |-
+  Root Cause: Routing-engine deadlocks happen when concurrent work-order state transitions take shared row locks on the same equipment-resource record in a different order than the line-release transaction takes them, producing a cycle in the lock graph. Common after deploying a new routing ruleset or when the changeover transaction includes a cross-line resource swap.
+  Remediation: 1) Inspect the deadlock graph: `mes-admin deadlock-report --since 5m`. 2) Identify the offending transaction and abort the lower-priority side: `mes-admin abort-tx --tx-id {tx_id}`. 3) Restart the work-order engine to clear orphan locks: `systemctl restart mes-workorder-engine`. 4) Verify queue depth recovers: `mes-admin queue-depth --line {line_id}`. 5) If recurrence: revert the routing ruleset deploy and re-test in staging.
+remediation_action: restart_workorder_engine
+error_message: '[MES] MES-WORK-ORDER-DEADLOCK: line={line_id} wo={work_order_id} tx={tx_id} queue_depth={queue_depth} stuck_for_s={stuck_seconds}'
+stack_trace: |-
+  === MES DEADLOCK GRAPH ===
+  Line: {line_id} | Stuck WO: {work_order_id}
+  ------------------------------------------------------------------------
+  TX-ID         | OPERATION               | LOCK MODE | RESOURCE
+  ------------------------------------------------------------------------
+  {tx_id}        | wo_state_transition     | EXCL_ROW  | equipment_state[{line_id}]
+  TX-OTHER-A     | line_release            | EXCL_ROW  | work_order[{work_order_id}]
+  TX-OTHER-A     | wo_state_transition     | WAIT      | equipment_state[{line_id}]
+  {tx_id}        | line_release            | WAIT      | work_order[{work_order_id}]
+  ------------------------------------------------------------------------
+  MES-WORK-ORDER-DEADLOCK: cycle detected; queue_depth={queue_depth}; stuck for {stuck_seconds}s
+correlation_attr:
+  key: deployment.mes_routing_ruleset
+  value: routing-v3.4.1-beta
+fault_params:
+  line_id: {choice: [LINE-01, LINE-02, LINE-03, LINE-04, LINE-05]}
+  work_order_id:
+    format: "WO-{n}"
+    n: {randint: [100000, 999999]}
+  tx_id:
+    format: "TX-{n}"
+    n: {randint: [100000, 999999]}
+  queue_depth: {randint: [2200, 4800]}
+  stuck_seconds: {randint: [120, 1800]}
+rca_clues:
+  mes-controller:
+    mes.deadlock_tx_count: {randint: [2, 12]}
+    mes.routing_ruleset_version: v3.4.1-beta
+  oee-analytics:
+    oee.line_stalled_min: {randint: [5, 35]}
+  shopfloor-portal:
+    portal.operator_actions_held: {randint: [4, 25]}

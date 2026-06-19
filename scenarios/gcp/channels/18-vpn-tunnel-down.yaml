@@ -1,0 +1,58 @@
+name: VPN Tunnel Down
+subsystem: vpn
+vehicle_section: vpn_tunnels
+error_type: VPN-TUNNEL-DOWN
+sensor_type: tunnel_status
+affected_services:
+- cloud-vpn-gateway
+- cloud-interconnect
+cascade_services:
+- vpc-network-manager
+- network-intelligence
+description: Cloud VPN tunnel losing connectivity to remote peer
+investigation_notes: |-
+  Root cause: VPN tunnel has transitioned to DOWN state, meaning IPsec SA (Security Association) has expired or been torn down. Common causes: remote peer IP changed, pre-shared key mismatch after rotation, IKE SA lifetime expired without successful rekey, or remote gateway is unreachable due to internet path failure. Diagnose:
+    gcloud compute vpn-tunnels describe <tunnel> --region=<region> --format='value(status,detailedStatus)'
+    gcloud compute vpn-tunnels list --filter='status!=ESTABLISHED' --format='table(name,region,status,peerIp)'
+    Console > Hybrid Connectivity > VPN > <tunnel> > Status tab (IKE logs)
+  Remediation: Reset the VPN tunnel to force IKE renegotiation:
+    gcloud compute vpn-tunnels delete <tunnel> --region=<region>
+    gcloud compute vpn-tunnels create <tunnel> --region=<region> --peer-address=<peer-ip> --shared-secret=<secret> --ike-version=2 --router=<router> --vpn-gateway=<gw> --interface=0
+  Verify the remote peer is reachable: ping <peer-ip> from a VM in the same region. Check if the remote side has rotated the pre-shared key.
+remediation_action: reset_vpn_tunnel
+error_message: '[CloudVPN] VPN-TUNNEL-DOWN tunnel={vpn_tunnel_name} gateway={vpn_gateway_name} peer={vpn_peer_ip} status=DOWN
+  since {vpn_down_sec}s ike_version={vpn_ike_version} last_handshake={vpn_last_handshake_sec}s ago'
+stack_trace: |-
+  Cloud VPN Tunnel Report
+  -------------------------
+  Tunnel:          {vpn_tunnel_name}
+  Gateway:         {vpn_gateway_name}
+  Peer IP:         {vpn_peer_ip}
+  Status:          DOWN
+  Down Since:      {vpn_down_sec}s
+  IKE Version:     {vpn_ike_version}
+  Last Handshake:  {vpn_last_handshake_sec}s ago
+  Action: Verify peer gateway and IKE configuration
+correlation_attr:
+  key: infra.vpn_psk_rotation
+  value: psk-rotate-2024q4-batch2
+fault_params:
+  vpn_tunnel_name: {choice: [gcpnet-vpn-tunnel-01, gcpnet-vpn-tunnel-02, gcpnet-vpn-tunnel-03]}
+  vpn_gateway_name: {choice: [gcpnet-vpn-gw-europe1, gcpnet-vpn-gw-central1]}
+  vpn_peer_ip: {format: "203.0.113.{a}", a: {randint: [1, 254]}}
+  vpn_down_sec: {randint: [10, 300]}
+  vpn_ike_version: {choice: [IKEv2, IKEv1]}
+  vpn_last_handshake_sec: {randint: [60, 600]}
+rca_clues:
+  cloud-vpn-gateway:
+    vpn.ipsec_sa_status: EXPIRED
+    vpn.last_rekey_sec_ago: {randint: [300, 3600]}
+  cloud-interconnect:
+    interconnect.vpn_backup_needed: true
+    interconnect.capacity_headroom_pct: {uniform: [5, 30], round: 1}
+  vpc-network-manager:
+    vpc.tunnel_routes_withdrawn: {randint: [5, 20]}
+    vpc.affected_remote_cidrs: {randint: [2, 8]}
+  network-intelligence:
+    ni.vpn_path_test: DOWN
+    ni.latency_via_backup_ms: {randint: [20, 120]}

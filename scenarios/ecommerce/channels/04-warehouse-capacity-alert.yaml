@@ -1,0 +1,49 @@
+name: Warehouse Capacity Alert
+subsystem: fulfillment
+vehicle_section: warehouse_management
+error_type: WAREHOUSE-CAPACITY-ALERT
+sensor_type: storage_utilization
+affected_services:
+- fulfillment-orchestrator
+- inventory-service
+cascade_services:
+- order-management
+description: Warehouse storage capacity approaching critical threshold — new inbound shipments being rejected, causing supply
+  chain delays
+investigation_notes: |-
+  1. Check fulfillment-orchestrator logs for WAREHOUSE-CAPACITY-ALERT — capacity={capacity_used_pct}% at {warehouse_id}.
+  2. Identify the capacity drivers: check inventory.items_tracked metric by category — overstocked SKUs consuming disproportionate space.
+  3. Review inbound shipment schedule: if {inbound_units} units arriving in next 48hrs and capacity is already at {capacity_used_pct}%, overflow is imminent.
+  4. Prioritize outbound to free space: run velocity analysis on slow-moving SKUs ({slow_sku_count} items with 0 sales in 30 days) for clearance.
+  5. Activate overflow warehouse at {overflow_facility} — reroute inbound from top {slow_sku_categories} categories to free primary warehouse capacity.
+  6. Alert merchandising team: if capacity remains critical, new product listings should be paused until space is freed.
+remediation_action: rebalance_warehouse_capacity
+error_message: '[FulfillmentOrchestrator] WAREHOUSE-CAPACITY-ALERT: warehouse={warehouse_id} capacity={capacity_used_pct}%
+  ({capacity_used_sqft}/{capacity_total_sqft} sqft) inbound_units={inbound_units} slow_skus={slow_sku_count}'
+stack_trace: "com.ecommerce.fulfillment.CapacityException: WAREHOUSE-CAPACITY-ALERT\n\tat com.ecommerce.fulfillment.WarehouseManager.checkCapacity(id={warehouse_id})\n\
+  \tat com.ecommerce.fulfillment.FulfillmentOrchestrator.receiveInbound(asn={asn_id})\nWarehouse:         {warehouse_id}\n\
+  Capacity used:     {capacity_used_pct}% ({capacity_used_sqft}/{capacity_total_sqft} sqft)\nInbound (48h):     {inbound_units}\
+  \ units\nSlow SKUs:         {slow_sku_count}\nOverflow facility: {overflow_facility}"
+correlation_attr:
+  key: fulfillment.warehouse_capacity_critical
+  value: true
+fault_params:
+  warehouse_id: {choice: [WH-US-NJ-01, WH-US-OH-02, WH-US-TX-03]}
+  capacity_used_pct: {uniform: [88, 98], round: 1}
+  capacity_used_sqft: {randint: [880000, 980000]}
+  capacity_total_sqft: 1000000
+  inbound_units: {randint: [5000, 50000]}
+  slow_sku_count: {randint: [500, 10000]}
+  slow_sku_categories: {choice: [home-decor, seasonal, electronics-accessories]}
+  overflow_facility: {choice: [WH-US-PA-OVERFLOW, WH-US-IN-OVERFLOW]}
+  asn_id: {format: "ASN-{n}", n: {randint: [10000, 99999]}}
+rca_clues:
+  fulfillment-orchestrator:
+    fulfillment.warehouse_capacity_pct: {uniform: [88, 99], round: 1}
+    fulfillment.inbound_rejected_count: {randint: [10, 200]}
+  inventory-service:
+    inventory.overflow_sku_count: {randint: [100, 5000]}
+    inventory.receiving_paused_categories: {randint: [1, 5]}
+  order-management:
+    order.new_listing_hold: true
+    order.extended_delivery_estimate: true

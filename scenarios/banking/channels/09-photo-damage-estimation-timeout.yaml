@@ -1,0 +1,61 @@
+name: Photo Damage Estimation Timeout
+subsystem: claims_management
+vehicle_section: damage_estimation
+error_type: CLAIMS-PHOTO-EST-TIMEOUT
+sensor_type: ai_estimation
+affected_services:
+- claims-processor
+- document-vault
+cascade_services:
+- member-portal
+- mobile-gateway
+description: AI-powered photo damage estimation model exceeding response time threshold
+investigation_notes: |-
+  1. Check GPU utilization on the DamageNet inference cluster — 98% GPU util with 847 queued batches indicates the model fleet is saturated. Scale GPU instances: aws autoscaling set-desired-capacity.
+  2. The repair_vs_replace stage is the bottleneck — this is the most compute-intensive step requiring part-level damage classification and repair cost lookup against the CCC ONE/Mitchell databases.
+  3. Review model version DamageNet-v4.2 performance — if inference P99 exceeds SLA after a recent model update, consider rolling back: kubectl rollout undo deployment/damage-estimator.
+  4. Enable MANUAL_ADJUSTER fallback routing — estimated 2-4hr delay is acceptable for non-drivable vehicles. For drivable vehicles, provide preliminary estimate and supplement later.
+  5. Monitor image preprocessing — low quality images (blur, poor lighting) cause the damage_detection stage to run multiple passes. Add client-side image quality validation before upload.
+  6. Check if CAT event volume is causing the surge — photo estimates spike 10-20x after hailstorms. Pre-scale GPU fleet when CAT alerts are issued.
+remediation_action: scale_estimation_fleet
+error_message: '[CLAIMS] CLAIMS-PHOTO-EST-TIMEOUT: claim={claim_id} model_latency_ms={model_latency_ms} sla_ms={model_sla_ms}
+  vehicle={vehicle_desc} images={image_count}'
+stack_trace: |-
+  === PHOTO ESTIMATION PIPELINE ===
+  claim={claim_id}  vehicle={vehicle_desc}
+  --- IMAGE ANALYSIS ---
+    images_submitted={image_count}  quality_pass={image_count}
+    STEP                    STATUS      ELAPSED_MS
+    image_preprocessing     COMPLETE    420
+    damage_detection        COMPLETE    1,240
+    part_identification     COMPLETE    890
+    repair_vs_replace       TIMEOUT     {model_latency_ms}  <<< STUCK
+    cost_estimation         SKIPPED     ---
+    supplement_prediction   SKIPPED     ---
+  --- MODEL HEALTH ---
+    model_version=DamageNet-v4.2  gpu_util=98%  batch_queue=847
+    inference_p99={model_latency_ms}ms  sla={model_sla_ms}ms
+    fallback=MANUAL_ADJUSTER  estimated_delay=2-4hrs
+  ACTION: route_manual=true  scale_gpu_fleet=true  alert=CLAIMS-PHOTO-EST-TIMEOUT
+correlation_attr:
+  key: runtime.damage_model_weights
+  value: DamageNet-v4.2.1-retrain
+fault_params:
+  claim_id: {format: "CLM-{n}", n: {randint: [100000, 999999]}}
+  model_latency_ms: {randint: [10000, 60000]}
+  model_sla_ms: 5000
+  vehicle_desc: {choice: [2024 Toyota Camry SE, 2023 Ford F-150 XLT, 2024 Honda CR-V EX, 2023 Chevrolet Silverado 1500, 2024 Hyundai Tucson SEL, 2023 Jeep Wrangler Rubicon]}
+  image_count: {randint: [4, 12]}
+rca_clues:
+  claims-processor:
+    claims.gpu_utilization_pct: {uniform: [93, 99], round: 1}
+    claims.model_inference_queue: {randint: [500, 1200]}
+  document-vault:
+    document.damage_photo_resolution: {choice: [4K, 1080p, 720p]}
+    document.image_preprocessing_ms: {randint: [300, 800]}
+  member-portal:
+    portal.estimate_eta_display: DELAYED
+    portal.manual_adjuster_fallback: true
+  mobile-gateway:
+    gateway.photo_upload_success_rate: {uniform: [0.85, 0.95], round: 2}
+    gateway.damage_estimate_timeout: true

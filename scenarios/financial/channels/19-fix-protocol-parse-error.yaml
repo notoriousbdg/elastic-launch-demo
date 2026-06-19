@@ -1,0 +1,46 @@
+name: FIX Protocol Parse Error
+subsystem: order_management
+vehicle_section: fix_gateway
+error_type: FIX-PARSE-REJECT
+sensor_type: protocol_parser
+affected_services:
+- order-gateway
+- audit-logger
+cascade_services:
+- matching-engine
+- compliance-monitor
+description: FIX 4.4 message parsing failure due to malformed tags or checksum errors
+investigation_notes: ''
+remediation_action: ''
+error_message: '[FIX] FIX-PARSE-REJECT: session={fix_session} msg_type={msg_type} tag={bad_tag} checksum_expected={expected_checksum}
+  checksum_actual={actual_checksum}'
+stack_trace: |-
+  === RAW FIX MESSAGE DUMP ===
+  8=FIX.4.4|9=176|35={msg_type}|49=SENDER|56=TARGET|34=12847|
+  52=20260217-14:32:07.882|11=ORD-847291|55=AAPL|54=1|38=2500|
+  44=244.52|40=2|59=0|{bad_tag}=<<<MALFORMED>>>|
+  10={actual_checksum}|
+  --- PARSE ANALYSIS ---
+    session={fix_session}  msg_type={msg_type}  direction=INBOUND
+    tag_{bad_tag}  status=INVALID  reason=unexpected_value_format
+    checksum  expected={expected_checksum}  actual={actual_checksum}  match=false
+    body_length=176  computed_length=174  length_match=false
+  --- SESSION STATS ---
+    msgs_today=124,832  parse_errors=47  reject_rate=0.038%
+    last_good_seq=12846  gap_detected=false
+  ACTION: send_reject(35=3)  increment_error_count=true  alert=FIX-PARSE-REJECT
+correlation_attr: {}
+fault_params:
+  fix_session:
+    format: "FIX-{e}-{n:02d}"
+    e: {choice: [NYSE, NSDQ, CBOE, CME]}
+    n: {randint: [1, 20]}
+  msg_type: {choice: [D, G, F, "8", "9"]}
+  bad_tag: {choice: [35, 49, 56, 11, 55, 44, 38, 54, 40]}
+  expected_checksum:
+    format: "{n:03d}"
+    n: {randint: [0, 255]}
+  actual_checksum:
+    format: "{n:03d}"
+    n: {randint: [0, 255]}
+rca_clues: {}

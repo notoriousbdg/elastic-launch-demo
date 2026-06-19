@@ -1,0 +1,40 @@
+name: Customer Session Timeout
+subsystem: client_services
+vehicle_section: portal_gateway
+error_type: PORTAL-SESSION-TIMEOUT
+sensor_type: session_manager
+affected_services:
+- customer-portal
+- order-gateway
+cascade_services:
+- audit-logger
+description: Customer trading sessions expiring mid-transaction causing order failures
+investigation_notes: ''
+remediation_action: ''
+error_message: '[PORTAL] PORTAL-SESSION-TIMEOUT: session={session_id} user={user_id} idle={session_age_s}s max=900s operation={operation}'
+stack_trace: |-
+  === SESSION DETAILS ===
+  session={session_id}  user={user_id}
+    created=14:02:17Z  last_activity=14:17:42Z  idle={session_age_s}s  max=900s
+    ip=10.2.0.47  user_agent=Bloomberg-Terminal/2026.1
+    auth_method=SSO/SAML  mfa=TOTP
+  --- PENDING OPERATIONS ---
+    operation={operation}  status=IN_PROGRESS
+    pending_orders={pending_orders}
+    unsaved_changes=true  last_heartbeat=892s_ago
+  --- IMPACT ---
+    orders_cancelled_on_disconnect={pending_orders}
+    portfolio_lock_released=true
+  ACTION: force_logout=true  cancel_pending=true  alert=PORTAL-SESSION-TIMEOUT
+correlation_attr: {}
+fault_params:
+  session_id:
+    format: "SESS-{n}"
+    n: {randint: [100000, 999999]}
+  user_id:
+    format: "USR-{n}"
+    n: {randint: [10000, 99999]}
+  session_age_s: {randint: [1800, 7200]}
+  operation: {choice: [order_submit, portfolio_view, position_close, margin_check]}
+  pending_orders: {randint: [1, 10]}
+rca_clues: {}

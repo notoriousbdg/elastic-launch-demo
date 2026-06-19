@@ -1,11 +1,11 @@
 ---
 name: add-fault-channel
-description: Replace one fault channel in an existing scenario. Use when the user wants to add, swap, or improve a fault in scenarios/<id>/scenario.py. Makes four coordinated edits: channel_registry, get_fault_params, get_rca_clues, and agent_config.system_prompt. Never touches any file outside scenarios/<id>/scenario.py.
+description: Replace one fault channel in an existing scenario. Use when the user wants to add, swap, or improve a fault in scenarios/<id>/channels/. Replaces the channel YAML file and updates agent_config.system_prompt in scenario.yaml. Never touches any file outside scenarios/<id>/.
 ---
 
 # Replace a fault channel
 
-This skill replaces one existing fault channel in a scenario with a new or improved one. It makes four coordinated edits in `scenarios/<id>/scenario.py` and validates consistency.
+This skill replaces one existing fault channel in a scenario with a new or improved one. It replaces `scenarios/<id>/channels/NN-<slug>.yaml` and updates `agent_config.system_prompt` in `scenario.yaml`.
 
 Read [GUARDRAILS.md](GUARDRAILS.md) now and hold every rule in it for the duration of this session.
 
@@ -24,13 +24,11 @@ Required before Phase 2:
 
 ## Phase 2: Read current state
 
-Read `scenarios/<id>/scenario.py` in full. Extract:
+Read the target channel file `scenarios/<id>/channels/NN-<slug>.yaml` in full. Extract:
 
-1. The **current channel** at the target number (all fields)
-2. The **services dict** — to know valid service keys and subsystems
-3. The **agent_config.system_prompt** — to locate the error_type list that needs updating
-4. The **get_fault_params** entry for this channel number
-5. The **get_rca_clues** entry for this channel number
+1. The **current channel** fields: name, subsystem, error_type, error_message, fault_params, rca_clues
+2. The **valid service keys** — list the filenames under `scenarios/<id>/services/` (each filename stem is a service key)
+3. The **agent_config.system_prompt** in `scenarios/<id>/scenario.yaml` — to locate the error_type list that needs updating
 
 Also read [CONTRACT.md](CONTRACT.md) now as a generation checklist.
 
@@ -38,7 +36,7 @@ Also read [CONTRACT.md](CONTRACT.md) now as a generation checklist.
 
 ## Phase 3: Design — propose then confirm
 
-Present the proposed new channel via `AskUserQuestion` (single question, long description field) and ask the user to confirm, adjust, or replace before writing any code.
+Present the proposed new channel via `AskUserQuestion` (single question, long description field) and ask the user to confirm, adjust, or replace before writing any files.
 
 The proposal must cover:
 
@@ -54,27 +52,35 @@ If the channel number is 16–20, confirm the `remediation_action` passes the au
 
 ---
 
-## Phase 4: Make the four coordinated edits
+## Phase 4: Make the edits
 
-After the user confirms, make all four edits using the `Edit` tool. Do not ask permission for each — make them all.
+After the user confirms, make both edits. Do not ask permission for each.
 
-### Edit 1 — `channel_registry[N]`
+### Edit 1 — Replace the channel YAML file
 
-Replace the entire channel dict at key `N`. Keep the key number the same.
+Write a new `scenarios/<id>/channels/NN-<new-slug>.yaml`. Keep the same channel number prefix (`NN`). Delete the old file if the slug changes.
 
-Follow the field order in CONTRACT.md: `name`, `subsystem`, `vehicle_section`, `error_type`, `sensor_type`, `affected_services`, `cascade_services`, `description`, `investigation_notes`, `remediation_action`, `error_message`, `stack_trace`.
+Follow the field order from CONTRACT.md. See the full schema there.
 
 `investigation_notes`: 5–6 numbered steps. Reference specific log field names, metric names, and `{placeholder}` values. Tell the agent exactly what to search for and how to confirm the fix.
 
-### Edit 2 — `get_fault_params(N)` entry
+`fault_params` and `rca_clues` use the YAML DSL (see CONTRACT.md):
 
-Replace the `N:` dict inside `get_fault_params`. Every `{placeholder}` in `error_message` and `stack_trace` must be a key. Use `rng` (already initialized as `random.Random(channel + int(time.time()) // 10)` at the top of the method) — do not re-initialize it.
+```yaml
+fault_params:
+  payment_provider: {choice: [stripe, adyen, braintree]}
+  timeout_ms: {randint: [3000, 15000]}
+  order_id: {format: "ORD-{n}", n: {randint: [100000, 999999]}}
 
-### Edit 3 — `get_rca_clues(N, ...)` entry
+rca_clues:
+  payment-processor:
+    payment.gateway_timeout_ms: {randint: [3000, 15000]}
+    payment.provider_circuit_open: true
+  order-management:
+    order.checkout_failure_rate_pct: {uniform: [15, 60], round: 1}
+```
 
-Replace the `N:` dict inside `get_rca_clues`. Keys are service names from `affected_services` + `cascade_services`. Each service gets 2–3 domain-appropriate numeric or boolean attributes that suggest the root cause without naming it directly.
-
-### Edit 4 — `agent_config` system_prompt
+### Edit 2 — Update `agent_config.system_prompt` in `scenario.yaml`
 
 Find the subsystem grouping that contained the old `error_type` and remove it. Add the new `error_type` to the appropriate subsystem grouping (or create a new grouping if the subsystem is new).
 
@@ -89,16 +95,21 @@ Pattern used in existing scenarios:
 
 Run the CONTRACT.md checklist inline (no external script needed — inspect the edited content):
 
-1. **Placeholder parity** — collect every `\{(\w+)\}` from the new `error_message` and `stack_trace`; confirm each is a key in `get_fault_params(N)`.
-2. **Service validity** — every value in `affected_services` and `cascade_services` is a key in `services`.
-3. **Channel count** — `len(channel_registry) == 20`.
+1. **Placeholder parity** — collect every `{placeholder}` from the new `error_message` and `stack_trace`; confirm each is a key in `fault_params`.
+2. **Service validity** — every value in `affected_services` and `cascade_services` is a filename stem under `scenarios/<id>/services/`.
+3. **Channel count** — run `ls scenarios/<id>/channels/*.yaml | wc -l` → must be 20.
 4. **HITL/auto-remediate** — channel ≤ 15: HITL action; channel 16–20: plausible auto-runbook action.
 5. **system_prompt sync** — new `error_type` appears in the prompt; old `error_type` (if changed) does not.
+
+**Full integrity check:**
+```bash
+python3 scripts/verify_yaml_scenarios.py <id>
+```
 
 **Scope check:**
 ```bash
 git diff --name-only
 ```
-Output must show only `scenarios/<id>/scenario.py`. If any other file appears, stop and alert the user.
+Output must show only files under `scenarios/<id>/`. If any other file appears, stop and alert the user.
 
-**Report:** Summarize what changed (old channel → new channel), which four locations were edited, and any validation warnings. Include the channel number and error_type for easy cross-reference.
+**Report:** Summarize what changed (old channel → new channel), which files were edited, and any validation warnings. Include the channel number and error_type for easy cross-reference.

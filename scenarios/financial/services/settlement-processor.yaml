@@ -1,0 +1,165 @@
+service: settlement-processor
+sort_order: 5
+cloud_provider: gcp
+cloud_region: us-central1
+cloud_platform: gcp_compute_engine
+cloud_availability_zone: us-central1-b
+subsystem: settlement
+language: java
+topology:
+- - audit-logger
+  - /api/v1/audit/log-settlement
+  - POST
+- - compliance-monitor
+  - /api/v1/compliance/settlement-report
+  - POST
+entry_endpoints:
+- - /api/v1/settlement/status
+  - GET
+db_operations:
+- - SELECT
+  - settlements
+  - SELECT settlement_id, trade_id, status, due_date FROM settlements WHERE status = 'PENDING' AND due_date < NOW() + INTERVAL
+    1 DAY
+- - UPDATE
+  - settlements
+  - UPDATE settlements SET status = ?, settled_at = NOW() WHERE settlement_id = ?
+emit_fault_logs: true
+kpi_emitter: false
+constants:
+  COUNTERPARTIES:
+  - Goldman Sachs
+  - Morgan Stanley
+  - JP Morgan
+  - Citadel
+  INSTRUMENTS:
+  - US.AAPL
+  - US.GOOGL
+  - FUT.ES
+  - FX.EURUSD
+state:
+  _settlements_processed:
+    init: 0
+  _last_netting_run:
+    init: now
+steps:
+- sample:
+    counterparty:
+      choice: COUNTERPARTIES
+    instrument:
+      choice: INSTRUMENTS
+    qty:
+      randint:
+      - 100
+      - 10000
+    settle_value:
+      expr: round(qty * rand.uniform(50, 400), 2)
+- counter:
+    state_key: _settlements_processed
+    by: 1
+- log:
+    level: INFO
+    message: '[SETTLE] settlement_processed instrument={instrument} qty={qty} value=${settle_value} counterparty={counterparty}
+      status=SETTLED'
+    attrs:
+      operation: settlement_process
+      settlement.instrument:
+        var: instrument
+      settlement.quantity:
+        var: qty
+      settlement.value:
+        var: settle_value
+      settlement.counterparty:
+        var: counterparty
+      settlement.status: SETTLED
+- sample:
+    net_payable:
+      uniform:
+      - 1000000.0
+      - 50000000.0
+      round: 2
+    net_receivable:
+      uniform:
+      - 1000000.0
+      - 50000000.0
+      round: 2
+    fmt_payable:
+      expr: f'${net_payable:,.2f}'
+    fmt_receivable:
+      expr: f'${net_receivable:,.2f}'
+- log:
+    level: INFO
+    message: '[SETTLE] obligation_status payable={fmt_payable} receivable={fmt_receivable} status=BALANCED'
+    attrs:
+      operation: obligation_status
+      obligation.net_payable:
+        var: net_payable
+      obligation.net_receivable:
+        var: net_receivable
+- every:
+    seconds: 15
+    state_key: _last_netting_run
+    steps:
+    - sample:
+        batches:
+          randint:
+          - 5
+          - 20
+        counterparty_count:
+          randint:
+          - 10
+          - 50
+        reduction_pct:
+          uniform:
+          - 60.0
+          - 90.0
+          round: 1
+    - log:
+        level: INFO
+        message: '[SETTLE] netting_run batches={batches} counterparties={counterparty_count} reduction_pct={reduction_pct}
+          status=COMPLETE'
+        attrs:
+          operation: netting_run
+          netting.batch_count:
+            var: batches
+          netting.counterparty_count:
+            var: counterparty_count
+          netting.reduction_pct:
+            var: reduction_pct
+- metric:
+    name: settlement.processed_count
+    value:
+      var: _settlements_processed
+    unit: settlements
+- sample:
+    pending:
+      if_active:
+        randint:
+        - 200
+        - 2000
+      else:
+        randint:
+        - 10
+        - 200
+- metric:
+    name: settlement.pending_count
+    value:
+      var: pending
+    unit: settlements
+- sample:
+    fail_rate:
+      if_active:
+        uniform:
+        - 5.0
+        - 20.0
+        round: 2
+      else:
+        uniform:
+        - 0.1
+        - 1.5
+        round: 2
+- metric:
+    name: settlement.fail_rate
+    value:
+      var: fail_rate
+    unit: '%'

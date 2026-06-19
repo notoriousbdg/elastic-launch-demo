@@ -1,0 +1,53 @@
+name: Range Safety Tracking Loss
+subsystem: safety
+vehicle_section: vehicle_wide
+error_type: RSO-TRACKING-LOSS
+sensor_type: radar_tracking
+affected_services:
+- range-safety
+- sensor-validator
+cascade_services:
+- mission-control
+- navigation
+description: Range safety radar losing vehicle track
+investigation_notes: 'Root cause: tracking radar lost skin-track on the vehicle — track fusion is in COAST mode with 72% prediction
+  confidence, meaning the system is dead-reckoning based on last known state. RCS (radar cross-section) at 12.4 dBsm is adequate,
+  so loss is likely from antenna servo tracking loop dropout, RF interference in the radar band, or physical obstruction in
+  the radar line-of-sight. Check for construction cranes, aircraft, or weather in the radar corridor. Other radars (RDR-2,
+  RDR-3) still tracking confirms single-radar fault. Remediation: command radar reacquisition (RSO_RADAR_REACQ {radar} TARGET
+  VEHICLE), check antenna servo error logs for tracking loop faults (RSO_RADAR_SERVO_STATUS {radar}). If RF interference suspected,
+  run spectrum analyzer sweep (RSO_SPECTRUM_SCAN {radar} BAND). Range Safety requires 2-of-3 radars tracking for launch commit
+  — verify RDR-2/RDR-3 health.'
+remediation_action: reset_safety_system
+error_message: '[RSO] RSO-TRACKING-LOSS: radar={radar_id} gap={gap_ms}ms max_allowed={max_gap_ms}ms track_state=COAST'
+stack_trace: |-
+  == RANGE SAFETY STATUS == TRACKING RADAR NETWORK ==
+  TIMESTAMP: MET+00:04:20.334 | FRAME: 0x4A42 | SEQ: 18461
+  ---------------------------------------------------------------
+  RADAR     TRACK_GAP   MAX_GAP   RCS_dBsm   STATUS
+  {radar_id}     {gap_ms}ms    {max_gap_ms}ms    12.4       **TRACK_LOSS**
+  RDR-2     0ms         250ms     14.1       TRACKING
+  RDR-3     0ms         250ms     11.8       TRACKING
+  ---------------------------------------------------------------
+  FUSION_STATE: COAST | PREDICT_CONF: 72% | CORRIDOR: WITHIN
+  RSO-TRACKING-LOSS: Radar {radar_id} lost track for {gap_ms}ms, max allowed {max_gap_ms}ms
+  ACTION: Verify radar antenna, check for RF interference
+correlation_attr:
+  key: infra.radar_firmware
+  value: rdr-track-v8.1.3-beta
+fault_params:
+  radar_id: {choice: [RDR-1, RDR-2, RDR-3]}
+  gap_ms: {randint: [500, 5000]}
+  max_gap_ms: 250
+rca_clues:
+  range-safety:
+    safety.fusion_state: COAST
+    safety.predict_confidence_pct: {uniform: [55.0, 80.0], round: 0}
+  sensor-validator:
+    validation.radar_track_status: LOST
+    validation.affected_radar: {choice: [RDR-1, RDR-2, RDR-3]}
+  mission-control:
+    upstream.degraded_subsystem: safety
+    telemetry.tracking_status: degraded
+  navigation:
+    gnc.external_tracking: unavailable

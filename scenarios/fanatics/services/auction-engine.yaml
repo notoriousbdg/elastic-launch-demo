@@ -1,0 +1,91 @@
+service: auction-engine
+sort_order: 3
+cloud_provider: aws
+cloud_region: us-east-1
+cloud_platform: aws_ec2
+cloud_availability_zone: us-east-1c
+subsystem: commerce
+language: go
+topology:
+- - digital-marketplace
+  - /api/v1/marketplace/listing-update
+  - POST
+- - digital-marketplace
+  - /api/v1/marketplace/payment-settle
+  - POST
+entry_endpoints:
+- - /api/v1/auction/live
+  - GET
+- - /api/v1/auction/bid
+  - POST
+db_operations:
+- - SELECT
+  - auctions
+  - SELECT id, current_bid, bid_count, end_time FROM auctions WHERE status = 'active' AND end_time > NOW()
+- - INSERT
+  - bids
+  - INSERT INTO bids (auction_id, bidder_id, amount, placed_at) VALUES (?, ?, ?, NOW())
+- - UPDATE
+  - auctions
+  - UPDATE auctions SET current_bid = ?, bid_count = bid_count + 1, last_bid_at = NOW() WHERE id = ? AND current_bid < ?
+emit_fault_logs: true
+kpi_emitter: false
+steps:
+- sample:
+    active_auctions:
+      randint:
+      - 50
+      - 250
+    bids_per_min:
+      randint:
+      - 200
+      - 1500
+    bid_latency_ms:
+      uniform:
+      - 8.0
+      - 45.0
+      round: 1
+    websocket_connections:
+      randint:
+      - 2000
+      - 8000
+- metric:
+    name: auction.active_auctions
+    value:
+      var: active_auctions
+    unit: auctions
+- metric:
+    name: auction.bids_per_min
+    value:
+      var: bids_per_min
+    unit: bids/min
+- metric:
+    name: auction.bid_latency_ms
+    value:
+      var: bid_latency_ms
+    unit: ms
+- metric:
+    name: auction.websocket_connections
+    value:
+      var: websocket_connections
+    unit: connections
+- log:
+    level: INFO
+    message: level=info ts=2025-01-15T14:32:01.234Z caller=auction.go:47 msg="health" active_auctions={active_auctions} bids_per_min={bids_per_min}
+      latency_ms={bid_latency_ms} ws_connections={websocket_connections}
+    attrs:
+      operation: auction_health
+      auction.active_count:
+        var: active_auctions
+      auction.bids_per_min:
+        var: bids_per_min
+      auction.latency_ms:
+        var: bid_latency_ms
+      auction.ws_connections:
+        var: websocket_connections
+- log:
+    level: INFO
+    message: level=info ts=2025-01-15T14:32:01.456Z caller=pipeline.go:112 msg="pipeline_check" status=healthy queues_draining=true
+    attrs:
+      operation: pipeline_check
+      check.result: PASS

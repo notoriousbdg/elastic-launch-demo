@@ -1,0 +1,139 @@
+service: dns-dhcp-service
+sort_order: 9
+cloud_provider: azure
+cloud_region: eastus
+cloud_platform: azure_vm
+cloud_availability_zone: eastus-1
+subsystem: network_services
+language: java
+generates_traces: false
+topology:
+- - network-controller
+  - /api/v1/network/interface-status
+  - GET
+entry_endpoints:
+- - /api/v1/dns/query
+  - POST
+- - /api/v1/dhcp/lease-report
+  - GET
+- - /api/v1/dns/health
+  - GET
+db_operations:
+- - SELECT
+  - dns_records
+  - SELECT fqdn, record_type, ttl, value FROM dns_records WHERE zone = ? AND record_type = ?
+- - SELECT
+  - dhcp_leases
+  - SELECT mac_addr, ip_addr, lease_start, lease_end, hostname FROM dhcp_leases WHERE scope = ? AND lease_end > NOW()
+emit_fault_logs: true
+kpi_emitter: false
+constants:
+  DNS_ZONES:
+  - fanatics.internal
+  - collectibles.prod
+  - warehouse.local
+  DHCP_SCOPES:
+  - 10.1.0.0/24
+  - 10.2.0.0/24
+  - 172.16.0.0/22
+  - 192.168.1.0/24
+steps:
+- sample:
+    queries_per_sec:
+      uniform:
+      - 500.0
+      - 2000.0
+      round: 1
+    cache_hit_pct:
+      uniform:
+      - 85.0
+      - 98.0
+      round: 1
+    nxdomain_pct:
+      uniform:
+      - 0.5
+      - 3.0
+      round: 2
+    avg_latency_ms:
+      uniform:
+      - 0.5
+      - 5.0
+      round: 2
+    zone:
+      choice: DNS_ZONES
+- metric:
+    name: dns.queries_per_sec
+    value:
+      var: queries_per_sec
+    unit: qps
+- metric:
+    name: dns.cache_hit_pct
+    value:
+      var: cache_hit_pct
+    unit: '%'
+- metric:
+    name: dns.nxdomain_pct
+    value:
+      var: nxdomain_pct
+    unit: '%'
+- metric:
+    name: dns.avg_latency_ms
+    value:
+      var: avg_latency_ms
+    unit: ms
+- log:
+    level: INFO
+    message: 'named[12345]: info: zone ''{zone}'' queries={queries_per_sec}/s cache_hit={cache_hit_pct}% nxdomain={nxdomain_pct}%
+      latency={avg_latency_ms}ms'
+    attrs:
+      operation: dns_health
+      dns.zone:
+        var: zone
+      dns.qps:
+        var: queries_per_sec
+      dns.cache_hit:
+        var: cache_hit_pct
+      dns.nxdomain:
+        var: nxdomain_pct
+      dns.latency_ms:
+        var: avg_latency_ms
+- sample:
+    scope:
+      choice: DHCP_SCOPES
+    active_leases:
+      if_active:
+        randint:
+        - 240
+        - 254
+      else:
+        randint:
+        - 100
+        - 230
+    utilization_pct:
+      expr: round(active_leases / 254 * 100, 1)
+- metric:
+    name: dhcp.active_leases
+    value:
+      var: active_leases
+    unit: leases
+- metric:
+    name: dhcp.utilization_pct
+    value:
+      var: utilization_pct
+    unit: '%'
+- log:
+    level: INFO
+    message: 'dhcpd[6789]: info: pool {scope} active_leases={active_leases}/254 utilization={utilization_pct}%'
+    attrs:
+      operation: dhcp_health
+      dhcp.scope:
+        var: scope
+      dhcp.active_leases:
+        var: active_leases
+      dhcp.total_leases: 254
+- log:
+    level: INFO
+    message: 'named[12345]: info: resolver health check PASS — all upstream forwarders responding within SLA'
+    attrs:
+      operation: resolver_check
+      check.result: PASS

@@ -1,0 +1,49 @@
+name: X-Band Packet Loss
+subsystem: communications
+vehicle_section: antenna_array
+error_type: COMM-PACKET-LOSS
+sensor_type: packet_integrity
+affected_services:
+- comms-array
+- sensor-validator
+cascade_services:
+- telemetry-relay
+- mission-control
+description: X-band data link experiencing excessive packet loss
+investigation_notes: 'Root cause: high bit error rate (BER 1.2e-04) causing FEC decoder failures — 847 frames uncorrectable
+  out of 2341 correction attempts. This BER level indicates either modulator output power degradation, X-band antenna misalignment,
+  or intermodulation interference from adjacent RF systems. Check modulator constellation diagram for excessive phase noise.
+  Verify X-band antenna boresight alignment and servo tracking loop bandwidth. Remediation: switch to backup X-band link (COMM_LINK_SELECT
+  XB-SECONDARY), increase FEC coding rate from 7/8 to 3/4 via COMM_FEC_RATE X-BAND 3/4 (trades bandwidth for robustness).
+  If antenna misalignment, run COMM_ANTENNA_CAL X-BAND to recalibrate servo offsets.'
+remediation_action: reset_comms_link
+error_message: '[COMM] COMM-PACKET-LOSS: link={link_id} loss_rate={loss_pct}% threshold={threshold_pct}% frames_dropped=847'
+stack_trace: |-
+  == LINK BUDGET ANALYSIS == X-BAND DATA LINK ==
+  TIMESTAMP: MET+00:04:15.221 | FRAME: 0x4A36 | SEQ: 18449
+  ---------------------------------------------------------------
+  LINK         TX_RATE    RX_RATE    LOSS     STATUS
+  {link_id}   150Mbps    142Mbps    {loss_pct}%    **DEGRADED**
+  ---------------------------------------------------------------
+  FEC_CORRECTIONS: 2341 | FEC_FAILURES: 847 | BER: 1.2e-04
+  THRESHOLD: {threshold_pct}% | MEASURED: {loss_pct}%
+  COMM-PACKET-LOSS: Packet loss {loss_pct}% exceeds threshold on link {link_id}
+  ACTION: Check antenna alignment, verify modulator output power
+correlation_attr:
+  key: infra.nic_driver
+  value: ena-2.12.3-unstable
+fault_params:
+  link_id: {choice: [XB-PRIMARY, XB-SECONDARY]}
+  loss_pct: {uniform: [5.0, 25.0], round: 1}
+  threshold_pct: 2.0
+rca_clues:
+  comms-array:
+    comms.ber: {choice: ["1.2e-04", "5.8e-05", "3.1e-04"]}
+    comms.fec_failure_count: {randint: [500, 1200]}
+  sensor-validator:
+    validation.packet_integrity: degraded
+    validation.link_affected: {choice: [XB-PRIMARY, XB-SECONDARY]}
+  telemetry-relay:
+    relay.x_band_retransmits: {randint: [100, 500]}
+  mission-control:
+    upstream.degraded_subsystem: communications

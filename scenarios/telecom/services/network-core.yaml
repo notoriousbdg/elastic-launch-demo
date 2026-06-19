@@ -1,0 +1,123 @@
+service: network-core
+sort_order: 4
+cloud_provider: gcp
+cloud_region: europe-west3
+cloud_platform: gcp_compute_engine
+cloud_availability_zone: europe-west3-b
+subsystem: network
+language: cpp
+entry_endpoints:
+- - /api/v1/network/status
+  - GET
+topology:
+- - bss-billing
+  - /api/v1/billing/activate
+  - POST
+emit_fault_logs: true
+kpi_emitter: false
+state:
+  _bearer_count:
+    init: 0
+  _last_summary:
+    init: now
+steps:
+- sample:
+    bearer_type:
+      choice:
+      - 5G_NR
+      - LTE
+      - NR-DC
+      - LTE-A
+    qos_class:
+      choice:
+      - QCI-1
+      - QCI-5
+      - QCI-9
+      - 5QI-1
+      - 5QI-9
+    cell_id:
+      format: "CELL-EU-{n}"
+      n:
+        randint:
+        - 10000
+        - 99999
+- counter:
+    state_key: _bearer_count
+    by: 1
+- log:
+    level: INFO
+    message: '[NET] bearer_allocation type={bearer_type} qos={qos_class} cell={cell_id} status=ALLOCATED'
+    attrs:
+      operation: bearer_allocation
+      network.bearer_type:
+        var: bearer_type
+      network.qos_class:
+        var: qos_class
+- sample:
+    sctp_load:
+      randint:
+      - 30
+      - 70
+    attach_rate:
+      randint:
+      - 200
+      - 500
+- log:
+    level: INFO
+    message: '[NET] signaling_health sctp_load={sctp_load}% attach_rate={attach_rate}/min status=NORMAL'
+    attrs:
+      operation: signaling_health
+      network.sctp_load_pct:
+        var: sctp_load
+      network.attach_rate:
+        var: attach_rate
+- every:
+    seconds: 10
+    state_key: _last_summary
+    steps:
+    - log:
+        level: INFO
+        message: '[NET] network_summary bearers_allocated={_bearer_count} gtp_tunnels=42000 mme_pool=HEALTHY status=NORMAL'
+        attrs:
+          operation: network_summary
+          network.bearers_allocated:
+            var: _bearer_count
+          network.gtp_tunnels: 42000
+- sample:
+    prb_util:
+      if_active:
+        uniform:
+        - 90.0
+        - 99.0
+        round: 1
+      else:
+        uniform:
+        - 40.0
+        - 75.0
+        round: 1
+    active_bearers:
+      if_active:
+        randint:
+        - 240
+        - 256
+      else:
+        randint:
+        - 100
+        - 200
+- metric:
+    name: network_core.prb_utilization_pct
+    value:
+      var: prb_util
+    unit: '%'
+- metric:
+    name: network_core.active_bearers
+    value:
+      var: active_bearers
+    unit: bearers
+- metric:
+    name: network_core.gtp_tunnels_active
+    value:
+      randint:
+      - 30000
+      - 45000
+    unit: tunnels

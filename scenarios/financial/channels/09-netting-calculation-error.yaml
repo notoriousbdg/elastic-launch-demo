@@ -1,0 +1,40 @@
+name: Netting Calculation Error
+subsystem: settlement
+vehicle_section: netting_engine
+error_type: SETTLE-NETTING-CALC
+sensor_type: netting_integrity
+affected_services:
+- settlement-processor
+- risk-calculator
+cascade_services:
+- audit-logger
+- compliance-monitor
+description: Multilateral netting calculation produces inconsistent net obligations
+investigation_notes: ''
+remediation_action: ''
+error_message: '[SETTLE] SETTLE-NETTING-CALC: batch={batch_id} net_mismatch=${net_mismatch} counterparties={counterparty_count}
+  currency={currency}'
+stack_trace: |-
+  === NETTING BATCH SUMMARY ===
+  batch={batch_id}  currency={currency}  counterparties={counterparty_count}
+  COUNTERPARTY          DELIVER        RECEIVE       NET
+  Goldman Sachs         $42,300,000    $38,100,000   ($4,200,000)
+  Morgan Stanley        $31,500,000    $35,800,000    $4,300,000
+  JP Morgan             $28,700,000    $27,200,000   ($1,500,000)
+  Citadel Securities    $19,400,000    $21,800,000    $2,400,000
+  --- BALANCE CHECK ---
+    sum_delivers   $121,900,000
+    sum_receives   $122,900,000
+    mismatch       ${net_mismatch}  <<< NON-ZERO
+    tolerance      $0.01
+  reduction_pct=72.4%  expected_reduction=75.0%  NSCC_CNS=REJECTED
+  ACTION: recompute_batch=true  hold_settlement=true  alert=SETTLE-NETTING-CALC
+correlation_attr: {}
+fault_params:
+  batch_id:
+    format: "NET-{n}"
+    n: {randint: [1000, 9999]}
+  net_mismatch: {uniform: [10000, 5000000], round: 2}
+  counterparty_count: {randint: [3, 20]}
+  currency: {choice: [USD, EUR, GBP, JPY, CHF]}
+rca_clues: {}

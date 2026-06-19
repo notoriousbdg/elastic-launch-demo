@@ -1,0 +1,56 @@
+name: Auction Bid Latency Spike
+subsystem: commerce
+vehicle_section: bidding_platform
+error_type: BID_LATENCY_SLA_BREACH
+sensor_type: bid_processing
+affected_services:
+- auction-engine
+- digital-marketplace
+cascade_services:
+- network-controller
+- firewall-gateway
+description: Real-time bid processing latency exceeding SLA thresholds
+investigation_notes: |-
+  1. Check the bid processing queue depth in the Go auction-engine metrics — a queue depth above 500 indicates the goroutine pool is saturated.
+  2. Examine WebSocket broadcast latency: `ws_delay_ms` above 1000ms means the hub.broadcastBidUpdate is falling behind real-time.
+  3. Profile the database: `EXPLAIN ANALYZE` on the bid INSERT and auction UPDATE queries — lock contention on the `auctions` table during high-bid periods is common.
+  4. Check Redis pub/sub for bid event fanout delays: `redis-cli --latency-history -i 1` — if Redis is slow, all downstream WebSocket clients stall.
+  5. Scale horizontally: increase the auction-engine replica count in EKS and verify the ALB is distributing WebSocket connections evenly.
+  6. For immediate relief, increase the goroutine pool size and bid queue buffer, and enable connection draining on the load balancer.
+remediation_action: scale_auction_service
+error_message: level=error ts=2025-01-15T14:32:01.234Z caller=bid_processor.go:289 msg="BID_LATENCY_SLA_BREACH" auction={auction_id}
+  bid={bid_id} latency_ms={bid_latency_ms} sla_ms={bid_sla_ms} queue_depth={bid_queue_depth} ws_delay_ms={ws_delay_ms} affected_bidders={affected_bidders}
+stack_trace: "goroutine 847 [running]:\nruntime/debug.Stack()\n\t/usr/local/go/src/runtime/debug/stack.go:24 +0x5e\ngithub.com/fanatics/auction-engine/internal/processor.(*BidProcessor).ProcessBid(0xc000518000,\
+  \ {{0xc000a12480, 0x24}}, {{0xc000a124c0, 0x26}}, 0x{bid_latency_ms})\n\t/app/internal/processor/bid_processor.go:289 +0x3a2\n\
+  github.com/fanatics/auction-engine/internal/processor.(*BidProcessor).handleBidQueue(0xc000518000)\n\t/app/internal/processor/bid_processor.go:145\
+  \ +0x1b8\ngithub.com/fanatics/auction-engine/internal/ws.(*Hub).broadcastBidUpdate(0xc000420000, {{0xc000a12480, 0x24}})\n\
+  \t/app/internal/ws/hub.go:89 +0x204\ncreated by github.com/fanatics/auction-engine/cmd/server.Run in goroutine 1\n\t/app/cmd/server/main.go:67\
+  \ +0x2a5"
+correlation_attr:
+  key: deployment.auction_runtime
+  value: go1.22-race-detect-enabled
+fault_params:
+  auction_id:
+    format: "AUC-{n}"
+    n: {randint: [100000, 999999]}
+  bid_id:
+    format: "BID-{n}"
+    n: {randint: [1000000, 9999999]}
+  bid_latency_ms: {randint: [500, 5000]}
+  bid_sla_ms: 200
+  bid_queue_depth: {randint: [100, 2000]}
+  ws_delay_ms: {randint: [200, 3000]}
+  affected_bidders: {randint: [10, 500]}
+rca_clues:
+  auction-engine:
+    auction.goroutine_pool_saturated: true
+    auction.bid_queue_depth: {randint: [500, 2000]}
+  digital-marketplace:
+    marketplace.ws_broadcast_delay_ms: {randint: [1000, 5000]}
+    marketplace.stale_bid_display_count: {randint: [10, 200]}
+  network-controller:
+    network.alb_latency_ms: {randint: [100, 1000]}
+    network.connection_draining: false
+  firewall-gateway:
+    firewall.ws_inspection_overhead_ms: {randint: [20, 200]}
+    firewall.deep_packet_inspection_enabled: true

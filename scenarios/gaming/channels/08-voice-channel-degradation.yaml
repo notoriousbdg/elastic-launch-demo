@@ -1,0 +1,60 @@
+name: Voice Channel Degradation
+subsystem: social
+vehicle_section: voice_server
+error_type: VOICE-CHANNEL-OVERLOAD
+sensor_type: audio_quality_monitor
+affected_services:
+- chat-service
+- game-server
+cascade_services:
+- analytics-pipeline
+description: Voice chat channels experiencing audio quality degradation with packet loss, jitter, and codec failures
+investigation_notes: |-
+  Root cause: voice server CPU saturation at 87.4% causes the audio mixing pipeline to miss its 10ms deadline, resulting in packet drops on the UDP voice channel. The server downgrades bitrate from 96kbps to 64kbps but this is insufficient under load.
+  1. Check server resources: `top -p $(pgrep voice-mixer)` to verify CPU usage per thread; the mixing thread is single-core bound and needs CPU affinity pinning.
+  2. Review MOS scores: any stream below 2.0 MOS is unintelligible — those players should be migrated to a less-loaded voice server immediately.
+  3. Inspect FEC recovery rate: 12.3% recovery means FEC is working but insufficient for {voice_packet_loss_pct}% loss — consider enabling Opus FEC redundancy mode.
+  4. Remediate: issue `restart_voice_servers` to rebalance voice channel assignments across the server pool; then `reset_codec_pipeline` to force codec renegotiation at optimal bitrates for current network conditions.
+  5. Scale voice server pods horizontally and set max speakers per server to 50 to prevent CPU saturation; enable Opus DTX (discontinuous transmission) to reduce idle bandwidth.
+remediation_action: restart_voice_servers
+error_message: '[Voice] VOICE-CHANNEL-OVERLOAD: channel={voice_channel_id} loss={voice_packet_loss_pct}% jitter={jitter_ms}ms
+  speakers={active_speakers} codec={codec}'
+stack_trace: |-
+  === VOICE SERVER QUALITY METRICS ===
+  channel={voice_channel_id}  codec={codec}
+  ----------- per-stream stats --------
+    stream_count     = {active_speakers}
+    packet_loss_avg  = {voice_packet_loss_pct}%
+    jitter_avg       = {jitter_ms}ms
+    jitter_max       = 287ms
+    bitrate          = 64kbps (target 96kbps — downgraded)
+    fec_recovery     = 12.3%
+  ----------- worst streams -----------
+    PLR-481020  loss=34.2%  jitter=198ms  MOS=1.8
+    PLR-229103  loss=28.7%  jitter=154ms  MOS=2.1
+    PLR-884712  loss=19.1%  jitter=112ms  MOS=2.6
+  ----------- server state ------------
+    cpu_pct     = 87.4%
+    mix_latency = 23ms (target 10ms)
+    udp_rx_drop = 4.2%
+  VOICE-CHANNEL-OVERLOAD: channel {voice_channel_id} quality degraded — {voice_packet_loss_pct}% loss
+correlation_attr:
+  key: infra.audio_codec_lib
+  value: opus-1.4.0-custom-build
+fault_params:
+  voice_channel_id:
+    format: "VC-{n}"
+    n: {randint: [10000, 99999]}
+  voice_packet_loss_pct: {uniform: [5.0, 35.0], round: 1}
+  jitter_ms: {uniform: [20.0, 150.0], round: 1}
+  active_speakers: {randint: [2, 25]}
+  codec: {choice: [opus, g711, aac]}
+rca_clues:
+  chat-service:
+    voice.mixer_cpu_pct: {uniform: [80.0, 99.0], round: 1}
+    voice.codec_downgrade: true
+  game-server:
+    game.voice_disconnect_count: {randint: [10, 100]}
+    game.team_comm_degraded: true
+  analytics-pipeline:
+    analytics.voice_quality_events: {randint: [200, 1000]}

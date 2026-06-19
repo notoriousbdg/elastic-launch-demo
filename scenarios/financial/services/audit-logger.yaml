@@ -1,0 +1,136 @@
+service: audit-logger
+sort_order: 9
+cloud_provider: azure
+cloud_region: eastus
+cloud_platform: azure_vm
+cloud_availability_zone: eastus-1
+subsystem: audit
+language: go
+entry_endpoints:
+- - /api/v1/audit/query
+  - POST
+db_operations:
+- - INSERT
+  - audit_events
+  - INSERT INTO audit_events (event_id, event_type, actor, payload, seq_num, ts) VALUES (?, ?, ?, ?, ?, NOW())
+- - SELECT
+  - audit_events
+  - SELECT event_id, event_type, payload FROM audit_events WHERE stream_id = ? AND seq_num > ? ORDER BY seq_num ASC LIMIT
+    100
+emit_fault_logs: true
+kpi_emitter: false
+constants:
+  STREAMS:
+  - orders
+  - trades
+  - settlements
+  - risk-events
+  - compliance-alerts
+  EVENT_TYPES:
+  - ORDER_NEW
+  - ORDER_CANCEL
+  - TRADE_EXEC
+  - SETTLEMENT_INIT
+  - RISK_CHECK
+  - COMPLIANCE_ALERT
+  REPLICATION_DESTS:
+  - eu-west-1
+  - us-west-2
+state:
+  _events_logged:
+    init: 0
+  _last_integrity_check:
+    init: now
+  _sequence_counters:
+    init_per_key:
+      keys_from: STREAMS
+      spec:
+        randint:
+        - 1000000
+        - 5000000
+steps:
+- sample:
+    stream:
+      choice: STREAMS
+    event_type:
+      choice: EVENT_TYPES
+- incr_key:
+    state_key: _sequence_counters
+    key:
+      var: stream
+    by: 1
+- sample:
+    seq:
+      expr: _sequence_counters[stream]
+- log:
+    level: INFO
+    message: '[AUDIT] event_logged stream={stream} seq={seq} type={event_type} status=COMMITTED'
+    attrs:
+      operation: audit_log
+      audit.stream:
+        var: stream
+      audit.sequence:
+        var: seq
+      audit.event_type:
+        var: event_type
+      audit.status: COMMITTED
+- sample:
+    rep_lag_ms:
+      randint:
+      - 50
+      - 800
+    rep_dest:
+      choice: REPLICATION_DESTS
+- log:
+    level: INFO
+    message: '[AUDIT] replication_status source=eastus dest={rep_dest} lag_ms={rep_lag_ms} status=SYNCED'
+    attrs:
+      operation: replication_status
+      replication.source: eastus
+      replication.destination:
+        var: rep_dest
+      replication.lag_ms:
+        var: rep_lag_ms
+      replication.status: SYNCED
+- every:
+    seconds: 12
+    state_key: _last_integrity_check
+    steps:
+    - sample:
+        streams_ok:
+          expr: len(STREAMS)
+        total_events:
+          expr: sum(_sequence_counters.values())
+    - log:
+        level: INFO
+        message: '[AUDIT] integrity_check streams_valid={streams_ok}/{streams_ok} total_events={total_events} hash_chain=VALID'
+        attrs:
+          operation: integrity_check
+          integrity.streams_valid:
+            var: streams_ok
+          integrity.total_events:
+            var: total_events
+          integrity.hash_chain: VALID
+- counter:
+    state_key: _events_logged
+    by: 1
+- metric:
+    name: audit_logger.events_logged
+    value:
+      var: _events_logged
+    unit: events
+- metric:
+    name: audit_logger.replication_lag_ms
+    value:
+      randint:
+      - 50
+      - 800
+    unit: ms
+- metric:
+    name: audit_logger.storage_used_gb
+    value:
+      uniform:
+      - 100.0
+      - 500.0
+      round: 1
+    unit: GB

@@ -1,0 +1,140 @@
+service: comms-array
+sort_order: 5
+cloud_provider: gcp
+cloud_region: us-central1
+cloud_platform: gcp_compute_engine
+cloud_availability_zone: us-central1-b
+subsystem: communications
+language: cpp
+entry_endpoints:
+- - /api/v1/comms/poll
+  - POST
+emit_fault_logs: true
+kpi_emitter: false
+constants:
+  ANTENNAS:
+    s_band:
+      name: S-Band
+      lo: 18.0
+      hi: 32.0
+      loss_lo: 0.0
+      loss_hi: 0.5
+      channels:
+      - S1
+      - S2
+      - S3
+    x_band:
+      name: X-Band
+      lo: 22.0
+      hi: 38.0
+      loss_lo: 0.0
+      loss_hi: 0.3
+      channels:
+      - XB-PRIMARY
+      - XB-SECONDARY
+    uhf:
+      name: UHF
+      lo: 15.0
+      hi: 28.0
+      loss_lo: 0.0
+      loss_hi: 0.8
+      channels:
+      - UHF-1
+      - UHF-2
+state:
+  _frame_count:
+    init: 0
+  _last_link_report:
+    init: now
+steps:
+- for_each:
+    in: ANTENNAS
+    as:
+    - ant_key
+    - ant
+    steps:
+    - sample:
+        channel:
+          expr: rand.choice(ant['channels'])
+        signal_db:
+          uniform:
+          - 0.0
+          - 1.0
+          round: 1
+        packet_loss:
+          uniform:
+          - 0.0
+          - 1.0
+          round: 2
+    - sample:
+        signal_db:
+          expr: round(ant['lo'] + (ant['hi'] - ant['lo']) * signal_db, 1)
+        packet_loss:
+          expr: round(ant['loss_lo'] + (ant['loss_hi'] - ant['loss_lo']) * packet_loss, 2)
+    - metric:
+        name:
+          expr: f'comms.{ant_key}.signal_db'
+        value:
+          var: signal_db
+        unit: dB
+    - metric:
+        name:
+          expr: f'comms.{ant_key}.packet_loss_pct'
+        value:
+          var: packet_loss
+        unit: '%'
+    - log:
+        level: INFO
+        message: '[COMM] antenna={ant[name]} channel={channel} signal={signal_db}dB loss={packet_loss}% lock=ACQUIRED status=NOMINAL'
+        attrs:
+          comms.antenna:
+            expr: ant['name']
+          comms.signal_db:
+            var: signal_db
+          comms.packet_loss_pct:
+            var: packet_loss
+          comms.channel:
+            var: channel
+          operation: antenna_check
+- counter:
+    state_key: _frame_count
+    by: 1
+- sample:
+    total_throughput:
+      uniform:
+      - 45.0
+      - 65.0
+      round: 1
+- metric:
+    name: comms.total_throughput_mbps
+    value:
+      var: total_throughput
+    unit: Mbps
+- metric:
+    name: comms.frame_count
+    value:
+      var: _frame_count
+    unit: frames
+- every:
+    seconds: 10
+    state_key: _last_link_report
+    steps:
+    - log:
+        level: INFO
+        message: '[COMM] link_budget throughput={total_throughput}Mbps margin=+3.2dB frames={_frame_count} status=NOMINAL'
+        attrs:
+          operation: link_budget
+          comms.throughput_mbps:
+            var: total_throughput
+          comms.frame_count:
+            var: _frame_count
+          comms.status: NOMINAL
+    else:
+    - log:
+        level: INFO
+        message: '[COMM] link_budget throughput={total_throughput}Mbps margin=+3.2dB status=NOMINAL'
+        attrs:
+          operation: link_budget
+          comms.throughput_mbps:
+            var: total_throughput
+          comms.status: NOMINAL

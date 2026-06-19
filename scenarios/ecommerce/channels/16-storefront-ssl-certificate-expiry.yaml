@@ -1,0 +1,52 @@
+name: Storefront SSL Certificate Expiry
+subsystem: storefront
+vehicle_section: tls_termination
+error_type: SSL-CERT-EXPIRY
+sensor_type: certificate
+affected_services:
+- storefront-gateway
+cascade_services:
+- order-management
+- payment-processor
+description: TLS certificate for storefront domain expiring soon or expired — browsers will show security warnings and block
+  HTTPS connections
+investigation_notes: |-
+  1. Check storefront-gateway logs for SSL-CERT-EXPIRY — cert_days_remaining={cert_days_remaining} days for domain {cert_domain}.
+  2. Verify current certificate details: `openssl s_client -connect {cert_domain}:443 | openssl x509 -noout -dates` — check NotAfter field.
+  3. Check auto-renewal status: if using Let's Encrypt/ACME, verify the renewal cron job ran successfully in the last 60 days.
+  4. Identify all domains covered by this cert (SANs): `openssl x509 -noout -text | grep DNS:` — all listed domains are affected.
+  5. Payment processor integrations may reject requests if the cert is expired — PCI DSS requires valid TLS for cardholder data environments.
+  6. Emergency renewal: use `certbot renew --force-renewal --cert-name {cert_domain}` or renew via your CA portal and deploy immediately.
+remediation_action: renew_ssl_certificate
+error_message: '[StorefrontGateway] SSL-CERT-EXPIRY: domain={cert_domain} cert_serial={cert_serial} days_remaining={cert_days_remaining}
+  issuer={cert_issuer} san_count={cert_san_count} auto_renewal_status={auto_renewal_status}'
+stack_trace: |-
+  SSLCertificateException: SSL-CERT-EXPIRY
+    at TlsTerminator.validateCertificate(domain={cert_domain})
+    at StorefrontGateway.handleRequest(host={cert_domain})
+  Domain:           {cert_domain}
+  Serial:           {cert_serial}
+  Days remaining:   {cert_days_remaining}
+  Issuer:           {cert_issuer}
+  SANs covered:     {cert_san_count}
+  Auto-renewal:     {auto_renewal_status}
+correlation_attr:
+  key: storefront.cert_expiring
+  value: true
+fault_params:
+  cert_domain: {choice: [shop.example.com, checkout.example.com, api.example.com]}
+  cert_serial: {format: "{n:X}", n: {randint: [10000000, 99999999]}}
+  cert_days_remaining: {randint: [0, 7]}
+  cert_issuer: {choice: ["Let's Encrypt", DigiCert, Comodo]}
+  cert_san_count: {randint: [3, 15]}
+  auto_renewal_status: {choice: [FAILED, NOT_CONFIGURED, EXPIRED]}
+rca_clues:
+  storefront-gateway:
+    tls.cert_days_remaining: {randint: [0, 7]}
+    tls.browser_warning_triggered: true
+  order-management:
+    order.https_errors_count: {randint: [10, 500]}
+    order.mixed_content_warnings: {randint: [5, 50]}
+  payment-processor:
+    payment.pci_tls_validation_failed: true
+    payment.secure_channel_degraded: true

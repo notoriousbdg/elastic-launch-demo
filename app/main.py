@@ -282,8 +282,6 @@ def _inject_theme(html: str, deployment_id: Optional[str] = None) -> str:
 
     kibana_display = KIBANA_PROXY or kibana
 
-    theme = scenario.theme
-
     # Elastic brand CSS — light theme matching the home page. All chaos pages share
     # the same look regardless of scenario. Semantic status colors use Elastic palette.
     css_override = """:root {
@@ -342,7 +340,7 @@ body { font-family: 'Inter', -apple-system, system-ui, sans-serif; }"""
         "SCENARIO_ID_PLACEHOLDER": scenario.scenario_id,
         "NAMESPACE_PLACEHOLDER": scenario.namespace,
         "MISSION_ID_PLACEHOLDER": mission_id,
-        "CHAOS_TITLE_PLACEHOLDER": theme.chaos_title,
+        "CHAOS_TITLE_PLACEHOLDER": "Incident Simulator",
         "KIBANA_URL_PLACEHOLDER": kibana_display,
         "CHANNEL_TIMEOUT_PLACEHOLDER": str(CHANNEL_TIMEOUT),
         "REVENUE_DASHBOARD_CARD_PLACEHOLDER": revenue_dashboard_card,
@@ -499,7 +497,7 @@ async def list_scenarios():
 
 @app.post("/api/scenarios/reload")
 async def reload_scenarios():
-    """Re-scan scenarios/*/scenario.py and reload modules from disk."""
+    """Re-scan scenarios/*/scenario.yaml and reload all scenarios from disk."""
     from scenarios import reload_registry
 
     return reload_registry()
@@ -507,9 +505,8 @@ async def reload_scenarios():
 
 @app.get("/api/scenario")
 async def current_scenario(deployment_id: Optional[str] = None):
-    """Return active scenario metadata and theme."""
+    """Return active scenario metadata."""
     scenario = _get_scenario_for_deployment(deployment_id)
-    theme = scenario.theme
     return {
         "id": scenario.scenario_id,
         "name": scenario.scenario_name,
@@ -526,22 +523,6 @@ async def current_scenario(deployment_id: Optional[str] = None):
                 "description": v["description"],
             }
             for k, v in scenario.channel_registry.items()
-        },
-        "theme": {
-            "bg_primary": theme.bg_primary,
-            "bg_secondary": theme.bg_secondary,
-            "bg_tertiary": theme.bg_tertiary,
-            "accent_primary": theme.accent_primary,
-            "accent_secondary": theme.accent_secondary,
-            "text_primary": theme.text_primary,
-            "text_secondary": theme.text_secondary,
-            "text_accent": theme.text_accent,
-            "status_nominal": theme.status_nominal,
-            "status_warning": theme.status_warning,
-            "status_critical": theme.status_critical,
-            "chaos_title": theme.chaos_title,
-            "font_family": theme.font_family,
-            "font_mono": theme.font_mono,
         },
     }
 

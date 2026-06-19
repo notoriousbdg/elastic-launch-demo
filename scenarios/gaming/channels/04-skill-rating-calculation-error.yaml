@@ -1,0 +1,64 @@
+name: Skill Rating Calculation Error
+subsystem: matchmaking
+vehicle_section: rating_engine
+error_type: MM-SKILL-RATING-DIVERGE
+sensor_type: rating_validator
+affected_services:
+- matchmaking-engine
+- leaderboard-api
+cascade_services:
+- analytics-pipeline
+description: Skill rating calculation produces invalid MMR values due to edge cases in the Elo/Glicko algorithm implementation
+investigation_notes: |-
+  Root cause: a code defect in the Glicko-2 convergence loop — the volatility (sigma) iterative solver does not clamp intermediate values, allowing sigma to diverge when a player's actual score vastly exceeds expected score (e.g., 0.83 vs 0.41). This produces new_mu values outside the valid [0, max_mmr] range.
+  1. Check convergence iterations: if `convergence_i` approaches max (20), the Illinois method is not converging — the tau system constant may be misconfigured.
+  2. Query affected players: `FROM logs WHERE body.text LIKE '*MM-SKILL-RATING-DIVERGE*'` and check how many players have out-of-range MMR in the current season.
+  3. Validate the Glicko-2 implementation against Mark Glickman's reference paper — specifically step 5.1 (volatility estimation) needs a bisection fallback.
+  4. Remediate: issue `reset_skill_ratings` for affected players to recalculate from match history; deploy a hotfix adding sigma clamping (0.3 < sigma < 1.2).
+  5. The current CLAMP action masks the defect — the algorithm must be fixed to prevent incorrect competitive matchmaking downstream.
+remediation_action: reset_skill_ratings
+error_message: '[MM] MM-SKILL-RATING-DIVERGE: player={player_id} mmr={mmr_value} valid_range=[0,{max_mmr}] volatility={volatility}
+  match={match_id}'
+stack_trace: |-
+  === GLICKO-2 CALCULATION TRACE ===
+  player={player_id}  match={match_id}
+  ----------- pre-match state ----------
+    mu (rating)     = 1847.3
+    phi (deviation) = 142.7
+    sigma (vol)     = {volatility}
+    games_in_period = 14
+  ----------- match result -------------
+    opponents       = 5
+    actual_score    = 0.83
+    expected_score  = 0.41
+    k_factor        = 32.0
+  ----------- post-match calc ----------
+    new_mu          = {mmr_value}  <<< OUT OF RANGE [0, {max_mmr}]
+    new_phi         = 187.2
+    new_sigma       = 0.089
+    convergence_i   = 12 iterations (max 20)
+  ----------- action -------------------
+    CLAMP to valid range  FLAG for manual review
+  MM-SKILL-RATING-DIVERGE: player {player_id} mmr {mmr_value} outside bounds
+correlation_attr:
+  key: runtime.glicko_impl
+  value: glicko2-v3.0.1-unclamped
+fault_params:
+  player_id:
+    format: "PLR-{n}"
+    n: {randint: [100000, 999999]}
+  mmr_value: {randint: [-500, 10000]}
+  max_mmr: 5000
+  volatility: {uniform: [0.01, 2.5], round: 3}
+  match_id:
+    format: "MATCH-{n}"
+    n: {randint: [100000, 999999]}
+rca_clues:
+  matchmaking-engine:
+    matchmaking.glicko_convergence_iter: {randint: [12, 20]}
+    matchmaking.sigma_unclamped: true
+  leaderboard-api:
+    leaderboard.out_of_range_players: {randint: [10, 200]}
+    leaderboard.season_integrity: compromised
+  analytics-pipeline:
+    analytics.rating_anomaly_count: {randint: [50, 300]}

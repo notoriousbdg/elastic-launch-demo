@@ -1,0 +1,123 @@
+service: fraud-detector
+sort_order: 6
+cloud_provider: gcp
+cloud_region: us-central1
+cloud_platform: gcp_compute_engine
+cloud_availability_zone: us-central1-a
+subsystem: compliance
+language: python
+entry_endpoints:
+- - /api/v1/fraud/analyze
+  - POST
+emit_fault_logs: true
+kpi_emitter: false
+constants:
+  PATTERNS:
+  - VELOCITY
+  - GEOLOC
+  - AMOUNT
+  - WASH_TRADE
+  - LAYERING
+  - SPOOFING
+  - FRONT_RUNNING
+state:
+  _scans_total:
+    init: 0
+  _last_model_report:
+    init: now
+steps:
+- sample:
+    score:
+      uniform:
+      - 0.01
+      - 0.35
+      round: 3
+- log:
+    level: INFO
+    message: '[COMPL] fraud_scan score={score} decision=ALLOW model=v3.2.1'
+    attrs:
+      operation: fraud_scan
+      fraud.score:
+        var: score
+      fraud.decision: ALLOW
+      fraud.model_version: 3.2.1
+- sample:
+    pattern:
+      choice: PATTERNS
+    matches:
+      randint:
+      - 0
+      - 2
+    pattern_status:
+      expr: '''CLEAR'' if matches == 0 else ''FLAGGED'''
+- log:
+    level: INFO
+    message: '[COMPL] pattern_check pattern={pattern} matches={matches} status={pattern_status}'
+    attrs:
+      operation: pattern_check
+      pattern.name:
+        var: pattern
+      pattern.matches:
+        var: matches
+      pattern.status:
+        var: pattern_status
+- every:
+    seconds: 12
+    state_key: _last_model_report
+    steps:
+    - sample:
+        precision:
+          uniform:
+          - 0.92
+          - 0.99
+          round: 3
+        recall:
+          uniform:
+          - 0.85
+          - 0.95
+          round: 3
+        f1:
+          expr: round(2 * precision * recall / (precision + recall), 3)
+    - log:
+        level: INFO
+        message: '[COMPL] model_performance precision={precision} recall={recall} f1={f1} status=WITHIN_TARGETS'
+        attrs:
+          operation: model_performance
+          model.precision:
+            var: precision
+          model.recall:
+            var: recall
+          model.f1_score:
+            var: f1
+- counter:
+    state_key: _scans_total
+    by: 1
+- metric:
+    name: fraud_detector.scans_total
+    value:
+      var: _scans_total
+    unit: scans
+- sample:
+    fp_rate:
+      if_active:
+        uniform:
+        - 15.0
+        - 50.0
+        round: 2
+      else:
+        uniform:
+        - 0.5
+        - 3.0
+        round: 2
+- metric:
+    name: fraud_detector.false_positive_rate
+    value:
+      var: fp_rate
+    unit: '%'
+- metric:
+    name: fraud_detector.model_latency_ms
+    value:
+      randint:
+      - 5
+      - 50
+    unit: ms

@@ -1,0 +1,98 @@
+service: card-printing-system
+sort_order: 1
+cloud_provider: aws
+cloud_region: us-east-1
+cloud_platform: aws_ec2
+cloud_availability_zone: us-east-1a
+subsystem: manufacturing
+language: java
+topology:
+- - packaging-fulfillment
+  - /api/v1/fulfillment/queue-package
+  - POST
+- - digital-marketplace
+  - /api/v1/marketplace/inventory-update
+  - POST
+entry_endpoints:
+- - /api/v1/printing/queue-status
+  - GET
+- - /api/v1/printing/submit
+  - POST
+db_operations:
+- - SELECT
+  - print_jobs
+  - SELECT job_id, card_design_id, quantity, priority, status FROM print_jobs WHERE status IN ('queued', 'printing') ORDER
+    BY priority DESC
+- - UPDATE
+  - print_jobs
+  - UPDATE print_jobs SET status = ?, completed_at = NOW() WHERE job_id = ?
+emit_fault_logs: true
+kpi_emitter: false
+constants:
+  PRODUCTION_METRICS:
+    print_throughput:
+      name: Print Throughput
+      unit: cards/min
+      nominal_min: 120.0
+      nominal_max: 180.0
+      metric: card_printing.throughput
+    print_queue_depth:
+      name: Print Queue Depth
+      unit: jobs
+      nominal_min: 0.0
+      nominal_max: 50.0
+      metric: card_printing.queue_depth
+    ink_coverage:
+      name: Ink Coverage Accuracy
+      unit: '%'
+      nominal_min: 97.0
+      nominal_max: 100.0
+      metric: card_printing.ink_coverage
+    substrate_temp:
+      name: Substrate Temperature
+      unit: C
+      nominal_min: 22.0
+      nominal_max: 28.0
+      metric: card_printing.substrate_temp
+steps:
+- for_each:
+    in: PRODUCTION_METRICS
+    as:
+    - sensor_key
+    - sensor
+    steps:
+    - sample:
+        raw_value:
+          expr: rand.uniform(sensor['nominal_min'], sensor['nominal_max'])
+        noise:
+          expr: rand.gauss(0, (sensor['nominal_max'] - sensor['nominal_min']) * 0.02)
+        value:
+          if_active:
+            expr: round(raw_value + noise, 2)
+          else:
+            expr: round(max(sensor['nominal_min'], min(sensor['nominal_max'], raw_value + noise)), 2)
+    - metric:
+        name:
+          expr: sensor['metric']
+        value:
+          var: value
+        unit:
+          expr: sensor['unit']
+    - log:
+        level: INFO
+        message: '[PrintController] INFO - {sensor_key}: {value} {sensor[unit]} status=NOMINAL'
+        attrs:
+          operation: production_reading
+          sensor.name:
+            var: sensor_key
+          sensor.value:
+            var: value
+          sensor.unit:
+            expr: sensor['unit']
+          sensor.status: NOMINAL
+- log:
+    level: INFO
+    message: '[PrintController] INFO - production_line_check: all systems nominal throughput=156cards/min'
+    attrs:
+      operation: system_check
+      check.result: PASS

@@ -1,0 +1,152 @@
+service: matching-engine
+sort_order: 2
+cloud_provider: aws
+cloud_region: us-east-1
+cloud_platform: aws_ec2
+cloud_availability_zone: us-east-1b
+subsystem: trade_execution
+language: cpp
+topology:
+- - risk-calculator
+  - /api/v1/risk/position-update
+  - POST
+- - settlement-processor
+  - /api/v1/settlement/initiate
+  - POST
+- - market-data-feed
+  - /api/v1/market/last-price
+  - GET
+entry_endpoints:
+- - /api/v1/engine/health
+  - GET
+db_operations:
+- - UPDATE
+  - order_book
+  - UPDATE order_book SET best_bid = ?, best_ask = ?, last_match_ts = NOW() WHERE instrument = ?
+- - INSERT
+  - trades
+  - INSERT INTO trades (trade_id, instrument, buy_order, sell_order, qty, price, ts) VALUES (?, ?, ?, ?, ?, ?, NOW())
+emit_fault_logs: true
+kpi_emitter: false
+constants:
+  INSTRUMENTS:
+  - AAPL
+  - GOOGL
+  - MSFT
+  - AMZN
+  - TSLA
+  - JPM
+  - GS
+state:
+  _matches_total:
+    init: 0
+  _last_book_snapshot:
+    init: now
+steps:
+- sample:
+    instrument:
+      choice: INSTRUMENTS
+    trade_price:
+      uniform:
+      - 100.0
+      - 400.0
+      round: 2
+    trade_qty:
+      randint:
+      - 100
+      - 2000
+    trade_latency_us:
+      randint:
+      - 5
+      - 80
+- counter:
+    state_key: _matches_total
+    by: 1
+- log:
+    level: INFO
+    message: '[ME] trade_match instrument={instrument} qty={trade_qty} price=${trade_price} latency_us={trade_latency_us}
+      status=FILLED'
+    attrs:
+      operation: trade_match
+      trade.instrument:
+        var: instrument
+      trade.price:
+        var: trade_price
+      trade.quantity:
+        var: trade_qty
+      trade.latency_us:
+        var: trade_latency_us
+      trade.status: FILLED
+- sample:
+    book_instrument:
+      choice: INSTRUMENTS
+    bid_levels:
+      randint:
+      - 50
+      - 200
+    ask_levels:
+      randint:
+      - 50
+      - 200
+    spread_bps:
+      uniform:
+      - 0.5
+      - 3.0
+      round: 2
+- log:
+    level: INFO
+    message: '[ME] book_depth instrument={book_instrument} bid_levels={bid_levels} ask_levels={ask_levels} spread_bps={spread_bps}'
+    attrs:
+      operation: book_depth
+      book.instrument:
+        var: book_instrument
+      book.bid_levels:
+        var: bid_levels
+      book.ask_levels:
+        var: ask_levels
+      book.spread_bps:
+        var: spread_bps
+- every:
+    seconds: 8
+    state_key: _last_book_snapshot
+    steps:
+    - sample:
+        total_instruments:
+          expr: len(INSTRUMENTS)
+    - log:
+        level: INFO
+        message: '[ME] book_snapshot instruments={total_instruments} total_matches={_matches_total} status=NOMINAL'
+        attrs:
+          operation: book_snapshot
+          snapshot.instrument_count:
+            var: total_instruments
+          snapshot.total_matches:
+            var: _matches_total
+          snapshot.status: NOMINAL
+- sample:
+    match_latency:
+      if_active:
+        randint:
+        - 500
+        - 50000
+      else:
+        randint:
+        - 5
+        - 80
+- metric:
+    name: matching_engine.match_latency_us
+    value:
+      var: match_latency
+    unit: us
+- metric:
+    name: matching_engine.matches_total
+    value:
+      var: _matches_total
+    unit: trades
+- metric:
+    name: matching_engine.order_book_depth
+    value:
+      randint:
+      - 500
+      - 5000
+    unit: levels

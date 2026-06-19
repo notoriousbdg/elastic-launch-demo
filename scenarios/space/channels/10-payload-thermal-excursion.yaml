@@ -1,0 +1,51 @@
+name: Payload Thermal Excursion
+subsystem: payload
+vehicle_section: payload_bay
+error_type: PLD-THERMAL-EXCURSION
+sensor_type: thermal
+affected_services:
+- payload-monitor
+- sensor-validator
+cascade_services:
+- mission-control
+description: Payload bay temperature outside safe operating range
+investigation_notes: 'Root cause: coolant loop flow restriction or heater control circuit stuck-on condition. Coolant flow
+  at 2.4L/min is below nominal 3.2L/min — check pump outlet pressure and look for air bubbles in the coolant loop (cavitation
+  from improper ground fill). Verify MLI (multi-layer insulation) blanket integrity — a torn or displaced blanket on the sun-facing
+  side causes rapid thermal excursion. Cross-reference with payload bay zones B/C/D — if only one zone affected, suspect local
+  heater controller failure rather than loop-wide issue. Remediation: increase coolant pump speed (PLD_COOLANT_FLOW 4.0),
+  disable zone heater if stuck-on (PLD_HEATER zone OFF), and monitor temperature convergence over 5-minute window. If MLI
+  damage confirmed, notify payload integration team for EVA inspection.'
+remediation_action: reset_payload_thermal
+error_message: '[PLD] PLD-THERMAL-EXCURSION: zone={zone} temp={temp}C safe_max={safe_max}C delta=+{deviation}C'
+stack_trace: |-
+  == PAYLOAD CONTROLLER STATUS == THERMAL MANAGEMENT ==
+  TIMESTAMP: MET+00:04:16.002 | FRAME: 0x4A38 | SEQ: 18451
+  ---------------------------------------------------------------
+  ZONE    TEMP     SAFE_MIN   SAFE_MAX   STATUS
+  {zone}       {temp}C   {safe_min}C     {safe_max}C     **EXCURSION**
+  B       22.1C    -10.0C     45.0C      NOMINAL
+  C       19.8C    -10.0C     45.0C      NOMINAL
+  D       24.3C    -10.0C     45.0C      NOMINAL
+  ---------------------------------------------------------------
+  COOLANT_FLOW: 2.4L/min | HEATER_STATE: OFF | MLI_STATUS: INTACT
+  PLD-THERMAL-EXCURSION: Zone {zone} temperature {temp}C exceeds safe max {safe_max}C
+  ACTION: Increase coolant flow rate, verify MLI blanket integrity
+correlation_attr:
+  key: runtime.jvm_flags
+  value: -XX:+UseZGC -Xmx2g
+fault_params:
+  zone: {choice: [A, B, C, D]}
+  temp: {uniform: [55.0, 85.0], round: 1}
+  safe_min: -10.0
+  safe_max: 45.0
+  deviation: {uniform: [3.0, 12.0], round: 1}
+rca_clues:
+  payload-monitor:
+    payload.coolant_flow_lpm: {uniform: [1.8, 2.6], round: 1}
+    payload.heater_state: {choice: [OFF, STUCK_ON]}
+  sensor-validator:
+    validation.thermal_zone_affected: {choice: [A, B]}
+    validation.mli_status: {choice: [INTACT, SUSPECT]}
+  mission-control:
+    upstream.degraded_subsystem: payload

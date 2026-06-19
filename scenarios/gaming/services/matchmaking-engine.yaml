@@ -1,0 +1,161 @@
+service: matchmaking-engine
+sort_order: 2
+cloud_provider: aws
+cloud_region: us-east-1
+cloud_platform: aws_ec2
+cloud_availability_zone: us-east-1b
+subsystem: matchmaking
+language: go
+topology:
+- - game-server
+  - /api/v1/server/allocate
+  - POST
+- - auth-gateway
+  - /api/v1/auth/player-profile
+  - GET
+- - leaderboard-api
+  - /api/v1/leaderboard/mmr
+  - GET
+entry_endpoints:
+- - /api/v1/matchmaking/queue
+  - POST
+db_operations:
+- - SELECT
+  - player_ratings
+  - SELECT player_id, mmr, volatility, games_played FROM player_ratings WHERE player_id = ? AND season = ?
+- - UPDATE
+  - player_ratings
+  - UPDATE player_ratings SET mmr = ?, volatility = ?, games_played = games_played + 1 WHERE player_id = ? AND season = ?
+emit_fault_logs: true
+kpi_emitter: false
+constants:
+  QUEUES:
+  - ranked-solo
+  - ranked-duo
+  - casual-squad
+  - tournament-5v5
+  TEAM_SIZES:
+  - 1
+  - 2
+  - 4
+  - 5
+state:
+  _matches_formed:
+    init: 0
+  _last_queue_report:
+    init: now
+steps:
+- counter:
+    state_key: _matches_formed
+    by: 1
+- sample:
+    match_queue:
+      choice: QUEUES
+    team_size:
+      choice: TEAM_SIZES
+    avg_mmr:
+      randint:
+      - 800
+      - 3500
+    mmr_spread:
+      randint:
+      - 20
+      - 200
+    wait_s:
+      uniform:
+      - 5.0
+      - 45.0
+      round: 1
+- log:
+    level: INFO
+    message: '[MM] match_formed pool={match_queue} teams={team_size}v{team_size} avg_mmr={avg_mmr} spread={mmr_spread} wait={wait_s}s
+      status=READY'
+    attrs:
+      operation: match_formed
+      match.queue:
+        var: match_queue
+      match.team_size:
+        var: team_size
+      match.avg_mmr:
+        var: avg_mmr
+      match.mmr_spread:
+        var: mmr_spread
+      match.wait_seconds:
+        var: wait_s
+- sample:
+    queue_name:
+      choice: QUEUES
+    queue_depth_status:
+      randint:
+      - 100
+      - 2000
+    queue_avg_wait:
+      uniform:
+      - 5.0
+      - 35.0
+      round: 1
+- log:
+    level: INFO
+    message: '[MM] queue_status pool={queue_name} depth={queue_depth_status} avg_wait={queue_avg_wait}s dequeue_rate=12/s'
+    attrs:
+      operation: queue_status
+      queue.name:
+        var: queue_name
+      queue.depth:
+        var: queue_depth_status
+      queue.avg_wait_s:
+        var: queue_avg_wait
+- every:
+    seconds: 10
+    state_key: _last_queue_report
+    steps:
+    - sample:
+        total_waiting:
+          randint:
+          - 500
+          - 5000
+    - log:
+        level: INFO
+        message: '[MM] summary matches_formed={_matches_formed} total_waiting={total_waiting} pools=4 avg_quality=0.87'
+        attrs:
+          operation: queue_summary
+          summary.matches_formed:
+            var: _matches_formed
+          summary.total_waiting:
+            var: total_waiting
+- sample:
+    queue_depth:
+      if_active:
+        randint:
+        - 8000
+        - 50000
+      else:
+        randint:
+        - 200
+        - 3000
+    avg_wait:
+      if_active:
+        uniform:
+        - 60.0
+        - 300.0
+        round: 1
+      else:
+        uniform:
+        - 8.0
+        - 30.0
+        round: 1
+- metric:
+    name: matchmaking.queue_depth
+    value:
+      var: queue_depth
+    unit: players
+- metric:
+    name: matchmaking.avg_wait_time_s
+    value:
+      var: avg_wait
+    unit: s
+- metric:
+    name: matchmaking.matches_formed
+    value:
+      var: _matches_formed
+    unit: matches

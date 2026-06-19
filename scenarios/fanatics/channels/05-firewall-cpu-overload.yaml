@@ -1,0 +1,56 @@
+name: Firewall CPU Overload
+subsystem: security
+vehicle_section: perimeter_defense
+error_type: SYSTEM-cpu-critical
+sensor_type: cpu_utilization
+affected_services:
+- firewall-gateway
+- network-controller
+cascade_services:
+- dns-dhcp-service
+- digital-marketplace
+description: Firewall data plane CPU exceeding safe operating threshold
+investigation_notes: |-
+  1. Run `show running resource-monitor` to see per-DP CPU, packet buffer, and session rate in real time.
+  2. Identify offending policy: `show rule-hit-count` — rules with high hit counts and complex App-ID or content inspection drive DP CPU.
+  3. Check threat prevention load: `show threat statistics` — if IPS/AV signature matching is spiking, a signature update or new attack pattern may be the cause.
+  4. Review decryption overhead: `show counter global filter aspect dp delta yes | match ssl` — SSL decryption is the #1 DP CPU consumer.
+  5. Consider bypassing decryption for trusted high-bandwidth flows (e.g., Windows Update, CDN traffic) with a no-decrypt rule.
+  6. If CPU remains critical, enable hardware offload for IPSec tunnels and reduce logging verbosity on high-traffic rules.
+remediation_action: restart_management_plane
+error_message: 1,2025/01/15 14:32:01,007200001234,SYSTEM,general,0,SYSTEM-cpu-critical,Data plane CPU at {fw_dp_cpu_pct}%
+  (threshold {fw_cpu_threshold}%), management plane {fw_mgmt_cpu_pct}%, packet buffer {fw_buffer_pct}%, active rules {fw_policy_count}
+stack_trace: |-
+  > show running resource-monitor
+  Resource utilization (observed over last 60 seconds):
+    Data Plane CPU Utilization:
+      DP-0:  {fw_dp_cpu_pct}%  (threshold: {fw_cpu_threshold}%)
+      DP-1:  {fw_dp_cpu_pct}%
+    Management Plane CPU: {fw_mgmt_cpu_pct}%
+    Packet Buffer:        {fw_buffer_pct}%
+    Active Security Rules: {fw_policy_count}
+    Session Rate:          8,452 sessions/sec
+    Throughput:            4.2 Gbps
+    Packet Rate:           892,341 pps
+correlation_attr:
+  key: deployment.threat_sig_ver
+  value: content-8845-8432-experimental
+fault_params:
+  fw_dp_cpu_pct: {uniform: [85.0, 99.0], round: 1}
+  fw_cpu_threshold: 80
+  fw_mgmt_cpu_pct: {uniform: [60.0, 90.0], round: 1}
+  fw_buffer_pct: {uniform: [75.0, 98.0], round: 1}
+  fw_policy_count: {randint: [800, 2500]}
+rca_clues:
+  firewall-gateway:
+    firewall.dp_cpu_offender: {choice: [ssl-decrypt, threat-prevention, url-filtering]}
+    firewall.packet_buffer_pct: {uniform: [80, 98], round: 1}
+  network-controller:
+    network.throughput_degraded: true
+    network.latency_spike_ms: {randint: [50, 500]}
+  dns-dhcp-service:
+    dns.query_timeout_pct: {uniform: [15, 60], round: 1}
+    dns.upstream_latency_ms: {randint: [200, 2000]}
+  digital-marketplace:
+    marketplace.page_load_ms: {randint: [3000, 15000]}
+    marketplace.ssl_handshake_failures: {randint: [10, 100]}

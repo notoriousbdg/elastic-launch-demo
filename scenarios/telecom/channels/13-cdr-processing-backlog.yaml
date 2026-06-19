@@ -1,0 +1,64 @@
+name: CDR Processing Backlog
+subsystem: billing
+vehicle_section: cdr_pipeline
+error_type: BSS-CDR-BACKLOG
+sensor_type: cdr_processing
+affected_services:
+- bss-billing
+- subscriber-db
+cascade_services:
+- notification-service
+description: Call Detail Record mediation pipeline backlogged causing delayed billing and usage reporting
+investigation_notes: |
+  1. Check CDR ingestion vs processing rate — ingestion at high rate with processing bottlenecked creates a growing deficit. Backlog grows each minute the deficit persists.
+  2. CDR mediation involves: raw CDR ingestion → format normalization → rating → account posting → invoice generation. Identify which stage is the bottleneck.
+  3. Rating engine performance — complex tariff plans (Enterprise multi-APN, MVNO wholesale) take 10x longer to rate than Consumer plans. Check rating engine CPU utilization.
+  4. Subscriber-db writes for balance updates are queuing — CDR processing writes real-time usage data to subscriber profiles. Large backlog causes stale usage data visible to customers.
+  5. Enterprise SLA reporting depends on timely CDR processing — delays beyond 30min breach reporting SLAs. Notify enterprise account managers if backlog exceeds 15min.
+remediation_action: scale_cdr_workers
+error_message: '[BSS] BSS-CDR-BACKLOG: queue_depth={cdr_queue_depth} ingestion_rate={cdr_ingestion_rate}/min processing_rate={cdr_processing_rate}/min oldest_cdr_min={cdr_oldest_min} backlog_gb={cdr_backlog_gb}'
+stack_trace: |
+  === CDR PROCESSING PIPELINE ===
+  pipeline=meridian-cdr-mediation  mode=real-time
+  --- PIPELINE STAGES ---
+    STAGE                STATUS      RATE        QUEUE
+    raw_ingestion        OK          {cdr_ingestion_rate}/min   ---
+    format_normalize     OK          {cdr_ingestion_rate}/min   200
+    rating_engine        BACKLOGGED  {cdr_processing_rate}/min  {cdr_queue_depth}  <<< BOTTLENECK
+    account_posting      WAITING     ---         ---
+    invoice_generation   WAITING     ---         ---
+  --- BACKLOG ANALYSIS ---
+    deficit={cdr_deficit}/min  backlog_size={cdr_backlog_gb}GB
+    oldest_unprocessed={cdr_oldest_min}min  sla_threshold=30min
+    enterprise_reporting=DELAYED  mvno_wholesale=DELAYED
+  ACTION: scale_rating_workers=true  notify_enterprise=true  alert=BSS-CDR-BACKLOG
+infrastructure_events:
+- body: '[AzureMonitor] CDRProcessingBacklog: queue_depth=50000 processing_rate=200/min normal_rate=5000/min mediation_pipeline=STALLED region=westeurope'
+  severity: ERROR
+  event_name: azure.monitor.CDRProcessingBacklog
+  service: bss-billing
+  attributes:
+    cloud.provider: azure
+    cloud.service: monitor
+    azure.health.status: Critical
+    infrastructure.source: AzureMonitor
+correlation_attr:
+  key: billing.rating_engine_build
+  value: rating-v4.2.1-retrain
+fault_params:
+  cdr_queue_depth: {randint: [50000, 200000]}
+  cdr_ingestion_rate: {randint: [2000, 5000]}
+  cdr_processing_rate: {randint: [500, 1500]}
+  cdr_oldest_min: {randint: [15, 120]}
+  cdr_backlog_gb: {uniform: [2.0, 20.0], round: 1}
+  cdr_deficit: {randint: [500, 3500]}
+rca_clues:
+  bss-billing:
+    billing.cdr_queue_depth: {randint: [50000, 200000]}
+    billing.rating_engine_cpu_pct: {randint: [90, 99]}
+  subscriber-db:
+    db.balance_update_queue: {randint: [5000, 20000]}
+    db.stale_usage_data: true
+  notification-service:
+    notification.usage_alert_delayed: true
+    notification.enterprise_reporting_blocked: true

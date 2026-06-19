@@ -250,12 +250,12 @@ elastic-launch-demo/
 │       ├── twilio_handler.py        # SMS + voice via Twilio
 │       └── slack_handler.py         # Slack webhooks
 ├── scenarios/
-│   ├── base.py                      # BaseScenario ABC, UITheme
-│   ├── __init__.py                  # ScenarioRegistry with auto-discovery
+│   ├── base.py                      # BaseScenario ABC
+│   ├── __init__.py                  # ScenarioRegistry — discovers scenarios/*/scenario.yaml
 │   ├── space/                       # NOVA-7 Space Mission
-│   │   ├── scenario.py
-│   │   ├── executive_kpis.py
-│   │   └── services/
+│   │   ├── scenario.yaml            # identity, infra, agent, KPIs, trace attrs
+│   │   ├── channels/                # 20 fault channel YAML files
+│   │   └── services/                # 9 per-service YAML files (identity + telemetry DSL)
 │   ├── fanatics/                    # Fanatics Collectibles (sports streaming)
 │   ├── financial/                   # Financial Trading Platform
 │   ├── healthcare/                  # Healthcare Systems

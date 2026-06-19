@@ -1,0 +1,103 @@
+service: analytics-pipeline
+sort_order: 9
+cloud_provider: azure
+cloud_region: eastus
+cloud_platform: azure_vm
+cloud_availability_zone: eastus-1
+subsystem: analytics
+language: python
+topology:
+- - ad-platform
+  - /api/v1/ads/metrics-refresh
+  - POST
+entry_endpoints:
+- - /api/v1/analytics/events
+  - POST
+- - /api/v1/analytics/query
+  - POST
+db_operations:
+- - INSERT
+  - analytics_events
+  - INSERT INTO analytics_events (event_type, user_id, session_id, payload, ingested_at) VALUES (?, ?, ?, ?, NOW())
+- - SELECT
+  - analytics_aggregates
+  - SELECT metric_name, value, dimensions, window_start, window_end FROM analytics_aggregates WHERE metric_name = ? AND window_start
+    >= ?
+emit_fault_logs: true
+kpi_emitter: false
+constants:
+  STAGES:
+  - ingest
+  - transform
+  - aggregate
+  - index
+steps:
+- sample:
+    events_per_sec:
+      uniform:
+      - 25000.0
+      - 120000.0
+      round: 1
+    pipeline_lag_ms:
+      uniform:
+      - 200.0
+      - 2500.0
+      round: 1
+    dashboards_active:
+      randint:
+      - 12
+      - 85
+    consumer_lag_events:
+      randint:
+      - 0
+      - 5000
+- metric:
+    name: analytics.events_per_sec
+    value:
+      var: events_per_sec
+    unit: events/s
+- metric:
+    name: analytics.pipeline_lag_ms
+    value:
+      var: pipeline_lag_ms
+    unit: ms
+- metric:
+    name: analytics.dashboards_active
+    value:
+      var: dashboards_active
+    unit: dashboards
+- metric:
+    name: analytics.consumer_lag_events
+    value:
+      var: consumer_lag_events
+    unit: events
+- log:
+    level: INFO
+    message: analytics.health events_per_sec={events_per_sec} lag_ms={pipeline_lag_ms} dashboards={dashboards_active} consumer_lag={consumer_lag_events}
+    attrs:
+      operation: analytics_health
+      analytics.events_per_sec:
+        var: events_per_sec
+      analytics.pipeline_lag_ms:
+        var: pipeline_lag_ms
+      analytics.dashboards_active:
+        var: dashboards_active
+      analytics.consumer_lag_events:
+        var: consumer_lag_events
+- sample:
+    stage:
+      choice: STAGES
+    stage_throughput:
+      uniform:
+      - 20000.0
+      - 100000.0
+      round: 1
+- log:
+    level: INFO
+    message: analytics.stage_health stage={stage} throughput={stage_throughput} lag_ms={pipeline_lag_ms}
+    attrs:
+      operation: stage_health
+      analytics.current_stage:
+        var: stage
+      analytics.stage_throughput:
+        var: stage_throughput

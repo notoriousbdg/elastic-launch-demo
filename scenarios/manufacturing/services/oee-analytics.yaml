@@ -1,0 +1,158 @@
+service: oee-analytics
+sort_order: 4
+cloud_provider: gcp
+cloud_region: us-central1
+cloud_platform: gcp_compute_engine
+cloud_availability_zone: us-central1-a
+subsystem: oee
+language: python
+topology:
+- - mes-controller
+  - /api/v1/mes/oee-feedback
+  - POST
+- - shopfloor-portal
+  - /api/v1/portal/oee-tile
+  - POST
+entry_endpoints:
+- - /api/v1/oee/calculate
+  - POST
+db_operations:
+- - SELECT
+  - shift_summary
+  - SELECT line_id, shift, availability_pct, performance_pct, quality_pct FROM shift_summary WHERE shift_date = CURRENT_DATE
+- - INSERT
+  - oee_calculations
+  - INSERT INTO oee_calculations (line_id, shift, window_start, availability, performance, quality, oee) VALUES (?, ?, ?,
+    ?, ?, ?, ?)
+emit_fault_logs: true
+kpi_emitter: true
+constants:
+  LINES:
+  - LINE-01
+  - LINE-02
+  - LINE-03
+  - LINE-04
+  - LINE-05
+  SHIFTS:
+  - A
+  - B
+  - C
+state:
+  _calculations_total:
+    init: 0
+  _last_shift_report:
+    init: now
+steps:
+- sample:
+    line:
+      choice: LINES
+    availability:
+      uniform:
+      - 82.0
+      - 96.0
+      round: 1
+    performance:
+      uniform:
+      - 85.0
+      - 98.0
+      round: 1
+    quality:
+      uniform:
+      - 94.0
+      - 99.5
+      round: 1
+- sample:
+    oee:
+      expr: round(availability * performance * quality / 10000, 1)
+- log:
+    level: INFO
+    message: '[OEE] oee_calc line={line} availability={availability}% performance={performance}% quality={quality}% oee={oee}%'
+    attrs:
+      operation: oee_calc
+      oee.line:
+        var: line
+      oee.availability_pct:
+        var: availability
+      oee.performance_pct:
+        var: performance
+      oee.quality_pct:
+        var: quality
+      oee.overall_pct:
+        var: oee
+- sample:
+    tp_line:
+      choice: LINES
+    units:
+      randint:
+      - 40
+      - 220
+    target:
+      randint:
+      - 180
+      - 250
+- sample:
+    attainment:
+      expr: round(units / target * 100, 1)
+- log:
+    level: INFO
+    message: '[OEE] throughput_window line={tp_line} units={units} target={target} attainment_pct={attainment}'
+    attrs:
+      operation: throughput_window
+      oee.line:
+        var: tp_line
+      oee.units_produced:
+        var: units
+      oee.target_units:
+        var: target
+- every:
+    seconds: 10
+    state_key: _last_shift_report
+    steps:
+    - sample:
+        shift:
+          choice: SHIFTS
+        shift_line:
+          choice: LINES
+        downtime:
+          randint:
+          - 2
+          - 32
+    - log:
+        level: INFO
+        message: '[OEE] shift_summary shift={shift} line={shift_line} downtime_min={downtime} status=ON_TARGET'
+        attrs:
+          operation: shift_summary
+          oee.shift:
+            var: shift
+          oee.line:
+            var: shift_line
+          oee.unplanned_downtime_min:
+            var: downtime
+- counter:
+    state_key: _calculations_total
+    by: 1
+- metric:
+    name: oee.calculations_total
+    value:
+      var: _calculations_total
+    unit: calcs
+- metric:
+    name: oee.cache_hit_rate_pct
+    value:
+      uniform:
+      - 82.0
+      - 98.5
+      round: 1
+    unit: '%'
+- metric:
+    name: oee.calc_latency_ms
+    value:
+      if_active:
+        randint:
+        - 800
+        - 6500
+      else:
+        randint:
+        - 40
+        - 280
+    unit: ms

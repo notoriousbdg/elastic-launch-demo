@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
-import importlib
 import logging
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+import yaml
+
+from scenarios.yaml_scenario import load_yaml_scenario
 
 if TYPE_CHECKING:
     from scenarios.base import BaseScenario
@@ -34,27 +37,25 @@ def _evict_scenario_modules() -> None:
 
 
 def _discover_impl() -> list[dict[str, str]]:
-    """Scan scenarios/*/scenario.py and populate _registry. Returns load errors."""
+    """Scan scenarios/*/scenario.yaml and populate _registry. Returns load errors."""
     errors: list[dict[str, str]] = []
 
-    for scenario_file in sorted(_SCENARIOS_DIR.glob("*/scenario.py")):
+    for scenario_file in sorted(_SCENARIOS_DIR.glob("*/scenario.yaml")):
         pkg = scenario_file.parent.name
-        mod_path = f"scenarios.{pkg}.scenario"
         try:
-            mod = importlib.import_module(mod_path)
-            scenario = mod.scenario  # Each module exposes a `scenario` instance
+            scenario = load_yaml_scenario(scenario_file.parent)
             _registry[scenario.scenario_id] = scenario
             logger.debug("Registered scenario: %s", scenario.scenario_id)
-        except (ImportError, AttributeError, SyntaxError) as e:
+        except (OSError, KeyError, yaml.YAMLError) as e:
             msg = str(e)
-            logger.warning("Scenario %s not available: %s", mod_path, msg)
+            logger.warning("Scenario %s not available: %s", pkg, msg)
             errors.append({"package": pkg, "error": msg})
 
     return errors
 
 
 def _discover(force: bool = False) -> list[dict[str, str]]:
-    """Auto-discover all scenario modules under scenarios/*/scenario.py."""
+    """Auto-discover all scenarios under scenarios/*/scenario.yaml."""
     global _loaded
     if _loaded and not force:
         return []
@@ -68,7 +69,7 @@ def _discover(force: bool = False) -> list[dict[str, str]]:
 
 
 def reload_registry() -> dict[str, Any]:
-    """Re-scan the filesystem and reload all scenario modules from disk."""
+    """Re-scan the filesystem and reload all scenarios from disk."""
     global _loaded
 
     before_ids = set(_registry.keys())

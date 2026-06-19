@@ -1,0 +1,64 @@
+name: Identity DB Replication Lag
+subsystem: database
+vehicle_section: identity_data
+error_type: DB-REPLICATION-LAG
+sensor_type: replication
+affected_services:
+- identity-db
+- auth-service
+cascade_services:
+- api-gateway
+description: Azure PostgreSQL cross-region replication lag causing stale authentication reads and session failures
+investigation_notes: |
+  1. Check Azure PostgreSQL replication metrics — replica lag exceeding 5000ms causes stale session reads where auth-service validates expired tokens as active.
+  2. WAL replay rate deficit indicates the replica cannot keep up with write throughput. Check disk IOPS saturation on the replica: az postgres flexible-server show --name identity-db-replica.
+  3. Auth-service reads from replica for session validation — stale reads cause 30% of sessions to appear invalid, triggering unnecessary re-authentication storms on the primary.
+  4. Route all reads to primary immediately: UPDATE pg_settings SET setting='primary' WHERE name='read_routing'. This increases primary load but prevents stale authentication data.
+  5. Scale replica compute tier: az postgres flexible-server update --sku-name Standard_E4s_v3 to increase IOPS capacity and reduce WAL replay deficit.
+remediation_action: failover_identity_db
+error_message: '[DB] DB-REPLICATION-LAG: lag_ms={repl_lag_ms} max_ms={repl_max_ms} replica={repl_node} pending_txns={repl_pending_txns} stale_reads_pct={stale_reads_pct}%'
+stack_trace: |
+  === IDENTITY DB REPLICATION STATUS ===
+  cluster=identity-db  engine=Azure_PostgreSQL_15
+  --- REPLICATION TOPOLOGY ---
+    NODE                ROLE        LAG_MS    STATUS
+    identity-db-primary PRIMARY     0         OK
+    identity-db-replica REPLICA     {repl_lag_ms}     BEHIND  <<< ALERT
+  --- LAG ANALYSIS ---
+    current_lag={repl_lag_ms}ms  max_allowed={repl_max_ms}ms  breach=true
+    pending_txns={repl_pending_txns}  wal_send_rate=8MB/s  wal_replay_rate=5MB/s
+    disk_iops=SATURATED  cpu_replica=91%
+  --- AUTH IMPACT ---
+    stale_session_reads={stale_reads_pct}%  invalid_token_rate=elevated
+    reauth_storm_risk=HIGH  read_routing=ROUND_ROBIN
+  ACTION: route_reads_primary=true  scale_replica=true  alert=DB-REPLICATION-LAG
+infrastructure_events:
+- body: '[AzureHealth] ReplicationLagExceeded: resource=identity-db-replica lag_ms=15000 threshold_ms=5000 region=westeurope cause=IOPS_SATURATION'
+  severity: WARN
+  event_name: azure.health.ReplicationLagExceeded
+  service: identity-db
+  attributes:
+    cloud.provider: azure
+    cloud.service: postgresql
+    azure.health.status: Degraded
+    azure.health.cause: IOPS_SATURATION
+    infrastructure.source: AzureHealth
+correlation_attr:
+  key: infra.azure_pg_replica_sku
+  value: flex-replica-v1.2.0-rc1
+fault_params:
+  repl_lag_ms: {randint: [5000, 30000]}
+  repl_max_ms: 3000
+  repl_node: identity-db-replica
+  repl_pending_txns: {randint: [5000, 50000]}
+  stale_reads_pct: {uniform: [20.0, 40.0], round: 1}
+rca_clues:
+  identity-db:
+    db.replication_lag_ms: {randint: [5000, 30000]}
+    db.wal_replay_deficit_pct: {uniform: [20.0, 50.0], round: 0}
+  auth-service:
+    auth.stale_session_reads_pct: {uniform: [20.0, 40.0], round: 1}
+    auth.invalid_token_false_positive: true
+  api-gateway:
+    gateway.auth_failure_rate: {uniform: [0.1, 0.3], round: 2}
+    gateway.reauth_storm_risk: HIGH

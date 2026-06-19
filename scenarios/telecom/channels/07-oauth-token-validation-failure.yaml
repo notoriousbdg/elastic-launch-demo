@@ -1,0 +1,68 @@
+name: OAuth Token Validation Failure
+subsystem: authentication
+vehicle_section: auth_pipeline
+error_type: AUTH-TOKEN-INVALID
+sensor_type: token_validation
+affected_services:
+- auth-service
+- identity-db
+cascade_services:
+- api-gateway
+- activation-service
+description: OAuth2 token validation failing due to JWKS key rotation mismatch between auth-service and identity provider
+investigation_notes: |
+  1. Check JWKS endpoint response — if the identity provider rotated signing keys but auth-service cached the old JWKS, all token validations fail with INVALID_SIGNATURE. Verify: curl https://idp.meridian.eu/.well-known/jwks.json.
+  2. Auth-service JWKS cache TTL is 3600s — if keys rotated mid-TTL, stale keys are used for validation. Force cache refresh: POST /api/v1/auth/jwks/refresh on auth-service.
+  3. Check clock skew between auth-service and identity-db — token expiry validation is sensitive to clock drift. NTP sync status: timedatectl show | grep NTPSynchronized.
+  4. Review token issuer claim (iss) — multiple identity providers (internal, Azure AD, MVNO partner) may have different JWKS endpoints. Ensure all issuers are registered in auth-service config.
+  5. Impact: all API requests through api-gateway require valid tokens. Token validation failures cause 401 responses, blocking all activation and provisioning operations.
+remediation_action: refresh_jwks_cache
+error_message: '[AUTH] AUTH-TOKEN-INVALID: issuer={token_issuer} error={token_error} cache_age_s={jwks_cache_age_s} kid={token_kid} affected_requests={auth_affected_requests}'
+stack_trace: |
+  === OAUTH TOKEN VALIDATION FAILURE ===
+  issuer={token_issuer}  kid={token_kid}
+  --- VALIDATION PIPELINE ---
+    STEP                    STATUS      DETAIL
+    token_parse             COMPLETE    JWT format valid
+    issuer_check            COMPLETE    issuer={token_issuer}
+    jwks_lookup             COMPLETE    cache_age={jwks_cache_age_s}s
+    signature_verify        FAILED      {token_error}  <<< MISMATCH
+    claims_validate         SKIPPED     ---
+    scope_check             SKIPPED     ---
+  --- JWKS STATUS ---
+    cache_ttl=3600s  cache_age={jwks_cache_age_s}s  keys_cached=2
+    idp_keys_current=3  mismatch=true  rotation_detected=true
+    affected_requests={auth_affected_requests}  reject_rate=100%
+  ACTION: force_jwks_refresh=true  clear_token_cache=true  alert=AUTH-TOKEN-INVALID
+infrastructure_events:
+- body: '[AzureHealth] TokenValidationDegraded: resource=auth-service error_rate=45% jwks_cache=STALE provider=AzureAD region=westeurope'
+  severity: WARN
+  event_name: azure.health.TokenValidationDegraded
+  service: auth-service
+  attributes:
+    cloud.provider: azure
+    cloud.service: active_directory
+    azure.health.status: Degraded
+    infrastructure.source: AzureHealth
+correlation_attr:
+  key: auth.jwks_cache_version
+  value: jwks-v3.1.0-stale
+fault_params:
+  token_issuer: {choice: ['https://idp.meridian.eu', 'https://login.microsoftonline.com/meridian', 'https://auth.mvno-partner.eu']}
+  token_error: {choice: [INVALID_SIGNATURE, KEY_NOT_FOUND, TOKEN_EXPIRED, ISSUER_MISMATCH]}
+  jwks_cache_age_s: {randint: [3000, 7200]}
+  token_kid: {format: "kid-{n}", n: {randint: [1000, 9999]}}
+  auth_affected_requests: {randint: [500, 5000]}
+rca_clues:
+  auth-service:
+    auth.jwks_cache_age_s: {randint: [3000, 7200]}
+    auth.key_rotation_detected: true
+  identity-db:
+    db.token_lookup_failures: {randint: [100, 500]}
+    db.cache_miss_rate: {uniform: [0.8, 1.0], round: 2}
+  api-gateway:
+    gateway.401_rate: {uniform: [0.5, 1.0], round: 2}
+    gateway.auth_bypass: false
+  activation-service:
+    activation.auth_blocked: true
+    activation.queue_depth: {randint: [500, 2000]}

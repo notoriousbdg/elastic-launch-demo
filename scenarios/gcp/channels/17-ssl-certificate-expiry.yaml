@@ -1,0 +1,52 @@
+name: SSL Certificate Expiry
+subsystem: traffic_management
+vehicle_section: ssl_termination
+error_type: LB-SSL-CERT-EXPIRY
+sensor_type: certificate
+affected_services:
+- cloud-load-balancer
+- cloud-cdn-service
+cascade_services:
+- cloud-armor-waf
+description: Google-managed SSL certificate approaching or past expiration
+investigation_notes: |-
+  Root cause: Google-managed SSL certificate renewal has failed. The managed status FAILED_NOT_VISIBLE means Google's CA cannot reach the domain for DCV (Domain Control Validation), FAILED_CAA_CHECKING means CAA DNS records do not permit Google's CA (pki.goog), and PROVISIONING means the cert is still being issued but may be stuck. Check status:
+    gcloud compute ssl-certificates describe <cert> --format='value(managed.status,managed.domainStatus)'
+    gcloud compute ssl-certificates list --filter='type:MANAGED AND managed.status!=ACTIVE'
+  Remediation: Verify DNS A/AAAA record points to the LB's external IP:
+    dig <domain> +short (must resolve to the forwarding rule IP)
+  Add or fix CAA record to allow Google's CA: add DNS CAA record 'pki.goog' for the domain. If stuck in PROVISIONING > 24h, delete and recreate the certificate:
+    gcloud compute ssl-certificates delete <cert>
+    gcloud compute ssl-certificates create <cert> --domains=<domain> --global
+  Attach the new cert to the target HTTPS proxy immediately.
+remediation_action: reset_backend_service
+error_message: '[CloudLB] LB-SSL-CERT-EXPIRY certificate={ssl_cert_name} domain={ssl_domain} expires_in={ssl_days_remaining}d
+  managed_status={ssl_managed_status} forwarding_rules={ssl_affected_rules}'
+stack_trace: |-
+  SSL Certificate Status Report
+  -------------------------------
+  Certificate:      {ssl_cert_name}
+  Domain:           {ssl_domain}
+  Days Remaining:   {ssl_days_remaining}
+  Managed Status:   {ssl_managed_status}
+  Forwarding Rules: {ssl_affected_rules}
+  Provisioning:     FAILED_NOT_VISIBLE
+  Action: Verify DNS authorization and domain ownership
+correlation_attr:
+  key: deployment.cert_manager
+  value: google-managed-v2-beta
+fault_params:
+  ssl_cert_name: {choice: [gcpnet-managed-cert-01, gcpnet-managed-cert-02]}
+  ssl_domain: {choice: [api.gcpnet.example.com, cdn.gcpnet.example.com, "*.gcpnet.example.com"]}
+  ssl_days_remaining: {randint: [-5, 3]}
+  ssl_managed_status: {choice: [FAILED_NOT_VISIBLE, FAILED_CAA_CHECKING, PROVISIONING]}
+  ssl_affected_rules: {randint: [2, 8]}
+rca_clues:
+  cloud-load-balancer:
+    lb.managed_cert_status: {choice: [FAILED_NOT_VISIBLE, FAILED_CAA_CHECKING]}
+    lb.cert_domain: api.gcpnet.example.com
+  cloud-cdn-service:
+    cdn.https_serving_degraded: true
+    cdn.fallback_to_http: {choice: [true, false]}
+  cloud-armor-waf:
+    armor.ssl_policy_affected: true

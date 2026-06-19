@@ -1,62 +1,9 @@
-"""Base scenario class and UITheme dataclass — all scenarios implement this interface."""
+"""Base scenario class — all scenarios implement this interface."""
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
 from typing import Any
-
-
-@dataclass
-class UITheme:
-    """Visual theme for a scenario's UI pages."""
-
-    # Colors
-    bg_primary: str = "#0d1117"  # Main background
-    bg_secondary: str = "#161b22"  # Card/panel backgrounds
-    bg_tertiary: str = "#21262d"  # Input/accent backgrounds
-    accent_primary: str = "#00BFB3"  # Primary accent (buttons, borders)
-    accent_secondary: str = "#58a6ff"  # Secondary accent
-    text_primary: str = "#e6edf3"  # Main text
-    text_secondary: str = "#8b949e"  # Muted text
-    text_accent: str = "#00BFB3"  # Highlighted text
-    status_nominal: str = "#3fb950"  # Green — healthy
-    status_warning: str = "#d29922"  # Amber — degraded
-    status_critical: str = "#f85149"  # Red — error
-    status_info: str = "#58a6ff"  # Blue — info
-
-    # Typography
-    font_family: str = "'Inter', 'Segoe UI', system-ui, sans-serif"
-    font_mono: str = "'JetBrains Mono', 'Fira Code', monospace"
-    font_size_base: str = "14px"
-
-    # Terminology
-    chaos_title: str = "Incident Simulator"
-    service_label: str = "Service"  # "Service", "System", "Module"
-    channel_label: str = "Channel"  # "Channel", "Scenario", "Incident"
-
-    # CSS custom properties dict (for injection into templates)
-    def to_css_vars(self) -> str:
-        """Generate CSS custom property declarations."""
-        return "\n".join(
-            [
-                f"  --bg-primary: {self.bg_primary};",
-                f"  --bg-secondary: {self.bg_secondary};",
-                f"  --bg-tertiary: {self.bg_tertiary};",
-                f"  --accent-primary: {self.accent_primary};",
-                f"  --accent-secondary: {self.accent_secondary};",
-                f"  --text-primary: {self.text_primary};",
-                f"  --text-secondary: {self.text_secondary};",
-                f"  --text-accent: {self.text_accent};",
-                f"  --status-nominal: {self.status_nominal};",
-                f"  --status-warning: {self.status_warning};",
-                f"  --status-critical: {self.status_critical};",
-                f"  --status-info: {self.status_info};",
-                f"  --font-family: {self.font_family};",
-                f"  --font-mono: {self.font_mono};",
-                f"  --font-size-base: {self.font_size_base};",
-            ]
-        )
 
 
 class BaseScenario(ABC):
@@ -187,14 +134,6 @@ class BaseScenario(ABC):
     @abstractmethod
     def k8s_clusters(self) -> list[dict[str, Any]]:
         """3 K8s cluster definitions."""
-        ...
-
-    # ── UI & Theme ───────────────────────────────────────────────────
-
-    @property
-    @abstractmethod
-    def theme(self) -> UITheme:
-        """Visual theme configuration."""
         ...
 
     @property

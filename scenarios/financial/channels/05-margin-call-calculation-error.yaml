@@ -1,0 +1,40 @@
+name: Margin Call Calculation Error
+subsystem: risk_management
+vehicle_section: margin_system
+error_type: RISK-MARGIN-CALL
+sensor_type: margin_calculator
+affected_services:
+- risk-calculator
+- settlement-processor
+cascade_services:
+- customer-portal
+- compliance-monitor
+description: Margin requirement calculation fails due to stale collateral valuations
+investigation_notes: ''
+remediation_action: ''
+error_message: '[RISK] RISK-MARGIN-CALL: account={account_id} margin_ratio={margin_ratio} maintenance_ratio={maintenance_ratio}
+  valuation_age_s={valuation_age_s}'
+stack_trace: |-
+  === MARGIN SUMMARY ===
+  account={account_id}  margin_ratio={margin_ratio}  maintenance={maintenance_ratio}
+  --- COLLATERAL ---
+    cash          $2,340,000    valued=CURRENT
+    treasuries    $8,120,000    valued=STALE ({valuation_age_s}s)
+    equities      $4,560,000    valued=STALE ({valuation_age_s}s)
+    total_col     $15,020,000
+  --- REQUIREMENTS ---
+    initial_margin    $18,450,000
+    maintenance       $14,760,000
+    current_equity    $12,180,000  <<< BELOW MAINTENANCE
+    shortfall         $2,580,000
+  collateral_stale=true  valuation_age={valuation_age_s}s  max_staleness=300s
+  ACTION: issue_margin_call=true  liquidation_t+1=PENDING  alert=RISK-MARGIN-CALL
+correlation_attr: {}
+fault_params:
+  account_id:
+    format: "ACC-{n}"
+    n: {randint: [10000, 99999]}
+  margin_ratio: {uniform: [0.05, 0.20], round: 3}
+  maintenance_ratio: 0.25
+  valuation_age_s: {randint: [300, 3600]}
+rca_clues: {}

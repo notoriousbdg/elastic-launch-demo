@@ -1,0 +1,173 @@
+service: ehr-system
+sort_order: 1
+cloud_provider: aws
+cloud_region: us-east-1
+cloud_platform: aws_ec2
+cloud_availability_zone: us-east-1a
+subsystem: clinical_records
+language: java
+topology:
+- - lab-integration
+  - /api/v1/lab/orders
+  - POST
+- - lab-integration
+  - /api/v1/lab/results
+  - GET
+- - pharmacy-system
+  - /api/v1/pharmacy/orders
+  - POST
+- - pharmacy-system
+  - /api/v1/pharmacy/verify
+  - GET
+- - imaging-service
+  - /api/v1/imaging/orders
+  - POST
+- - scheduling-api
+  - /api/v1/schedule/appointments
+  - GET
+- - billing-processor
+  - /api/v1/billing/charges
+  - POST
+- - clinical-alerts
+  - /api/v1/alerts/patient
+  - GET
+entry_endpoints:
+- - /api/v1/ehr/patient
+  - GET
+- - /api/v1/ehr/encounter
+  - POST
+- - /api/v1/ehr/clinical-notes
+  - POST
+db_operations:
+- - SELECT
+  - patient_demographics
+  - SELECT * FROM patient_demographics WHERE mrn = ? AND facility_id = ?
+- - INSERT
+  - clinical_encounters
+  - INSERT INTO clinical_encounters (patient_id, encounter_type, admit_dt, provider_id) VALUES (?, ?, NOW(), ?)
+- - UPDATE
+  - patient_chart
+  - UPDATE patient_chart SET last_modified = NOW(), modified_by = ? WHERE patient_id = ?
+emit_fault_logs: true
+kpi_emitter: false
+constants:
+  DEPARTMENTS:
+  - ED
+  - ICU-3A
+  - MedSurg-4N
+  - L&D
+  - Oncology
+  - Cardiology
+  ENC_TYPES:
+  - inpatient
+  - outpatient
+  - emergency
+  - observation
+  CHART_ACTIONS:
+  - view
+  - edit
+  - sign
+  - cosign
+  - addendum
+  DOC_TYPES:
+  - progress_note
+  - h_and_p
+  - discharge_summary
+  - order_set
+state:
+  _encounters_total:
+    init: 0
+  _last_census_report:
+    init: now
+steps:
+- sample:
+    dept:
+      choice: DEPARTMENTS
+    mrn:
+      expr: f'MRN-{rand.randint(1000000, 9999999)}'
+    enc_type:
+      choice: ENC_TYPES
+- log:
+    level: INFO
+    message: '[EHR] encounter_open type={enc_type} mrn={mrn} dept={dept} status=ACTIVE'
+    attrs:
+      operation: encounter_open
+      encounter.type:
+        var: enc_type
+      encounter.department:
+        var: dept
+      patient.mrn:
+        var: mrn
+      encounter.status: ACTIVE
+- sample:
+    chart_action:
+      choice: CHART_ACTIONS
+    doc_type:
+      choice: DOC_TYPES
+    provider:
+      expr: f'NPI-{rand.randint(1000000000, 9999999999)}'
+    latency_ms:
+      randint:
+      - 15
+      - 120
+- log:
+    level: INFO
+    message: '[EHR] chart_access action={chart_action} doc_type={doc_type} provider={provider} latency={latency_ms}ms status=OK'
+    attrs:
+      operation: chart_access
+      chart.action:
+        var: chart_action
+      chart.document_type:
+        var: doc_type
+      chart.provider:
+        var: provider
+      chart.latency_ms:
+        var: latency_ms
+- every:
+    seconds: 10
+    state_key: _last_census_report
+    steps:
+    - sample:
+        total_patients:
+          randint:
+          - 180
+          - 350
+    - log:
+        level: INFO
+        message: '[EHR] census_snapshot patients={total_patients} departments=6 adt_sync=CURRENT status=NOMINAL'
+        attrs:
+          operation: census_snapshot
+          census.total_patients:
+            var: total_patients
+          census.departments: 6
+          census.status: NOMINAL
+- counter:
+    state_key: _encounters_total
+    by: 1
+- metric:
+    name: ehr.encounters_total
+    value:
+      var: _encounters_total
+    unit: encounters
+- metric:
+    name: ehr.active_sessions
+    value:
+      randint:
+      - 40
+      - 120
+    unit: sessions
+- sample:
+    query_ms:
+      if_active:
+        randint:
+        - 800
+        - 5000
+      else:
+        randint:
+        - 5
+        - 80
+- metric:
+    name: ehr.query_latency_ms
+    value:
+      var: query_ms
+    unit: ms

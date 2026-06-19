@@ -1,0 +1,65 @@
+name: Account Takeover Detection Spike
+subsystem: identity
+vehicle_section: fraud_detector
+error_type: AUTH-TAKEOVER-DETECT
+sensor_type: anomaly_detector
+affected_services:
+- auth-gateway
+- payment-processor
+cascade_services:
+- moderation-engine
+- analytics-pipeline
+description: Anomaly detection system flags a surge in credential stuffing attempts indicating a coordinated account takeover
+  campaign
+investigation_notes: |-
+  Root cause: a leaked credential database from another service is being replayed against the gaming platform. 94.2% of attempts come through VPN/proxy with low user-agent entropy, confirming automated credential stuffing tooling.
+  1. Check the attack surface: 87% known-bad IP reputation with 12 Tor exit nodes — enable GeoIP blocking for the primary attack region via WAF rules.
+  2. Review 0.3% success rate: even this low rate means ~30 accounts may be compromised per 10,000 attempts — immediately force password resets for successfully authenticated IPs in the attack window.
+  3. Inspect request patterns: 0.8ms avg interval between requests is clearly automated; deploy progressive rate limiting (CAPTCHA after 3 failures, block after 10).
+  4. Remediate: issue `block_attack_ips` to immediately blacklist the {blocked_ips} flagged IPs and `enable_captcha_enforcement` globally for login endpoints.
+  5. Notify affected players, enable mandatory 2FA for accounts accessed from new IPs, and submit the attack IPs to threat intelligence feeds.
+remediation_action: block_attack_ips
+error_message: '[Auth] AUTH-TAKEOVER-DETECT: attempts={ato_attempts} window={window_seconds}s blocked_ips={blocked_ips} risk={risk_score}
+  geo={geo_region}'
+stack_trace: |-
+  === ATO DETECTION ANALYSIS ===
+  window={window_seconds}s  geo={geo_region}
+  ----------- attempt metrics ---------
+    total_attempts  = {ato_attempts}
+    unique_ips      = {blocked_ips}
+    credential_pairs = 12,401
+    success_rate    = 0.3% (credential stuffing pattern)
+    risk_score      = {risk_score}
+  ----------- geo analysis ------------
+    primary_region  = {geo_region}
+    ip_reputation   = 87% known-bad
+    vpn_pct         = 94.2%
+    tor_exit_nodes  = 12
+  ----------- attack pattern ----------
+    type            = CREDENTIAL_STUFFING
+    rate            = {ato_attempts} / {window_seconds}s
+    user_agent_entropy = LOW (bot signature)
+    request_interval   = 0.8ms avg (automated)
+  ----------- action ------------------
+    BLOCK {blocked_ips} IPs  ENABLE captcha  NOTIFY security team
+  AUTH-TAKEOVER-DETECT: {ato_attempts} attempts from {blocked_ips} IPs, risk {risk_score}
+correlation_attr:
+  key: network.waf_ruleset
+  value: waf-rules-v8.1.0-permissive
+fault_params:
+  ato_attempts: {randint: [500, 10000]}
+  window_seconds: {randint: [60, 300]}
+  blocked_ips: {randint: [50, 500]}
+  risk_score: {uniform: [0.85, 0.99], round: 2}
+  geo_region: {choice: [Eastern Europe, Southeast Asia, South America, Unknown VPN]}
+rca_clues:
+  auth-gateway:
+    auth.credential_stuffing_detected: true
+    auth.bad_ip_reputation_pct: {uniform: [70.0, 95.0], round: 1}
+  payment-processor:
+    payment.fraudulent_purchase_attempts: {randint: [10, 100]}
+    payment.wallet_freeze_count: {randint: [5, 50]}
+  moderation-engine:
+    moderation.ato_flagged_accounts: {randint: [20, 200]}
+  analytics-pipeline:
+    analytics.security_event_surge: true

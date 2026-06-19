@@ -1,0 +1,144 @@
+service: scada-gateway
+sort_order: 2
+cloud_provider: aws
+cloud_region: us-east-1
+cloud_platform: aws_ec2
+cloud_availability_zone: us-east-1b
+subsystem: scada
+language: python
+topology:
+- - ot-historian
+  - /api/v1/historian/tag-write
+  - POST
+- - mes-controller
+  - /api/v1/mes/equipment-state
+  - POST
+entry_endpoints:
+- - /api/v1/scada/tag-write
+  - POST
+db_operations:
+- - INSERT
+  - tag_subscription_log
+  - INSERT INTO tag_subscription_log (plc_id, tag_name, value, quality, ts) VALUES (?, ?, ?, ?, NOW())
+emit_fault_logs: true
+kpi_emitter: false
+constants:
+  PLCS:
+  - PLC-LINE01-A
+  - PLC-LINE02-A
+  - PLC-LINE03-A
+  - PLC-LINE03-B
+  - PLC-PACK-01
+  PROTOCOLS:
+  - opcua
+  - opcua
+  - opcua
+  - modbus_tcp
+  - ethernet_ip
+  TAGS:
+  - MotorSpeed
+  - OvenTempC
+  - ConveyorRPM
+  - PressurePsi
+  - PartsCounter
+state:
+  _tag_updates_total:
+    init: 0
+  _last_subscription_report:
+    init: now
+steps:
+- sample:
+    plc:
+      choice: PLCS
+    protocol:
+      choice: PROTOCOLS
+    tag:
+      choice: TAGS
+    tag_value:
+      uniform:
+      - 0.0
+      - 1500.0
+      round: 2
+- log:
+    level: INFO
+    message: '[SCADA] tag_update plc={plc} protocol={protocol} tag={tag} value={tag_value} quality=GOOD'
+    attrs:
+      operation: tag_update
+      scada.plc:
+        var: plc
+      scada.protocol:
+        var: protocol
+      scada.tag_name:
+        var: tag
+      scada.value:
+        var: tag_value
+      scada.quality: GOOD
+- sample:
+    session_plc:
+      choice: PLCS
+    rtt_ms:
+      randint:
+      - 2
+      - 18
+- log:
+    level: DEBUG
+    message: '[SCADA] session_keepalive plc={session_plc} rtt_ms={rtt_ms} secure_channel=ACTIVE'
+    attrs:
+      operation: session_keepalive
+      scada.plc:
+        var: session_plc
+      scada.rtt_ms:
+        var: rtt_ms
+- every:
+    seconds: 10
+    state_key: _last_subscription_report
+    steps:
+    - sample:
+        active_subs:
+          randint:
+          - 180
+          - 320
+        tags_per_sub:
+          randint:
+          - 8
+          - 24
+    - sample:
+        total_tags:
+          expr: active_subs * tags_per_sub
+    - log:
+        level: INFO
+        message: '[SCADA] subscription_summary active={active_subs} total_tags={total_tags} health=NOMINAL'
+        attrs:
+          operation: subscription_summary
+          scada.active_subscriptions:
+            var: active_subs
+- counter:
+    state_key: _tag_updates_total
+    by:
+      randint:
+      - 50
+      - 200
+- metric:
+    name: scada.tag_updates_total
+    value:
+      var: _tag_updates_total
+    unit: updates
+- metric:
+    name: scada.tag_update_rate_per_s
+    value:
+      if_active:
+        randint:
+        - 15000
+        - 60000
+      else:
+        randint:
+        - 800
+        - 1500
+    unit: updates/s
+- metric:
+    name: scada.active_subscriptions
+    value:
+      randint:
+      - 180
+      - 320
+    unit: subs

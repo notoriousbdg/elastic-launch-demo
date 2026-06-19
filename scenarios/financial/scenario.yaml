@@ -1,0 +1,342 @@
+scenario_id: financial
+scenario_name: Financial Trading Platform
+scenario_description: Real-time trading operations with order management, matching engine, risk calculation, market data,
+  and settlement systems. Bloomberg terminal-style Operations Center.
+namespace: finserv
+scenario_icon: 💹
+sort_order: 3
+nominal_label: NORMAL
+hosts:
+- host.name: finserv-aws-host-01
+  host.id: i-0f1a2b3c4d5e67890
+  host.arch: amd64
+  host.type: c5.2xlarge
+  host.image.id: ami-0fedcba9876543210
+  host.cpu.model.name: Intel(R) Xeon(R) Platinum 8275CL CPU @ 3.00GHz
+  host.cpu.vendor.id: GenuineIntel
+  host.cpu.family: '6'
+  host.cpu.model.id: '85'
+  host.cpu.stepping: '7'
+  host.cpu.cache.l2.size: 1048576
+  host.ip:
+  - 10.0.2.50
+  - 172.16.1.10
+  host.mac:
+  - 0a:2b:3c:4d:5e:6f
+  - 0a:2b:3c:4d:5e:70
+  os.type: linux
+  os.description: Amazon Linux 2023.6.20250115
+  cloud.provider: aws
+  cloud.platform: aws_ec2
+  cloud.region: us-east-1
+  cloud.availability_zone: us-east-1a
+  cloud.account.id: '987654321098'
+  cloud.instance.id: i-0f1a2b3c4d5e67890
+  cpu_count: 8
+  memory_total_bytes: 17179869184
+  disk_total_bytes: 536870912000
+- host.name: finserv-gcp-host-01
+  host.id: '7823456789012345678'
+  host.arch: amd64
+  host.type: c2-standard-8
+  host.image.id: projects/debian-cloud/global/images/debian-12-bookworm-v20250115
+  host.cpu.model.name: Intel(R) Xeon(R) CPU @ 3.10GHz
+  host.cpu.vendor.id: GenuineIntel
+  host.cpu.family: '6'
+  host.cpu.model.id: '85'
+  host.cpu.stepping: '7'
+  host.cpu.cache.l2.size: 1048576
+  host.ip:
+  - 10.128.1.20
+  - 10.128.1.21
+  host.mac:
+  - 42:01:0a:80:01:14
+  - 42:01:0a:80:01:15
+  os.type: linux
+  os.description: Debian GNU/Linux 12 (bookworm)
+  cloud.provider: gcp
+  cloud.platform: gcp_compute_engine
+  cloud.region: us-central1
+  cloud.availability_zone: us-central1-a
+  cloud.account.id: finserv-trading-prod
+  cloud.instance.id: '7823456789012345678'
+  cpu_count: 8
+  memory_total_bytes: 34359738368
+  disk_total_bytes: 214748364800
+- host.name: finserv-azure-host-01
+  host.id: /subscriptions/def-456/resourceGroups/finserv-rg/providers/Microsoft.Compute/virtualMachines/finserv-vm-01
+  host.arch: amd64
+  host.type: Standard_F8s_v2
+  host.image.id: Canonical:0001-com-ubuntu-server-jammy:22_04-lts-gen2:latest
+  host.cpu.model.name: Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz
+  host.cpu.vendor.id: GenuineIntel
+  host.cpu.family: '6'
+  host.cpu.model.id: '106'
+  host.cpu.stepping: '6'
+  host.cpu.cache.l2.size: 1310720
+  host.ip:
+  - 10.2.0.10
+  - 10.2.0.11
+  host.mac:
+  - 00:0d:3a:6b:5c:4d
+  - 00:0d:3a:6b:5c:4e
+  os.type: linux
+  os.description: Ubuntu 22.04.5 LTS
+  cloud.provider: azure
+  cloud.platform: azure_vm
+  cloud.region: eastus
+  cloud.availability_zone: eastus-1
+  cloud.account.id: def-456-ghi-789
+  cloud.instance.id: finserv-vm-01
+  cpu_count: 8
+  memory_total_bytes: 17179869184
+  disk_total_bytes: 274877906944
+k8s_clusters:
+- name: finserv-eks-cluster
+  provider: aws
+  platform: aws_eks
+  region: us-east-1
+  zones:
+  - us-east-1a
+  - us-east-1b
+  - us-east-1c
+  os_description: Amazon Linux 2
+  services:
+  - order-gateway
+  - matching-engine
+  - risk-calculator
+- name: finserv-gke-cluster
+  provider: gcp
+  platform: gcp_gke
+  region: us-central1
+  zones:
+  - us-central1-a
+  - us-central1-b
+  - us-central1-c
+  os_description: Container-Optimized OS
+  services:
+  - market-data-feed
+  - settlement-processor
+  - fraud-detector
+- name: finserv-aks-cluster
+  provider: azure
+  platform: azure_aks
+  region: eastus
+  zones:
+  - eastus-1
+  - eastus-2
+  - eastus-3
+  os_description: Ubuntu 22.04 LTS
+  services:
+  - compliance-monitor
+  - customer-portal
+  - audit-logger
+agent_config:
+  id: finserv-trading-analyst
+  name: Trading Operations Analyst
+  assessment_tool_name: trading_risk_assessment
+  system_prompt: 'You are the Trading Operations Analyst, an expert AI assistant for financial trading platform operations.
+    You help trading desk operators investigate incidents, analyze order flow, and provide root cause analysis for fault conditions
+    across 9 trading infrastructure services spanning AWS, GCP, and Azure. You have deep expertise in FIX 4.4 protocol, order
+    management systems, matching engine internals, risk limit frameworks (VaR, margin), T+2 settlement, DTCC/NSCC clearing,
+    regulatory reporting (EMIR, MiFID II, CAT), AML/KYC screening, and cross-region audit replication. When investigating
+    incidents, search for these system identifiers in logs: Order Management faults (OMS-BOOK-IMBALANCE, FIX-PARSE-REJECT),
+    Matching Engine faults (ME-LATENCY-SLA, ME-DARKPOOL-REJECT), Market Data faults (MDF-PRICE-GAP, MDF-STALE-QUOTE), Risk
+    faults (RISK-LIMIT-BREACH, RISK-MARGIN-CALL, RISK-POSITION-RECON), Settlement faults (SETTLE-T2-TIMEOUT, SETTLE-FAIL,
+    SETTLE-NETTING-CALC), Compliance faults (COMPL-FRAUD-FP-STORM, COMPL-REG-REPORT-FAIL, COMPL-AML-SCREENING), Portal faults
+    (PORTAL-SESSION-TIMEOUT, PORTAL-VALUATION-LAG, PORTAL-CONFIRM-DELAY), and Audit faults (AUDIT-SEQ-GAP, AUDIT-REPLICATION-LAG).
+    Log messages are in body.text — NEVER search the body field alone.'
+assessment_tool_config:
+  id: trading_risk_assessment
+  description: 'Comprehensive pre-market trading risk assessment. Evaluates all services against operational readiness criteria
+    for trading sessions. Returns data for risk evaluation across order management, matching engine, settlement, and compliance
+    systems. Log message field: body.text (never use ''body'' alone).'
+executive_kpi_emitter_service_name: risk-calculator
+executive_dashboard_intro: '**Trading platform KPIs** — trade flow, risk exposure, market quality, and settlement operations
+  (synthetic `business.*` from `risk-calculator`).'
+executive_kpi_sections:
+- header: '**Trade flow** — orders, fill rate, notional, executions, and rejects'
+  specs:
+  - - Order flow / min
+    - metrics.business.order_flow_per_min
+  - - Fill rate (%)
+    - metrics.business.fill_rate_pct
+  - - Notional value (USD/min)
+    - metrics.business.notional_value_usd_per_min
+  - - Executed trades / min
+    - metrics.business.executed_trades_per_min
+  - - Rejected orders / min
+    - metrics.business.rejected_orders_per_min
+  - - Cancel-replace rate (%)
+    - metrics.business.cancel_replace_rate_pct
+- header: '**Risk exposure** — VaR, margin, limits, delta, counterparty, and P&L'
+  specs:
+  - - Portfolio VaR (USD)
+    - metrics.business.portfolio_var_usd
+  - - Margin utilization (%)
+    - metrics.business.margin_utilization_pct
+  - - Position limit breaches
+    - metrics.business.position_limit_breaches
+  - - Delta exposure (USD)
+    - metrics.business.delta_exposure_usd
+  - - Counterparty credit risk (USD)
+    - metrics.business.counterparty_credit_risk_usd
+  - - Mark-to-market P&L (USD/min)
+    - metrics.business.mark_to_market_pnl_usd_per_min
+- header: '**Market quality** — spread, impact, slippage, latency, and best execution'
+  specs:
+  - - Avg spread (bps)
+    - metrics.business.avg_spread_bps
+  - - Market impact (bps)
+    - metrics.business.market_impact_bps
+  - - Slippage cost (USD/min)
+    - metrics.business.slippage_cost_usd_per_min
+  - - Latency SLA breach (%)
+    - metrics.business.latency_sla_breach_rate_pct
+  - - Best execution (%)
+    - metrics.business.best_execution_pct
+  - - Venue fill quality (%)
+    - metrics.business.venue_fill_quality_pct
+- header: '**Operations** — settlement, fails, breaks, alerts, availability, and reporting'
+  specs:
+  - - Settlement success rate (%)
+    - metrics.business.settlement_success_rate_pct
+  - - Settlement fails in queue
+    - metrics.business.settlement_fails_in_queue
+  - - Reconciliation breaks
+    - metrics.business.reconciliation_breaks
+  - - Ops alerts / min
+    - metrics.business.ops_alerts_per_min
+  - - System availability (%)
+    - metrics.business.system_availability_pct
+  - - Reporting latency (s)
+    - metrics.business.reporting_latency_sec
+executive_trend_charts:
+- title: Order flow / min
+  field: metrics.business.order_flow_per_min
+  y_label: orders/min
+- title: Notional value (USD/min)
+  field: metrics.business.notional_value_usd_per_min
+  y_label: USD/min
+- title: Mark-to-market P&L
+  field: metrics.business.mark_to_market_pnl_usd_per_min
+  y_label: USD/min
+- title: Portfolio VaR
+  field: metrics.business.portfolio_var_usd
+  y_label: USD
+- title: Fill rate
+  field: metrics.business.fill_rate_pct
+  y_label: '%'
+- title: Settlement success rate
+  field: metrics.business.settlement_success_rate_pct
+  y_label: '%'
+executive_kpi_emissions:
+- name: business.order_flow_per_min
+  value: {randint: [850, 28000]}
+  unit: orders/min
+- name: business.fill_rate_pct
+  value: {uniform: [89.0, 99.6], round: 2}
+  unit: '%'
+- name: business.notional_value_usd_per_min
+  value: {uniform: [2800000.0, 48000000.0], round: 1}
+  unit: USD/min
+- name: business.executed_trades_per_min
+  value: {randint: [620, 18000]}
+  unit: trades/min
+- name: business.rejected_orders_per_min
+  value: {randint: [2, 85]}
+  unit: orders/min
+- name: business.cancel_replace_rate_pct
+  value: {uniform: [3.2, 18.4], round: 2}
+  unit: '%'
+- name: business.portfolio_var_usd
+  value: {uniform: [180000.0, 2400000.0], round: 1}
+  unit: USD
+- name: business.margin_utilization_pct
+  value: {uniform: [42.0, 88.0], round: 2}
+  unit: '%'
+- name: business.position_limit_breaches
+  value: {randint: [0, 8]}
+  unit: count
+- name: business.delta_exposure_usd
+  value: {uniform: [-850000.0, 2100000.0], round: 1}
+  unit: USD
+- name: business.counterparty_credit_risk_usd
+  value: {uniform: [280000.0, 4800000.0], round: 1}
+  unit: USD
+- name: business.mark_to_market_pnl_usd_per_min
+  value: {uniform: [-120000.0, 380000.0], round: 1}
+  unit: USD/min
+- name: business.avg_spread_bps
+  value: {uniform: [0.8, 12.4], round: 2}
+  unit: bps
+- name: business.market_impact_bps
+  value: {uniform: [0.2, 4.8], round: 2}
+  unit: bps
+- name: business.slippage_cost_usd_per_min
+  value: {uniform: [850.0, 12000.0], round: 1}
+  unit: USD/min
+- name: business.latency_sla_breach_rate_pct
+  value: {uniform: [0.01, 0.85], round: 3}
+  unit: '%'
+- name: business.best_execution_pct
+  value: {uniform: [92.0, 99.8], round: 2}
+  unit: '%'
+- name: business.venue_fill_quality_pct
+  value: {uniform: [88.0, 98.4], round: 2}
+  unit: '%'
+- name: business.settlement_success_rate_pct
+  value: {uniform: [97.2, 99.98], round: 3}
+  unit: '%'
+- name: business.settlement_fails_in_queue
+  value: {randint: [0, 28]}
+  unit: count
+- name: business.reconciliation_breaks
+  value: {randint: [0, 12]}
+  unit: count
+- name: business.ops_alerts_per_min
+  value: {uniform: [0.2, 4.8], round: 2}
+  unit: alerts/min
+- name: business.system_availability_pct
+  value: {uniform: [99.2, 99.99], round: 3}
+  unit: '%'
+- name: business.reporting_latency_sec
+  value: {uniform: [0.8, 12.4], round: 2}
+  unit: s
+raw_log_profile:
+  service_name: trading-edge
+  user_id_prefix: trader
+  tier_field: account_class
+  tier_values:
+  - - retail
+    - 55
+  - - prime
+    - 30
+  - - institutional
+    - 15
+  country_weights:
+    US: 45
+    GB: 15
+    JP: 10
+    SG: 10
+    DE: 8
+    HK: 7
+    CH: 5
+  methods:
+  - GET
+  - POST
+  - PUT
+  - DELETE
+  paths:
+  - /api/v1/orders
+  - /api/v1/positions
+  - /api/v1/market-data
+  - /api/v1/risk
+  - /api/v1/quotes
+  - /api/v1/portfolios
+  - /login
+  - /health
+  change_point_path: /api/v1/orders
+trace_attributes:
+  base: {}
+  services: {}

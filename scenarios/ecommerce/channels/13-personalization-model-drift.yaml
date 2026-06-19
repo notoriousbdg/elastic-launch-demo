@@ -1,0 +1,52 @@
+name: Personalization Model Drift
+subsystem: personalization
+vehicle_section: ml_model_serving
+error_type: RECO-MODEL-DRIFT
+sensor_type: model_accuracy
+affected_services:
+- recommendation-engine
+- ad-platform
+cascade_services:
+- storefront-gateway
+description: Recommendation model experiencing feature drift — predictions degrading silently, reducing click-through and
+  conversion rates
+investigation_notes: |-
+  1. Check recommendation-engine logs for RECO-MODEL-DRIFT — personalization_hit_rate_pct={hit_rate_pct}% below threshold {hit_rate_threshold_pct}%.
+  2. Review feature distribution shift: if the input feature distribution has diverged from training data distribution by >{drift_threshold_pct}%, the model is unreliable.
+  3. Check the model's online metrics (click-through rate, add-to-cart rate) against the A/B test baseline — a >10% degradation is a drift signal.
+  4. Inspect recent feature pipeline changes — a schema change in user behavior events can silently zero-out key features causing systematic errors.
+  5. Rollback to the previous stable model version (v{prev_model_version}) while retraining — degraded recommendations are worse than generic ones.
+  6. Ad-platform targeting also uses recommendation signals — notify the ads team that targeting quality is degraded until the model is retrained.
+remediation_action: rollback_reco_model
+error_message: '[RecommendationEngine] RECO-MODEL-DRIFT: model_version=v{model_version} hit_rate={hit_rate_pct}% (threshold
+  {hit_rate_threshold_pct}%) feature_drift={drift_score:.2f} prev_stable_version=v{prev_model_version}'
+stack_trace: |-
+  ModelDriftException: RECO-MODEL-DRIFT
+    at ModelMonitor.checkDrift(model=v{model_version})
+    at RecommendationService.serve(user_id={user_id})
+  Model version:      v{model_version}
+  Hit rate:           {hit_rate_pct}% (threshold: {hit_rate_threshold_pct}%)
+  Feature drift score:{drift_score}
+  Prev stable:        v{prev_model_version}
+  Affected users/hr:  {affected_users_hr}
+correlation_attr:
+  key: reco.model_drifting
+  value: true
+fault_params:
+  model_version: {randint: [8, 12]}
+  hit_rate_pct: {uniform: [20, 45], round: 1}
+  hit_rate_threshold_pct: 60.0
+  drift_score: {uniform: [0.3, 0.8], round: 2}
+  prev_model_version: {randint: [6, 9]}
+  user_id: {format: "USR-{n}", n: {randint: [100000, 999999]}}
+  affected_users_hr: {randint: [10000, 500000]}
+rca_clues:
+  recommendation-engine:
+    reco.feature_drift_score: {uniform: [0.3, 0.8], round: 2}
+    reco.ctr_delta_pct: {uniform: [-30, -10], round: 1}
+  ad-platform:
+    ads.targeting_signal_quality_pct: {uniform: [40, 70], round: 1}
+    ads.cpc_increase_pct: {uniform: [10, 40], round: 1}
+  storefront-gateway:
+    storefront.reco_click_rate_drop_pct: {uniform: [15, 45], round: 1}
+    storefront.personalization_confidence: LOW

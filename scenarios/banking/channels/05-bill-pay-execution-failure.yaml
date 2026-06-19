@@ -1,0 +1,61 @@
+name: Bill Pay Execution Failure
+subsystem: payment_processing
+vehicle_section: bill_pay
+error_type: PAY-BILLPAY-FAIL
+sensor_type: bill_pay_status
+affected_services:
+- payment-engine
+- member-portal
+cascade_services:
+- mobile-gateway
+- document-vault
+description: Scheduled bill payments failing to execute on due date
+investigation_notes: |-
+  1. Check FedACH window status — bill pay electronic payments can only transmit during Fed operating windows. If the window is CLOSED and retries are exhausted, payments queue until next window (06:00 ET).
+  2. Review the specific failure reason: INSUFFICIENT_FUNDS requires member notification with balance info; PAYEE_ACCOUNT_CLOSED needs payee record update; ROUTING_NUMBER_INVALID indicates stale payee data.
+  3. Assess late fee and credit impact risk — failed bill payments on due date can trigger late fees from payees and potential credit score impact. Flag HIGH risk payments for immediate member outreach.
+  4. Check payment-engine retry logic — 3/3 attempts exhausted means auto-retry will not help. Manual intervention required: SELECT * FROM bill_payments WHERE status='FAILED' AND due_date=CURRENT_DATE.
+  5. For military members on deployment, verify SCRA protections apply — late fees may be waivable under Servicemembers Civil Relief Act. Check member.deployment_status in member profile.
+remediation_action: restart_billpay_processor
+error_message: '[PAY] PAY-BILLPAY-FAIL: payment={billpay_id} payee={payee_name} amount=${billpay_amount} member={member_id}
+  reason={billpay_reason}'
+stack_trace: |-
+  === BILL PAY EXECUTION LOG ===
+  payment={billpay_id}  member={member_id}
+  --- PAYMENT DETAILS ---
+    payee={payee_name}  amount=${billpay_amount}
+    method=ELECTRONIC  scheduled_date=2026-02-18
+    funding_account=****{acct_last4}  available_balance=${available_balance}
+  --- EXECUTION ATTEMPT ---
+    attempt=3/3  last_error={billpay_reason}
+    FedACH_window=CLOSED  next_window=06:00_ET_TOMORROW
+    payee_routing={routing_number}  payee_status=ACTIVE
+  --- MEMBER IMPACT ---
+    late_fee_risk=HIGH  credit_score_impact=POSSIBLE
+    auto_retry=EXHAUSTED  member_notified=false
+  ACTION: notify_member=true  schedule_retry=true  alert=PAY-BILLPAY-FAIL
+correlation_attr:
+  key: deployment.billpay_scheduler
+  value: quartz-v2.5.0-experimental
+fault_params:
+  billpay_id: {format: "BP-{n}", n: {randint: [100000, 999999]}}
+  payee_name: {choice: [Auto Insurance Premium, Credit Union Transfer, "AT&T Wireless", GEICO, State Farm, Mortgage Company, Electric Utility, Water Authority, Comcast, Progressive Insurance]}
+  billpay_amount: {uniform: [25.0, 3000.0], round: 2}
+  member_id: {format: "{p}-{n}", p: {choice: [M, MBR, USR]}, n: {randint: [1000000, 9999999]}}
+  billpay_reason: {choice: [INSUFFICIENT_FUNDS, PAYEE_ACCOUNT_CLOSED, ROUTING_NUMBER_INVALID, DUPLICATE_PAYMENT, FEDACH_WINDOW_CLOSED]}
+  acct_last4: {randint: [1000, 9999]}
+  available_balance: {uniform: [100.0, 25000.0], round: 2}
+  routing_number: {randint: [100000000, 999999999]}
+rca_clues:
+  payment-engine:
+    payment.billpay_fedach_window: CLOSED
+    payment.retry_attempts_exhausted: true
+  member-portal:
+    portal.billpay_failure_notifications: {randint: [100, 500]}
+    portal.late_fee_risk_count: {randint: [50, 200]}
+  mobile-gateway:
+    gateway.billpay_status_queries_spike: {randint: [2000, 8000]}
+    gateway.payment_confirmation: PENDING
+  document-vault:
+    document.payment_receipt_generation: BLOCKED
+    document.receipt_queue_depth: {randint: [200, 800]}

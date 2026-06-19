@@ -1,0 +1,57 @@
+name: Patient Identity Match Failure
+subsystem: clinical_records
+vehicle_section: mpi_engine
+error_type: EMPI-MATCH-FAIL
+sensor_type: mpi_matcher
+affected_services:
+- ehr-system
+- patient-monitor
+cascade_services:
+- lab-integration
+- pharmacy-system
+description: Master Patient Index fails to resolve patient identity, risking duplicate records
+investigation_notes: |-
+  Root Cause: EMPI probabilistic matching scores fall below threshold when patient demographics contain discrepancies (name spelling variants, transposed DOB digits, SSN mismatches). The matching algorithm (Jaro-Winkler + probabilistic weighting) requires tuning when registration workflows change.
+  Remediation: 1) Review the EMPI candidate match table for near-matches and manually adjudicate: `empi-admin review-queue --mrn {mrn}`. 2) Check if the matching algorithm weights need adjustment: `empi-admin config --show-weights`. 3) Run a patient index reconciliation report: `empi-admin reconcile --facility FACILITY-01 --threshold 40`. 4) For confirmed duplicates, merge records via HIM worklist: `empi-admin merge --source MRN-DUPLICATE --target MRN-PRIMARY --reason 'duplicate_registration'`. 5) Notify HIM (Health Information Management) department to review and finalize identity resolution. 6) Audit downstream systems (lab, pharmacy, billing) for orders linked to the duplicate MRN.
+remediation_action: reconcile_patient_index
+error_message: '[EHR] EMPI-MATCH-FAIL: mrn={mrn} encounter={encounter_id} score={match_score}% threshold={match_threshold}%
+  action=REVIEW_REQUIRED'
+stack_trace: |-
+  === EMPI CANDIDATE MATCH TABLE ===
+  Query MRN: {mrn} | Encounter: {encounter_id}
+  Match Threshold: {match_threshold}% | Algorithm: Probabilistic
+  ------------------------------------------------------------------------
+  CANDIDATE MRN | LAST     | FIRST  | DOB        | SSN-LAST4 | SCORE
+  ------------------------------------------------------------------------
+  MRN-8832104   | DOE      | JANE   | 1965-03-15 | 4589      | {match_score}%
+  MRN-7741023   | DOE      | JANE M | 1965-03-15 | 4589      | 42.3%
+  MRN-6629817   | DOE      | JEAN   | 1965-04-15 | 4590      | 28.7%
+  ------------------------------------------------------------------------
+  EMPI-MATCH-FAIL: Best score {match_score}% below {match_threshold}% threshold
+  Action: REVIEW_REQUIRED — potential duplicate for {mrn}
+  HIM worklist item created, manual identity resolution pending
+correlation_attr:
+  key: deployment.empi_algorithm_config
+  value: jaro-winkler-tuned-v3.2
+fault_params:
+  mrn:
+    format: "MRN-{n}"
+    n: {randint: [1000000, 9999999]}
+  encounter_id:
+    format: "ENC-{n}"
+    n: {randint: [100000, 999999]}
+  match_score: {uniform: [45.0, 78.0], round: 1}
+  match_threshold: 85.0
+rca_clues:
+  ehr-system:
+    empi.matching_algorithm: jaro_winkler
+    empi.threshold_pct: 85
+  patient-monitor:
+    vitals.patient_id_confidence: low
+    vitals.dual_band_mismatch: true
+  lab-integration:
+    lis.duplicate_mrn_detected: true
+    lis.specimen_hold: {randint: [2, 8]}
+  pharmacy-system:
+    pharmacy.patient_merge_pending: true
+    pharmacy.orders_held: {randint: [3, 12]}

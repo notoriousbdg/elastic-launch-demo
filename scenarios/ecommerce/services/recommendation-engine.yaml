@@ -1,0 +1,100 @@
+service: recommendation-engine
+sort_order: 5
+cloud_provider: gcp
+cloud_region: us-central1
+cloud_platform: gcp_compute_engine
+cloud_availability_zone: us-central1-b
+subsystem: personalization
+language: python
+topology:
+- - product-catalog
+  - /api/v1/catalog/product-details
+  - GET
+- - analytics-pipeline
+  - /api/v1/analytics/user-events
+  - POST
+entry_endpoints:
+- - /api/v1/recommendations/user
+  - GET
+- - /api/v1/recommendations/similar
+  - GET
+db_operations:
+- - SELECT
+  - user_embeddings
+  - SELECT user_id, embedding_vector, model_version, computed_at FROM user_embeddings WHERE user_id = ? AND model_version
+    = ?
+- - SELECT
+  - item_embeddings
+  - SELECT item_id, embedding_vector FROM item_embeddings WHERE item_id IN (?) AND model_version = ?
+emit_fault_logs: true
+kpi_emitter: false
+steps:
+- sample:
+    requests_per_sec:
+      uniform:
+      - 2500.0
+      - 8500.0
+      round: 1
+    latency_p99_ms:
+      uniform:
+      - 45.0
+      - 280.0
+      round: 1
+    personalization_hit_rate_pct:
+      uniform:
+      - 68.0
+      - 92.0
+      round: 2
+    cache_hit_rate_pct:
+      uniform:
+      - 80.0
+      - 95.0
+      round: 2
+- metric:
+    name: recommendations.requests_per_sec
+    value:
+      var: requests_per_sec
+    unit: rps
+- metric:
+    name: recommendations.latency_p99_ms
+    value:
+      var: latency_p99_ms
+    unit: ms
+- metric:
+    name: recommendations.personalization_hit_rate_pct
+    value:
+      var: personalization_hit_rate_pct
+    unit: '%'
+- metric:
+    name: recommendations.cache_hit_rate_pct
+    value:
+      var: cache_hit_rate_pct
+    unit: '%'
+- log:
+    level: INFO
+    message: reco.health rps={requests_per_sec} p99_ms={latency_p99_ms} hit_rate={personalization_hit_rate_pct}% cache_hit={cache_hit_rate_pct}%
+    attrs:
+      operation: reco_health
+      reco.requests_per_sec:
+        var: requests_per_sec
+      reco.latency_p99_ms:
+        var: latency_p99_ms
+      reco.hit_rate_pct:
+        var: personalization_hit_rate_pct
+      reco.cache_hit_rate_pct:
+        var: cache_hit_rate_pct
+- sample:
+    heap_used_mb:
+      randint:
+      - 2000
+      - 7500
+- log:
+    level: INFO
+    message: reco.model_health heap_used={heap_used_mb}MB heap_max=10240MB
+    attrs:
+      operation: model_health
+      reco.heap_used_mb:
+        var: heap_used_mb
+      reco.heap_max_mb: 10240
+      reco.heap_utilization_pct:
+        expr: round(heap_used_mb / 10240 * 100, 1)

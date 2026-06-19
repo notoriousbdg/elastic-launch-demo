@@ -1,0 +1,71 @@
+name: 5G Bearer Allocation Timeout
+subsystem: network
+vehicle_section: radio_access
+error_type: NET-BEARER-TIMEOUT
+sensor_type: bearer_allocation
+affected_services:
+- network-core
+- provisioning-service
+cascade_services:
+- activation-service
+- api-gateway
+description: 5G NR bearer setup requests timing out due to gNodeB resource exhaustion in target cell
+investigation_notes: |
+  1. Check gNodeB resource utilization for the target cell — PRB (Physical Resource Block) usage above 95% prevents new bearer allocation. Query: network-core metrics for gnb.prb_utilization_pct.
+  2. Bearer setup involves S1-AP InitialContextSetupRequest → gNodeB resource allocation → E-RAB setup. Timeout at the gNodeB allocation step indicates radio resource congestion, not core network issues.
+  3. Review concurrent bearer count per cell — max 256 active bearers per cell. If at capacity, new activations queue until existing bearers are released (average bearer lifetime 45min).
+  4. Check for mass event scenarios (stadium, convention) that concentrate subscribers in a single cell. Enable carrier aggregation or activate temporary small cells if available.
+  5. Provisioning-service retries bearer allocation 3x with exponential backoff (1s, 2s, 4s) before returning failure to activation-service. Monitor retry success rate to gauge recovery trajectory.
+remediation_action: reset_bearer_allocation
+error_message: '[NET] NET-BEARER-TIMEOUT: cell_id={cell_id} bearer_type={bearer_type} timeout_ms={bearer_timeout_ms} prb_util={prb_util_pct}% active_bearers={active_bearers}'
+stack_trace: |
+  === 5G BEARER ALLOCATION REPORT ===
+  cell_id={cell_id}  gnodeb={gnodeb_id}  sector=3
+  --- ALLOCATION PIPELINE ---
+    STEP                    STATUS      ELAPSED_MS
+    s1ap_initial_context    COMPLETE    42
+    gnb_resource_check      COMPLETE    18
+    prb_allocation          TIMEOUT     {bearer_timeout_ms}  <<< STUCK
+    erab_setup              SKIPPED     ---
+    bearer_activation       SKIPPED     ---
+  --- CELL RESOURCES ---
+    prb_utilization={prb_util_pct}%  active_bearers={active_bearers}/256
+    carrier_aggregation=DISABLED  small_cell_available=false
+    bearer_type={bearer_type}  qos_class=QCI-9
+  --- SUBSCRIBER IMPACT ---
+    queued_activations={queued_activations}  avg_wait_s=45
+  ACTION: enable_ca=true  redistribute_load=true  alert=NET-BEARER-TIMEOUT
+infrastructure_events:
+- body: '[GCP-Monitoring] BearerAllocationTimeout: cluster=network-core-gke pod=bearer-allocator-7f9a latency_p99=12000ms threshold=5000ms region=europe-west3'
+  severity: WARN
+  event_name: gcp.monitoring.BearerAllocationTimeout
+  service: network-core
+  attributes:
+    cloud.provider: gcp
+    cloud.service: monitoring
+    gcp.resource_type: gke_container
+    infrastructure.source: GCP-Monitoring
+correlation_attr:
+  key: network.gnb_firmware
+  value: gnb-v4.8.0-rc2
+fault_params:
+  cell_id: {format: "CELL-EU-{n}", n: {randint: [10000, 99999]}}
+  gnodeb_id: {format: "gNB-FRA-{n}", n: {randint: [100, 999]}}
+  bearer_type: {choice: [5G_NR, LTE, NR-DC, LTE-A]}
+  bearer_timeout_ms: {randint: [5000, 15000]}
+  prb_util_pct: {randint: [92, 99]}
+  active_bearers: {randint: [240, 256]}
+  queued_activations: {randint: [20, 100]}
+rca_clues:
+  network-core:
+    network.prb_utilization_pct: {randint: [92, 99]}
+    network.active_bearers: {randint: [240, 256]}
+  provisioning-service:
+    provisioning.bearer_retry_count: {randint: [2, 3]}
+    provisioning.allocation_queue: {randint: [50, 200]}
+  activation-service:
+    activation.network_timeout_count: {randint: [20, 100]}
+    activation.degraded_subsystem: network
+  api-gateway:
+    gateway.activation_latency_p99_ms: {randint: [15000, 45000]}
+    gateway.timeout_rate: {uniform: [0.05, 0.2], round: 2}

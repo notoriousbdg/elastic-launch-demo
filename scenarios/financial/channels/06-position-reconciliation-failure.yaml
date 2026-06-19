@@ -1,0 +1,38 @@
+name: Position Reconciliation Failure
+subsystem: risk_management
+vehicle_section: position_keeper
+error_type: RISK-POSITION-RECON
+sensor_type: reconciliation
+affected_services:
+- risk-calculator
+- settlement-processor
+cascade_services:
+- audit-logger
+description: Position records diverge between real-time and end-of-day systems
+investigation_notes: ''
+remediation_action: ''
+error_message: '[RISK] RISK-POSITION-RECON: instrument={instrument} realtime_qty={realtime_qty} eod_qty={eod_qty} delta={position_delta}
+  account={account_id}'
+stack_trace: |-
+  === POSITION RECONCILIATION TABLE ===
+  account={account_id}  instrument={instrument}
+  SOURCE          QTY        AVG_PX      NOTIONAL
+  realtime        {realtime_qty}     $244.52     $12,430,100
+  eod_system      {eod_qty}     $244.50     $11,918,550
+  DELTA           {position_delta}                 $511,550
+  --- BREAK ANALYSIS ---
+    missing_fills=7  late_cancels=2  amendment_lag=3
+    last_match_rt=14:32:07.112  last_match_eod=14:31:54.890
+    rt_source=OMS-REALTIME  eod_source=DTCC-NSCC-CNS
+  recon_status=BREAK  severity=MATERIAL  auto_resolve=false
+  ACTION: escalate_ops=true  block_settlement=true  alert=RISK-POSITION-RECON
+correlation_attr: {}
+fault_params:
+  instrument: {choice: [US.AAPL, US.GOOGL, US.MSFT, US.AMZN, US.TSLA, FX.EURUSD, FX.GBPUSD, FUT.ES, FUT.NQ, OPT.SPX]}
+  realtime_qty: {randint: [1000, 100000]}
+  eod_qty: {randint: [1000, 100000]}
+  position_delta: {randint: [1, 5000]}
+  account_id:
+    format: "ACC-{n}"
+    n: {randint: [10000, 99999]}
+rca_clues: {}

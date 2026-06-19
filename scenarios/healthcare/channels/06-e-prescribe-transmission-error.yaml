@@ -1,0 +1,58 @@
+name: E-Prescribe Transmission Error
+subsystem: medication
+vehicle_section: eprescribe_gateway
+error_type: NCPDP-SCRIPT-FAIL
+sensor_type: ncpdp_transmitter
+affected_services:
+- pharmacy-system
+- ehr-system
+cascade_services:
+- clinical-alerts
+- billing-processor
+description: Electronic prescription transmission to external pharmacy via NCPDP SCRIPT fails
+investigation_notes: |-
+  Root Cause: NCPDP SCRIPT 10.6 NEWRX transmission failures are typically caused by pharmacy NPI validation errors at the Surescripts network, expired DEA registrations for controlled substances, or SCRIPT message formatting issues in the UIB/UIH envelope segments.
+  Remediation: 1) Verify the pharmacy NPI against the NPPES registry: `ncpdp-admin npi-lookup --npi {pharmacy_npi}`. 2) Check the Surescripts connection status: `ncpdp-admin connection-test --endpoint surescripts-prod`. 3) Restart the pharmacy transmission queue: `systemctl restart eprescribe-gateway`. 4) Review the NCPDP STATUS response codes — 000=accepted, 600=rejected, 900=system error. 5) For controlled substances (Schedule II-V), verify EPCS two-factor authentication tokens are valid. 6) Resubmit failed prescriptions: `ncpdp-admin resubmit --rx {prescription_id} --force-npi-refresh`.
+remediation_action: restart_pharmacy_queue
+error_message: '[PHARM] NCPDP-SCRIPT-FAIL: rx={prescription_id} patient={patient_id} pharmacy_npi={pharmacy_npi} ncpdp_status={ncpdp_status}'
+stack_trace: |-
+  --- NCPDP SCRIPT 10.6 MESSAGE TRACE ---
+  >>> NEWRX Request
+    UIB+UNOA:0++{prescription_id}+{pharmacy_npi}:D+20260217143052
+    UIH+SCRIPT:010:006:NEWRX+{prescription_id}:P
+    PVD+PC+{pharmacy_npi}:HPI+++COMMUNITY PHARMACY
+    PTT+1+{patient_id}+DOE:JANE+19650315:F
+    DRU+P:MEDICATION:{medication_id}+85+EA+++1
+    UIT+{prescription_id}+7
+    UIZ++1
+  <<< STATUS Response
+    STS+{ncpdp_status}:NCPDP-SCRIPT-FAIL
+    FreeText: Transmission rejected — pharmacy NPI {pharmacy_npi} validation failed
+    Rx {prescription_id} for patient {patient_id}: queued for retry
+correlation_attr:
+  key: infra.ncpdp_gateway_version
+  value: surescripts-adapter-v6.0.3-rc1
+fault_params:
+  prescription_id:
+    format: "RX-{n}"
+    n: {randint: [100000, 999999]}
+  patient_id:
+    format: "PT-{n}"
+    n: {randint: [100000, 999999]}
+  pharmacy_npi: {randint: [1000000000, 9999999999]}
+  ncpdp_status: {choice: ["000", "600", "900", "510", "210"]}
+  medication_id:
+    format: "MED-{n}"
+    n: {randint: [10000, 99999]}
+rca_clues:
+  pharmacy-system:
+    ncpdp.npi_validation_status: failed
+    ncpdp.script_version: "10.6"
+  ehr-system:
+    ehr.pending_erx_count: {randint: [5, 30]}
+    ehr.surescripts_link: degraded
+  clinical-alerts:
+    alerts.erx_failure_count: {randint: [3, 15]}
+  billing-processor:
+    billing.rx_claim_pending: {randint: [5, 20]}
+    billing.ncpdp_d0_queue: {randint: [10, 50]}

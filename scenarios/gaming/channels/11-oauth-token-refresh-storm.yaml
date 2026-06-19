@@ -1,0 +1,63 @@
+name: OAuth Token Refresh Storm
+subsystem: identity
+vehicle_section: auth_core
+error_type: AUTH-TOKEN-STORM
+sensor_type: token_monitor
+affected_services:
+- auth-gateway
+- game-server
+cascade_services:
+- matchmaking-engine
+- chat-service
+description: Mass token refresh requests overwhelm the auth service when tokens expire simultaneously due to clock sync issues
+investigation_notes: |-
+  Root cause: token TTLs were issued with identical expiry timestamps because the auth service clock was NTP-synchronized during a bulk login wave (e.g., after maintenance). 61.4% of active tokens expire within 5 minutes, creating a thundering herd.
+  1. Check NTP sync: `chronyc tracking` on auth-gateway pods — a clock jump during token issuance would cause all tokens in that window to share the same expiry.
+  2. Review provider breakdown: oauth-google and oauth-discord are OVERLOADED — verify their rate limits haven't been lowered; check provider status pages.
+  3. Inspect JWKS cache: `jwks_cache_age=312s` is stale — if the signing key rotated and the cache is stale, all validations will fail and trigger needless refreshes.
+  4. Remediate: issue `stagger_token_refresh` to add random jitter (0-300s) to expiry times and `extend_token_ttl` to push current expirations out by 5 minutes.
+  5. Implement token refresh jitter at issuance time: TTL = base_ttl + random(0, 300s) to prevent future synchronized expiration storms.
+remediation_action: stagger_token_refresh
+error_message: '[Auth] AUTH-TOKEN-STORM: refresh_rate={refresh_rate}/s capacity={max_refresh_rate}/s failures={failed_refreshes}
+  pool={token_pool_id}'
+stack_trace: |-
+  === TOKEN SERVICE METRICS DUMP ===
+  pool={token_pool_id}
+  ----------- refresh metrics ---------
+    refresh_rate    = {refresh_rate}/s
+    capacity        = {max_refresh_rate}/s
+    failures        = {failed_refreshes}
+    success_rate    = 14.2%
+    avg_latency     = 4,821ms (target 50ms)
+  ----------- token pool state --------
+    active_tokens   = 142,301
+    expiring_5min   = 87,412  (61.4% — clock skew)
+    signing_key     = RS256-prod-2026-02
+    jwks_cache_age  = 312s
+  ----------- provider breakdown ------
+    oauth-google    : 3,201/s (OVERLOADED)
+    oauth-discord   : 2,847/s (OVERLOADED)
+    oauth-steam     : 1,204/s (DEGRADED)
+    email-password  : 891/s   (OK)
+  ----------- action ------------------
+    STAGGER refresh window  EXTEND ttl by 300s
+  AUTH-TOKEN-STORM: refresh rate {refresh_rate}/s exceeds capacity {max_refresh_rate}/s
+correlation_attr:
+  key: infra.ntp_source
+  value: chrony-4.5-gps-backup
+fault_params:
+  refresh_rate: {randint: [5000, 50000]}
+  max_refresh_rate: 2000
+  failed_refreshes: {randint: [100, 5000]}
+  token_pool_id: {choice: [pool-primary, pool-secondary, pool-failover]}
+rca_clues:
+  auth-gateway:
+    auth.expiring_tokens_5min_pct: {uniform: [40.0, 75.0], round: 1}
+    auth.jwks_cache_age_s: {randint: [200, 600]}
+  game-server:
+    game.session_validation_failures: {randint: [500, 5000]}
+    game.forced_relogin_count: {randint: [100, 1000]}
+  matchmaking-engine:
+    matchmaking.auth_timeout_pct: {uniform: [10.0, 50.0], round: 1}
+  chat-service:
+    chat.disconnected_users: {randint: [500, 5000]}

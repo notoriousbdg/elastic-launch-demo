@@ -1,0 +1,136 @@
+service: chat-service
+sort_order: 4
+cloud_provider: gcp
+cloud_region: us-central1
+cloud_platform: gcp_compute_engine
+cloud_availability_zone: us-central1-a
+subsystem: social
+language: java
+topology:
+- - moderation-engine
+  - /api/v1/moderation/check
+  - POST
+- - auth-gateway
+  - /api/v1/auth/validate-token
+  - POST
+entry_endpoints:
+- - /api/v1/chat/send
+  - POST
+emit_fault_logs: true
+kpi_emitter: false
+constants:
+  CHANNELS:
+  - global-en
+  - guild-12345
+  - match-lobby
+  - trade-market
+  - lfg-ranked
+  BITRATES:
+  - 48
+  - 64
+  - 96
+  - 128
+state:
+  _messages_processed:
+    init: 0
+  _last_channel_report:
+    init: now
+steps:
+- counter:
+    state_key: _messages_processed
+    by: 1
+- sample:
+    channel:
+      choice: CHANNELS
+    chat_latency_ms:
+      uniform:
+      - 1.0
+      - 15.0
+      round: 1
+- log:
+    level: INFO
+    message: '[Chat] msg_routed channel={channel} latency={chat_latency_ms}ms delivery=OK subscribers=247'
+    attrs:
+      operation: message_routed
+      chat.channel:
+        var: channel
+      chat.latency_ms:
+        var: chat_latency_ms
+      chat.delivery_status: OK
+- sample:
+    voice_id:
+      format: VC-{n}
+      n:
+        randint:
+        - 10000
+        - 99999
+    participants:
+      randint:
+      - 2
+      - 20
+    bitrate_kbps:
+      choice: BITRATES
+    packet_loss:
+      uniform:
+      - 0.0
+      - 1.5
+      round: 2
+- log:
+    level: INFO
+    message: '[Voice] channel={voice_id} participants={participants} bitrate={bitrate_kbps}kbps loss={packet_loss}% codec=opus
+      MOS=4.2'
+    attrs:
+      operation: voice_status
+      voice.channel_id:
+        var: voice_id
+      voice.participants:
+        var: participants
+      voice.bitrate_kbps:
+        var: bitrate_kbps
+      voice.packet_loss_pct:
+        var: packet_loss
+- every:
+    seconds: 10
+    state_key: _last_channel_report
+    steps:
+    - log:
+        level: INFO
+        message: '[Chat] summary msgs_processed={_messages_processed} channels=5 mod_queue=12 voice_active=84'
+        attrs:
+          operation: channel_summary
+          summary.messages_processed:
+            var: _messages_processed
+          summary.channel_count: 5
+- sample:
+    msg_rate:
+      if_active:
+        randint:
+        - 800
+        - 5000
+      else:
+        randint:
+        - 50
+        - 400
+    active_users:
+      randint:
+      - 5000
+      - 50000
+    voice_channels:
+      randint:
+      - 200
+      - 2000
+- metric:
+    name: chat.message_rate
+    value:
+      var: msg_rate
+    unit: msg/s
+- metric:
+    name: chat.active_users
+    value:
+      var: active_users
+    unit: users
+- metric:
+    name: chat.voice_channels_active
+    value:
+      var: voice_channels
+    unit: channels

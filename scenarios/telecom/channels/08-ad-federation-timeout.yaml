@@ -1,0 +1,60 @@
+name: AD Federation Timeout
+subsystem: authentication
+vehicle_section: identity_federation
+error_type: AUTH-FEDERATION-TIMEOUT
+sensor_type: federation
+affected_services:
+- auth-service
+cascade_services:
+- api-gateway
+description: Azure AD federation SAML/OIDC response timeout preventing enterprise SSO authentication
+investigation_notes: |
+  1. Check Azure AD health dashboard — federation timeouts typically correlate with Azure AD regional outages or certificate rotation. Monitor: https://status.azure.com/en-us/status.
+  2. SAML assertion response timeout at 30s indicates the Azure AD token endpoint is not responding. Verify network connectivity: curl -w '%{time_total}' https://login.microsoftonline.com/{tenant_id}/saml2.
+  3. Enterprise SSO users (20% of traffic) are completely blocked when federation is down. Consumer and MVNO users using local auth are unaffected — impact is limited to enterprise segment.
+  4. Enable fallback to cached SAML assertions for recently-authenticated enterprise users. Auth-service maintains a 15-minute assertion cache that can extend active sessions during federation outages.
+  5. For new enterprise login attempts, display a maintenance message directing users to contact their enterprise admin. Do not expose Azure AD error details to end users.
+remediation_action: enable_federation_fallback
+error_message: '[AUTH] AUTH-FEDERATION-TIMEOUT: provider={federation_provider} timeout_ms={federation_timeout_ms} tenant={federation_tenant} sso_users_blocked={sso_blocked_count}'
+stack_trace: |
+  === AD FEDERATION STATUS ===
+  provider={federation_provider}  tenant={federation_tenant}
+  --- FEDERATION PIPELINE ---
+    STEP                    STATUS      ELAPSED_MS
+    saml_request_build      COMPLETE    12
+    idp_redirect            COMPLETE    85
+    saml_response_wait      TIMEOUT     {federation_timeout_ms}  <<< STUCK
+    assertion_validate      SKIPPED     ---
+    session_create          SKIPPED     ---
+  --- AZURE AD STATUS ---
+    endpoint=login.microsoftonline.com  response=TIMEOUT
+    region=westeurope  status_page=DEGRADED
+    sso_users_blocked={sso_blocked_count}  enterprise_impact=100%
+    consumer_impact=0%  mvno_impact=0%
+  ACTION: enable_assertion_cache=true  display_maintenance=true  alert=AUTH-FEDERATION-TIMEOUT
+infrastructure_events:
+- body: '[AzureHealth] ResourceHealthChanged: resource=auth-service status=Degraded cause=AzureAD_Federation_Timeout region=westeurope timestamp=2026-03-08T09:12:00Z'
+  severity: WARN
+  event_name: azure.health.ResourceHealthChanged
+  service: auth-service
+  attributes:
+    cloud.provider: azure
+    cloud.service: active_directory
+    azure.health.status: Degraded
+    azure.health.cause: AzureAD_Federation_Timeout
+    infrastructure.source: AzureHealth
+correlation_attr:
+  key: auth.saml_library_version
+  value: saml2-v2.4.1-hotfix
+fault_params:
+  federation_provider: {choice: [Azure AD, Okta, OneLogin]}
+  federation_timeout_ms: {randint: [25000, 35000]}
+  federation_tenant: {choice: [meridian-enterprise, partner-sso, mvno-auth]}
+  sso_blocked_count: {randint: [100, 1000]}
+rca_clues:
+  auth-service:
+    auth.federation_timeout_ms: {randint: [25000, 35000]}
+    auth.azure_ad_status: DEGRADED
+  api-gateway:
+    gateway.enterprise_login_blocked: true
+    gateway.consumer_impact: NONE

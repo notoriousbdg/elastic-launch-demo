@@ -1,0 +1,109 @@
+service: notification-service
+sort_order: 5
+cloud_provider: gcp
+cloud_region: europe-west3
+cloud_platform: gcp_compute_engine
+cloud_availability_zone: europe-west3-a
+subsystem: notifications
+language: python
+db_operations:
+- - INSERT
+  - notification_log
+  - INSERT INTO notification_log (msisdn, channel, template, status, ts) VALUES ($1, $2, $3, $4, NOW())
+topology:
+- - subscriber-db
+  - /api/v1/db/notifications/insert
+  - POST
+emit_fault_logs: true
+kpi_emitter: false
+state:
+  _notification_count:
+    init: 0
+  _last_summary:
+    init: now
+steps:
+- sample:
+    notif_channel:
+      choice:
+      - sms
+      - push
+      - email
+      - webhook
+    notif_template:
+      choice:
+      - activation_confirm
+      - plan_change
+      - usage_alert
+      - partner_callback
+- counter:
+    state_key: _notification_count
+    by: 1
+- log:
+    level: INFO
+    message: '[NOTIF] notification_sent channel={notif_channel} template={notif_template} priority=high delivery=SUCCESS'
+    attrs:
+      operation: notification_sent
+      notification.channel:
+        var: notif_channel
+      notification.template:
+        var: notif_template
+      notification.delivery: SUCCESS
+- log:
+    level: INFO
+    message: '[NOTIF] channel_health sms=98.5% push=99.2% email=99.8% webhook=97.5% smpp_bind=BOUND status=NORMAL'
+    attrs:
+      operation: channel_health
+      notification.sms_rate: 98.5
+      notification.push_rate: 99.2
+      notification.webhook_rate: 97.5
+- every:
+    seconds: 10
+    state_key: _last_summary
+    steps:
+    - log:
+        level: INFO
+        message: '[NOTIF] notification_summary total={_notification_count} delivery_rate=98.8% queue_depth=45 status=NORMAL'
+        attrs:
+          operation: notification_summary
+          notification.total:
+            var: _notification_count
+          notification.delivery_rate: 98.8
+- sample:
+    notif_queue:
+      if_active:
+        randint:
+        - 500
+        - 5000
+      else:
+        randint:
+        - 10
+        - 100
+    notif_delivery_rate:
+      if_active:
+        uniform:
+        - 10.0
+        - 60.0
+        round: 2
+      else:
+        uniform:
+        - 95.0
+        - 99.5
+        round: 2
+- metric:
+    name: notification_service.queue_depth
+    value:
+      var: notif_queue
+    unit: messages
+- metric:
+    name: notification_service.delivery_rate
+    value:
+      var: notif_delivery_rate
+    unit: '%'
+- metric:
+    name: notification_service.sms_throughput
+    value:
+      uniform:
+      - 200.0
+      - 500.0
+      round: 1
+    unit: msg/min

@@ -1,0 +1,54 @@
+name: WiFi AP Disconnect Storm
+subsystem: network_access
+vehicle_section: wireless_lan
+error_type: AP_DISCONNECTED
+sensor_type: ap_status
+affected_services:
+- wifi-controller
+- network-controller
+cascade_services:
+- packaging-fulfillment
+- card-printing-system
+description: Multiple wireless access points simultaneously losing connectivity to the controller
+investigation_notes: |-
+  1. Check the Mist dashboard for AP connectivity status and last-seen timestamps across the affected site.
+  2. Verify upstream switch port status: `show interface status | include AP` — a switch reboot or PoE budget exhaustion can take down multiple APs simultaneously.
+  3. Check PoE allocation: `show power inline` — if the switch PoE budget is exceeded, lower-priority APs will be shut down.
+  4. Verify CAPWAP/DTLS tunnel health between APs and the Mist cloud controller — firewall rules may be blocking UDP 2049.
+  5. If APs are on a shared VLAN, check for a broadcast storm or STP issue on that VLAN that could saturate AP management traffic.
+  6. As immediate remediation, power-cycle the affected switch stack or re-provision APs from the Mist cloud console.
+remediation_action: restart_access_point
+error_message: 'AP_DISCONNECTED event_id=mist-evt-{ap_disconnect_count}: {ap_disconnect_count} APs lost connectivity in {ap_disconnect_window}s,
+  including {ap_name} (site {ap_site}), last CAPWAP heartbeat {ap_last_heartbeat}s ago'
+stack_trace: '{{"type": "AP_DISCONNECTED", "event_id": "mist-evt-{ap_disconnect_count}", "org_id": "fanatics-org-001", "site_id":
+  "{ap_site}", "ap_name": "{ap_name}", "ap_mac": "5c:5b:35:a1:b2:c3", "timestamp": 1705329121, "duration": {ap_disconnect_window},
+  "count": {ap_disconnect_count}, "last_seen": {ap_last_heartbeat}, "reason": "CAPWAP heartbeat timeout", "firmware": "0.14.29313"}}'
+correlation_attr:
+  key: deployment.ap_firmware
+  value: mist-fw-0.14.29313-beta
+fault_params:
+  ap_disconnect_count: {randint: [5, 20]}
+  ap_disconnect_window: {randint: [10, 60]}
+  ap_name:
+    choice:
+    - AP-WAREHOUSE-01
+    - AP-WAREHOUSE-02
+    - AP-PRINT-FLOOR-01
+    - AP-OFFICE-01
+    - AP-SHIPPING-01
+    - AP-DOCK-01
+  ap_site: {choice: [warehouse-east, print-facility, office-hq, shipping-dock]}
+  ap_last_heartbeat: {randint: [30, 300]}
+rca_clues:
+  wifi-controller:
+    wifi.capwap_tunnel_down: {randint: [5, 20]}
+    wifi.poe_budget_exceeded: {choice: [true, false]}
+  network-controller:
+    network.switch_port_down_count: {randint: [3, 15]}
+    network.poe_watts_available: {randint: [0, 50]}
+  packaging-fulfillment:
+    warehouse.scanner_offline_count: {randint: [2, 10]}
+    warehouse.pick_rate_degraded: true
+  card-printing-system:
+    print.mes_connectivity_lost: true
+    print.jobs_queued_offline: {randint: [10, 100]}

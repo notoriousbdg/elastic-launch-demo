@@ -1,0 +1,63 @@
+name: S1-MME Interface Congestion
+subsystem: network
+vehicle_section: core_network
+error_type: NET-S1MME-CONGEST
+sensor_type: signaling
+affected_services:
+- network-core
+- provisioning-service
+cascade_services:
+- notification-service
+description: S1-MME signaling interface congested causing attach/detach procedure delays across MME pool
+investigation_notes: |
+  1. Check MME signaling load — S1-MME SCTP association handling above 85% capacity causes queuing of NAS messages (Attach, TAU, Service Request). Monitor: mme.sctp_association_count and mme.nas_msg_queue.
+  2. Identify the source of signaling surge — mass TAU (Tracking Area Update) storms from moving subscribers (trains, highways) can spike signaling 10-20x above baseline.
+  3. Review MME pool load balancing — if one MME in the pool is receiving disproportionate signaling load, DNS-based S1-MME distribution may need rebalancing.
+  4. Check for paging storms — excessive paging for idle-mode subscribers (e.g., push notification bursts) consumes S1-MME capacity. Coordinate with notification-service to throttle.
+  5. Enable S1-MME overload control: send OVERLOAD START to eNodeBs to trigger reject-non-emergency procedures. This preserves capacity for emergency calls and critical activations.
+remediation_action: rebalance_mme_pool
+error_message: '[NET] NET-S1MME-CONGEST: mme_id={mme_id} sctp_load={sctp_load_pct}% nas_queue={nas_queue_depth} attach_delay_ms={attach_delay_ms} region={mme_region}'
+stack_trace: |
+  === S1-MME INTERFACE STATUS ===
+  mme_id={mme_id}  region={mme_region}  pool=MME-POOL-EU-CENTRAL
+  --- SIGNALING METRICS ---
+    METRIC               VALUE       CAPACITY    STATUS
+    sctp_associations     {sctp_load_pct}%       85%         CONGESTED
+    nas_msg_queue         {nas_queue_depth}       1000        OVERFLOW
+    attach_procedures     4,200/min   5,000/min   WARNING
+    tau_procedures        8,400/min   6,000/min   EXCEEDED  <<< SURGE
+  --- PROCEDURE DELAYS ---
+    attach_avg_ms={attach_delay_ms}  baseline=50ms  multiplier={attach_multiplier}x
+    tau_avg_ms=1,200    baseline=30ms
+    service_request_avg_ms=800  baseline=20ms
+  ACTION: overload_start=true  rebalance_pool=true  alert=NET-S1MME-CONGEST
+infrastructure_events:
+- body: '[GCP-Monitoring] SCTPAssociationDegraded: interface=S1-MME load_pct=95 nas_queue=500 region=europe-west3 cluster=network-core-gke'
+  severity: WARN
+  event_name: gcp.monitoring.SCTPAssociationDegraded
+  service: network-core
+  attributes:
+    cloud.provider: gcp
+    cloud.service: monitoring
+    gcp.resource_type: gke_container
+    infrastructure.source: GCP-Monitoring
+correlation_attr:
+  key: network.mme_firmware
+  value: mme-v8.2.0-rc1
+fault_params:
+  mme_id: {format: "MME-EU-{n:02d}", n: {randint: [1, 8]}}
+  sctp_load_pct: {randint: [85, 98]}
+  nas_queue_depth: {randint: [1000, 5000]}
+  attach_delay_ms: {randint: [500, 3000]}
+  mme_region: EU-CENTRAL
+  attach_multiplier: {randint: [5, 30]}
+rca_clues:
+  network-core:
+    network.sctp_load_pct: {randint: [85, 98]}
+    network.nas_queue_depth: {randint: [1000, 5000]}
+  provisioning-service:
+    provisioning.attach_delay_ms: {randint: [500, 3000]}
+    provisioning.signaling_backpressure: true
+  notification-service:
+    notification.paging_storm_detected: true
+    notification.throttle_active: true

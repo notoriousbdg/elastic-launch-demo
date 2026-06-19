@@ -116,25 +116,52 @@ These map to exception type tables in `log_generators/trace_generator.py`. Any o
 
 ---
 
-## 9. `get_service_classes()` must use lazy imports
+## 9. Each service is fully defined in `services/<svc>.yaml` — `scenario.yaml` carries no per-service data
 
-```python
-def get_service_classes(self) -> list[type]:
-    from scenarios.<id>.services.<svc1> import <Svc1>Service
-    # ...
-    return [<Svc1>Service, ...]
+A service's complete definition — identity/resource metadata, call topology, entry endpoints, DB operations, and telemetry DSL — all live in one file per service:
+
+```
+scenarios/<id>/services/
+    payment-processor.yaml     # sort_order, cloud_*, subsystem, language, topology,
+    order-management.yaml      # entry_endpoints, db_operations, emit_fault_logs,
+    ... (9 total)              # kpi_emitter, constants, state, steps
 ```
 
-Do not import service classes at module top-level. Circular import issues arise if you do, because service files import from `scenarios/<id>/executive_kpis.py` which is in the same package.
+`YamlScenario` auto-discovers these files, sorts by `sort_order`, and assembles `scenario.services`, `service_topology`, `entry_endpoints`, and `db_operations` at load time. **`scenario.yaml` must NOT contain `services:`, `service_topology:`, `entry_endpoints:`, or `db_operations:` blocks** — those are now per-service concerns.
+
+The telemetry DSL is interpreted by `app/services/telemetry_dsl.py` (shared infra — see §11). **Never write a Python `BaseService` subclass for service telemetry.** The `services/` directory must contain only `.yaml` files (no `.py` files, no `__init__.py`).
+
+See the **Service telemetry DSL** section in CONTRACT.md for the full spec schema.
 
 ---
 
-## 10. The module-level `scenario` instance is required
+## 10. Scenario folders are pure YAML — no Python files
 
-The last line of every `scenarios/<id>/scenario.py` must be:
+A scenario folder contains **only**:
 
-```python
-scenario = <Name>Scenario()
+```text
+scenarios/<id>/
+    scenario.yaml
+    channels/
+        01-<slug>.yaml  (×20)
+        ...
+    services/
+        <svc>.yaml      (×9)
+        ...
 ```
 
-The auto-discovery in `scenarios/__init__.py` reads `mod.scenario` from each imported module. Without this, the scenario is invisible to the runtime.
+**Do NOT create `scenario.py`, `__init__.py`, or `executive_kpis.py`** in a scenario folder. The registry (`scenarios/__init__.py`) discovers scenarios by globbing `scenarios/*/scenario.yaml` and calling `load_yaml_scenario` directly — no Python shim is needed or expected.
+
+---
+
+## 11. `scenarios/fault_spec.py` and `scenarios/yaml_scenario.py` are shared infrastructure
+
+These are shared across all scenarios. **Never modify them for a new scenario.**
+
+If you believe a change to these files is necessary, stop and ask the user. The default answer is no.
+
+These files live outside any scenario subfolder and are not scenario-specific:
+- `scenarios/fault_spec.py` — YAML DSL resolver for fault params / rca_clues / trace_attributes
+- `scenarios/yaml_scenario.py` — `YamlScenario` class + `load_yaml_scenario()` + `emit_executive_business_metrics_if_eligible()`
+- `app/services/telemetry_dsl.py` — `YamlService` executor (interprets `services/<svc>.yaml` specs each cycle)
+- `app/services/expr.py` — sandboxed expression evaluator used by the DSL (`{expr: "..."}` values)

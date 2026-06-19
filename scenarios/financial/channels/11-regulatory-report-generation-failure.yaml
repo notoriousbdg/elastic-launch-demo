@@ -1,0 +1,37 @@
+name: Regulatory Report Generation Failure
+subsystem: compliance
+vehicle_section: reporting_engine
+error_type: COMPL-REG-REPORT-FAIL
+sensor_type: report_generator
+affected_services:
+- compliance-monitor
+- audit-logger
+cascade_services:
+- settlement-processor
+description: Mandatory regulatory report fails to generate before submission deadline
+investigation_notes: ''
+remediation_action: ''
+error_message: '[COMPL] COMPL-REG-REPORT-FAIL: report={report_type} period={report_period} stage={stage} deadline={deadline_utc}'
+stack_trace: |-
+  === REG REPORT PIPELINE STATUS ===
+  report={report_type}  period={report_period}  deadline={deadline_utc}
+  STAGE               STATUS       RECORDS     ERRORS
+  data_collection     COMPLETE     1,247,832   0
+  validation          FAILED       1,247,832   3,412  <<< BLOCKED
+  aggregation         PENDING      ---         ---
+  formatting          PENDING      ---         ---
+  submission          PENDING      ---         ---
+  --- VALIDATION ERRORS ---
+    missing_LEI=1,204  invalid_UTI=892  stale_price=1,316
+    regulator=ESMA  schema=ISO20022  format=XML
+  failed_stage={stage}  retry_count=3  max_retries=3
+  ACTION: manual_remediation=true  regulator_extension=REQUESTED  alert=COMPL-REG-REPORT-FAIL
+correlation_attr: {}
+fault_params:
+  report_type: {choice: [EMIR-TR, MiFID-II-RTS25, CAT-FINRA, SFTR, SEC-13F, TRF-TRACE]}
+  report_period:
+    format: "2026-Q{n}"
+    n: {randint: [1, 4]}
+  stage: {choice: [data_collection, validation, aggregation, formatting, submission]}
+  deadline_utc: 2026-02-16T23:59:00Z
+rca_clues: {}

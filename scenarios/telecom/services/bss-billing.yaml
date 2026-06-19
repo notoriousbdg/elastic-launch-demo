@@ -1,0 +1,124 @@
+service: bss-billing
+sort_order: 7
+cloud_provider: azure
+cloud_region: westeurope
+cloud_platform: azure_vm
+cloud_availability_zone: westeurope-2
+subsystem: billing
+language: java
+entry_endpoints:
+- - /api/v1/billing/status
+  - GET
+db_operations:
+- - SELECT
+  - billing_accounts
+  - SELECT account_id, balance, plan_tier FROM billing_accounts WHERE msisdn = $1
+- - INSERT
+  - billing_events
+  - INSERT INTO billing_events (msisdn, event_type, amount, ts) VALUES ($1, $2, $3, NOW())
+topology:
+- - subscriber-db
+  - /api/v1/db/subscribers/update
+  - POST
+emit_fault_logs: true
+kpi_emitter: true
+state:
+  _billing_count:
+    init: 0
+  _last_summary:
+    init: now
+steps:
+- sample:
+    billing_op:
+      choice:
+      - account_create
+      - cdr_rate
+      - invoice_generate
+      - credit_apply
+    billing_plan:
+      choice:
+      - 5G-BASIC-EU-v3
+      - 5G-PLUS-EU-v3
+      - 5G-MAX-EU-v3
+      - ENT-BUS-L-v2
+- counter:
+    state_key: _billing_count
+    by: 1
+- log:
+    level: INFO
+    message: '[BSS] billing_operation type={billing_op} plan={billing_plan} currency=EUR status=COMPLETED'
+    attrs:
+      operation: billing_operation
+      billing.operation:
+        var: billing_op
+      billing.plan_code:
+        var: billing_plan
+- sample:
+    cdr_rate:
+      randint:
+      - 1500
+      - 3000
+    cdr_queue:
+      randint:
+      - 100
+      - 500
+- log:
+    level: INFO
+    message: '[BSS] cdr_pipeline processing_rate={cdr_rate}/min queue_depth={cdr_queue} rating_engine=OK mediation=HEALTHY status=NORMAL'
+    attrs:
+      operation: cdr_pipeline
+      billing.cdr_rate:
+        var: cdr_rate
+      billing.queue_depth:
+        var: cdr_queue
+- every:
+    seconds: 10
+    state_key: _last_summary
+    steps:
+    - log:
+        level: INFO
+        message: '[BSS] billing_summary operations={_billing_count} cdr_processed=45000 sla_compliance=99.8% status=NORMAL'
+        attrs:
+          operation: billing_summary
+          billing.total_operations:
+            var: _billing_count
+          billing.sla_compliance: 99.8
+- sample:
+    cdr_processing_rate:
+      if_active:
+        uniform:
+        - 200.0
+        - 800.0
+        round: 1
+      else:
+        uniform:
+        - 1500.0
+        - 3000.0
+        round: 1
+    mediation_queue:
+      if_active:
+        randint:
+        - 50000
+        - 200000
+      else:
+        randint:
+        - 100
+        - 500
+- metric:
+    name: bss_billing.cdr_processing_rate
+    value:
+      var: cdr_processing_rate
+    unit: cdr/min
+- metric:
+    name: bss_billing.mediation_queue_depth
+    value:
+      var: mediation_queue
+    unit: cdrs
+- metric:
+    name: bss_billing.revenue_per_hour
+    value:
+      uniform:
+      - 15000.0
+      - 45000.0
+      round: 2
+    unit: EUR

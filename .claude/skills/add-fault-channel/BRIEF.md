@@ -10,7 +10,7 @@ All three must be confirmed before moving to Phase 2.
 
 ### 1. Scenario
 
-Which scenario is being modified. Accept either the `scenario_id` slug (`space`, `fanatics`, `financial`, `healthcare`, `gaming`, `banking`, `ecommerce`, `manufacturing`, `gcp`) or a display name.
+Which scenario is being modified. Accept either the `scenario_id` slug (any existing scenario under `scenarios/` — e.g. `banking`, `ecommerce`, `telecom`, `space`, `fanatics`, `financial`, `healthcare`, `gaming`, `gcp`, `manufacturing`) or a display name.
 
 If the user names a customer or vertical without specifying a scenario, pick the closest existing scenario and confirm: "It sounds like you want the `financial` scenario — is that right?"
 

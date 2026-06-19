@@ -1,0 +1,229 @@
+service: fuel-system
+sort_order: 2
+cloud_provider: aws
+cloud_region: us-east-1
+cloud_platform: aws_ec2
+cloud_availability_zone: us-east-1b
+subsystem: propulsion
+language: go
+topology:
+- - sensor-validator
+  - /api/v1/validate/pressure
+  - POST
+- - sensor-validator
+  - /api/v1/validate/thermal
+  - POST
+- - sensor-validator
+  - /api/v1/validate/flow-rate
+  - POST
+entry_endpoints:
+- - /api/v1/fuel/monitor
+  - POST
+db_operations:
+- - SELECT
+  - sensor_data
+  - SELECT reading, baseline FROM sensor_data WHERE sensor_type = 'pressure' AND ts > NOW() - INTERVAL 5 MINUTE
+- - UPDATE
+  - sensor_registry
+  - UPDATE sensor_registry SET last_reading = ?, last_seen = NOW() WHERE sensor_id = ?
+emit_fault_logs: true
+kpi_emitter: false
+constants:
+  SENSORS:
+    engine_thermal:
+      lo: 280.0
+      hi: 320.0
+      unit: K
+      metric: fuel_system.engine_thermal
+    lox_pressure:
+      lo: 240.0
+      hi: 290.0
+      unit: PSI
+      metric: fuel_system.lox_pressure
+    rp1_pressure:
+      lo: 220.0
+      hi: 270.0
+      unit: PSI
+      metric: fuel_system.rp1_pressure
+    fuel_flow:
+      lo: 4.2
+      hi: 5.8
+      unit: kg/s
+      metric: fuel_system.fuel_flow_rate
+    oxidizer_flow:
+      lo: 10.5
+      hi: 14.5
+      unit: kg/s
+      metric: fuel_system.oxidizer_flow_rate
+    turbopump_rpm:
+      lo: 28000.0
+      hi: 34000.0
+      unit: RPM
+      metric: fuel_system.turbopump_rpm
+state:
+  _check_count:
+    init: 0
+  _last_press_summary:
+    init: now
+steps:
+- sample:
+    engine_thermal_val:
+      expr: round(max(280.0, min(320.0, rand.uniform(280.0, 320.0) + rand.gauss(0, (320.0 - 280.0) * 0.02))) if not active
+        else round(rand.uniform(280.0, 320.0) + rand.gauss(0, (320.0 - 280.0) * 0.02), 2), 2)
+- metric:
+    name: fuel_system.engine_thermal
+    value:
+      var: engine_thermal_val
+    unit: K
+- log:
+    level: INFO
+    message: '[PMS] sensor=engine_thermal reading={engine_thermal_val}K nominal=280.0-320.0K status=NOMINAL'
+    attrs:
+      operation: sensor_reading
+      sensor.name: engine_thermal
+      sensor.type: engine
+      sensor.value:
+        var: engine_thermal_val
+      sensor.unit: K
+      sensor.expected_min: 280.0
+      sensor.expected_max: 320.0
+      sensor.status: NOMINAL
+- sample:
+    lox_pressure_val:
+      expr: round(max(240.0, min(290.0, rand.uniform(240.0, 290.0) + rand.gauss(0, (290.0 - 240.0) * 0.02))) if not active
+        else round(rand.uniform(240.0, 290.0) + rand.gauss(0, (290.0 - 240.0) * 0.02), 2), 2)
+- metric:
+    name: fuel_system.lox_pressure
+    value:
+      var: lox_pressure_val
+    unit: PSI
+- log:
+    level: INFO
+    message: '[PMS] sensor=lox_pressure reading={lox_pressure_val}PSI nominal=240.0-290.0PSI status=NOMINAL'
+    attrs:
+      operation: sensor_reading
+      sensor.name: lox_pressure
+      sensor.type: lox
+      sensor.value:
+        var: lox_pressure_val
+      sensor.unit: PSI
+      sensor.expected_min: 240.0
+      sensor.expected_max: 290.0
+      sensor.status: NOMINAL
+- sample:
+    rp1_pressure_val:
+      expr: round(max(220.0, min(270.0, rand.uniform(220.0, 270.0) + rand.gauss(0, (270.0 - 220.0) * 0.02))) if not active
+        else round(rand.uniform(220.0, 270.0) + rand.gauss(0, (270.0 - 220.0) * 0.02), 2), 2)
+- metric:
+    name: fuel_system.rp1_pressure
+    value:
+      var: rp1_pressure_val
+    unit: PSI
+- log:
+    level: INFO
+    message: '[PMS] sensor=rp1_pressure reading={rp1_pressure_val}PSI nominal=220.0-270.0PSI status=NOMINAL'
+    attrs:
+      operation: sensor_reading
+      sensor.name: rp1_pressure
+      sensor.type: rp1
+      sensor.value:
+        var: rp1_pressure_val
+      sensor.unit: PSI
+      sensor.expected_min: 220.0
+      sensor.expected_max: 270.0
+      sensor.status: NOMINAL
+- sample:
+    fuel_flow_val:
+      expr: round(max(4.2, min(5.8, rand.uniform(4.2, 5.8) + rand.gauss(0, (5.8 - 4.2) * 0.02))) if not active else round(rand.uniform(4.2,
+        5.8) + rand.gauss(0, (5.8 - 4.2) * 0.02), 2), 2)
+- metric:
+    name: fuel_system.fuel_flow_rate
+    value:
+      var: fuel_flow_val
+    unit: kg/s
+- log:
+    level: INFO
+    message: '[PMS] sensor=fuel_flow reading={fuel_flow_val}kg/s nominal=4.2-5.8kg/s status=NOMINAL'
+    attrs:
+      operation: sensor_reading
+      sensor.name: fuel_flow
+      sensor.type: fuel
+      sensor.value:
+        var: fuel_flow_val
+      sensor.unit: kg/s
+      sensor.expected_min: 4.2
+      sensor.expected_max: 5.8
+      sensor.status: NOMINAL
+- sample:
+    oxidizer_flow_val:
+      expr: round(max(10.5, min(14.5, rand.uniform(10.5, 14.5) + rand.gauss(0, (14.5 - 10.5) * 0.02))) if not active else
+        round(rand.uniform(10.5, 14.5) + rand.gauss(0, (14.5 - 10.5) * 0.02), 2), 2)
+- metric:
+    name: fuel_system.oxidizer_flow_rate
+    value:
+      var: oxidizer_flow_val
+    unit: kg/s
+- log:
+    level: INFO
+    message: '[PMS] sensor=oxidizer_flow reading={oxidizer_flow_val}kg/s nominal=10.5-14.5kg/s status=NOMINAL'
+    attrs:
+      operation: sensor_reading
+      sensor.name: oxidizer_flow
+      sensor.type: oxidizer
+      sensor.value:
+        var: oxidizer_flow_val
+      sensor.unit: kg/s
+      sensor.expected_min: 10.5
+      sensor.expected_max: 14.5
+      sensor.status: NOMINAL
+- sample:
+    turbopump_rpm_val:
+      expr: round(max(28000.0, min(34000.0, rand.uniform(28000.0, 34000.0) + rand.gauss(0, (34000.0 - 28000.0) * 0.02))) if
+        not active else round(rand.uniform(28000.0, 34000.0) + rand.gauss(0, (34000.0 - 28000.0) * 0.02), 2), 2)
+- metric:
+    name: fuel_system.turbopump_rpm
+    value:
+      var: turbopump_rpm_val
+    unit: RPM
+- log:
+    level: INFO
+    message: '[PMS] sensor=turbopump_rpm reading={turbopump_rpm_val}RPM nominal=28000.0-34000.0RPM status=NOMINAL'
+    attrs:
+      operation: sensor_reading
+      sensor.name: turbopump_rpm
+      sensor.type: turbopump
+      sensor.value:
+        var: turbopump_rpm_val
+      sensor.unit: RPM
+      sensor.expected_min: 28000.0
+      sensor.expected_max: 34000.0
+      sensor.status: NOMINAL
+- counter:
+    state_key: _check_count
+    by: 1
+- metric:
+    name: fuel_system.check_count
+    value:
+      var: _check_count
+    unit: checks
+- every:
+    seconds: 10
+    state_key: _last_press_summary
+    steps:
+    - log:
+        level: INFO
+        message: '[PMS] system_check sensors=6 failures=0 checks={_check_count} result=PASS status=NOMINAL'
+        attrs:
+          operation: system_check
+          check.result: PASS
+          check.sensor_count: 6
+          check.total_count:
+            var: _check_count
+    else:
+    - log:
+        level: INFO
+        message: '[PMS] system_check sensors=6 failures=0 result=PASS status=NOMINAL'
+        attrs:
+          operation: system_check
+          check.result: PASS
+          check.sensor_count: 6

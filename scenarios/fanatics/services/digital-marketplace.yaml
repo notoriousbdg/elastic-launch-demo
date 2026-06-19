@@ -1,0 +1,110 @@
+service: digital-marketplace
+sort_order: 2
+cloud_provider: aws
+cloud_region: us-east-1
+cloud_platform: aws_ec2
+cloud_availability_zone: us-east-1b
+subsystem: commerce
+language: python
+topology:
+- - auction-engine
+  - /api/v1/auction/active-listings
+  - GET
+- - auction-engine
+  - /api/v1/auction/place-bid
+  - POST
+- - card-printing-system
+  - /api/v1/printing/order-status
+  - GET
+- - card-printing-system
+  - /api/v1/printing/submit-job
+  - POST
+- - packaging-fulfillment
+  - /api/v1/fulfillment/ship-order
+  - POST
+entry_endpoints:
+- - /api/v1/marketplace/browse
+  - GET
+- - /api/v1/marketplace/checkout
+  - POST
+- - /api/v1/marketplace/search
+  - GET
+db_operations:
+- - SELECT
+  - products
+  - SELECT id, name, price, stock FROM products WHERE category = ? AND status = 'active' ORDER BY listed_at DESC LIMIT 50
+- - INSERT
+  - orders
+  - INSERT INTO orders (user_id, product_id, quantity, total, status, created_at) VALUES (?, ?, ?, ?, 'pending', NOW())
+- - UPDATE
+  - inventory
+  - UPDATE inventory SET quantity = quantity - ? WHERE sku = ? AND quantity >= ?
+emit_fault_logs: true
+kpi_emitter: true
+steps:
+- sample:
+    active_users:
+      randint:
+      - 800
+      - 3500
+    transactions_per_sec:
+      uniform:
+      - 45.0
+      - 120.0
+      round: 1
+    cart_conversion:
+      uniform:
+      - 2.5
+      - 6.8
+      round: 2
+    avg_response_ms:
+      uniform:
+      - 35.0
+      - 120.0
+      round: 1
+- metric:
+    name: marketplace.active_users
+    value:
+      var: active_users
+    unit: users
+- metric:
+    name: marketplace.transactions_per_sec
+    value:
+      var: transactions_per_sec
+    unit: tps
+- metric:
+    name: marketplace.cart_conversion_pct
+    value:
+      var: cart_conversion
+    unit: '%'
+- metric:
+    name: marketplace.avg_response_ms
+    value:
+      var: avg_response_ms
+    unit: ms
+- log:
+    level: INFO
+    message: marketplace.health active_users={active_users} tps={transactions_per_sec} cart_conversion={cart_conversion}%
+      response_ms={avg_response_ms}
+    attrs:
+      operation: marketplace_health
+      marketplace.active_users:
+        var: active_users
+      marketplace.tps:
+        var: transactions_per_sec
+      marketplace.conversion:
+        var: cart_conversion
+      marketplace.response_ms:
+        var: avg_response_ms
+- sample:
+    catalog_items:
+      randint:
+      - 120000
+      - 180000
+- log:
+    level: INFO
+    message: marketplace.catalog_sync status=nominal items_indexed={catalog_items}
+    attrs:
+      operation: catalog_sync
+      catalog.item_count:
+        var: catalog_items

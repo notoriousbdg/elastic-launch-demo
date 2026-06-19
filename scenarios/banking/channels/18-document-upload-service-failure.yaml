@@ -1,0 +1,62 @@
+name: Document Upload Service Failure
+subsystem: document_management
+vehicle_section: upload_service
+error_type: DOC-UPLOAD-FAIL
+sensor_type: document_upload
+affected_services:
+- document-vault
+- member-portal
+cascade_services:
+- claims-processor
+- policy-manager
+description: Document upload and digital storage service failing affecting claims photos and policy documents
+investigation_notes: |-
+  1. Check S3 upload failure type: S3_WRITE_TIMEOUT indicates network latency to S3 endpoint — verify VPC endpoint configuration and S3 gateway endpoint health in us-east-1.
+  2. BUCKET_QUOTA_EXCEEDED means storage limits hit — check bucket metrics: aws s3api head-bucket --bucket banking-member-docs-prod. Request quota increase or implement lifecycle policy for old documents.
+  3. ENCRYPTION_KEY_ERROR indicates KMS key access issue — verify the document-vault service role has kms:GenerateDataKey and kms:Decrypt permissions. Check KMS key rotation status.
+  4. PII detection pipeline is working (ssn=REDACTED, dob=REDACTED) but uploads are blocking at S3. With 2,847 queued documents and oldest pending 12min, enable local cache fallback to prevent data loss.
+  5. Critical document types: DD214_DISCHARGE and COE_VA_LOAN uploads are time-sensitive for member benefits. Flag these for priority retry when S3 recovers.
+  6. Check virus_scan throughput — ClamAV scanning should not be the bottleneck but verify: kubectl logs -l app=document-vault --tail=100 | grep 'virus_scan' | grep -c 'TIMEOUT'.
+remediation_action: restart_document_service
+error_message: '[DOC] DOC-UPLOAD-FAIL: upload={upload_id} type={doc_type} size_mb={doc_size_mb} member={member_id} error={upload_error}'
+stack_trace: |-
+  === DOCUMENT UPLOAD SERVICE ===
+  upload={upload_id}  member={member_id}
+  --- UPLOAD DETAILS ---
+    type={doc_type}  size={doc_size_mb}MB  format=PDF/JPEG
+    classification=AUTO  sensitivity=PII_DETECTED
+  --- PROCESSING PIPELINE ---
+    STEP                STATUS      DETAIL
+    virus_scan          COMPLETE    clean
+    format_validate     COMPLETE    valid
+    pii_redaction       COMPLETE    ssn=REDACTED, dob=REDACTED
+    s3_upload           FAILED      {upload_error}  <<< BLOCKED
+    index_metadata      SKIPPED     ---
+    ocr_extract         SKIPPED     ---
+  --- STORAGE HEALTH ---
+    s3_bucket=banking-member-docs-prod  region=us-east-1
+    error={upload_error}  retry=3/3
+    queue_depth=2,847  oldest_pending=12min
+  ACTION: retry_upload=true  enable_local_cache=true  alert=DOC-UPLOAD-FAIL
+correlation_attr:
+  key: deployment.s3_endpoint_config
+  value: vpc-endpoint-v1.3.0-rc2
+fault_params:
+  upload_id: {format: "UPL-{n}", n: {randint: [100000, 999999]}}
+  doc_type: {choice: [CLAIM_PHOTO, POLICY_DEC_PAGE, ID_VERIFICATION, PROOF_OF_LOSS, COE_VA_LOAN, DD214_DISCHARGE]}
+  doc_size_mb: {uniform: [0.5, 25.0], round: 1}
+  member_id: {format: "M-{n}", n: {randint: [1000000, 9999999]}}
+  upload_error: {choice: [S3_WRITE_TIMEOUT, BUCKET_QUOTA_EXCEEDED, ENCRYPTION_KEY_ERROR, NETWORK_TIMEOUT]}
+rca_clues:
+  document-vault:
+    document.s3_error_type: {choice: [S3_WRITE_TIMEOUT, BUCKET_QUOTA_EXCEEDED, ENCRYPTION_KEY_ERROR]}
+    document.upload_queue_depth: {randint: [1000, 5000]}
+  member-portal:
+    portal.upload_retry_display: FAILED
+    portal.member_docs_pending: {randint: [200, 1000]}
+  claims-processor:
+    claims.photo_attachment_blocked: true
+    claims.claims_without_docs: {randint: [50, 200]}
+  policy-manager:
+    policy.dec_page_storage_blocked: true
+    policy.renewal_docs_delayed: {randint: [100, 400]}

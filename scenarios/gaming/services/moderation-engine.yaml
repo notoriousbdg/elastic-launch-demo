@@ -1,0 +1,170 @@
+service: moderation-engine
+sort_order: 9
+cloud_provider: azure
+cloud_region: eastus
+cloud_platform: azure_vm
+cloud_availability_zone: eastus-1
+subsystem: trust_safety
+language: java
+topology:
+- - analytics-pipeline
+  - /api/v1/analytics/moderation-event
+  - POST
+- - auth-gateway
+  - /api/v1/auth/player-flags
+  - GET
+entry_endpoints:
+- - /api/v1/moderation/report
+  - POST
+emit_fault_logs: true
+kpi_emitter: false
+constants:
+  CATEGORIES:
+  - harassment
+  - cheating
+  - hate_speech
+  - exploits
+  - spam
+  MODEL_VERSIONS:
+  - automod-v5.2
+  - automod-v5.3
+  - automod-v6.0
+  - automod-v6.1
+  VERDICTS:
+  - CLEAN
+  - CLEAN
+  - CLEAN
+  - FLAGGED
+  RESOLUTIONS:
+  - warning_issued
+  - temp_ban
+  - cleared
+  - escalated
+state:
+  _actions_taken:
+    init: 0
+  _last_moderation_report:
+    init: now
+steps:
+- sample:
+    model:
+      choice: MODEL_VERSIONS
+    confidence:
+      uniform:
+      - 0.85
+      - 0.99
+      round: 3
+    category:
+      choice: CATEGORIES
+    scan_latency_ms:
+      uniform:
+      - 5.0
+      - 30.0
+      round: 1
+    verdict:
+      choice: VERDICTS
+- counter:
+    state_key: _actions_taken
+    by:
+      expr: 1 if verdict == 'FLAGGED' else 0
+- log:
+    level: INFO
+    message: '[T&S] content_scan model={model} verdict={verdict} category={category} confidence={confidence} latency={scan_latency_ms}ms'
+    attrs:
+      operation: content_scanned
+      moderation.model:
+        var: model
+      moderation.verdict:
+        var: verdict
+      moderation.category:
+        var: category
+      moderation.confidence:
+        var: confidence
+      moderation.latency_ms:
+        var: scan_latency_ms
+- sample:
+    report_category:
+      choice: CATEGORIES
+    report_player_id:
+      format: PLR-{n}
+      n:
+        randint:
+        - 100000
+        - 999999
+    resolution:
+      choice: RESOLUTIONS
+    wait_min:
+      randint:
+      - 1
+      - 120
+- log:
+    level: INFO
+    message: '[T&S] report_processed player={report_player_id} category={report_category} resolution={resolution} wait={wait_min}min
+      queue_depth=142'
+    attrs:
+      operation: report_processed
+      report.player_id:
+        var: report_player_id
+      report.category:
+        var: report_category
+      report.resolution:
+        var: resolution
+      report.wait_minutes:
+        var: wait_min
+- every:
+    seconds: 10
+    state_key: _last_moderation_report
+    steps:
+    - log:
+        level: INFO
+        message: '[T&S] summary actions_taken={_actions_taken} active_models=4 fp_rate=1.2% queue_depth=84'
+        attrs:
+          operation: moderation_summary
+          summary.actions_taken:
+            var: _actions_taken
+          summary.active_models: 4
+- sample:
+    scan_rate:
+      randint:
+      - 200
+      - 2000
+    fp_rate:
+      if_active:
+        uniform:
+        - 15.0
+        - 45.0
+        round: 2
+      else:
+        uniform:
+        - 0.5
+        - 3.0
+        round: 2
+    queue_depth:
+      if_active:
+        randint:
+        - 5000
+        - 50000
+      else:
+        randint:
+        - 50
+        - 500
+- metric:
+    name: moderation.scan_rate
+    value:
+      var: scan_rate
+    unit: msg/s
+- metric:
+    name: moderation.false_positive_rate
+    value:
+      var: fp_rate
+    unit: '%'
+- metric:
+    name: moderation.report_queue_depth
+    value:
+      var: queue_depth
+    unit: reports
+- metric:
+    name: moderation.actions_taken
+    value:
+      var: _actions_taken
+    unit: actions

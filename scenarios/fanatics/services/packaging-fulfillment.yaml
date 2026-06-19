@@ -1,0 +1,90 @@
+service: packaging-fulfillment
+sort_order: 4
+cloud_provider: gcp
+cloud_region: us-central1
+cloud_platform: gcp_compute_engine
+cloud_availability_zone: us-central1-a
+subsystem: logistics
+language: python
+topology:
+- - cloud-inventory-scanner
+  - /api/v1/inventory/reconcile
+  - POST
+- - digital-marketplace
+  - /api/v1/marketplace/shipment-notify
+  - POST
+entry_endpoints:
+- - /api/v1/fulfillment/status
+  - GET
+- - /api/v1/fulfillment/ship
+  - POST
+db_operations:
+- - SELECT
+  - shipments
+  - SELECT order_id, tracking_number, carrier, status FROM shipments WHERE created_at > NOW() - INTERVAL 24 HOUR AND status
+    = 'pending'
+- - INSERT
+  - shipments
+  - INSERT INTO shipments (order_id, tracking_number, carrier, weight_oz, status) VALUES (?, ?, ?, ?, 'label_printed')
+emit_fault_logs: true
+kpi_emitter: false
+steps:
+- sample:
+    orders_pending:
+      randint:
+      - 50
+      - 400
+    labels_printed:
+      randint:
+      - 200
+      - 800
+    scan_accuracy:
+      uniform:
+      - 99.2
+      - 100.0
+      round: 2
+    pick_rate:
+      uniform:
+      - 120.0
+      - 250.0
+      round: 1
+- metric:
+    name: fulfillment.orders_pending
+    value:
+      var: orders_pending
+    unit: orders
+- metric:
+    name: fulfillment.labels_printed
+    value:
+      var: labels_printed
+    unit: labels
+- metric:
+    name: fulfillment.scan_accuracy_pct
+    value:
+      var: scan_accuracy
+    unit: '%'
+- metric:
+    name: fulfillment.pick_rate
+    value:
+      var: pick_rate
+    unit: items/hr
+- log:
+    level: INFO
+    message: wms.fulfillment orders_pending={orders_pending} labels_printed={labels_printed} scan_accuracy={scan_accuracy}%
+      pick_rate={pick_rate}/hr
+    attrs:
+      operation: fulfillment_health
+      fulfillment.pending:
+        var: orders_pending
+      fulfillment.labels:
+        var: labels_printed
+      fulfillment.scan_accuracy:
+        var: scan_accuracy
+      fulfillment.pick_rate:
+        var: pick_rate
+- log:
+    level: INFO
+    message: wms.scanner_sync status=nominal all_readers=synced
+    attrs:
+      operation: scanner_sync
+      check.result: PASS

@@ -1,0 +1,53 @@
+name: Payload Vibration Anomaly
+subsystem: payload
+vehicle_section: payload_bay
+error_type: PLD-VIBRATION-LIMIT
+sensor_type: vibration
+affected_services:
+- payload-monitor
+- sensor-validator
+cascade_services:
+- mission-control
+- range-safety
+description: Payload vibration levels exceed structural safety margins
+investigation_notes: 'Root cause: resonance coupling between the launch vehicle structure and payload isolation mounts at
+  the observed frequency. Spectrum peaks at the primary frequency with harmonics at 88.4Hz and 142.7Hz suggest a structural
+  mode, not random vibration. Check isolation mount damper pressure (nominal 48.2PSI) — low pressure indicates a damper gas
+  leak allowing resonance transmission. Verify no loose payload adapter bolts (torque spec 45 ft-lb). Remediation: activate
+  vibration suppression mode (PLD_VIBRATION_DAMP ACTIVE), increase damper pressure via PLD_DAMPER_PRESS +10PSI. If structural
+  resonance confirmed, assess whether launch loads will excite this mode — may require launch hold for structural review.
+  Log the vibration spectrum for post-flight coupled loads analysis.'
+remediation_action: reset_payload_thermal
+error_message: '[PLD] PLD-VIBRATION-LIMIT: axis={axis} amplitude={amplitude}g frequency={frequency}Hz limit={limit}g'
+stack_trace: |-
+  == VIBRATION SPECTRUM DATA == PAYLOAD ACCELEROMETER ==
+  TIMESTAMP: MET+00:04:16.334 | FRAME: 0x4A39 | SEQ: 18452
+  ---------------------------------------------------------------
+  AXIS    FREQ_HZ    AMPLITUDE   LIMIT    STATUS
+  {axis}       {frequency}Hz    {amplitude}g       {limit}g    **EXCEEDED**
+  Y       45.2Hz     0.42g        1.5g     NOMINAL
+  Z       31.8Hz     0.67g        1.5g     NOMINAL
+  ---------------------------------------------------------------
+  SPECTRUM_PEAKS: {frequency}Hz({amplitude}g), 88.4Hz(0.31g), 142.7Hz(0.18g)
+  ISOLATION_MOUNT: ACTIVE | DAMPER_PRESSURE: 48.2PSI
+  PLD-VIBRATION-LIMIT: {axis}-axis {amplitude}g at {frequency}Hz exceeds {limit}g structural limit
+  ACTION: Verify isolation mount dampers, check for resonance coupling
+correlation_attr:
+  key: infra.mount_revision
+  value: iso-bracket-rev-C
+fault_params:
+  axis: {choice: [X, Y, Z]}
+  amplitude: {uniform: [2.0, 8.0], round: 2}
+  frequency: {uniform: [20.0, 200.0], round: 1}
+  limit: 1.5
+rca_clues:
+  payload-monitor:
+    payload.damper_pressure_psi: {uniform: [38, 48], round: 1}
+    payload.resonance_freq_hz: {uniform: [20, 80], round: 1}
+  sensor-validator:
+    validation.vibration_exceeded: true
+    validation.isolation_mount_status: {choice: [ACTIVE, DEGRADED]}
+  mission-control:
+    upstream.degraded_subsystem: payload
+  range-safety:
+    safety.structural_status: monitor

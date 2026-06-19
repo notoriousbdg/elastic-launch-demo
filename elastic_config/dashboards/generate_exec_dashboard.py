@@ -11,7 +11,7 @@ Primary output: **Systems Operations Dashboard** (saved object id `{namespace}-e
 
 Also emits a second saved object, **Executive Dashboard** (id `{namespace}-business-exec-dashboard`),
 when the scenario defines `executive_kpi_emitter_service_name`. Synthetic `business.*` OTLP gauges
-are emitted once per cycle from that service (`scenarios/{name}/executive_kpis.py`).
+are emitted once per cycle from that service via the telemetry DSL executor.
 
 Produces by-value Lens panels using the formBased datasource format that matches
 the built-in [OTel] dashboards shipped with Kibana 9.4, including all required

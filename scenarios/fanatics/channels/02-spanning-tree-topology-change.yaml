@@ -1,0 +1,63 @@
+name: Spanning Tree Topology Change
+subsystem: network_core
+vehicle_section: switching_fabric
+error_type: SPANTREE-2-TOPO_CHANGE
+sensor_type: stp_state
+affected_services:
+- network-controller
+- firewall-gateway
+cascade_services:
+- dns-dhcp-service
+- wifi-controller
+description: Rapid spanning tree topology changes destabilizing Layer 2 forwarding
+investigation_notes: |-
+  1. Run `show spanning-tree vlan <id> detail` to identify the port generating Topology Change Notifications (TCNs).
+  2. Check `show spanning-tree detail | include ieee|from|occur` across all switches to pinpoint the originating bridge.
+  3. Verify BPDU Guard and Root Guard are enabled on access ports: `show spanning-tree inconsistentports`.
+  4. A sudden burst of TCNs often indicates a flapping uplink or a new device plugged into a trunk port — correlate with interface up/down events.
+  5. Enable `spanning-tree portfast` on all edge/access ports to prevent end-host connections from triggering topology changes.
+  6. If the root bridge is shifting, set explicit root priority: `spanning-tree vlan <id> root primary` on the designated core switch.
+remediation_action: reset_spanning_tree
+error_message: '%SPANTREE-2-TOPO_CHANGE: Topology Change received on VLAN {vlan_id} instance {stp_instance} from bridge {bridge_id}
+  via port {interface}, {tc_count} TCN BPDUs in {tc_window}s'
+stack_trace: |-
+  switch# show spanning-tree vlan {vlan_id} detail
+  VLAN{vlan_id} is executing the rstp compatible Spanning Tree protocol
+    Bridge Identifier has priority 32768, address {bridge_id}
+    Topology change flag set, detected flag set
+    Number of topology changes {tc_count}
+    Last change occurred on port {interface}
+    Times: hello 2, max age 20, forward delay 15, topology change {tc_window}
+    Port {interface} of VLAN{vlan_id} is designated forwarding
+      Port cost 4, Port priority 128, Port Identifier 128.1
+      Number of transitions to forwarding state: {tc_count}
+correlation_attr:
+  key: infra.stp_firmware
+  value: ios-xe-17.9.4a-prerelease
+fault_params:
+  vlan_id: {choice: [100, 200, 300, 400, 500, 1000]}
+  stp_instance: {randint: [0, 15]}
+  bridge_id:
+    format: "8000.{a:02x}{b:02x}.{c:02x}{d:02x}.{e:02x}{f:02x}"
+    a: {randint: [0, 255]}
+    b: {randint: [0, 255]}
+    c: {randint: [0, 255]}
+    d: {randint: [0, 255]}
+    e: {randint: [0, 255]}
+    f: {randint: [0, 255]}
+  interface: {choice: [Gi0/0/1, Gi0/0/2, Te1/0/1, Te1/0/2, Po1]}
+  tc_count: {randint: [15, 80]}
+  tc_window: {randint: [10, 60]}
+rca_clues:
+  network-controller:
+    stp.root_bridge_change: true
+    stp.tcn_source_port: {choice: [Gi0/0/2, Po1, Te1/0/1]}
+  firewall-gateway:
+    firewall.l2_loop_detected: true
+    firewall.broadcast_storm_pps: {randint: [5000, 50000]}
+  dns-dhcp-service:
+    dns.resolution_flapping: true
+    dns.affected_zone: fanatics.internal
+  wifi-controller:
+    wifi.uplink_state: flapping
+    wifi.ap_isolation_triggered: {randint: [2, 10]}

@@ -1,0 +1,162 @@
+service: patient-monitor
+sort_order: 2
+cloud_provider: aws
+cloud_region: us-east-1
+cloud_platform: aws_ec2
+cloud_availability_zone: us-east-1b
+subsystem: vital_signs
+language: python
+topology:
+- - ehr-system
+  - /api/v1/ehr/vitals
+  - POST
+- - clinical-alerts
+  - /api/v1/alerts/vital-signs
+  - POST
+entry_endpoints:
+- - /api/v1/vitals/stream
+  - POST
+db_operations:
+- - INSERT
+  - vital_readings
+  - INSERT INTO vital_readings (patient_id, hr, bp_sys, bp_dia, spo2, temp, rr, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, NOW())
+- - SELECT
+  - alert_thresholds
+  - SELECT threshold_type, min_val, max_val FROM alert_thresholds WHERE unit_id = ? AND active = 1
+emit_fault_logs: true
+kpi_emitter: false
+constants:
+  UNITS:
+  - ICU-3A
+  - ICU-3B
+  - MedSurg-4N
+  - MedSurg-4S
+  - ED-1
+  - NICU-2
+state:
+  _readings_total:
+    init: 0
+  _last_device_status:
+    init: now
+steps:
+- sample:
+    unit:
+      choice: UNITS
+    patient_id:
+      expr: f'PT-{rand.randint(100000, 999999)}'
+    hr:
+      randint:
+      - 55
+      - 110
+    spo2:
+      randint:
+      - 92
+      - 100
+    bp_sys:
+      randint:
+      - 100
+      - 160
+    bp_dia:
+      randint:
+      - 60
+      - 95
+    temp:
+      uniform:
+      - 36.2
+      - 38.0
+      round: 1
+- log:
+    level: INFO
+    message: '[MONITOR] vitals_recorded patient={patient_id} unit={unit} hr={hr} bp={bp_sys}/{bp_dia} spo2={spo2}% temp={temp}C
+      status=NORMAL'
+    attrs:
+      operation: vital_reading
+      vitals.unit:
+        var: unit
+      vitals.patient_id:
+        var: patient_id
+      vitals.heart_rate:
+        var: hr
+      vitals.spo2:
+        var: spo2
+      vitals.bp_systolic:
+        var: bp_sys
+      vitals.bp_diastolic:
+        var: bp_dia
+      vitals.temperature:
+        var: temp
+- sample:
+    wf_unit:
+      choice: UNITS
+    devices_active:
+      randint:
+      - 8
+      - 25
+    packet_loss:
+      uniform:
+      - 0.0
+      - 0.5
+      round: 2
+- log:
+    level: INFO
+    message: '[MONITOR] waveform_stream unit={wf_unit} devices={devices_active} packet_loss={packet_loss}% status=STREAMING'
+    attrs:
+      operation: waveform_status
+      waveform.unit:
+        var: wf_unit
+      waveform.devices_active:
+        var: devices_active
+      waveform.packet_loss_pct:
+        var: packet_loss
+- every:
+    seconds: 12
+    state_key: _last_device_status
+    steps:
+    - sample:
+        total_devices:
+          randint:
+          - 120
+          - 200
+    - sample:
+        devices_online:
+          expr: total_devices - rand.randint(0, 5)
+    - log:
+        level: INFO
+        message: '[MONITOR] device_summary online={devices_online}/{total_devices} units=6 telemetry=NOMINAL'
+        attrs:
+          operation: device_summary
+          devices.total:
+            var: total_devices
+          devices.online:
+            var: devices_online
+          devices.units: 6
+- counter:
+    state_key: _readings_total
+    by: 1
+- metric:
+    name: patient_monitor.readings_total
+    value:
+      var: _readings_total
+    unit: readings
+- metric:
+    name: patient_monitor.active_devices
+    value:
+      randint:
+      - 60
+      - 150
+    unit: devices
+- sample:
+    alert_rate:
+      if_active:
+        randint:
+        - 30
+        - 120
+      else:
+        randint:
+        - 1
+        - 8
+- metric:
+    name: patient_monitor.alerts_per_minute
+    value:
+      var: alert_rate
+    unit: alerts/min

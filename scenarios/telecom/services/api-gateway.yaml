@@ -1,0 +1,111 @@
+service: api-gateway
+sort_order: 1
+cloud_provider: aws
+cloud_region: eu-central-1
+cloud_platform: aws_ec2
+cloud_availability_zone: eu-central-1a
+subsystem: gateway
+language: go
+entry_endpoints:
+- - /api/v1/activate
+  - POST
+- - /api/v1/bundle/5g-home
+  - GET
+- - /api/v1/customer/status
+  - GET
+topology:
+- - activation-service
+  - /api/v1/activate
+  - POST
+- - auth-service
+  - /api/v1/auth/validate
+  - POST
+emit_fault_logs: true
+kpi_emitter: false
+state:
+  _request_count:
+    init: 0
+  _last_summary:
+    init: now
+steps:
+- sample:
+    endpoint:
+      choice:
+      - /api/v1/activate
+      - /api/v1/bundle/5g-home
+      - /api/v1/customer/status
+    latency_ms:
+      uniform:
+      - 15.0
+      - 180.0
+      round: 1
+- counter:
+    state_key: _request_count
+    by: 1
+- log:
+    level: INFO
+    message: '[GW] api_request endpoint={endpoint} method=POST latency_ms={latency_ms} status=200 protocol=HTTP/2'
+    attrs:
+      operation: api_request
+      api.endpoint:
+        var: endpoint
+      api.latency_ms:
+        var: latency_ms
+      api.status: 200
+- sample:
+    tokens:
+      randint:
+      - 600
+      - 1000
+- log:
+    level: INFO
+    message: '[GW] rate_limiter tokens_available={tokens} limit=1000/min burst=200 status=OK'
+    attrs:
+      operation: rate_limiter
+      rate_limiter.tokens:
+        var: tokens
+      rate_limiter.limit: 1000
+- every:
+    seconds: 10
+    state_key: _last_summary
+    steps:
+    - log:
+        level: INFO
+        message: '[GW] gateway_summary total_requests={_request_count} error_rate=0.01% tls_handshake_avg_ms=12 status=NORMAL'
+        attrs:
+          operation: gateway_summary
+          gateway.total_requests:
+            var: _request_count
+          gateway.error_rate: 0.01
+- sample:
+    request_latency_ms:
+      if_active:
+        uniform:
+        - 2000.0
+        - 12000.0
+        round: 1
+      else:
+        uniform:
+        - 10.0
+        - 200.0
+        round: 1
+- metric:
+    name: api_gateway.request_latency_ms
+    value:
+      var: request_latency_ms
+    unit: ms
+- metric:
+    name: api_gateway.active_connections
+    value:
+      randint:
+      - 500
+      - 2000
+    unit: connections
+- metric:
+    name: api_gateway.requests_per_sec
+    value:
+      uniform:
+      - 400.0
+      - 1200.0
+      round: 1
+    unit: req/s

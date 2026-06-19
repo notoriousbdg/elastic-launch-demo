@@ -1,0 +1,115 @@
+service: range-safety
+sort_order: 9
+cloud_provider: azure
+cloud_region: eastus
+cloud_platform: azure_vm
+cloud_availability_zone: eastus-1
+subsystem: safety
+language: java
+topology:
+- - navigation
+  - /api/v1/nav/position
+  - GET
+- - comms-array
+  - /api/v1/comms/tracking
+  - GET
+entry_endpoints:
+- - /api/v1/safety/check
+  - POST
+emit_fault_logs: true
+kpi_emitter: false
+constants:
+  SAFETY_CHECKS:
+  - name: flight_termination_system
+    description: FTS self-test
+  - name: tracking_radar
+    description: Vehicle tracking acquisition
+  - name: telemetry_link
+    description: Telemetry data link integrity
+  - name: destruct_package
+    description: Destruct system status
+  - name: boundary_corridor
+    description: Flight corridor boundaries
+  - name: populated_area_clearance
+    description: Populated area safety margin
+  - name: debris_footprint
+    description: Predicted debris footprint
+state:
+  _check_seq:
+    init: 0
+  _last_rso_report:
+    init: now
+steps:
+- counter:
+    state_key: _check_seq
+    by: 1
+- sample:
+    checks_to_run:
+      sample:
+        from: SAFETY_CHECKS
+        k: 4
+- for_each:
+    in: checks_to_run
+    as: check
+    steps:
+    - sample:
+        margin:
+          uniform:
+          - 15.0
+          - 95.0
+          round: 1
+    - log:
+        level: INFO
+        message: '[RSO] seq={_check_seq} check={check[name]} margin={margin}% result=PASS status=NOMINAL'
+        attrs:
+          safety.check:
+            expr: check['name']
+          safety.check_seq:
+            var: _check_seq
+          safety.status: PASS
+          safety.margin_pct:
+            var: margin
+          safety.description:
+            expr: check['description']
+          operation: safety_check
+    - metric:
+        name:
+          expr: f'range_safety.{check["name"]}_margin'
+        value:
+          var: margin
+        unit: '%'
+- metric:
+    name: range_safety.check_seq
+    value:
+      var: _check_seq
+    unit: checks
+- sample:
+    track_quality:
+      uniform:
+      - 0.92
+      - 1.0
+      round: 4
+    radar_count:
+      randint:
+      - 2
+      - 4
+- metric:
+    name: range_safety.track_quality
+    value:
+      var: track_quality
+    unit: ratio
+- metric:
+    name: range_safety.active_radars
+    value:
+      var: radar_count
+    unit: count
+- log:
+    level: INFO
+    message: '[RSO] tracking radars={radar_count} quality={track_quality} corridor=WITHIN status=NOMINAL'
+    attrs:
+      operation: tracking_status
+      safety.radar_count:
+        var: radar_count
+      safety.track_quality:
+        var: track_quality
+      safety.status: NOMINAL

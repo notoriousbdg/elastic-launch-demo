@@ -1,0 +1,150 @@
+service: pharmacy-system
+sort_order: 4
+cloud_provider: gcp
+cloud_region: us-central1
+cloud_platform: gcp_compute_engine
+cloud_availability_zone: us-central1-a
+subsystem: medication
+language: java
+topology:
+- - ehr-system
+  - /api/v1/ehr/medication-admin
+  - POST
+- - clinical-alerts
+  - /api/v1/alerts/drug-interaction
+  - POST
+entry_endpoints:
+- - /api/v1/pharmacy/dispense
+  - POST
+db_operations:
+- - SELECT
+  - medication_orders
+  - SELECT rx_id, drug_code, dose, route, frequency FROM medication_orders WHERE patient_id = ? AND status = 'active'
+- - SELECT
+  - drug_interactions
+  - SELECT drug_a, drug_b, severity, description FROM drug_interactions WHERE drug_a IN (?) OR drug_b IN (?)
+emit_fault_logs: true
+kpi_emitter: false
+constants:
+  MEDICATIONS:
+  - Metoprolol 50mg
+  - Lisinopril 10mg
+  - Heparin 5000u
+  - Vancomycin 1g
+  - Morphine 4mg
+  - Ondansetron 4mg
+  - Ceftriaxone 1g
+  - Pantoprazole 40mg
+  ROUTES:
+  - IV
+  - PO
+  - IM
+  - SQ
+  - topical
+  SEVERITIES:
+  - none
+  - none
+  - minor
+  - moderate
+state:
+  _orders_dispensed:
+    init: 0
+  _last_formulary_check:
+    init: now
+steps:
+- sample:
+    med:
+      choice: MEDICATIONS
+    disp_patient_id:
+      expr: f'PT-{rand.randint(100000, 999999)}'
+    rx_id:
+      expr: f'RX-{rand.randint(100000, 999999)}'
+    route:
+      choice: ROUTES
+- log:
+    level: INFO
+    message: '[PHARM] dispense rx={rx_id} med={med} route={route} patient={disp_patient_id} status=VERIFIED'
+    attrs:
+      operation: dispense
+      pharmacy.rx_id:
+        var: rx_id
+      pharmacy.medication:
+        var: med
+      pharmacy.route:
+        var: route
+      pharmacy.patient_id:
+        var: disp_patient_id
+      pharmacy.status: DISPENSED
+- sample:
+    med_a:
+      choice: MEDICATIONS
+    med_b:
+      choice: MEDICATIONS
+    severity:
+      choice: SEVERITIES
+    check_ms:
+      randint:
+      - 5
+      - 40
+- log:
+    level: INFO
+    message: '[PHARM] ddi_screen drug_a={med_a} drug_b={med_b} severity={severity} eval_ms={check_ms} status=CLEAR'
+    attrs:
+      operation: interaction_check
+      pharmacy.drug_a:
+        var: med_a
+      pharmacy.drug_b:
+        var: med_b
+      pharmacy.interaction_severity:
+        var: severity
+      pharmacy.check_ms:
+        var: check_ms
+- every:
+    seconds: 10
+    state_key: _last_formulary_check
+    steps:
+    - sample:
+        formulary_items:
+          randint:
+          - 2800
+          - 3200
+    - log:
+        level: INFO
+        message: '[PHARM] formulary_status items={formulary_items} dispensed={_orders_dispensed} cpoe_pipeline=NOMINAL'
+        attrs:
+          operation: formulary_status
+          formulary.active_items:
+            var: formulary_items
+          formulary.total_dispensed:
+            var: _orders_dispensed
+- counter:
+    state_key: _orders_dispensed
+    by: 1
+- metric:
+    name: pharmacy.orders_dispensed
+    value:
+      var: _orders_dispensed
+    unit: orders
+- sample:
+    interaction_queue:
+      if_active:
+        randint:
+        - 80
+        - 400
+      else:
+        randint:
+        - 2
+        - 15
+- metric:
+    name: pharmacy.interaction_queue_depth
+    value:
+      var: interaction_queue
+    unit: checks
+- metric:
+    name: pharmacy.formulary_compliance_pct
+    value:
+      uniform:
+      - 95.0
+      - 99.8
+      round: 1
+    unit: '%'

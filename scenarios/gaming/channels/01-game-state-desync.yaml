@@ -1,0 +1,60 @@
+name: Game State Desync
+subsystem: game_engine
+vehicle_section: game_loop
+error_type: NET-STATE-DESYNC
+sensor_type: state_validator
+affected_services:
+- game-server
+- matchmaking-engine
+cascade_services:
+- analytics-pipeline
+description: Game state diverges between server authoritative state and client prediction, causing rubber-banding and rollback
+  cascades
+investigation_notes: |-
+  Root cause: client-side prediction drift exceeds reconciliation threshold due to packet loss or jitter spikes on the UDP game channel. The server authoritative state and client extrapolation diverge beyond 0.5m, triggering forced rollbacks.
+  1. Check network quality: run `netstat -su` on game-server pods for UDP packet drops; review CloudWatch `NetworkPacketsDropped` for the hosting AZ.
+  2. Inspect tick alignment: query `FROM logs WHERE body.text LIKE '*NET-STATE-DESYNC*'` and correlate `seq` gaps — 2+ ticks behind indicates client CPU starvation or GC pauses.
+  3. Verify interpolation buffer: if `interp_delay` is <100ms, increase to 150ms to absorb jitter.
+  4. Remediate: if widespread, issue `reset_game_state` to force all clients to re-download authoritative world state and rebuild prediction buffers from scratch.
+  5. Long-term: audit the client prediction model — consider switching from dead-reckoning to hermite interpolation for smoother reconciliation under packet loss.
+remediation_action: reset_game_state
+error_message: '[Net] NET-STATE-DESYNC: player={player_id} pos_delta={position_delta}m threshold=0.5m tick={tick_number} match={match_id}'
+stack_trace: |-
+  === NET STATE RECONCILIATION DUMP ===
+  match={match_id}  tick={tick_number}  player={player_id}
+  ----------- server state -----------
+    pos  = (1247.32, 45.00, -892.17)
+    vel  = (3.41, 0.00, -1.22)
+    yaw  = 127.4 deg
+    seq  = 48201
+  ----------- client state -----------
+    pos  = (1248.87, 45.00, -893.40)  delta={position_delta}m
+    vel  = (4.02, 0.00, -1.87)
+    yaw  = 128.1 deg
+    seq  = 48199  (2 behind)
+  ----------- action -----------------
+    FORCE_RECONCILE  rollback_ticks=3  bandwidth_cost=2.4KB
+    client_rtt=47ms  jitter=8ms  interp_delay=100ms
+  NET-STATE-DESYNC: threshold exceeded — forced reconcile for player {player_id}
+correlation_attr:
+  key: deployment.server_build
+  value: game-server-v7.2.1-canary
+fault_params:
+  player_id:
+    format: "PLR-{n}"
+    n: {randint: [100000, 999999]}
+  position_delta: {uniform: [1.0, 25.0], round: 2}
+  tick_number: {randint: [100000, 9999999]}
+  match_id:
+    format: "MATCH-{n}"
+    n: {randint: [100000, 999999]}
+rca_clues:
+  game-server:
+    net.udp_loss_pct: {uniform: [3.0, 12.0], round: 1}
+    net.interp_delay_ms: {randint: [50, 100]}
+  matchmaking-engine:
+    matchmaking.server_pool_exhausted: true
+    matchmaking.fallback_region: {choice: [us-west-2, eu-west-1]}
+  analytics-pipeline:
+    analytics.desync_event_rate: {randint: [50, 200]}
+    analytics.data_quality: degraded

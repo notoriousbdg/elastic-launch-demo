@@ -1,0 +1,65 @@
+name: Auto-Moderation False Positive Storm
+subsystem: trust_safety
+vehicle_section: automod_engine
+error_type: MOD-FALSE-POS-STORM
+sensor_type: accuracy_monitor
+affected_services:
+- moderation-engine
+- chat-service
+cascade_services:
+- analytics-pipeline
+description: Automated content moderation system producing excessive false positives, silencing legitimate player communication
+investigation_notes: |-
+  Root cause: the automod NLP classifier model was updated to a new version that has dramatically higher sensitivity for the hate_speech category (fp_rate jumped from 2.1% to 34.8%), likely due to training data contamination or threshold miscalibration.
+  1. Check model versioning: compare precision/recall between current and previous model version — if recall stayed at 0.95 but precision dropped to 0.42, the decision threshold was lowered too aggressively during the update.
+  2. Review silenced players: {affected_players} wrongly silenced players with 847 pending appeals — prioritize unsilencing by checking if their messages match known-good patterns.
+  3. Inspect category breakdown: hate_speech fp_rate of 34.8% is the primary driver — this category likely needs a higher confidence threshold (0.85 instead of 0.60).
+  4. Remediate: issue `rollback_automod_model` to revert to the previous model version and `unsilence_affected_players` to restore communication for falsely flagged accounts.
+  5. Implement canary model deployment: route 5% of traffic to new model versions and compare fp_rate before full rollout; add automated rollback on fp_rate >5%.
+remediation_action: rollback_automod_model
+error_message: '[T&S] MOD-FALSE-POS-STORM: flagged={false_positive_count} window={window_minutes}min fp_rate={fp_rate_pct}%
+  model={model_version} affected_players={affected_players}'
+stack_trace: |-
+  === AUTOMOD ACCURACY METRICS ===
+  model={model_version}  window={window_minutes}min
+  ----------- classification stats ----
+    total_scanned    = 84,201
+    true_positives   = 412
+    false_positives  = {false_positive_count}
+    false_negatives  = 23
+    fp_rate          = {fp_rate_pct}%
+    precision        = 0.42
+    recall           = 0.95
+  ----------- category breakdown ------
+    harassment   : fp_rate=12.1%  (normal: 1.2%)
+    hate_speech  : fp_rate=34.8%  (normal: 2.1%)  <<< SPIKE
+    spam         : fp_rate=8.4%   (normal: 3.1%)
+    exploits     : fp_rate=2.1%   (normal: 0.8%)
+  ----------- affected players --------
+    silenced    = {affected_players}
+    appeals     = 847 (pending)
+    overturned  = 0 (queue backed up)
+  ----------- action ------------------
+    ROLLBACK to {model_version}-prev  UNSILENCE affected players
+  MOD-FALSE-POS-STORM: {false_positive_count} false positives at {fp_rate_pct}% rate
+correlation_attr:
+  key: deployment.automod_model
+  value: nlp-classifier-v4.0-beta-sensitive
+fault_params:
+  false_positive_count: {randint: [100, 5000]}
+  window_minutes: {randint: [5, 60]}
+  fp_rate_pct: {uniform: [15.0, 45.0], round: 1}
+  model_version:
+    format: "automod-v{major}.{minor}"
+    major: {randint: [3, 7]}
+    minor: {randint: [0, 9]}
+  affected_players: {randint: [50, 2000]}
+rca_clues:
+  moderation-engine:
+    moderation.model_precision: {uniform: [0.30, 0.50], round: 2}
+    moderation.hate_speech_fp_rate_pct: {uniform: [20.0, 45.0], round: 1}
+  chat-service:
+    chat.silenced_players: {randint: [500, 5000]}
+    chat.appeal_queue_depth: {randint: [200, 2000]}
+  analytics-pipeline:
+    analytics.moderation_accuracy_alert: true

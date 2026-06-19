@@ -1,0 +1,55 @@
+name: Fulfillment Label Printer Failure
+subsystem: logistics
+vehicle_section: shipping_bay
+error_type: WMS-LABEL-PRINTER-FAULT
+sensor_type: label_printer
+affected_services:
+- packaging-fulfillment
+- card-printing-system
+cascade_services:
+- digital-marketplace
+description: Shipping label printers going offline or producing unreadable labels
+investigation_notes: |-
+  1. Check the Zebra printer error code: E1001 = print head overheated, E2003 = ribbon empty, E3005 = label gap detection failure, E4002 = paper out.
+  2. For OFFLINE status, verify the network connection: `ping <printer_ip>` and check the switch port: `show interface <port> status`.
+  3. HEAD_ERROR requires print head replacement — Zebra ZT411/ZT421 heads have a ~50km print life; check the odometer in the printer menu.
+  4. Unreadable labels (barcode scan failures) indicate print darkness is too low or the thermal ribbon is wrinkled — run a test label: `^XA^FO50,50^BY3^BCN,100,Y,N,N^FD1234567890^FS^XZ`.
+  5. Queue depth above 200 while the printer is offline means shipments are stacking up — redirect traffic to a backup Zebra printer immediately.
+  6. For carrier-specific label format issues (ZPL vs EPL), verify the printer firmware supports the required label format and update if needed.
+remediation_action: restart_label_printer
+error_message: wms.shipping WMS-LABEL-PRINTER-FAULT printer={label_printer_id} status={label_printer_status} error_code={label_error_code}
+  failed_labels={label_failed_count} window={label_window_min}m carrier={label_carrier} queue_depth={label_queue_depth}
+stack_trace: |-
+  WMS Label Subsystem Diagnostic Report
+  --------------------------------------
+  Printer ID:     {label_printer_id}
+  Status:         {label_printer_status}
+  Error Code:     {label_error_code}
+  Failed Labels:  {label_failed_count} in last {label_window_min} minutes
+  Carrier:        {label_carrier}
+  Queue Depth:    {label_queue_depth} shipments pending
+  ZPL Version:    ZPL-II
+  Print Head:     NEEDS_REPLACEMENT
+  Last Maintenance: 45 days ago
+  Recommended Action: Replace print head, recalibrate label alignment
+correlation_attr:
+  key: infra.label_zpl_version
+  value: zebra-zpl-ii-v6.1-patched
+fault_params:
+  label_printer_id: {choice: [ZBR-SHIP-01, ZBR-SHIP-02, ZBR-DOCK-01]}
+  label_printer_status: {choice: [OFFLINE, PAPER_OUT, HEAD_ERROR, RIBBON_EMPTY]}
+  label_error_code: {choice: [E1001, E2003, E3005, E4002]}
+  label_failed_count: {randint: [10, 100]}
+  label_window_min: {randint: [5, 30]}
+  label_carrier: {choice: [UPS, FedEx, USPS, DHL]}
+  label_queue_depth: {randint: [50, 500]}
+rca_clues:
+  packaging-fulfillment:
+    warehouse.label_printer_error: {choice: [E1001, E2003, E3005]}
+    warehouse.shipments_held: {randint: [50, 500]}
+  card-printing-system:
+    print.completed_no_label: {randint: [20, 200]}
+    print.staging_area_full: true
+  digital-marketplace:
+    marketplace.shipping_delay_orders: {randint: [50, 500]}
+    marketplace.tracking_unavailable_count: {randint: [30, 300]}

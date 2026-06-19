@@ -1,0 +1,174 @@
+service: cloud-dns-resolver
+sort_order: 6
+cloud_provider: gcp
+cloud_region: us-east1
+cloud_platform: gcp_compute_engine
+cloud_availability_zone: us-east1-d
+subsystem: dns
+language: cpp
+generates_traces: false
+topology:
+- - vpc-network-manager
+  - /api/v1/vpc/peering-dns
+  - GET
+entry_endpoints:
+- - /api/v1/dns/query
+  - POST
+- - /api/v1/dns/zones
+  - GET
+- - /api/v1/dns/health
+  - GET
+db_operations:
+- - SELECT
+  - dns_zones
+  - SELECT zone_id, dns_name, visibility, dnssec_state, record_count FROM dns_zones WHERE project = ?
+- - SELECT
+  - dns_records
+  - SELECT name, type, ttl, rrdatas FROM dns_records WHERE zone_id = ? AND type = ?
+emit_fault_logs: true
+kpi_emitter: false
+constants:
+  ZONES:
+  - gcpnet-internal
+  - gcpnet-prod-zone
+  - gcpnet-services
+  - gcpnet-reverse
+  RECORD_TYPES:
+  - A
+  - AAAA
+  - CNAME
+  - MX
+  - SRV
+  - TXT
+  DNSSEC_ERROR_STATES:
+  - VALIDATION_ERROR
+  - KEY_ROTATION_PENDING
+steps:
+- sample:
+    zone:
+      choice: ZONES
+    queries_per_sec:
+      randint:
+      - 5000
+      - 30000
+    latency_avg_ms:
+      if_active:
+        uniform:
+        - 50.0
+        - 500.0
+        round: 2
+      else:
+        uniform:
+        - 1.0
+        - 5.0
+        round: 2
+- metric:
+    name: dns.queries_per_sec
+    value:
+      var: queries_per_sec
+    unit: qps
+- metric:
+    name: dns.latency_avg_ms
+    value:
+      var: latency_avg_ms
+    unit: ms
+- log:
+    level: INFO
+    message: 'cloud-dns: zone={zone} qps={queries_per_sec} avg_latency={latency_avg_ms}ms visibility=private'
+    attrs:
+      operation: query_stats
+      dns.zone:
+        var: zone
+      dns.qps:
+        var: queries_per_sec
+      dns.latency_avg:
+        var: latency_avg_ms
+- sample:
+    dnssec_state:
+      if_active:
+        choice: DNSSEC_ERROR_STATES
+      else: 'ON'
+    validation_errors:
+      if_active:
+        randint:
+        - 50
+        - 500
+      else:
+        randint:
+        - 0
+        - 2
+- metric:
+    name: dns.dnssec_validation_errors
+    value:
+      var: validation_errors
+    unit: errors
+- log:
+    level: INFO
+    message: 'cloud-dns: zone={zone} dnssec_state={dnssec_state} validation_errors={validation_errors}/min algorithm=RSASHA256'
+    attrs:
+      operation: dnssec_status
+      dns.dnssec_state:
+        var: dnssec_state
+      dns.validation_errors:
+        var: validation_errors
+- sample:
+    record_type:
+      choice: RECORD_TYPES
+    nxdomain_count:
+      if_active:
+        randint:
+        - 100
+        - 1000
+      else:
+        randint:
+        - 0
+        - 10
+    servfail_count:
+      if_active:
+        randint:
+        - 50
+        - 300
+      else:
+        randint:
+        - 0
+        - 2
+- metric:
+    name: dns.nxdomain_count
+    value:
+      var: nxdomain_count
+    unit: responses
+- metric:
+    name: dns.servfail_count
+    value:
+      var: servfail_count
+    unit: responses
+- log:
+    level: INFO
+    message: 'cloud-dns: record_type={record_type} nxdomain={nxdomain_count} servfail={servfail_count} zone={zone}'
+    attrs:
+      operation: resolution_stats
+      dns.record_type:
+        var: record_type
+      dns.nxdomain:
+        var: nxdomain_count
+      dns.servfail:
+        var: servfail_count
+- sample:
+    record_count:
+      randint:
+      - 200
+      - 1500
+- metric:
+    name: dns.zone_record_count
+    value:
+      var: record_count
+    unit: records
+- log:
+    level: INFO
+    message: 'cloud-dns: zone={zone} records={record_count} pending_changes=0 propagation_status=DONE'
+    attrs:
+      operation: zone_health
+      dns.zone:
+        var: zone
+      dns.record_count:
+        var: record_count

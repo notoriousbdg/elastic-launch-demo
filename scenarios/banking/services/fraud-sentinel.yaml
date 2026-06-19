@@ -1,0 +1,119 @@
+service: fraud-sentinel
+sort_order: 5
+cloud_provider: gcp
+cloud_region: us-central1
+cloud_platform: gcp_compute_engine
+cloud_availability_zone: us-central1-b
+subsystem: fraud_detection
+language: python
+topology:
+- - auth-gateway
+  - /api/v1/auth/risk-score
+  - GET
+- - payment-engine
+  - /api/v1/payments/hold-transaction
+  - POST
+entry_endpoints:
+- - /api/v1/fraud/analyze
+  - POST
+- - /api/v1/fraud/alerts
+  - GET
+db_operations:
+- - INSERT
+  - fraud_alerts
+  - INSERT INTO fraud_alerts (alert_id, transaction_id, score, model_version, disposition, ts) VALUES (?, ?, ?, ?, 'PENDING',
+    NOW())
+- - SELECT
+  - fraud_rules
+  - SELECT rule_id, pattern, threshold, action FROM fraud_rules WHERE product_type = ? AND active = true
+emit_fault_logs: true
+kpi_emitter: false
+state:
+  _scans_completed:
+    init: 0
+  _last_summary:
+    init: now
+steps:
+- sample:
+    fraud_risk_score:
+      randint:
+      - 0
+      - 20
+- counter:
+    state_key: _scans_completed
+    by: 1
+- log:
+    level: INFO
+    message: '[FRAUD] transaction_scan score={fraud_risk_score}/100 decision=ALLOW model=FraudNet-v5.2 latency_ms=12 status=CLEAR'
+    attrs:
+      operation: transaction_scan
+      fraud.score:
+        var: fraud_risk_score
+      fraud.decision: ALLOW
+      fraud.model: FraudNet-v5.2
+- sample:
+    model_precision:
+      uniform:
+      - 94.0
+      - 99.0
+      round: 1
+    model_recall:
+      uniform:
+      - 88.0
+      - 96.0
+      round: 1
+- log:
+    level: INFO
+    message: '[FRAUD] model_health precision={model_precision}% recall={model_recall}% drift=0.02 feature_count=247 status=NOMINAL'
+    attrs:
+      operation: model_health
+      model.precision:
+        var: model_precision
+      model.recall:
+        var: model_recall
+      model.drift: 0.02
+- every:
+    seconds: 10
+    state_key: _last_summary
+    steps:
+    - log:
+        level: INFO
+        message: '[FRAUD] sentinel_summary scans={_scans_completed} blocked=3 fp_rate=0.08% prevented=$42,800 status=NOMINAL'
+        attrs:
+          operation: sentinel_summary
+          sentinel.scans:
+            var: _scans_completed
+          sentinel.blocked: 3
+- sample:
+    avg_risk_score:
+      if_active:
+        uniform:
+        - 40.0
+        - 90.0
+        round: 1
+      else:
+        uniform:
+        - 0.0
+        - 25.0
+        round: 1
+- metric:
+    name: fraud_sentinel.avg_risk_score
+    value:
+      var: avg_risk_score
+    unit: score
+- metric:
+    name: fraud_sentinel.scans_per_sec
+    value:
+      uniform:
+      - 200.0
+      - 800.0
+      round: 1
+    unit: scans/s
+- metric:
+    name: fraud_sentinel.model_latency_ms
+    value:
+      uniform:
+      - 8.0
+      - 45.0
+      round: 1
+    unit: ms

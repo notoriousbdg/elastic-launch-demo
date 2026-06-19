@@ -1,0 +1,53 @@
+name: Flight Termination System Check Failure
+subsystem: safety
+vehicle_section: vehicle_wide
+error_type: RSO-FTS-CHECK-FAIL
+sensor_type: safety_system
+affected_services:
+- range-safety
+- sensor-validator
+cascade_services:
+- mission-control
+description: Flight termination system self-check returning anomalous results
+investigation_notes: 'Root cause: FTS self-test failure code (non-zero) indicates a fault in the command decoder, safe/arm
+  logic, or destruct initiator continuity circuit. Unit is in SAFED state with both inhibits ON — no destruct risk, but a
+  failed FTS is a mandatory launch hold per Range Safety requirements. Check command uplink integrity (AES-256 encrypted link
+  must show LOCKED decoder status). Battery at 98.2% rules out power issues. Error code mapping: 0x01-0x0F = decoder, 0x10-0x1F
+  = safe/arm relay, 0x20-0xFF = initiator circuit. Remediation: power-cycle the FTS unit (RSO_FTS_POWER {unit} CYCLE), wait
+  30s for POST completion, then re-run self-test (RSO_FTS_SELFTEST {unit}). If error persists, request Range Safety Officer
+  approval for FTS unit swap — requires pad access and minimum 2-hour recertification window. FTS-B can serve as backup if
+  FTS-A is non-recoverable.'
+remediation_action: reset_safety_system
+error_message: '[RSO] RSO-FTS-CHECK-FAIL: unit={unit_id} self_test=FAIL code={error_code} arm_state=SAFED'
+stack_trace: |-
+  == RANGE SAFETY STATUS == FLIGHT TERMINATION SYSTEM ==
+  TIMESTAMP: MET+00:04:20.001 | FRAME: 0x4A41 | SEQ: 18460
+  ---------------------------------------------------------------
+  UNIT      SELF_TEST   CODE       ARM_STATE   BATTERY
+  {unit_id}     FAIL        {error_code}     SAFED       98.2%
+  FTS-B     PASS        0x00       SAFED       97.8%
+  ---------------------------------------------------------------
+  COMMAND_LINK: UP | DECODER: LOCKED | ENCRYPT: AES-256
+  DESTRUCT_SAFE_ARM: SAFE | INHIBIT_1: ON | INHIBIT_2: ON
+  RSO-FTS-CHECK-FAIL: Unit {unit_id} self-test returned code {error_code}, expected 0x00
+  ACTION: Recycle FTS power, repeat self-test sequence
+correlation_attr:
+  key: deployment.fts_firmware
+  value: fts-controller-v5.2.0-rc1
+fault_params:
+  unit_id: {choice: [FTS-A, FTS-B]}
+  error_code:
+    format: "0x{n:02X}"
+    n: {randint: [1, 255]}
+rca_clues:
+  range-safety:
+    safety.fts_error_code:
+      format: "0x{n:02X}"
+      n: {randint: [1, 255]}
+    safety.fts_battery_pct: {uniform: [95, 99], round: 1}
+  sensor-validator:
+    validation.fts_self_test: FAIL
+    validation.decoder_status: {choice: [LOCKED, DEGRADED]}
+  mission-control:
+    upstream.degraded_subsystem: safety
+    telemetry.launch_hold: FTS

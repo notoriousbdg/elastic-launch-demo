@@ -2,7 +2,7 @@
 
 Complete reference for the fault channel system. Each scenario defines 20 independent fault channels. This document details the channels for the default **space** (NOVA-7) scenario. Other scenarios follow the same structure with industry-specific channel names, subsystems, and error types.
 
-> **Note:** Channels are defined per-scenario in each scenario's `scenario.py` file. The channel numbers (1-20), structure (affected services, cascade services, subsystem, error type), and API endpoints are consistent across all scenarios — only the names and domain-specific details differ.
+> **Note:** Channels are defined per-scenario in `scenarios/<id>/channels/NN-<slug>.yaml` files. The channel numbers (1–20), structure (affected services, cascade services, subsystem, error type), and API endpoints are consistent across all scenarios — only the names and domain-specific details differ.
 
 ---
 

@@ -1,0 +1,53 @@
+name: Analytics Pipeline Lag
+subsystem: analytics
+vehicle_section: data_pipeline
+error_type: ANALYTICS-PIPELINE-LAG
+sensor_type: pipeline_latency
+affected_services:
+- analytics-pipeline
+cascade_services:
+- ad-platform
+- order-management
+description: Real-time analytics pipeline falling behind — dashboards showing stale data, ad optimization running on outdated
+  metrics
+investigation_notes: |-
+  1. Check analytics-pipeline logs for ANALYTICS-PIPELINE-LAG — pipeline_lag_ms={pipeline_lag_ms}ms vs acceptable {max_pipeline_lag_ms}ms.
+  2. Check consumer group lag on the analytics stream: if consumer_lag={consumer_lag} events, the pipeline is not keeping up with ingest volume.
+  3. Identify the slow stage: ETL transforms, aggregation, or index writes — each has distinct latency signatures in the pipeline metrics.
+  4. Check for a data skew issue: if one partition has {hot_partition_events}x more events than others, the partition key is not evenly distributed.
+  5. Ad-platform's budget optimization queries rely on fresh analytics — with {pipeline_lag_ms}ms lag, spend data is stale and bidding may over- or under-spend.
+  6. Scale the analytics consumers and increase parallelism on the aggregation step to drain the backlog within {eta_drain_min}min.
+remediation_action: restart_analytics_pipeline
+error_message: '[AnalyticsPipeline] ANALYTICS-PIPELINE-LAG: lag={pipeline_lag_ms}ms (max {max_pipeline_lag_ms}ms) consumer_lag={consumer_lag}
+  events_per_sec={events_per_sec} hot_partition={hot_partition}'
+stack_trace: |-
+  PipelineLagException: ANALYTICS-PIPELINE-LAG
+    at StreamConsumer.checkLag(group=analytics-consumer-group)
+    at AnalyticsPipeline.processBatch(batch_id={batch_id})
+  Pipeline lag:      {pipeline_lag_ms}ms
+  Consumer lag:      {consumer_lag} events
+  Events/sec:        {events_per_sec}
+  Hot partition:     {hot_partition}
+  Stages behind:     etl_transform, aggregation
+correlation_attr:
+  key: analytics.pipeline_lagging
+  value: true
+fault_params:
+  pipeline_lag_ms: {randint: [60000, 600000]}
+  max_pipeline_lag_ms: 5000
+  consumer_lag: {randint: [50000, 500000]}
+  events_per_sec: {randint: [10000, 100000]}
+  hot_partition: {format: "partition-{n}", n: {randint: [0, 31]}}
+  batch_id: {format: "BATCH-{n}", n: {randint: [10000, 99999]}}
+  hot_partition_events: {randint: [3, 15]}
+  eta_drain_min: {randint: [10, 60]}
+rca_clues:
+  analytics-pipeline:
+    analytics.pipeline_lag_ms: {randint: [60000, 600000]}
+    analytics.consumer_lag_events: {randint: [50000, 500000]}
+  ad-platform:
+    ads.budget_optimization_stale: true
+    ads.bid_using_lag_min: {randint: [10, 120]}
+  order-management:
+    order.gmv_dashboard_stale_min: {randint: [5, 60]}
+    order.realtime_reporting_delayed: true

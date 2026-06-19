@@ -1,0 +1,45 @@
+name: OEE Availability Drop
+subsystem: oee
+vehicle_section: availability_calc
+error_type: OEE-AVAILABILITY-DROP
+sensor_type: availability_calc
+affected_services:
+- oee-analytics
+cascade_services:
+- mes-controller
+- shopfloor-portal
+description: Calculated OEE for a critical line falls below 75%; production guidance at risk
+investigation_notes: |-
+  Root Cause: An OEE availability drop is the *symptom* — the underlying cause is upstream (unplanned downtime, micro-stops, slow cycles). Always correlate the drop window with maintenance events, MES equipment-state transitions, and SCADA tag-quality changes for the same line.
+  Remediation: 1) Pull the equipment-state timeline: `oee-admin timeline --line {line_id} --window 60m`. 2) Cross-reference with MES work-order status: `mes-admin status --line {line_id}`. 3) Check for active maintenance: `cmms-admin active-mwo --line {line_id}`. 4) Recompute OEE with corrected planned-downtime exclusions: `oee-admin recompute --line {line_id} --exclude-planned`. 5) Engage the line lead and shift supervisor before reporting upward — the metric needs human context.
+remediation_action: recompute_oee
+error_message: '[OEE] OEE-AVAILABILITY-DROP: line={line_id} availability={availability_pct}% threshold=75% downtime_min={downtime_minutes}
+  target_oee={target_oee}%'
+stack_trace: |-
+  === OEE AVAILABILITY DROP — {line_id} ===
+  Window: 60 minutes | Calculated: {availability_pct}% | Threshold: 75%
+  ------------------------------------------------------------------------
+  INTERVAL    | STATE       | DURATION (s)  | NOTES
+  ------------------------------------------------------------------------
+  00:00–02:14 | RUNNING     | 134           | nominal
+  02:14–08:30 | UNPLANNED   | {downtime_minutes}m         | trigger event
+  08:30–18:00 | RUNNING     | 570           | recovered
+  18:00–22:45 | MICROSTOP   | 285           | <2min stops
+  ------------------------------------------------------------------------
+  OEE-AVAILABILITY-DROP: target {target_oee}%, actual {availability_pct}% — investigation required
+correlation_attr:
+  key: deployment.oee_calc_engine
+  value: oee-v5.1.0-rc2
+fault_params:
+  line_id: {choice: [LINE-01, LINE-02, LINE-03, LINE-04, LINE-05]}
+  availability_pct: {uniform: [45.0, 74.0], round: 1}
+  downtime_minutes: {randint: [8, 45]}
+  target_oee: 85.0
+rca_clues:
+  oee-analytics:
+    oee.availability_pct: {uniform: [45.0, 74.0], round: 1}
+    oee.target_pct: 85.0
+  mes-controller:
+    mes.unplanned_downtime_min: {randint: [8, 45]}
+  shopfloor-portal:
+    portal.line_alert_displayed: true

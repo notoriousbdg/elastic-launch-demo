@@ -1,0 +1,165 @@
+service: scheduling-api
+sort_order: 6
+cloud_provider: gcp
+cloud_region: us-central1
+cloud_platform: gcp_compute_engine
+cloud_availability_zone: us-central1-a
+subsystem: scheduling
+language: go
+topology:
+- - ehr-system
+  - /api/v1/ehr/encounter
+  - POST
+- - billing-processor
+  - /api/v1/billing/encounter-charges
+  - POST
+entry_endpoints:
+- - /api/v1/schedule/book
+  - POST
+emit_fault_logs: true
+kpi_emitter: false
+constants:
+  UNITS:
+  - ICU-3A
+  - ICU-3B
+  - MedSurg-4N
+  - MedSurg-4S
+  - ED-1
+  - NICU-2
+  RESOURCE_TYPES:
+  - exam_room
+  - procedure_room
+  - consult_room
+  - infusion_bay
+  TIME_MINUTES:
+  - '00'
+  - '15'
+  - '30'
+  - '45'
+  BED_WINGS:
+  - A
+  - B
+  - C
+  - D
+  BED_STATUSES:
+  - occupied
+  - vacant
+  - cleaning
+  - reserved
+state:
+  _appointments_booked:
+    init: 0
+  _last_bed_census:
+    init: now
+steps:
+- sample:
+    appt_patient_id:
+      expr: f'PT-{rand.randint(100000, 999999)}'
+    provider:
+      expr: f'NPI-{rand.randint(1000000000, 9999999999)}'
+    resource:
+      choice: RESOURCE_TYPES
+    slot_hour:
+      randint:
+      - 7
+      - 17
+    slot_min:
+      choice: TIME_MINUTES
+- sample:
+    slot:
+      expr: f'{slot_hour:02d}:{slot_min}'
+- log:
+    level: INFO
+    message: '[SCHED] appointment_booked patient={appt_patient_id} provider={provider} slot={slot} resource={resource} status=CONFIRMED'
+    attrs:
+      operation: appointment_book
+      scheduling.patient_id:
+        var: appt_patient_id
+      scheduling.provider_id:
+        var: provider
+      scheduling.resource:
+        var: resource
+      scheduling.time_slot:
+        var: slot
+      scheduling.status: CONFIRMED
+- sample:
+    bed_unit:
+      choice: UNITS
+    bed_wing:
+      choice: BED_WINGS
+    bed_num:
+      randint:
+      - 101
+      - 450
+    bed_status:
+      choice: BED_STATUSES
+- sample:
+    bed:
+      expr: f'{bed_wing}-{bed_num}'
+- log:
+    level: INFO
+    message: '[SCHED] bed_update unit={bed_unit} bed={bed} new_status={bed_status} adt_sync=OK'
+    attrs:
+      operation: bed_update
+      bed.unit:
+        var: bed_unit
+      bed.id:
+        var: bed
+      bed.status:
+        var: bed_status
+- every:
+    seconds: 10
+    state_key: _last_bed_census
+    steps:
+    - sample:
+        total_beds:
+          randint:
+          - 280
+          - 350
+    - sample:
+        occupied:
+          expr: int(total_beds * rand.uniform(0.78, 0.95))
+    - log:
+        level: INFO
+        message: '[SCHED] bed_census occupied={occupied}/{total_beds} units=6 adt_sync=CURRENT'
+        attrs:
+          operation: bed_census
+          census.total_beds:
+            var: total_beds
+          census.occupied:
+            var: occupied
+          census.units: 6
+          census.adt_sync: CURRENT
+- counter:
+    state_key: _appointments_booked
+    by: 1
+- metric:
+    name: scheduling.appointments_booked
+    value:
+      var: _appointments_booked
+    unit: appointments
+- sample:
+    occupancy:
+      if_active:
+        uniform:
+        - 97.0
+        - 100.0
+        round: 1
+      else:
+        uniform:
+        - 75.0
+        - 96.0
+        round: 1
+- metric:
+    name: scheduling.bed_occupancy_pct
+    value:
+      var: occupancy
+    unit: '%'
+- metric:
+    name: scheduling.or_utilization_pct
+    value:
+      uniform:
+      - 65.0
+      - 92.0
+      round: 1
+    unit: '%'

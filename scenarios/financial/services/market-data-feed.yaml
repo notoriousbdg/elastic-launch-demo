@@ -1,0 +1,149 @@
+service: market-data-feed
+sort_order: 4
+cloud_provider: gcp
+cloud_region: us-central1
+cloud_platform: gcp_compute_engine
+cloud_availability_zone: us-central1-a
+subsystem: market_data
+language: go
+entry_endpoints:
+- - /api/v1/market/subscribe
+  - POST
+- - /api/v1/market/snapshot
+  - GET
+emit_fault_logs: true
+kpi_emitter: false
+constants:
+  FEEDS:
+    CQS-SIP:
+      exchange: NYSE/NASDAQ
+      symbols: 8000
+    OPRA:
+      exchange: Options
+      symbols: 500000
+    CME-MDP3:
+      exchange: CME
+      symbols: 3000
+    Bloomberg-B-PIPE:
+      exchange: Multi
+      symbols: 50000
+    Reuters-Elektron:
+      exchange: Multi
+      symbols: 40000
+  SYMBOLS:
+  - AAPL
+  - GOOGL
+  - MSFT
+  - AMZN
+  - SPY
+  - QQQ
+state:
+  _ticks_processed:
+    init: 0
+  _last_feed_summary:
+    init: now
+steps:
+- sample:
+    tick_delta:
+      randint:
+      - 1000
+      - 10000
+    feed_name:
+      choice: FEEDS
+    feed_info:
+      expr: FEEDS[feed_name]
+    feed_exchange:
+      expr: feed_info['exchange']
+    symbol:
+      choice: SYMBOLS
+    tick_latency_us:
+      randint:
+      - 10
+      - 200
+    tick_price:
+      uniform:
+      - 100.0
+      - 500.0
+      round: 4
+- counter:
+    state_key: _ticks_processed
+    by:
+      var: tick_delta
+- log:
+    level: INFO
+    message: '[MDF] tick_processed symbol={symbol} price=${tick_price} feed={feed_name} exchange={feed_exchange} latency_us={tick_latency_us}'
+    attrs:
+      operation: tick_process
+      tick.symbol:
+        var: symbol
+      tick.price:
+        var: tick_price
+      tick.feed:
+        var: feed_name
+      tick.exchange:
+        var: feed_exchange
+      tick.latency_us:
+        var: tick_latency_us
+- sample:
+    health_feed:
+      choice: FEEDS
+    gap_count:
+      randint:
+      - 0
+      - 2
+- log:
+    level: INFO
+    message: '[MDF] feed_health feed={health_feed} gaps_60s={gap_count} status=CONNECTED'
+    attrs:
+      operation: feed_health
+      feed.name:
+        var: health_feed
+      feed.gap_count:
+        var: gap_count
+      feed.status: CONNECTED
+- every:
+    seconds: 10
+    state_key: _last_feed_summary
+    steps:
+    - sample:
+        active_feeds:
+          expr: len(FEEDS)
+    - log:
+        level: INFO
+        message: '[MDF] feed_summary active_feeds={active_feeds} total_ticks={_ticks_processed} status=NOMINAL'
+        attrs:
+          operation: feed_summary
+          summary.active_feeds:
+            var: active_feeds
+          summary.total_ticks:
+            var: _ticks_processed
+          summary.status: NOMINAL
+- sample:
+    tps:
+      if_active:
+        randint:
+        - 5000
+        - 20000
+      else:
+        randint:
+        - 50000
+        - 200000
+- metric:
+    name: market_data.ticks_per_second
+    value:
+      var: tps
+    unit: tps
+- metric:
+    name: market_data.feed_latency_us
+    value:
+      randint:
+      - 10
+      - 500
+    unit: us
+- metric:
+    name: market_data.active_subscriptions
+    value:
+      randint:
+      - 5000
+      - 50000
+    unit: subscriptions

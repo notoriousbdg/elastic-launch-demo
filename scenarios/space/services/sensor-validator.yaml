@@ -1,0 +1,159 @@
+service: sensor-validator
+sort_order: 7
+cloud_provider: azure
+cloud_region: eastus
+cloud_platform: azure_vm
+cloud_availability_zone: eastus-1
+subsystem: validation
+language: dotnet
+entry_endpoints:
+- - /api/v1/validate/batch
+  - POST
+db_operations:
+- - SELECT
+  - validation_results
+  - SELECT * FROM validation_results WHERE sensor_id = ? AND validated_at > NOW() - INTERVAL 1 MINUTE
+- - INSERT
+  - validation_results
+  - INSERT INTO validation_results (sensor_id, result, confidence, validated_at) VALUES (?, ?, ?, NOW())
+emit_fault_logs: true
+kpi_emitter: false
+constants:
+  VALIDATION_SENSORS:
+  - thermal
+  - pressure
+  - flow_rate
+  - gps
+  - imu
+  - star_tracker
+  - rf_signal
+  - packet_integrity
+  - antenna_position
+  - vibration
+  - electrical
+  - weather
+  - hydraulic
+  - pipeline_health
+  - calibration
+  - safety_system
+  - radar_tracking
+  - network_latency
+  - data_integrity
+state:
+  _validation_count:
+    init: 0
+  _last_pipeline_report:
+    init: now
+per_active_channel_steps:
+- log:
+    level: ERROR
+    message: 'Validation FAIL: {ch_sensor_type} sensor calibration out of bounds — {ch_error_type}'
+    attrs:
+      validation.result: FAIL
+      validation.sensor_type:
+        channel_field: sensor_type
+      validation.calibration_epoch:
+        expr: int(time.time()) - rand.randint(3600, 86400)
+      validation.confidence:
+        uniform:
+        - 0.1
+        - 0.5
+        round: 4
+      error.type:
+        channel_field: error_type
+      vehicle_section:
+        channel_field: vehicle_section
+      chaos.channel:
+        var: channel
+      chaos.fault_type:
+        channel_field: name
+      operation: sensor_validation
+      system.status: CRITICAL
+    with_remediation_meta: true
+steps:
+- sample:
+    sensors_to_validate:
+      sample:
+        from: VALIDATION_SENSORS
+        k: 5
+- for_each:
+    in: sensors_to_validate
+    as: sensor_type
+    steps:
+    - sample:
+        confidence:
+          uniform:
+          - 0.95
+          - 1.0
+          round: 4
+        epoch:
+          expr: int(time.time()) - rand.randint(0, 3600)
+    - log:
+        level: INFO
+        message: '[VV] validate sensor={sensor_type} epoch={epoch} confidence={confidence} result=PASS status=NOMINAL'
+        attrs:
+          validation.result: PASS
+          validation.sensor_type:
+            var: sensor_type
+          validation.calibration_epoch:
+            var: epoch
+          validation.confidence:
+            var: confidence
+          operation: sensor_validation
+- sample:
+    n_validated:
+      expr: len(sensors_to_validate)
+- counter:
+    state_key: _validation_count
+    by:
+      var: n_validated
+- sample:
+    validations_per_sec:
+      uniform:
+      - 45.0
+      - 65.0
+      round: 1
+    queue_depth:
+      randint:
+      - 0
+      - 20
+- metric:
+    name: sensor_validator.validations_per_sec
+    value:
+      var: validations_per_sec
+    unit: validations/s
+- metric:
+    name: sensor_validator.queue_depth
+    value:
+      var: queue_depth
+    unit: items
+- metric:
+    name: sensor_validator.total_validations
+    value:
+      var: _validation_count
+    unit: validations
+- every:
+    seconds: 10
+    state_key: _last_pipeline_report
+    steps:
+    - log:
+        level: INFO
+        message: '[VV] pipeline_status rate={validations_per_sec}/s queue_depth={queue_depth} total={_validation_count} status=NOMINAL'
+        attrs:
+          operation: pipeline_health
+          validation.rate:
+            var: validations_per_sec
+          validation.queue_depth:
+            var: queue_depth
+          validation.total_count:
+            var: _validation_count
+    else:
+    - log:
+        level: INFO
+        message: '[VV] pipeline_status rate={validations_per_sec}/s queue_depth={queue_depth} status=NOMINAL'
+        attrs:
+          operation: pipeline_health
+          validation.rate:
+            var: validations_per_sec
+          validation.queue_depth:
+            var: queue_depth

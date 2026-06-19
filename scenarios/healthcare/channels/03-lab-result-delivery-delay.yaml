@@ -1,0 +1,54 @@
+name: Lab Result Delivery Delay
+subsystem: laboratory
+vehicle_section: lab_interface
+error_type: LIS-RESULT-DELAY
+sensor_type: lab_result_queue
+affected_services:
+- lab-integration
+- ehr-system
+cascade_services:
+- pharmacy-system
+- clinical-alerts
+description: Laboratory result delivery exceeds critical TAT threshold, delaying clinical decisions
+investigation_notes: |-
+  Root Cause: TAT breaches stem from either LIS instrument interface backlogs, specimen processing delays, or the HL7 ORU^R01 result delivery queue being stalled. STAT orders should have a 30-minute TAT for critical tests (Troponin, BNP, Lactate) but queue congestion delays the OBX result segments.
+  Remediation: 1) Check the LIS outbound queue depth: `lis-admin queue-status --interface EHR-RESULTS`. 2) Verify the ASTM/LIS2-A2 instrument interface is connected: `netstat -an | grep 5562`. 3) For stuck results, force requeue: `lis-admin requeue --order {lab_order_id} --priority STAT`. 4) Review the analyzer worklist for instrument flags (QC lockout, reagent expiry). 5) If the HL7 result channel is down, restart: `systemctl restart lis-hl7-outbound`. 6) Notify lab supervisor and clinical staff of delayed critical results per CAP notification protocol.
+remediation_action: restart_lis_interface
+error_message: '[LIS] LIS-RESULT-DELAY: order={lab_order_id} test={test_code} tat={tat_minutes}min sla={max_tat}min patient={patient_id}'
+stack_trace: |-
+  H|\^&|||LIS-CORE^Lab Integration|||||LIS2-A2||P|1|20260217143052
+  P|1||{patient_id}||DOE^JANE||19650315|F
+  OBR|1|{lab_order_id}||{test_code}|||20260217143052||||||||SERUM
+  OBX|1|NM|{test_code}^Result^^LIS||--PENDING--|mg/dL|3.5-5.0|N|||F
+  --- TAT BREACH ---
+  Order: {lab_order_id} | Test: {test_code} | Collected: 20260217143052
+  TAT Elapsed: {tat_minutes} min | SLA Target: {max_tat} min | Status: BREACHED
+  Patient: {patient_id} | Priority: STAT | Specimen: SERUM
+  LIS-RESULT-DELAY: Result pending for {tat_minutes}min exceeds {max_tat}min SLA
+  L|1|N
+correlation_attr:
+  key: deployment.lis_interface_version
+  value: lis2a2-bridge-v2.8.1-beta
+fault_params:
+  lab_order_id:
+    format: "LAB-{n}"
+    n: {randint: [100000, 999999]}
+  test_code: {choice: [CBC, BMP, CMP, "PT/INR", Troponin, BNP, Lipase, UA]}
+  tat_minutes: {randint: [60, 360]}
+  max_tat: {choice: [30, 45, 60]}
+  patient_id:
+    format: "PT-{n}"
+    n: {randint: [100000, 999999]}
+rca_clues:
+  lab-integration:
+    lis.outbound_queue_depth: {randint: [500, 2000]}
+    lis.instrument_interface: stalled
+  ehr-system:
+    ehr.pending_results_count: {randint: [50, 200]}
+    ehr.oru_channel_status: backlogged
+  pharmacy-system:
+    pharmacy.awaiting_lab_results: {randint: [10, 50]}
+    pharmacy.dosing_hold: true
+  clinical-alerts:
+    alerts.critical_lab_pending: {randint: [3, 15]}
+    alerts.tat_breach_count: {randint: [5, 25]}

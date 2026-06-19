@@ -1,0 +1,48 @@
+name: Relay Packet Corruption
+subsystem: relay
+vehicle_section: ground_network
+error_type: RLY-PACKET-CORRUPT
+sensor_type: data_integrity
+affected_services:
+- telemetry-relay
+- sensor-validator
+cascade_services:
+- mission-control
+description: Telemetry packets failing integrity checks during relay
+investigation_notes: 'Root cause: burst error pattern on CRC32-C failures indicates physical layer issue — likely NIC firmware
+  bug, faulty SFP transceiver, or fiber micro-bend causing intermittent bit errors. Burst errors (vs random) rule out EMI
+  and point to a specific link segment. Check NIC firmware version against known-good baseline. Inspect SFP optical power
+  levels (TX and RX) for the affected route — RX power below -18dBm indicates a dirty connector or damaged fiber. Verify no
+  recent rack maintenance that could have disturbed fiber runs. Remediation: replace suspect SFP transceiver on the affected
+  route, clean fiber connectors with IPA wipes. If NIC firmware is outdated, schedule firmware update (NIC_FW_UPDATE {route}).
+  Enable relay packet retransmission (RLY_RETRANSMIT ENABLE) as interim mitigation.'
+remediation_action: reset_relay_link
+error_message: '[RLY] RLY-PACKET-CORRUPT: route={route_id} corrupted={corrupted_count}/{total_count} crc_fail_rate={corrupted_count}pkt'
+stack_trace: |-
+  == RELAY DIAGNOSTIC REPORT == INTEGRITY CHECKER ==
+  TIMESTAMP: MET+00:04:17.228 | FRAME: 0x4A3B | SEQ: 18454
+  ---------------------------------------------------------------
+  ROUTE       TOTAL    CORRUPT   CRC_FAIL   STATUS
+  {route_id}   {total_count}     {corrupted_count}        {corrupted_count}         **CORRUPT**
+  GCP-AZ-01   487      0         0          NOMINAL
+  AWS-AZ-01   392      1         1          NOMINAL
+  ---------------------------------------------------------------
+  CRC_TYPE: CRC32-C | WINDOW: 60s | ERROR_PATTERN: BURST
+  RLY-PACKET-CORRUPT: {corrupted_count} of {total_count} packets failed CRC on route {route_id}
+  ACTION: Check physical layer, verify NIC firmware version
+correlation_attr:
+  key: infra.sfp_model
+  value: FTRJ1319P1BTL-v2
+fault_params:
+  route_id: {choice: [AWS-GCP-01, GCP-AZ-01, AWS-AZ-01]}
+  corrupted_count: {randint: [5, 50]}
+  total_count: {randint: [100, 500]}
+rca_clues:
+  telemetry-relay:
+    relay.crc_fail_pattern: burst
+    relay.sfp_rx_power_dbm: {uniform: [-20.0, -16.0], round: 1}
+  sensor-validator:
+    validation.data_integrity: compromised
+    validation.corrupt_route: {choice: [AWS-GCP-01, GCP-AZ-01]}
+  mission-control:
+    upstream.degraded_subsystem: relay

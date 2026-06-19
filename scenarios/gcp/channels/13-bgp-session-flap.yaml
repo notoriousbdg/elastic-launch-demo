@@ -1,0 +1,60 @@
+name: BGP Session Flap
+subsystem: connectivity
+vehicle_section: bgp_routing
+error_type: INTERCONNECT-BGP-FLAP
+sensor_type: bgp_session
+affected_services:
+- cloud-interconnect
+- cloud-vpn-gateway
+cascade_services:
+- vpc-network-manager
+- cloud-nat-gateway
+description: Cloud Router BGP session repeatedly flapping on interconnect attachment
+investigation_notes: |-
+  Root cause: BGP session flapping indicates the Cloud Router is repeatedly establishing and dropping the BGP peering with the on-premises router. Common causes: MTU mismatch (Interconnect supports 1440-byte MTU for BGP), hold timer too aggressive, route advertisement exceeding peer capacity, or unstable physical link causing BFD to trigger fast failover. Diagnose:
+    gcloud compute routers describe <router> --region=<region> --format='value(bgpPeers)'
+    gcloud compute routers get-status <router> --region=<region>
+    Console > Hybrid Connectivity > Cloud Routers > <router> > BGP Sessions tab
+  Remediation: Increase BGP hold timer to reduce flap sensitivity:
+    gcloud compute routers update-bgp-peer <router> --region=<region> --peer-name=<peer> --advertised-route-priority=100
+  Disable BFD temporarily to confirm if physical link instability is the trigger. Verify peer ASN and IP configuration match on both sides. Reduce advertised routes with custom route advertisements to stay under peer import limits.
+remediation_action: restart_bgp_session
+error_message: '[CloudRouter] INTERCONNECT-BGP-FLAP router={cloud_router} peer={bgp_peer_ip} peer_asn={bgp_peer_asn} flaps={bgp_flap_count}
+  window={bgp_flap_window}s state={bgp_state} advertised_routes={bgp_advertised_routes}'
+stack_trace: |-
+  Cloud Router BGP Session Report
+  ----------------------------------
+  Router:            {cloud_router}
+  Peer IP:           {bgp_peer_ip}
+  Peer ASN:          {bgp_peer_asn}
+  Flap Count:        {bgp_flap_count} in {bgp_flap_window}s
+  Current State:     {bgp_state}
+  Advertised Routes: {bgp_advertised_routes}
+  BFD Status:        DOWN
+  Action: Check peer configuration and physical link
+correlation_attr:
+  key: network.bgp_timer_profile
+  value: aggressive-bfd-50ms
+fault_params:
+  cloud_router: {choice: [gcpnet-router-central1, gcpnet-router-east1, gcpnet-router-europe1]}
+  bgp_peer_ip:
+    format: "169.254.{a}.{b}"
+    a: {randint: [0, 255]}
+    b: {randint: [1, 254]}
+  bgp_peer_asn: {choice: [16550, 64512, 64513, 65001]}
+  bgp_flap_count: {randint: [5, 30]}
+  bgp_flap_window: {randint: [60, 600]}
+  bgp_state: {choice: [IDLE, ACTIVE, CONNECT, OPEN_SENT]}
+  bgp_advertised_routes: {randint: [0, 50]}
+rca_clues:
+  cloud-interconnect:
+    interconnect.bgp_hold_timer: {choice: [90, 120, 180]}
+    interconnect.bfd_status: DOWN
+  cloud-vpn-gateway:
+    vpn.route_convergence_delayed: true
+    vpn.backup_route_active: {choice: [true, false]}
+  vpc-network-manager:
+    vpc.route_table_oscillating: true
+    vpc.stale_routes: {randint: [5, 20]}
+  cloud-nat-gateway:
+    nat.outbound_path_flapping: true

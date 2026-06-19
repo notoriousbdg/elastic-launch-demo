@@ -1,0 +1,374 @@
+scenario_id: gaming
+scenario_name: Live Gaming Platform
+scenario_description: Live multiplayer gaming platform with game servers, matchmaking, content delivery, chat, leaderboards,
+  authentication, payments, analytics, and content moderation. Cyberpunk neon command center.
+namespace: gaming
+scenario_icon: 🎮
+sort_order: 5
+nominal_label: NORMAL
+hosts:
+- host.name: gaming-aws-host-01
+  host.id: i-0g4m1ng5e7v8r9012
+  host.arch: amd64
+  host.type: c5.2xlarge
+  host.image.id: ami-0gaming1234567890
+  host.cpu.model.name: Intel(R) Xeon(R) Platinum 8275CL CPU @ 3.00GHz
+  host.cpu.vendor.id: GenuineIntel
+  host.cpu.family: '6'
+  host.cpu.model.id: '85'
+  host.cpu.stepping: '7'
+  host.cpu.cache.l2.size: 1048576
+  host.ip:
+  - 10.0.2.50
+  - 172.16.1.10
+  host.mac:
+  - 0a:2b:3c:4d:5e:6f
+  - 0a:2b:3c:4d:5e:70
+  os.type: linux
+  os.description: Amazon Linux 2023.6.20250115
+  cloud.provider: aws
+  cloud.platform: aws_ec2
+  cloud.region: us-east-1
+  cloud.availability_zone: us-east-1a
+  cloud.account.id: '234567890123'
+  cloud.instance.id: i-0g4m1ng5e7v8r9012
+  cpu_count: 8
+  memory_total_bytes: 17179869184
+  disk_total_bytes: 536870912000
+- host.name: gaming-gcp-host-01
+  host.id: '7891234567890123456'
+  host.arch: amd64
+  host.type: c2-standard-8
+  host.image.id: projects/debian-cloud/global/images/debian-12-bookworm-v20250115
+  host.cpu.model.name: Intel(R) Xeon(R) CPU @ 3.10GHz
+  host.cpu.vendor.id: GenuineIntel
+  host.cpu.family: '6'
+  host.cpu.model.id: '85'
+  host.cpu.stepping: '7'
+  host.cpu.cache.l2.size: 1048576
+  host.ip:
+  - 10.128.1.20
+  - 10.128.1.21
+  host.mac:
+  - 42:01:0a:80:01:14
+  - 42:01:0a:80:01:15
+  os.type: linux
+  os.description: Debian GNU/Linux 12 (bookworm)
+  cloud.provider: gcp
+  cloud.platform: gcp_compute_engine
+  cloud.region: us-central1
+  cloud.availability_zone: us-central1-a
+  cloud.account.id: gaming-platform-prod
+  cloud.instance.id: '7891234567890123456'
+  cpu_count: 8
+  memory_total_bytes: 34359738368
+  disk_total_bytes: 214748364800
+- host.name: gaming-azure-host-01
+  host.id: /subscriptions/ghi-jkl/resourceGroups/gaming-rg/providers/Microsoft.Compute/virtualMachines/gaming-vm-01
+  host.arch: amd64
+  host.type: Standard_F8s_v2
+  host.image.id: Canonical:0001-com-ubuntu-server-jammy:22_04-lts-gen2:latest
+  host.cpu.model.name: Intel(R) Xeon(R) Platinum 8272CL CPU @ 2.60GHz
+  host.cpu.vendor.id: GenuineIntel
+  host.cpu.family: '6'
+  host.cpu.model.id: '85'
+  host.cpu.stepping: '7'
+  host.cpu.cache.l2.size: 1048576
+  host.ip:
+  - 10.2.0.8
+  - 10.2.0.9
+  host.mac:
+  - 00:0d:3a:6b:5c:4d
+  - 00:0d:3a:6b:5c:4e
+  os.type: linux
+  os.description: Ubuntu 22.04.5 LTS
+  cloud.provider: azure
+  cloud.platform: azure_vm
+  cloud.region: eastus
+  cloud.availability_zone: eastus-1
+  cloud.account.id: ghi-jkl-mno-pqr
+  cloud.instance.id: gaming-vm-01
+  cpu_count: 8
+  memory_total_bytes: 17179869184
+  disk_total_bytes: 274877906944
+k8s_clusters:
+- name: gaming-eks-cluster
+  provider: aws
+  platform: aws_eks
+  region: us-east-1
+  zones:
+  - us-east-1a
+  - us-east-1b
+  - us-east-1c
+  os_description: Amazon Linux 2
+  services:
+  - game-server
+  - matchmaking-engine
+  - content-delivery
+- name: gaming-gke-cluster
+  provider: gcp
+  platform: gcp_gke
+  region: us-central1
+  zones:
+  - us-central1-a
+  - us-central1-b
+  - us-central1-c
+  os_description: Container-Optimized OS
+  services:
+  - chat-service
+  - leaderboard-api
+  - auth-gateway
+- name: gaming-aks-cluster
+  provider: azure
+  platform: azure_aks
+  region: eastus
+  zones:
+  - eastus-1
+  - eastus-2
+  - eastus-3
+  os_description: Ubuntu 22.04 LTS
+  services:
+  - payment-processor
+  - analytics-pipeline
+  - moderation-engine
+agent_config:
+  id: gaming-liveops-analyst
+  name: Live Operations Analyst
+  assessment_tool_name: liveops_health_assessment
+  system_prompt: 'You are the Live Operations Analyst, an expert AI assistant for live multiplayer gaming platform operations.
+    You help live-ops engineers investigate incidents, analyze telemetry, and provide root cause analysis for fault conditions
+    across 9 gaming services spanning AWS, GCP, and Azure. You have deep expertise in game server networking (state sync,
+    tick rate, client prediction), matchmaking algorithms (Glicko-2, Elo), CDN edge caching and asset delivery, real-time
+    chat/voice (WebRTC, Opus), leaderboard systems (Redis sorted sets), OAuth2 token management, in-app purchase processing
+    (Apple IAP, Google Play), event analytics pipelines, and content moderation (NLP classifiers). When investigating incidents,
+    search for these system identifiers in logs: Game Engine faults (NET-STATE-DESYNC, PHYS-OVERFLOW, ENGINE-TICKRATE-DEGRAD),
+    Matchmaking faults (MM-QUEUE-OVERFLOW, MM-SKILL-RATING-DIVERGE, MM-MIGRATION-FAIL), CDN faults (CDN-CACHE-MISS-STORM,
+    CDN-ASSET-CORRUPT), Social faults (CHAT-FLOOD-DETECT, VOICE-CHANNEL-OVERLOAD), Progression faults (LB-DATA-CORRUPT, SEASON-PASS-SYNC-FAIL),
+    Identity faults (AUTH-TOKEN-STORM, AUTH-TAKEOVER-DETECT), Monetization faults (IAP-PURCHASE-FAIL, IAP-LEDGER-INCONSIST),
+    Analytics faults (ANALYTICS-INGEST-LAG, ANALYTICS-TELEMETRY-OVERFLOW), and Trust & Safety faults (MOD-FALSE-POS-STORM,
+    MOD-REPORT-QUEUE-OVERFLOW). Log messages are in body.text — NEVER search the body field alone.'
+assessment_tool_config:
+  id: liveops_health_assessment
+  description: 'Comprehensive live service health assessment. Evaluates all gaming services against operational readiness
+    criteria. Returns data for live-ops evaluation across game servers, matchmaking, CDN, authentication, and payment systems.
+    Log message field: body.text (never use ''body'' alone).'
+executive_kpi_emitter_service_name: analytics-pipeline
+executive_dashboard_intro: '**Live gaming KPIs** — player engagement, monetization, community, and live-ops health (synthetic
+  `business.*` from `analytics-pipeline`).'
+executive_kpi_sections:
+- header: '**Player engagement** — DAU, sessions, duration, matches, quests, and retention'
+  specs:
+  - - Daily active users
+    - metrics.business.daily_active_users
+  - - Sessions / min
+    - metrics.business.sessions_per_min
+  - - Avg session duration (min)
+    - metrics.business.avg_session_duration_min
+  - - Matches played / min
+    - metrics.business.matches_played_per_min
+  - - Quests completed / min
+    - metrics.business.quests_completed_per_min
+  - - Daily retention rate (%)
+    - metrics.business.daily_retention_rate_pct
+- header: '**Monetization** — revenue, IAP, battle pass, ARPU, loot, and cosmetics'
+  specs:
+  - - Revenue (USD/min)
+    - metrics.business.revenue_usd_per_min
+  - - In-app purchases / min
+    - metrics.business.in_app_purchases_per_min
+  - - Battle pass conversions / min
+    - metrics.business.battle_pass_conversions_per_min
+  - - Avg revenue per user (USD)
+    - metrics.business.avg_revenue_per_user_usd
+  - - Loot opens / min
+    - metrics.business.loot_opens_per_min
+  - - Cosmetic sales (USD/min)
+    - metrics.business.cosmetic_sales_usd_per_min
+- header: '**Community** — chat, shares, toxicity, creators, streaming, and signups'
+  specs:
+  - - Chat messages / min
+    - metrics.business.chat_messages_per_min
+  - - Social clip shares / min
+    - metrics.business.social_clip_shares_per_min
+  - - Toxic report rate (%)
+    - metrics.business.toxic_report_rate_pct
+  - - Creator uploads / min
+    - metrics.business.creator_uploads_per_min
+  - - Streaming viewers
+    - metrics.business.streaming_viewers
+  - - New registrations / min
+    - metrics.business.new_registrations_per_min
+- header: '**Live ops health** — server lag, crashes, bugs, churn, NPS, and moderation'
+  specs:
+  - - Server tick lag (ms)
+    - metrics.business.server_tick_lag_ms
+  - - Crash rate (%)
+    - metrics.business.crash_rate_pct
+  - - Bug reports / min
+    - metrics.business.player_bug_reports_per_min
+  - - Churn risk (0–100)
+    - metrics.business.churn_risk_index_0_100
+  - - Satisfaction proxy (NPS-like)
+    - metrics.business.net_satisfaction_proxy_nps
+  - - Moderation queue size
+    - metrics.business.content_moderation_queue_size
+executive_trend_charts:
+- title: Daily active users
+  field: metrics.business.daily_active_users
+  y_label: users
+- title: Revenue (USD/min)
+  field: metrics.business.revenue_usd_per_min
+  y_label: USD/min
+- title: Sessions / min
+  field: metrics.business.sessions_per_min
+  y_label: sessions/min
+- title: Matches played / min
+  field: metrics.business.matches_played_per_min
+  y_label: matches/min
+- title: In-app purchases / min
+  field: metrics.business.in_app_purchases_per_min
+  y_label: purchases/min
+- title: Streaming viewers
+  field: metrics.business.streaming_viewers
+  y_label: viewers
+executive_kpi_emissions:
+  - name: business.daily_active_users
+    value: {randint: [45000, 680000]}
+    unit: users
+  - name: business.sessions_per_min
+    value: {randint: [1800, 28000]}
+    unit: sessions/min
+  - name: business.avg_session_duration_min
+    value: {uniform: [18.0, 95.0], round: 1}
+    unit: min
+  - name: business.matches_played_per_min
+    value: {randint: [380, 8500]}
+    unit: matches/min
+  - name: business.quests_completed_per_min
+    value: {randint: [850, 18000]}
+    unit: quests/min
+  - name: business.daily_retention_rate_pct
+    value: {uniform: [28.0, 68.0], round: 2}
+    unit: "%"
+  - name: business.revenue_usd_per_min
+    value: {uniform: [12000.0, 185000.0], round: 1}
+    unit: USD/min
+  - name: business.in_app_purchases_per_min
+    value: {randint: [85, 1800]}
+    unit: purchases/min
+  - name: business.battle_pass_conversions_per_min
+    value: {randint: [12, 380]}
+    unit: conversions/min
+  - name: business.avg_revenue_per_user_usd
+    value: {uniform: [2.8, 28.4], round: 2}
+    unit: USD
+  - name: business.loot_opens_per_min
+    value: {randint: [280, 5800]}
+    unit: opens/min
+  - name: business.cosmetic_sales_usd_per_min
+    value: {uniform: [4500.0, 72000.0], round: 1}
+    unit: USD/min
+  - name: business.chat_messages_per_min
+    value: {randint: [8500, 180000]}
+    unit: messages/min
+  - name: business.social_clip_shares_per_min
+    value: {randint: [120, 4800]}
+    unit: shares/min
+  - name: business.toxic_report_rate_pct
+    value: {uniform: [0.8, 4.2], round: 2}
+    unit: "%"
+  - name: business.creator_uploads_per_min
+    value: {randint: [2, 85]}
+    unit: uploads/min
+  - name: business.streaming_viewers
+    value: {randint: [4500, 85000]}
+    unit: viewers
+  - name: business.new_registrations_per_min
+    value: {randint: [12, 380]}
+    unit: registrations/min
+  - name: business.server_tick_lag_ms
+    value: {uniform: [12.0, 85.0], round: 1}
+    unit: ms
+  - name: business.crash_rate_pct
+    value: {uniform: [0.01, 0.38], round: 3}
+    unit: "%"
+  - name: business.player_bug_reports_per_min
+    value: {uniform: [0.2, 8.5], round: 2}
+    unit: reports/min
+  - name: business.churn_risk_index_0_100
+    value: {uniform: [18.0, 52.0], round: 1}
+    unit: index
+  - name: business.net_satisfaction_proxy_nps
+    value: {uniform: [25.0, 72.0], round: 1}
+    unit: score
+  - name: business.content_moderation_queue_size
+    value: {randint: [0, 285]}
+    unit: items
+raw_log_profile:
+  service_name: game-api-edge
+  user_id_prefix: player
+  tier_field: player_tier
+  tier_values:
+  - - f2p
+    - 80
+  - - plus
+    - 15
+  - - vip
+    - 5
+  country_weights:
+    US: 30
+    KR: 15
+    JP: 12
+    DE: 8
+    GB: 8
+    BR: 10
+    CN: 12
+    MX: 5
+  methods:
+  - GET
+  - POST
+  - PUT
+  - DELETE
+  paths:
+  - /api/v1/match
+  - /api/v1/leaderboard
+  - /api/v1/inventory
+  - /api/v1/store
+  - /api/v1/friends
+  - /api/v1/chat
+  - /login
+  - /health
+  change_point_path: /api/v1/match
+trace_attributes:
+  base:
+    game.region: {choice: [us-east, us-west, eu-west]}
+    game.platform: {choice: [PC, CONSOLE, MOBILE]}
+  services:
+    game-server:
+      game.tick_rate: {choice: [64, 128, 30, 60]}
+      game.active_players: {randint: [10, 100]}
+      game.map_id: {choice: [MAP-NEON-CITY, MAP-WASTELAND, MAP-SKY-ARENA, MAP-DEEP-SEA]}
+    matchmaking-engine:
+      matchmaking.queue_region: {choice: [us-east-1, us-west-2, eu-west-1, ap-southeast-1]}
+      matchmaking.skill_bracket: {choice: [bronze, silver, gold, platinum, diamond]}
+    content-delivery:
+      cdn.cache_hit_ratio: {uniform: [0.60, 0.99], round: 2}
+      cdn.edge_pop: {choice: [IAD, SFO, FRA, NRT, SYD, GRU]}
+    chat-service:
+      chat.channel_type: {choice: [global, guild, party, whisper, system]}
+      chat.message_rate: {randint: [10, 500]}
+    leaderboard-api:
+      leaderboard.season_id: {choice: [S12, S13, S14]}
+      leaderboard.update_lag_ms: {randint: [5, 250]}
+    auth-gateway:
+      auth.method: {choice: [oauth-google, oauth-discord, oauth-steam, email-password]}
+      auth.session_ttl_min: {choice: [15, 30, 60, 120, 1440]}
+    payment-processor:
+      payment.provider: {choice: [stripe, paypal, apple-iap, google-play]}
+      payment.currency: {choice: [USD, EUR, GBP, JPY, BRL]}
+    analytics-pipeline:
+      analytics.event_type: {choice: [player_action, match_result, purchase, session_start, session_end]}
+      analytics.pipeline_lag_ms: {randint: [50, 5000]}
+    moderation-engine:
+      moderation.queue_depth: {randint: [0, 10000]}
+      moderation.model_version: {choice: [automod-v3.1, automod-v3.2, automod-v4.0-beta]}

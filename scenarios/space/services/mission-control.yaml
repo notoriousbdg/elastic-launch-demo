@@ -1,0 +1,138 @@
+service: mission-control
+sort_order: 1
+cloud_provider: aws
+cloud_region: us-east-1
+cloud_platform: aws_ec2
+cloud_availability_zone: us-east-1a
+subsystem: command
+language: python
+topology:
+- - fuel-system
+  - /api/v1/fuel/status
+  - GET
+- - fuel-system
+  - /api/v1/fuel/pressure
+  - GET
+- - navigation
+  - /api/v1/nav/position
+  - GET
+- - navigation
+  - /api/v1/nav/trajectory
+  - POST
+- - ground-systems
+  - /api/v1/ground/weather
+  - GET
+- - ground-systems
+  - /api/v1/ground/power
+  - GET
+- - comms-array
+  - /api/v1/comms/status
+  - GET
+- - telemetry-relay
+  - /api/v1/relay/health
+  - GET
+entry_endpoints:
+- - /api/v1/mission/status
+  - GET
+- - /api/v1/mission/countdown
+  - GET
+- - /api/v1/mission/telemetry
+  - POST
+db_operations:
+- - SELECT
+  - mission_events
+  - SELECT * FROM mission_events WHERE phase = ? ORDER BY timestamp DESC LIMIT 100
+- - INSERT
+  - telemetry_readings
+  - INSERT INTO telemetry_readings (service, metric, value, ts) VALUES (?, ?, ?, NOW())
+emit_fault_logs: false
+kpi_emitter: true
+constants:
+  SUBSYSTEMS:
+  - propulsion
+  - guidance
+  - communications
+  - payload
+  - relay
+  - ground
+  - validation
+  - safety
+  PHASE_MESSAGES:
+    PRE-LAUNCH:
+    - '[MCC] phase=PRE-LAUNCH checks=IN_PROGRESS systems=ALL_REPORTING status=NOMINAL'
+    - '[MCC] phase=PRE-LAUNCH vehicle_pwr=NOMINAL telem_links=ACTIVE status=GO'
+    - '[MCC] phase=PRE-LAUNCH readiness_review=UNDERWAY director=CONFIRMED status=NOMINAL'
+    COUNTDOWN:
+    - '[MCC] phase=COUNTDOWN sequence=ACTIVE subsystems=MONITORING status=NOMINAL'
+    - '[MCC] phase=COUNTDOWN go_nogo_poll=IN_PROGRESS responses=PENDING status=NOMINAL'
+    - '[MCC] phase=COUNTDOWN verification=FINAL systems=ALL_GO status=NOMINAL'
+    LAUNCH:
+    - '[MCC] phase=LAUNCH event=MECO_IGNITION engines=ALL_NOMINAL status=GO'
+    - '[MCC] phase=LAUNCH event=TOWER_CLEAR engines=NOMINAL thrust=100% status=GO'
+    - '[MCC] phase=LAUNCH thrust=NOMINAL trajectory=ON_PROFILE status=GO'
+    ASCENT:
+    - '[MCC] phase=ASCENT event=MAX_Q structural_loads=NOMINAL status=GO'
+    - '[MCC] phase=ASCENT event=STAGE_SEP_APPROACH systems=ALL_GO status=NOMINAL'
+    - '[MCC] phase=ASCENT telemetry=NOMINAL tracking=STABLE status=GO'
+state:
+  _last_health_summary:
+    init: now
+  _subsystem_poll_idx:
+    init: 0
+steps:
+- sample:
+    subsystem:
+      expr: SUBSYSTEMS[_subsystem_poll_idx % len(SUBSYSTEMS)]
+    latency:
+      uniform:
+      - 1.2
+      - 8.5
+      round: 1
+- counter:
+    state_key: _subsystem_poll_idx
+    by: 1
+- log:
+    level: INFO
+    message: '[MCC] subsystem={subsystem} poll_latency={latency}ms response=ACK status=NOMINAL'
+    attrs:
+      operation: subsystem_poll
+      target.subsystem:
+        var: subsystem
+      poll.latency_ms:
+        var: latency
+      poll.result: NOMINAL
+- sample:
+    phase_msg:
+      expr: rand.choice(PHASE_MESSAGES.get(_phase, PHASE_MESSAGES['PRE-LAUNCH']))
+- log:
+    level: INFO
+    message: '{phase_msg}'
+    attrs:
+      operation: phase_status
+- every:
+    seconds: 10
+    state_key: _last_health_summary
+    steps:
+    - sample:
+        health_status:
+          expr: '''DEGRADED'' if cascade_count > 0 else ''NOMINAL'''
+    - log:
+        level: INFO
+        message: '[MCC] health_check subsystems=8 alerts={cascade_count} overall={health_status}'
+        attrs:
+          operation: health_summary
+          health.subsystem_count: 8
+          health.overall_status:
+            var: health_status
+          health.active_alerts:
+            var: cascade_count
+- metric:
+    name: mission_control.subsystem_polls
+    value:
+      var: _subsystem_poll_idx
+    unit: polls
+- metric:
+    name: mission_control.active_alerts
+    value:
+      var: cascade_count
+    unit: alerts

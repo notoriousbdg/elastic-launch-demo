@@ -1,0 +1,52 @@
+name: Ad Budget Cap Reached
+subsystem: advertising
+vehicle_section: budget_controller
+error_type: ADS-BUDGET-CAP
+sensor_type: budget_utilization
+affected_services:
+- ad-platform
+cascade_services:
+- analytics-pipeline
+description: Ad campaign daily budget cap reached mid-day — ads stop serving before end of business, leaving revenue on the
+  table
+investigation_notes: |-
+  1. Check ad-platform logs for ADS-BUDGET-CAP — campaign_id={campaign_id} has exhausted {budget_spent_usd}/{budget_daily_usd}.
+  2. Determine if this is expected (high-traffic day) or anomalous — compare to same day last week using analytics-pipeline GMV metrics.
+  3. Check if a bidding automation increased CPCs significantly: if avg_cpc={avg_cpc_usd} vs expected {expected_cpc_usd}, overbidding drained the budget early.
+  4. Review ad auction win rate: if win_rate={win_rate_pct}% and budget is exhausted, the campaign is competitive and budget needs upward adjustment.
+  5. Request emergency budget increase from the marketing team — document the incremental revenue opportunity: {hourly_revenue_usd}USD/hr with ads running.
+  6. Implement dayparting: if conversion rates are higher in afternoon hours, concentrate budget there rather than exhausting it in the morning.
+remediation_action: reset_ad_budget_cap
+error_message: '[AdPlatform] ADS-BUDGET-CAP: campaign_id={campaign_id} budget_spent={budget_spent_usd}/{budget_daily_usd}
+  avg_cpc={avg_cpc_usd} win_rate={win_rate_pct}% hours_remaining={hours_remaining} revenue_opportunity_usd={hourly_revenue_usd}'
+stack_trace: |-
+  AdBudgetCapException: ADS-BUDGET-CAP
+    at BudgetController.checkCap(campaign={campaign_id})
+    at AdPlatform.serveBid(request_id={bid_request_id})
+  Campaign:          {campaign_id}
+  Budget spent:      ${budget_spent_usd}/${budget_daily_usd}
+  Avg CPC:           ${avg_cpc_usd}
+  Win rate:          {win_rate_pct}%
+  Hours remaining:   {hours_remaining}
+  Revenue/hr missed: ${hourly_revenue_usd}
+correlation_attr:
+  key: ads.budget_exhausted
+  value: true
+fault_params:
+  campaign_id: {format: "CAMP-{n}", n: {randint: [1000, 9999]}}
+  budget_spent_usd: {uniform: [8000, 10000], round: 2}
+  budget_daily_usd: 10000.0
+  avg_cpc_usd: {uniform: [0.8, 3.5], round: 2}
+  expected_cpc_usd: {uniform: [0.5, 1.5], round: 2}
+  win_rate_pct: {uniform: [15, 45], round: 1}
+  hours_remaining: {randint: [2, 10]}
+  hourly_revenue_usd: {uniform: [500, 5000], round: 2}
+  bid_request_id: {format: "BID-{n}", n: {randint: [100000, 999999]}}
+rca_clues:
+  ad-platform:
+    ads.budget_exhausted: true
+    ads.serving_stopped: true
+    ads.hours_remaining_today: {randint: [1, 8]}
+  analytics-pipeline:
+    analytics.ad_revenue_drop_detected: true
+    analytics.revenue_delta_usd_hr: {randint: [-5000, -500]}

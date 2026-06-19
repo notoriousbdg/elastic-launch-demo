@@ -1,0 +1,38 @@
+name: Portfolio Valuation Lag
+subsystem: client_services
+vehicle_section: valuation_engine
+error_type: PORTAL-VALUATION-LAG
+sensor_type: valuation_timer
+affected_services:
+- customer-portal
+- risk-calculator
+cascade_services:
+- compliance-monitor
+description: Real-time portfolio valuation falling behind, showing stale P&L to clients
+investigation_notes: ''
+remediation_action: ''
+error_message: '[PORTAL] PORTAL-VALUATION-LAG: portfolio={portfolio_id} lag_s={lag_s} max_lag_s={max_lag_s} pending_positions={position_count}'
+stack_trace: |-
+  === PORTFOLIO VALUATION STATS ===
+  portfolio={portfolio_id}  positions={position_count}
+  --- VALUATION PIPELINE ---
+    market_data_fetch   OK       12ms
+    price_snap          OK       8ms
+    fx_conversion       SLOW     4,200ms  <<< BOTTLENECK
+    greeks_calc         QUEUED   ---
+    pnl_attribution     QUEUED   ---
+    total_lag           {lag_s}s  max={max_lag_s}s
+  --- POSITION BREAKDOWN ---
+    equities=142  fixed_income=87  options=64  fx=29  futures=18
+    stale_positions={position_count}  fresh_positions=0
+  displayed_pnl=STALE  client_visible=true  disclaimer_shown=false
+  ACTION: show_stale_banner=true  queue_priority_reval=true  alert=PORTAL-VALUATION-LAG
+correlation_attr: {}
+fault_params:
+  portfolio_id:
+    format: "PF-{n}"
+    n: {randint: [10000, 99999]}
+  lag_s: {uniform: [30.0, 300.0], round: 1}
+  max_lag_s: 15.0
+  position_count: {randint: [50, 500]}
+rca_clues: {}

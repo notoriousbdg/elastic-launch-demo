@@ -1,0 +1,38 @@
+name: SCADA Connection Pool Exhausted
+subsystem: scada
+vehicle_section: session_pool
+error_type: SCADA-CONNECTION-POOL-EXHAUST
+sensor_type: session_pool
+affected_services:
+- scada-gateway
+cascade_services:
+- mes-controller
+description: SCADA gateway client connection pool fully utilized; auto-restart pool eligible
+investigation_notes: |-
+  Root Cause: A leaked client session — typically a cancelled subscription that didn't release its channel — accumulates over hours until the pool is exhausted. New downstream consumers (MES, historian, dashboards) get connection refused.
+  Remediation (auto-remediate eligible): 1) Restart the pool: `scada-admin restart-pool --pool client-sessions`. 2) Confirm pool free count returns to ≥ 10. 3) Open a code issue if leak recurs within 24h — usually a missing `dispose()` on the consumer side.
+remediation_action: restart_session_pool
+error_message: '[SCADA] SCADA-CONNECTION-POOL-EXHAUST: pool=client-sessions used={pool_used} max=64 leaked_estimate={leaked_count}'
+stack_trace: |-
+  === SCADA CLIENT SESSION POOL ===
+  Pool: client-sessions | Used: {pool_used}/64 | Idle: 0
+  ------------------------------------------------------------------------
+  CONSUMER             | SESSIONS | OLDEST (h) | STATUS
+  ------------------------------------------------------------------------
+  mes-controller        | 12       | 0.5        | active
+  ot-historian          | 8        | 0.3        | active
+  (orphaned)            | {leaked_count}       | 14.2       | leaked
+  ------------------------------------------------------------------------
+  SCADA-CONNECTION-POOL-EXHAUST: restart pool — leaked sessions reclaimed
+correlation_attr:
+  key: infra.scada_session_pool_config
+  value: session-pool-v3.1-leak
+fault_params:
+  pool_used: {randint: [58, 64]}
+  leaked_count: {randint: [15, 45]}
+rca_clues:
+  scada-gateway:
+    scada.session_pool_used: {randint: [58, 64]}
+    scada.leaked_session_count: {randint: [15, 45]}
+  mes-controller:
+    mes.scada_connection_refused_count: {randint: [3, 25]}

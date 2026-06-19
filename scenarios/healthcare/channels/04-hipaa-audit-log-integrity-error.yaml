@@ -1,0 +1,62 @@
+name: HIPAA Audit Log Integrity Error
+subsystem: analytics
+vehicle_section: audit_subsystem
+error_type: HIPAA-AUDIT-FAIL
+sensor_type: audit_log_integrity
+affected_services:
+- data-warehouse
+- ehr-system
+cascade_services:
+- clinical-alerts
+- billing-processor
+description: HIPAA-mandated audit log chain integrity check fails, indicating possible tampering or data loss
+investigation_notes: |-
+  Root Cause: HIPAA audit chain integrity failures (SHA-256 hash mismatches) indicate either log record tampering, storage corruption, or an out-of-order write during high-volume PHI access logging. Per 45 CFR 164.312(b), audit controls must maintain an unbroken chain of custody for all PHI access events.
+  Remediation: 1) Identify the break point: `audit-admin chain-verify --chain {chain_id} --from-sequence {sequence_number} --range 100`. 2) Recover audit records from the write-ahead log: `audit-admin recover-wal --chain {chain_id} --sequence {sequence_number}`. 3) Rebuild the hash chain from the last valid entry: `audit-admin rebuild-chain --chain {chain_id} --from-last-valid`. 4) Check for storage I/O errors: `audit-admin storage-health --volume audit-vol-01`. 5) Close the compliance gap: generate an incident report for the Privacy Officer per HIPAA breach notification procedures (45 CFR 164.408). 6) Enable write verification: `audit-admin set-write-verify --chain {chain_id} --mode synchronous`.
+remediation_action: rebuild_audit_chain
+error_message: '[DW] HIPAA-AUDIT-FAIL: chain={chain_id} sequence={sequence_number} expected_hash={expected_hash} actual_hash={actual_hash}'
+stack_trace: |-
+  === HIPAA AUDIT CHAIN INTEGRITY REPORT ===
+  Chain: {chain_id} | Algorithm: SHA-256 | Verification: FAILED
+  ------------------------------------------------------------------------
+  SEQUENCE   | TIMESTAMP   | ACTION       | EXPECTED HASH        | STATUS
+  ------------------------------------------------------------------------
+  {sequence_number:10d} | 20260217143052 | PHI_ACCESS   | {expected_hash} | MISMATCH
+    Stored:   {actual_hash}
+    Expected: {expected_hash}
+  ------------------------------------------------------------------------
+  Previous 3 entries: VALID
+  Next entry: CANNOT VERIFY (chain broken)
+  ------------------------------------------------------------------------
+  HIPAA-AUDIT-FAIL: Chain {chain_id} integrity broken at sequence {sequence_number}
+  Hash mismatch indicates possible record tampering or data corruption
+  Compliance officer notification triggered — investigation required per 45 CFR 164.312(b)
+correlation_attr:
+  key: deployment.audit_chain_version
+  value: sha256-chain-v2.1.0-rc3
+fault_params:
+  chain_id:
+    format: "AUDIT-{n}"
+    n: {randint: [1000, 9999]}
+  sequence_number: {randint: [1, 100000]}
+  expected_hash:
+    format: "sha256:{a:016x}{b:016x}"
+    a: {randint: [0, 9007199254740991]}
+    b: {randint: [0, 9007199254740991]}
+  actual_hash:
+    format: "sha256:{a:016x}{b:016x}"
+    a: {randint: [0, 9007199254740991]}
+    b: {randint: [0, 9007199254740991]}
+rca_clues:
+  data-warehouse:
+    audit.chain_break_detected: true
+    audit.wal_recovery_available: {choice: [true, false]}
+  ehr-system:
+    ehr.phi_access_logging: degraded
+    ehr.unaudited_access_count: {randint: [10, 100]}
+  clinical-alerts:
+    alerts.compliance_violation_fired: true
+    alerts.breach_notification_pending: true
+  billing-processor:
+    billing.audit_gap_in_claims: true
+    billing.cms_reporting_risk: {choice: [low, medium, high]}

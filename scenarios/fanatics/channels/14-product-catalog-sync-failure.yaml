@@ -1,0 +1,62 @@
+name: Product Catalog Sync Failure
+subsystem: commerce
+vehicle_section: catalog_system
+error_type: CATALOG_SYNC_FAILURE
+sensor_type: catalog_sync
+affected_services:
+- digital-marketplace
+- card-printing-system
+cascade_services:
+- auction-engine
+description: Product catalog replication between marketplace and printing system failing
+investigation_notes: |-
+  1. Check the catalog_replicator logs for the specific error detail — 'schema version mismatch' means a migration ran on one side but not the other.
+  2. For 'primary key conflict on sku column', identify the duplicate SKUs: `SELECT sku, COUNT(*) FROM products GROUP BY sku HAVING COUNT(*) > 1`.
+  3. 'Connection reset by peer' during sync indicates a network interruption — check if the VPN tunnel between AWS (printing) and marketplace DB is stable.
+  4. 'Timeout waiting for lock on products table' means a long-running transaction is holding a row lock — find it with `SELECT * FROM information_schema.innodb_trx`.
+  5. If sync has been broken for hours, do not attempt a full resync during business hours — schedule it for the maintenance window to avoid locking the catalog.
+  6. As a workaround, enable the read-only cache mode on the marketplace so users see stale-but-consistent data while the sync recovers.
+remediation_action: resync_catalog
+error_message: '[CatalogReplicator] CATALOG_SYNC_FAILURE: {catalog_sync_failed}/{catalog_sync_total} records failed syncing
+  {catalog_source} -> {catalog_destination}, last_sync={catalog_last_sync_min}m ago, error="{catalog_error_detail}"'
+stack_trace: |-
+  Traceback (most recent call last):
+    File "/app/marketplace/sync/catalog_replicator.py", line 267, in sync_catalog
+      result = await self.replicate_batch(source, dest, batch)
+    File "/app/marketplace/sync/catalog_replicator.py", line 245, in replicate_batch
+      async for record in batch:
+    File "/app/marketplace/db/connector.py", line 134, in execute_batch
+      raise DBSyncError("{catalog_error_detail}")
+  marketplace.exceptions.CatalogSyncError: CATALOG_SYNC_FAILURE — {catalog_sync_failed}/{catalog_sync_total} records failed
+    Source: {catalog_source}
+    Destination: {catalog_destination}
+    Last successful sync: {catalog_last_sync_min} minutes ago
+correlation_attr:
+  key: deployment.catalog_schema_ver
+  value: schema-v5.3.0-migration-pending
+fault_params:
+  catalog_sync_failed: {randint: [50, 500]}
+  catalog_sync_total: {randint: [1000, 5000]}
+  catalog_source: {choice: [card-printing-system, product-master]}
+  catalog_destination: {choice: [digital-marketplace, auction-engine]}
+  catalog_last_sync_min: {randint: [30, 360]}
+  catalog_error_detail:
+    choice:
+    - "connection reset by peer"
+    - "schema version mismatch"
+    - "primary key conflict on sku column"
+    - "timeout waiting for lock on products table"
+rca_clues:
+  digital-marketplace:
+    marketplace.catalog_staleness_min: {randint: [30, 360]}
+    marketplace.sku_mismatch_count: {randint: [20, 500]}
+  card-printing-system:
+    print.catalog_version:
+      format: "v{a}.{b}.{c}"
+      a: {randint: [1, 5]}
+      b: {randint: [0, 9]}
+      c: {randint: [0, 9]}
+    print.schema_migration_pending: true
+  auction-engine:
+    auction.listing_sync_gap: {randint: [10, 200]}
+    auction.phantom_listings: {randint: [2, 30]}

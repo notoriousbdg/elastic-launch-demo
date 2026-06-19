@@ -1,0 +1,396 @@
+scenario_id: ecommerce
+scenario_name: Global Commerce Platform
+scenario_description: Global e-commerce marketplace running on multi-cloud infrastructure. Storefront, personalization, and
+  ad monetization on AWS/GCP, with payment processing and fulfillment on Azure.
+namespace: ecommerce
+scenario_icon: 🛒
+sort_order: 7
+nominal_label: NORMAL
+hosts:
+- host.name: ecommerce-aws-host-01
+  host.id: i-0a1b2c3d4e5f67890
+  host.arch: amd64
+  host.type: m6i.2xlarge
+  host.image.id: ami-0123456789abcdef0
+  host.cpu.model.name: Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz
+  host.cpu.vendor.id: GenuineIntel
+  host.cpu.family: '6'
+  host.cpu.model.id: '106'
+  host.cpu.stepping: '6'
+  host.cpu.cache.l2.size: 1310720
+  host.ip:
+  - 10.0.1.100
+  - 172.31.0.10
+  host.mac:
+  - 0e:1a:2b:3c:4d:5e
+  - 0e:1a:2b:3c:4d:5f
+  os.type: linux
+  os.description: Amazon Linux 2023.6.20250115
+  cloud.provider: aws
+  cloud.platform: aws_ec2
+  cloud.region: us-east-1
+  cloud.availability_zone: us-east-1a
+  cloud.account.id: '112233445566'
+  cloud.instance.id: i-0a1b2c3d4e5f67890
+  cpu_count: 8
+  memory_total_bytes: 34359738368
+  disk_total_bytes: 536870912000
+- host.name: ecommerce-gcp-host-01
+  host.id: '4567890123456789012'
+  host.arch: amd64
+  host.type: n2-standard-8
+  host.image.id: projects/debian-cloud/global/images/debian-12-bookworm-v20250115
+  host.cpu.model.name: Intel(R) Xeon(R) CPU @ 2.80GHz
+  host.cpu.vendor.id: GenuineIntel
+  host.cpu.family: '6'
+  host.cpu.model.id: '85'
+  host.cpu.stepping: '7'
+  host.cpu.cache.l2.size: 1048576
+  host.ip:
+  - 10.128.0.100
+  - 10.128.0.101
+  host.mac:
+  - 42:01:0a:80:00:64
+  - 42:01:0a:80:00:65
+  os.type: linux
+  os.description: Debian GNU/Linux 12 (bookworm)
+  cloud.provider: gcp
+  cloud.platform: gcp_compute_engine
+  cloud.region: us-central1
+  cloud.availability_zone: us-central1-a
+  cloud.account.id: ecommerce-prod-12345
+  cloud.instance.id: '4567890123456789012'
+  cpu_count: 8
+  memory_total_bytes: 34359738368
+  disk_total_bytes: 536870912000
+- host.name: ecommerce-azure-host-01
+  host.id: /subscriptions/ec-prod-001/resourceGroups/ecommerce-rg/providers/Microsoft.Compute/virtualMachines/ecommerce-vm-01
+  host.arch: amd64
+  host.type: Standard_D8s_v5
+  host.image.id: Canonical:0001-com-ubuntu-server-jammy:22_04-lts-gen2:latest
+  host.cpu.model.name: Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz
+  host.cpu.vendor.id: GenuineIntel
+  host.cpu.family: '6'
+  host.cpu.model.id: '106'
+  host.cpu.stepping: '6'
+  host.cpu.cache.l2.size: 1310720
+  host.ip:
+  - 10.1.0.100
+  - 10.1.0.101
+  host.mac:
+  - 00:22:48:1a:2b:3c
+  - 00:22:48:1a:2b:3d
+  os.type: linux
+  os.description: Ubuntu 22.04.5 LTS
+  cloud.provider: azure
+  cloud.platform: azure_vm
+  cloud.region: eastus
+  cloud.availability_zone: eastus-1
+  cloud.account.id: ec-prod-001-234-567
+  cloud.instance.id: ecommerce-vm-01
+  cpu_count: 8
+  memory_total_bytes: 34359738368
+  disk_total_bytes: 536870912000
+k8s_clusters:
+- name: ecommerce-eks-cluster
+  provider: aws
+  platform: aws_eks
+  region: us-east-1
+  zones:
+  - us-east-1a
+  - us-east-1b
+  - us-east-1c
+  os_description: Amazon Linux 2
+  services:
+  - storefront-gateway
+  - product-catalog
+  - order-management
+- name: ecommerce-gke-cluster
+  provider: gcp
+  platform: gcp_gke
+  region: us-central1
+  zones:
+  - us-central1-a
+  - us-central1-b
+  - us-central1-c
+  os_description: Container-Optimized OS
+  services:
+  - ad-platform
+  - recommendation-engine
+  - inventory-service
+- name: ecommerce-aks-cluster
+  provider: azure
+  platform: azure_aks
+  region: eastus
+  zones:
+  - eastus-1
+  - eastus-2
+  - eastus-3
+  os_description: Ubuntu 22.04 LTS
+  services:
+  - payment-processor
+  - fulfillment-orchestrator
+  - analytics-pipeline
+agent_config:
+  id: ecommerce-ops-analyst
+  name: Commerce Operations Analyst
+  assessment_tool_name: platform_readiness_assessment
+  system_prompt: 'You are the Commerce Operations Analyst for a global e-commerce platform. You help engineering and operations
+    teams investigate incidents, analyze telemetry, and perform root cause analysis across 9 services spanning AWS, GCP, and
+    Azure. You have deep expertise in e-commerce systems: storefront performance, product catalog search, order management,
+    ad monetization, ML-powered personalization, payment processing, inventory management, fulfillment logistics, and real-time
+    analytics pipelines. You understand that ad revenue is a critical business metric — when ads are not serving, that is
+    direct, reportable revenue loss. Always quantify business impact alongside technical findings. When investigating incidents,
+    search for these error identifiers in logs (field: body.text): payment errors (PAYMENT-GATEWAY-TIMEOUT, FRAUD-FALSE-POSITIVE,
+    PAYMENT-TOKEN-EXPIRY), ad platform errors (ADS-SERVING-FAILURE, ADS-CLICK-BACKLOG, ADS-BUDGET-CAP), catalog errors (CATALOG-INDEX-CORRUPT,
+    CATALOG-PRICE-SYNC), personalization errors (RECO-ENGINE-OOM, RECO-MODEL-DRIFT, RECO-CACHE-EVICTION), storefront errors
+    (SESSION-STORM, CDN-CACHE-STORM, SSL-CERT-EXPIRY), order errors (ORDER-DB-REPLICATION-LAG, CART-ABANDON-SPIKE), inventory
+    errors (INVENTORY-SYNC-LAG), fulfillment errors (CARRIER-RATE-LIMIT, WAREHOUSE-CAPACITY-ALERT), analytics errors (ANALYTICS-PIPELINE-LAG).
+    Log messages are in body.text — NEVER search the body field alone.'
+assessment_tool_config:
+  id: platform_readiness_assessment
+  description: 'Comprehensive platform readiness assessment for the global commerce platform. Evaluates ad serving health,
+    payment processing, order throughput, inventory sync, and personalization accuracy. Returns business impact metrics (GMV,
+    ad revenue, conversion rate) alongside infrastructure health. Log message field: body.text (never use ''body'' alone).'
+executive_kpi_emitter_service_name: ad-platform
+executive_dashboard_intro: '**Commerce & advertising KPIs** — revenue, traffic & engagement, fulfillment, and customer health
+  (synthetic `business.*` from `ad-platform`).'
+executive_kpi_sections:
+- header: '**Revenue** — GMV, conversion, AOV, ads, subscriptions, and seller fees'
+  specs:
+  - - GMV (USD/min)
+    - metrics.business.gmv_usd_per_min
+  - - Conversion rate (%)
+    - metrics.business.conversion_rate_pct
+  - - Average order value (USD)
+    - metrics.business.average_order_value_usd
+  - - Ad revenue (USD/min)
+    - metrics.business.ad_revenue_usd_per_min
+  - - Subscription MRR (USD/min)
+    - metrics.business.subscription_mrr_usd_per_min
+  - - Seller fee revenue (USD/min)
+    - metrics.business.seller_fee_revenue_usd_per_min
+- header: '**Traffic & engagement** — sessions, views, cart, search, and retention'
+  specs:
+  - - Sessions / min
+    - metrics.business.sessions_per_min
+  - - Page views / min
+    - metrics.business.page_views_per_min
+  - - Cart adds / min
+    - metrics.business.cart_adds_per_min
+  - - Search queries / min
+    - metrics.business.search_queries_per_min
+  - - Content completion (%)
+    - metrics.business.content_completion_rate_pct
+  - - Return visitor (%)
+    - metrics.business.return_visitor_pct
+- header: '**Fulfillment** — orders, SLA, returns, cancels, same-day, and inventory'
+  specs:
+  - - Orders placed / min
+    - metrics.business.orders_placed_per_min
+  - - Fulfillment SLA (%)
+    - metrics.business.fulfillment_sla_pct
+  - - Returns / min
+    - metrics.business.returns_per_min
+  - - Cancel rate (%)
+    - metrics.business.cancel_rate_pct
+  - - Same-day eligible (%)
+    - metrics.business.same_day_eligible_pct
+  - - Inventory turn rate
+    - metrics.business.inventory_turn_rate
+- header: '**Customer health** — CSAT, NPS, churn, email, push, and loyalty'
+  specs:
+  - - CSAT (0–5)
+    - metrics.business.csat_score_0_5
+  - - Satisfaction proxy (NPS-like)
+    - metrics.business.net_satisfaction_proxy_nps
+  - - Churn risk (0–100)
+    - metrics.business.churn_risk_index_0_100
+  - - Email open rate (%)
+    - metrics.business.email_open_rate_pct
+  - - Push CTR (%)
+    - metrics.business.push_notification_ctr_pct
+  - - Loyalty redeem (pts/min)
+    - metrics.business.loyalty_points_redeemed_per_min
+executive_trend_charts:
+- title: GMV trend
+  field: metrics.business.gmv_usd_per_min
+  y_label: USD/min
+- title: Sessions / min
+  field: metrics.business.sessions_per_min
+  y_label: sessions/min
+- title: Conversion rate
+  field: metrics.business.conversion_rate_pct
+  y_label: '%'
+- title: Orders placed / min
+  field: metrics.business.orders_placed_per_min
+  y_label: orders/min
+- title: Ad revenue trend
+  field: metrics.business.ad_revenue_usd_per_min
+  y_label: USD/min
+- title: Churn risk index
+  field: metrics.business.churn_risk_index_0_100
+  y_label: index
+executive_kpi_emissions:
+  # Revenue
+  - name: business.gmv_usd_per_min
+    value: {uniform: [85000.0, 680000.0], round: 1}
+    unit: USD/min
+  - name: business.conversion_rate_pct
+    value: {uniform: [1.8, 6.4], round: 2}
+    unit: "%"
+  - name: business.average_order_value_usd
+    value: {uniform: [42.0, 195.0], round: 2}
+    unit: USD
+  - name: business.ad_revenue_usd_per_min
+    value: {uniform: [28000.0, 185000.0], round: 1}
+    unit: USD/min
+  - name: business.subscription_mrr_usd_per_min
+    value: {uniform: [12000.0, 95000.0], round: 1}
+    unit: USD/min
+  - name: business.seller_fee_revenue_usd_per_min
+    value: {uniform: [4500.0, 38000.0], round: 1}
+    unit: USD/min
+  # Traffic & engagement
+  - name: business.sessions_per_min
+    value: {randint: [1200, 18000]}
+    unit: sessions/min
+  - name: business.page_views_per_min
+    value: {randint: [8500, 95000]}
+    unit: views/min
+  - name: business.cart_adds_per_min
+    value: {randint: [380, 4800]}
+    unit: adds/min
+  - name: business.search_queries_per_min
+    value: {randint: [620, 8200]}
+    unit: queries/min
+  - name: business.content_completion_rate_pct
+    value: {uniform: [38.0, 82.0], round: 2}
+    unit: "%"
+  - name: business.return_visitor_pct
+    value: {uniform: [28.0, 56.0], round: 2}
+    unit: "%"
+  # Fulfillment
+  - name: business.orders_placed_per_min
+    value: {randint: [85, 980]}
+    unit: orders/min
+  - name: business.fulfillment_sla_pct
+    value: {uniform: [91.0, 99.4], round: 2}
+    unit: "%"
+  - name: business.returns_per_min
+    value: {randint: [8, 120]}
+    unit: returns/min
+  - name: business.cancel_rate_pct
+    value: {uniform: [1.2, 5.8], round: 2}
+    unit: "%"
+  - name: business.same_day_eligible_pct
+    value: {uniform: [22.0, 68.0], round: 2}
+    unit: "%"
+  - name: business.inventory_turn_rate
+    value: {uniform: [4.2, 18.6], round: 2}
+    unit: turns
+  # Customer health
+  - name: business.csat_score_0_5
+    value: {uniform: [3.4, 4.9], round: 2}
+    unit: score
+  - name: business.net_satisfaction_proxy_nps
+    value: {uniform: [18.0, 72.0], round: 1}
+    unit: score
+  - name: business.churn_risk_index_0_100
+    value: {uniform: [12.0, 48.0], round: 1}
+    unit: index
+  - name: business.email_open_rate_pct
+    value: {uniform: [14.0, 38.0], round: 2}
+    unit: "%"
+  - name: business.push_notification_ctr_pct
+    value: {uniform: [1.8, 9.4], round: 2}
+    unit: "%"
+  - name: business.loyalty_points_redeemed_per_min
+    value: {randint: [12000, 180000]}
+    unit: pts/min
+raw_log_profile:
+  service_name: storefront-edge
+  user_id_prefix: u
+  tier_field: user_tier
+  tier_values:
+  - - free
+    - 75
+  - - pro
+    - 20
+  - - enterprise
+    - 5
+  country_weights:
+    US: 40
+    GB: 12
+    DE: 10
+    FR: 8
+    JP: 8
+    BR: 10
+    CA: 7
+    AU: 5
+  methods:
+  - GET
+  - POST
+  - PUT
+  - DELETE
+  paths:
+  - /checkout
+  - /api/v2/cart
+  - /api/v2/orders
+  - /products/{id}
+  - /search
+  - /login
+  - /account
+  - /health
+  change_point_path: /checkout
+trace_attributes:
+  base:
+    platform.region: {choice: [us-east-1, us-central1, eastus]}
+    platform.traffic_tier: {choice: [normal, normal, elevated, peak]}
+    platform.market: {choice: [US, US, US, JP, EU, UK]}
+  services:
+    storefront-gateway:
+      storefront.page_type: {choice: [home, search, pdp, cart, checkout, confirmation]}
+      storefront.device: {choice: [mobile, mobile, desktop, tablet, app]}
+      storefront.session_type: {choice: [browse, search, checkout, repeat_purchase]}
+      storefront.ab_variant: {choice: [control, variant_a, variant_b]}
+    product-catalog:
+      catalog.search_type: {choice: [keyword, category, filter, recommendation]}
+      catalog.result_count: {randint: [0, 200]}
+      catalog.category: {choice: [electronics, apparel, home, beauty, sports, books]}
+      catalog.index_version: {choice: [v12, v12, v12, v13]}
+    order-management:
+      order.channel: {choice: [web, mobile_app, mobile_web, api]}
+      order.payment_method: {choice: [credit_card, debit_card, paypal, apple_pay, google_pay, buy_now_pay_later]}
+      order.item_count: {randint: [1, 8]}
+      order.is_prime: {choice: [true, true, false]}
+    ad-platform:
+      ads.placement: {choice: [homepage_banner, search_top, pdp_sidebar, cart_upsell, email_retargeting]}
+      ads.format: {choice: [display, sponsored_product, video, native]}
+      ads.targeting_type: {choice: [behavioral, contextual, retargeting, lookalike, demographic]}
+      ads.auction_type: {choice: [first_price, second_price, fixed_cpm]}
+    recommendation-engine:
+      reco.algorithm: {choice: [collaborative_filter, content_based, hybrid, trending]}
+      reco.context: {choice: [homepage, pdp_related, cart_upsell, post_purchase, email]}
+      reco.personalized: {choice: [true, true, true, false]}
+      reco.model_version: {choice: [v8, v8, v8, v9]}
+    inventory-service:
+      inventory.warehouse_region: {choice: [us-east, us-west, us-central, eu-west]}
+      inventory.sku_category: {choice: [electronics, apparel, home, beauty, sports]}
+      inventory.fulfillment_type: {choice: [standard, express, same_day, pickup]}
+      inventory.stock_tier: {choice: [in_stock, in_stock, low_stock, backorder]}
+    payment-processor:
+      payment.provider: {choice: [stripe, adyen, braintree, square]}
+      payment.currency: {choice: [USD, USD, USD, JPY, EUR, GBP]}
+      payment.card_network: {choice: [visa, mastercard, amex, discover]}
+      payment.3ds_required: {choice: [false, false, true]}
+    fulfillment-orchestrator:
+      fulfillment.carrier: {choice: [fedex, ups, usps, dhl, amazon_logistics]}
+      fulfillment.service_level: {choice: [standard, two_day, overnight, same_day]}
+      fulfillment.warehouse_id: {choice: [WH-US-NJ-01, WH-US-OH-02, WH-US-TX-03, WH-US-CA-04]}
+      fulfillment.package_weight_lb: {uniform: [0.2, 25.0], round: 1}
+    analytics-pipeline:
+      analytics.event_type: {choice: [page_view, product_view, add_to_cart, purchase, ad_impression, ad_click]}
+      analytics.pipeline_stage: {choice: [ingest, transform, aggregate, index]}
+      analytics.consumer_group: {choice: [realtime-analytics, ad-attribution, inventory-analytics, fraud-signals]}
+      analytics.partition: {randint: [0, 31]}

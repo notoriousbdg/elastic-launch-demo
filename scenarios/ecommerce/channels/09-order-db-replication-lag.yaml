@@ -1,0 +1,56 @@
+name: Order DB Replication Lag
+subsystem: orders
+vehicle_section: database_cluster
+error_type: ORDER-DB-REPLICATION-LAG
+sensor_type: db_replication
+affected_services:
+- order-management
+cascade_services:
+- payment-processor
+- fulfillment-orchestrator
+description: Order database replica lagging behind primary, causing stale reads for order status queries and payment confirmation
+  lookups
+investigation_notes: |-
+  1. Check order-management logs for ORDER-DB-REPLICATION-LAG — replication_lag_ms={replication_lag_ms} vs max {max_replication_lag_ms}ms.
+  2. Run `SHOW SLAVE STATUS\G` on the replica — `Seconds_Behind_Master` and `Relay_Log_Space` are key indicators.
+  3. Check for long-running transactions on the primary: `SELECT * FROM information_schema.innodb_trx WHERE trx_started < NOW() - INTERVAL 30 SECOND` — these block replication.
+  4. Look at replica I/O thread vs SQL thread: if I/O thread is fast but SQL thread is slow, the replica is I/O-bound not network-bound — check disk throughput.
+  5. Route order-status reads to the primary temporarily to prevent customers from seeing stale state (order stuck in 'processing' when already shipped).
+  6. If lag exceeds {failover_threshold_ms}ms, promote the replica to primary and reconfigure clients to prevent prolonged stale-read exposure.
+remediation_action: force_db_failover
+error_message: '[OrderManagement] ORDER-DB-REPLICATION-LAG: replica={replica_host} lag={replication_lag_ms}ms (max {max_replication_lag_ms}ms)
+  relay_log_space_mb={relay_log_space_mb} seconds_behind_master={seconds_behind_master}'
+stack_trace: |-
+  DBReplicationException: ORDER-DB-REPLICATION-LAG
+    at OrderRepository.readFromReplica(host={replica_host})
+    at OrderService.getOrderStatus(order_id={order_id})
+  Replica:              {replica_host}
+  Lag:                  {replication_lag_ms}ms
+  Relay log space:      {relay_log_space_mb}MB
+  Seconds behind master:{seconds_behind_master}s
+  I/O thread:           Running
+  SQL thread:           Running (delayed)
+correlation_attr:
+  key: orders.db_replication_lagging
+  value: true
+fault_params:
+  replica_host:
+    format: "order-db-replica-{n}.us-east-1.internal"
+    n: {randint: [1, 3]}
+  replication_lag_ms: {randint: [10000, 120000]}
+  max_replication_lag_ms: 1000
+  relay_log_space_mb: {randint: [500, 5000]}
+  seconds_behind_master: {randint: [10, 120]}
+  order_id: {format: "ORD-{n}", n: {randint: [100000, 999999]}}
+  failover_threshold_ms: 30000
+rca_clues:
+  order-management:
+    db.replica_lag_ms: {randint: [10000, 120000]}
+    db.stale_reads_detected: true
+    db.seconds_behind_master: {randint: [10, 120]}
+  payment-processor:
+    payment.confirmation_stale_reads: {randint: [10, 100]}
+    payment.duplicate_charge_risk: true
+  fulfillment-orchestrator:
+    fulfillment.order_status_stale: true
+    fulfillment.double_ship_risk_orders: {randint: [1, 20]}

@@ -1,0 +1,57 @@
+name: Mobile App API Timeout
+subsystem: digital_banking
+vehicle_section: mobile_api
+error_type: MOBILE-API-TIMEOUT
+sensor_type: api_latency
+affected_services:
+- mobile-gateway
+- auth-gateway
+cascade_services:
+- member-portal
+- payment-engine
+description: Mobile banking API requests exceeding response time SLA causing member app failures
+investigation_notes: |-
+  1. Check mobile-gateway connection pool utilization — pool_active near pool_max indicates exhaustion. Run: kubectl exec -it mobile-gateway -- curl localhost:8080/actuator/metrics/hikaricp.connections.active
+  2. Review backend_routing phase — latency spike at this stage points to upstream service degradation, not the gateway itself. Check auth-gateway and payment-engine response times in APM.
+  3. Inspect circuit breaker state: HALF_OPEN means the gateway is testing recovery. If stuck in HALF_OPEN for >60s, the upstream service is intermittently failing. Check: /actuator/health for dependency status.
+  4. Queue depth >2000 indicates backpressure buildup — consider scaling mobile-gateway replicas or enabling request shedding. Check HPA metrics: kubectl get hpa mobile-gateway -n banking-prod.
+  5. Verify CACHE_STALE fallback is returning acceptable data — stale cached responses may show incorrect balances. Review cache TTL settings in mobile-gateway ConfigMap.
+remediation_action: restart_mobile_gateway
+error_message: '[MOBILE] MOBILE-API-TIMEOUT: endpoint={endpoint} latency_ms={latency_ms} sla_ms={sla_ms} member={member_id}
+  device={device_type}'
+stack_trace: |-
+  === MOBILE GATEWAY LATENCY REPORT ===
+  endpoint={endpoint}  member={member_id}  device={device_type}
+  --- REQUEST PIPELINE ---
+    PHASE                ELAPSED_MS    STATUS
+    tls_handshake            42        OK
+    auth_token_verify        180       OK
+    rate_limit_check         12        OK
+    backend_routing          {latency_ms}     TIMEOUT  <<< BOTTLENECK
+    response_serialize       ---       SKIPPED
+  total_ms={latency_ms}  sla_ms={sla_ms}  breach=true
+  connection_pool_active=847  pool_max=1000  queue_depth=2340
+  circuit_breaker=HALF_OPEN  retry_count=3  fallback=CACHE_STALE
+  ACTION: circuit_break=true  return_cached=true  alert=MOBILE-API-TIMEOUT
+correlation_attr:
+  key: deployment.api_gateway_version
+  value: gateway-v2.9.1-canary
+fault_params:
+  endpoint: {choice: [/api/v1/mobile/accounts, /api/v1/mobile/transfer, /api/v1/mobile/deposit, /api/v1/mobile/pay-bills, /api/v1/mobile/claims, /api/v1/mobile/insurance]}
+  latency_ms: {randint: [3000, 30000]}
+  sla_ms: 2000
+  member_id: {format: "M-{n}", n: {randint: [1000000, 9999999]}}
+  device_type: {choice: [iPhone_15_Pro, Samsung_S24, iPad_Air, Pixel_8, iPhone_14]}
+rca_clues:
+  mobile-gateway:
+    gateway.connection_pool_active: {randint: [800, 1000]}
+    gateway.backend_routing_phase: stalled
+  auth-gateway:
+    auth.token_verify_latency_ms: {randint: [400, 900]}
+    auth.session_cache_hit_rate: {uniform: [0.1, 0.3], round: 2}
+  member-portal:
+    upstream.degraded_dependency: mobile-gateway
+    portal.response_queue_depth: {randint: [1500, 3000]}
+  payment-engine:
+    payment.upstream_timeout_count: {randint: [50, 200]}
+    payment.circuit_breaker_state: HALF_OPEN

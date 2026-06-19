@@ -1,0 +1,70 @@
+name: Server Tick Rate Degradation
+subsystem: game_engine
+vehicle_section: game_loop
+error_type: ENGINE-TICKRATE-DEGRAD
+sensor_type: performance_monitor
+affected_services:
+- game-server
+- matchmaking-engine
+cascade_services:
+- analytics-pipeline
+- chat-service
+description: Game server tick rate drops below target causing gameplay lag, hit registration failures, and desync cascades
+investigation_notes: |-
+  Root cause: the game loop frame budget (15.6ms for 64Hz) is being exceeded because the physics system consumes 54% of tick time at 8.4ms. Combined with net_serialize at 27%, the server has no headroom and tick rate degrades under load.
+  1. Profile per-system costs: physics at 8.4ms with 4,201 entities is the bottleneck — check if entity_count spiked due to spawned projectiles or dropped items not being GC'd.
+  2. Review CPU metrics: 97.2% CPU means the server is saturated — verify no co-located processes are stealing cycles with `ps aux --sort=-%cpu | head -20`.
+  3. Check memory: 84.1% memory usage may be causing swap pressure — verify with `vmstat 1 5` for si/so columns indicating swap activity.
+  4. Remediate: issue `reduce_entity_budget` to cap active entities at 2,000 and force garbage collection of expired objects; disable non-essential AI to reclaim tick budget.
+  5. Long-term: implement server-side LOD (level of detail) that reduces physics fidelity for distant entities and pauses AI updates for out-of-range NPCs.
+remediation_action: resync_world_state
+error_message: '[Engine] ENGINE-TICKRATE-DEGRAD: server={server_id} tickrate={tick_rate}Hz target={target_tick_rate}Hz frame_time={frame_time_ms}ms
+  players={active_players} match={match_id}'
+stack_trace: |-
+  === SERVER PERFORMANCE PROFILER ===
+  server={server_id}  match={match_id}  players={active_players}
+  ----------- tick timing -------------
+    tick_rate    = {tick_rate}Hz (target {target_tick_rate}Hz)
+    frame_time   = {frame_time_ms}ms (budget 15.6ms)
+    frame_budget  = EXCEEDED by {frame_time_ms}ms
+  ----------- per-system tick time ----
+    physics        = 8.4ms  (54%)
+    net_serialize  = 4.2ms  (27%)
+    ai_update      = 1.8ms  (12%)
+    game_logic     = 0.7ms  (4%)
+    gc_pause       = 0.4ms  (3%)
+  ----------- resource usage ----------
+    cpu_pct      = 97.2%
+    memory_pct   = 84.1%
+    entity_count = 4,201
+    net_bandwidth = 128Mbps (cap 200Mbps)
+  ----------- action ------------------
+    REDUCE entity_budget  DISABLE non-essential AI  WARN players
+  ENGINE-TICKRATE-DEGRAD: server {server_id} at {tick_rate}Hz, target {target_tick_rate}Hz
+correlation_attr:
+  key: network.routing_policy
+  value: ecmp-4path-asymmetric
+fault_params:
+  server_id:
+    format: "GS-{region}-{n:02d}"
+    region: {choice: [US-E, US-W, EU-W, AP-SE]}
+    n: {randint: [1, 99]}
+  tick_rate: {uniform: [12.0, 45.0], round: 1}
+  target_tick_rate: 64
+  frame_time_ms: {uniform: [22.0, 83.0], round: 1}
+  active_players: {randint: [10, 100]}
+  match_id:
+    format: "MATCH-{n}"
+    n: {randint: [100000, 999999]}
+rca_clues:
+  game-server:
+    game.physics_tick_budget_pct: {uniform: [45.0, 65.0], round: 1}
+    game.entity_count: {randint: [3000, 6000]}
+  matchmaking-engine:
+    matchmaking.server_health_score: {uniform: [0.2, 0.5], round: 2}
+    matchmaking.rebalance_triggered: true
+  analytics-pipeline:
+    analytics.perf_alert_count: {randint: [50, 200]}
+  chat-service:
+    chat.voice_server_colocated: true
+    chat.voice_quality_impacted: true
