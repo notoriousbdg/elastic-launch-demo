@@ -4,6 +4,9 @@ description: >
   Generate and email a daily system health report using the Observability
   AI Assistant.  Triggered manually from the chaos controller UI.
 
+tags:
+  - "__NS__"
+
 triggers:
   - type: manual
 

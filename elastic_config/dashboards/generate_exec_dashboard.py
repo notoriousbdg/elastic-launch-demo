@@ -70,6 +70,36 @@ def make_ref(data_view_id, layer_id):
     }
 
 
+def _tag_saved_object(namespace: str) -> str:
+    """Return an NDJSON line for a Kibana 'tag' saved object keyed by namespace.
+
+    The tag is co-imported alongside each dashboard so Kibana can show it in
+    the tag filter. Using a stable ``id`` of ``tag-{namespace}`` makes the
+    import idempotent (overwrite=true replaces it on re-deploy).
+    """
+    obj = {
+        "attributes": {
+            "color": "#0077CC",
+            "description": f"Scenario: {namespace}",
+            "name": namespace,
+        },
+        "id": f"tag-{namespace}",
+        "managed": False,
+        "references": [],
+        "type": "tag",
+    }
+    return json.dumps(obj, separators=(",", ":"))
+
+
+def _tag_ref(namespace: str) -> dict:
+    """Return a saved-object reference that associates a dashboard with the scenario tag."""
+    return {
+        "id": f"tag-{namespace}",
+        "name": "tag-ref-scenario",
+        "type": "tag",
+    }
+
+
 # ── Layer / state / panel builders ─────────────────────────────────────────
 
 def make_layer(layer_id, column_order, columns, index_pattern_id=None):
@@ -367,11 +397,16 @@ def generate_dashboard_ndjson(scenario) -> str:
         for ch in scenario.channel_registry.values()
     ]
 
+    # The tag saved object must be co-imported so Kibana knows the tag exists
+    # before the dashboards reference it.  Using a stable id (tag-{namespace})
+    # makes repeated imports idempotent (overwrite=true replaces the object).
+    tag_line = _tag_saved_object(namespace) + "\n"
+
     main = _build_dashboard_ndjson(
         scenario_name, namespace, cloud_groups, dashboard_id, error_types
     )
     biz = _build_business_executive_dashboard_ndjson(scenario)
-    return main + biz if biz else main
+    return tag_line + main + biz if biz else tag_line + main
 
 
 def _build_dashboard_ndjson(
@@ -1175,6 +1210,9 @@ def _build_dashboard_ndjson(
                 all_refs.append(ref)
                 seen_ref_names.add(ref["name"])
 
+    # Add the scenario tag reference so the dashboard appears under the namespace tag
+    all_refs.append(_tag_ref(namespace))
+
     # ── Build the dashboard saved object ─────────────────────────────────────
 
     dashboard = {
@@ -1356,6 +1394,9 @@ def _build_business_executive_dashboard_ndjson(scenario) -> str:
             if ref["name"] not in seen_ref_names:
                 all_refs.append(ref)
                 seen_ref_names.add(ref["name"])
+
+    # Add the scenario tag reference so the dashboard appears under the namespace tag
+    all_refs.append(_tag_ref(namespace))
 
     dashboard = {
         "attributes": {

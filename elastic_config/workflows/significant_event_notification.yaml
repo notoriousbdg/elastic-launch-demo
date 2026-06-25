@@ -10,6 +10,9 @@ description: >
   Agent Builder surfaces the approval prompt inside the conversation for the
   operator to approve or deny.
 
+tags:
+  - "__NS__"
+
 triggers:
   - type: alert
 

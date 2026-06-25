@@ -7,6 +7,9 @@ description: >
   Error Rate SLOs, then recreates them fresh.
   SLO targets: Availability 95%, Error Rate 95%, Latency 85% under 2s.
 
+tags:
+  - "__NS__"
+
 triggers:
   - type: scheduled
     with:
@@ -40,7 +43,7 @@ steps:
     steps:
       - name: check_SLOs
         type: if
-        condition: "foreach.item.name : \"__SCENARIO_NAME__*\""
+        condition: "foreach.item.tags : \"__NS__\""
         steps:
           - name: print-results
             type: console
@@ -67,7 +70,7 @@ steps:
       method: POST
       path: /api/observability/slos
       body:
-        name: "__SCENARIO_NAME__: Availability SLO"
+        name: "Availability"
         description: Service availability - 95% target, grouped by service name
         indicator:
           type: sli.kql.custom
@@ -85,7 +88,9 @@ steps:
           type: rolling
         objective:
           target: 0.95
-        tags: []
+        tags:
+          - "__NS__"
+          - "availability"
       headers:
         Content-Type: application/json
         Accept: application/json
@@ -97,7 +102,7 @@ steps:
       method: POST
       path: /api/observability/slos
       body:
-        name: "__SCENARIO_NAME__: Latency SLO"
+        name: "Latency"
         description: Service latency - 85% of requests under 2s, grouped by service name
         indicator:
           type: sli.kql.custom
@@ -115,7 +120,9 @@ steps:
           type: rolling
         objective:
           target: 0.85
-        tags: []
+        tags:
+          - "__NS__"
+          - "latency"
       headers:
         Content-Type: application/json
         Accept: application/json
@@ -127,7 +134,7 @@ steps:
       method: POST
       path: /api/observability/slos
       body:
-        name: "__SCENARIO_NAME__: Error Rate SLO"
+        name: "Error Rate"
         description: Service error rate - less than 5% errors, grouped by service name
         indicator:
           type: sli.kql.custom
@@ -145,7 +152,9 @@ steps:
           type: rolling
         objective:
           target: 0.95
-        tags: []
+        tags:
+          - "__NS__"
+          - "error-rate"
       headers:
         Content-Type: application/json
         Accept: application/json

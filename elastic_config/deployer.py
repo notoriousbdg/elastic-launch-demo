@@ -163,6 +163,10 @@ class ScenarioDeployer(
                 # Block on APM datafeed catch-up now; should be near-instant
                 # since ES has been training throughout the steps above.
                 self._finalize_apm_anomaly_detection(client, _notify)
+                # Spawn a background thread that waits for all services to appear
+                # in traces, then re-runs the SLO workflow to capture the full set.
+                # Returns immediately; never blocks or raises.
+                self._schedule_slo_refresh()
         except Exception as exc:
             self.progress.error = str(exc)
             logger.exception("Deployment failed")
