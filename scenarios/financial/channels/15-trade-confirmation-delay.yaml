@@ -10,8 +10,13 @@ cascade_services:
 - audit-logger
 - compliance-monitor
 description: Trade confirmation messages delayed beyond regulatory reporting window
-investigation_notes: ''
-remediation_action: ''
+investigation_notes: |-
+  1. Check customer-portal logs for PORTAL-CONFIRM-DELAY — note trade_id, delay_s vs reg_max_s, and delivery_queue depth and consumer count.
+  2. Query FROM logs.otel.financial.* | WHERE body.text LIKE "*PORTAL-CONFIRM-DELAY*" | STATS count(), max(delay_s) BY instrument to identify if a specific asset class is most affected.
+  3. Inspect settlement-processor for enrichment failures on the affected trade_ids — missing SSI data causes confirmation messages to stall in the formatting stage.
+  4. Check audit-logger for confirmation dispatch records — if compliance_check stage took > 30s the downstream consumer_lag will cascade.
+  5. Scale the delivery queue consumers from 2 to at least 6; file a regulatory exception report for any trades where delay_s > reg_max_s and notify the client of the delay.
+remediation_action: scale_confirmation_queue_consumers
 error_message: '[PORTAL] PORTAL-CONFIRM-DELAY: trade={trade_id} delay_s={delay_s} reg_max_s={reg_max_s} instrument={instrument}
   qty={quantity}'
 stack_trace: |-
@@ -38,4 +43,16 @@ fault_params:
   reg_max_s: 300
   instrument: {choice: [US.AAPL, US.GOOGL, US.MSFT, US.AMZN, US.TSLA, FX.EURUSD, FX.GBPUSD, FUT.ES, FUT.NQ, OPT.SPX]}
   quantity: {randint: [100, 50000]}
-rca_clues: {}
+rca_clues:
+  customer-portal:
+    portal.confirmation_delay_s: {uniform: [300, 7200], round: 1}
+    portal.undelivered_confirmations: {randint: [100, 5000]}
+  settlement-processor:
+    settlement.ssi_lookup_failures: {randint: [1, 50]}
+    settlement.enrichment_timeout_count: {randint: [1, 100]}
+  audit-logger:
+    audit.confirm_dispatch_missing: {randint: [10, 1000]}
+    audit.reg_exception_reports_filed: {randint: [1, 20]}
+  compliance-monitor:
+    compliance.confirmation_reg_breach_count: {randint: [1, 100]}
+    compliance.mifid_disclosure_delay_s: {uniform: [300, 7200], round: 1}

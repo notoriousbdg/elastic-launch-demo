@@ -11,8 +11,13 @@ cascade_services:
 - audit-logger
 - compliance-monitor
 description: Smart order router fails to route block orders to dark pool venues
-investigation_notes: ''
-remediation_action: ''
+investigation_notes: |-
+  1. Check matching-engine logs for ME-DARKPOOL-REJECT — note order_id, symbol, quantity, venue, and rejection_reason.
+  2. Query FROM logs.otel.financial.* | WHERE body.text LIKE "*ME-DARKPOOL-REJECT*" | STATS count() BY venue, rejection_reason to find which venues are most restrictive.
+  3. Inspect the venue scorecard fill_rate and avg_size data — if the submitted quantity is below venue min_size, the router should have fallen back to lit market automatically.
+  4. Check risk-calculator for lit_market_impact_est — if market impact exceeds 10bps, reconsider whether a TWAP algo on the lit market is preferable to repeated dark pool rejections.
+  5. Update the venue score for the rejecting venue and route to the next best dark pool (e.g. CROSSFINDER or LIQUIDNET) with qty split if needed; log the routing decision in audit-logger.
+remediation_action: reroute_to_next_dark_pool_venue
 error_message: '[ME] ME-DARKPOOL-REJECT: order={order_id} symbol={symbol} qty={quantity} venue={venue} reason={rejection_reason}'
 stack_trace: |-
   === DARK POOL REJECTION DETAILS ===
@@ -40,4 +45,19 @@ fault_params:
   quantity: {randint: [100, 50000]}
   venue: {choice: [SIGMA-X, CROSSFINDER, SUPERX, POSIT, LIQUIDNET, INSTINET]}
   rejection_reason: {choice: [minimum_size_not_met, price_outside_band, venue_capacity, symbol_restricted, IOI_expired]}
-rca_clues: {}
+rca_clues:
+  matching-engine:
+    engine.dark_pool_rejection_count: {randint: [1, 50]}
+    engine.venue_fallback_attempts: {randint: [1, 10]}
+  order-gateway:
+    oms.block_order_routing_failures: {randint: [1, 30]}
+    oms.lit_market_impact_est_bps: {uniform: [5.0, 25.0], round: 1}
+  risk-calculator:
+    risk.dark_pool_fill_rate_pct: {uniform: [0.0, 60.0], round: 1}
+    risk.market_impact_cost_usd: {randint: [5000, 500000]}
+  audit-logger:
+    audit.routing_decision_log_count: {randint: [1, 100]}
+    audit.venue_score_updates: {randint: [1, 20]}
+  compliance-monitor:
+    compliance.best_execution_failures: {randint: [1, 20]}
+    compliance.dark_pool_reg_flags: {randint: [0, 10]}

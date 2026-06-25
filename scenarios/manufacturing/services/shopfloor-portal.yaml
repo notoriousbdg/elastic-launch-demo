@@ -5,7 +5,7 @@ cloud_region: eastus
 cloud_platform: azure_vm
 cloud_availability_zone: eastus-2
 subsystem: portal
-language: nodejs
+language: java
 topology:
 - - mes-controller
   - /api/v1/mes/operator-action

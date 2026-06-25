@@ -9,8 +9,13 @@ affected_services:
 cascade_services:
 - settlement-processor
 description: Mandatory regulatory report fails to generate before submission deadline
-investigation_notes: ''
-remediation_action: ''
+investigation_notes: |-
+  1. Check compliance-monitor logs for COMPL-REG-REPORT-FAIL — note report_type, failed_stage, and specific validation error counts (missing_LEI, invalid_UTI, stale_price).
+  2. Query FROM logs.otel.financial.* | WHERE body.text LIKE "*COMPL-REG-REPORT-FAIL*" | STATS count() BY report_type, stage to identify which report type and stage is most frequently failing.
+  3. Inspect audit-logger for the source trade records that failed validation — LEI and UTI issues typically trace back to stale reference data in the enrichment layer.
+  4. Check settlement-processor for trades with stale_price errors — if price data is older than T+1 the regulator schema will reject the record.
+  5. Remediate validation errors and resubmit; if the deadline is imminent, file a regulator extension request and document all remediation steps for the audit trail.
+remediation_action: remediate_validation_errors_and_resubmit
 error_message: '[COMPL] COMPL-REG-REPORT-FAIL: report={report_type} period={report_period} stage={stage} deadline={deadline_utc}'
 stack_trace: |-
   === REG REPORT PIPELINE STATUS ===
@@ -34,4 +39,13 @@ fault_params:
     n: {randint: [1, 4]}
   stage: {choice: [data_collection, validation, aggregation, formatting, submission]}
   deadline_utc: 2026-02-16T23:59:00Z
-rca_clues: {}
+rca_clues:
+  compliance-monitor:
+    compliance.validation_error_count: {randint: [500, 5000]}
+    compliance.missing_lei_count: {randint: [100, 2000]}
+  audit-logger:
+    audit.invalid_uti_records: {randint: [100, 2000]}
+    audit.stale_price_records: {randint: [100, 2000]}
+  settlement-processor:
+    settlement.stale_trade_price_age_s: {randint: [86400, 259200]}
+    settlement.report_blocked_trades: {randint: [100, 5000]}

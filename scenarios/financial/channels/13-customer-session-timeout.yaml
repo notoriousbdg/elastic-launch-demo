@@ -9,8 +9,13 @@ affected_services:
 cascade_services:
 - audit-logger
 description: Customer trading sessions expiring mid-transaction causing order failures
-investigation_notes: ''
-remediation_action: ''
+investigation_notes: |-
+  1. Check customer-portal logs for PORTAL-SESSION-TIMEOUT — note session_id, user_id, idle time, and the in-progress operation at the time of expiry.
+  2. Query FROM logs.otel.financial.* | WHERE body.text LIKE "*PORTAL-SESSION-TIMEOUT*" | STATS count() BY operation to find which workflow triggers the most mid-session timeouts.
+  3. Inspect order-gateway for orders cancelled on disconnect — confirm the cancel reason is logged as SESSION_EXPIRED for each pending_orders count.
+  4. Check audit-logger for the SSO/SAML heartbeat failures preceding the timeout — a missing heartbeat often indicates upstream IdP latency rather than idle user.
+  5. Investigate whether session max-age (900s) is too short for the affected operation; if order_submit or position_close operations regularly exceed 900s, request a session extension policy review.
+remediation_action: extend_session_idle_timeout_for_trading_ops
 error_message: '[PORTAL] PORTAL-SESSION-TIMEOUT: session={session_id} user={user_id} idle={session_age_s}s max=900s operation={operation}'
 stack_trace: |-
   === SESSION DETAILS ===
@@ -37,4 +42,13 @@ fault_params:
   session_age_s: {randint: [1800, 7200]}
   operation: {choice: [order_submit, portfolio_view, position_close, margin_check]}
   pending_orders: {randint: [1, 10]}
-rca_clues: {}
+rca_clues:
+  customer-portal:
+    portal.session_idle_age_s: {randint: [900, 7200]}
+    portal.cancelled_on_disconnect: {randint: [1, 10]}
+  order-gateway:
+    oms.session_expire_cancels: {randint: [1, 50]}
+    oms.in_progress_at_expiry: {randint: [1, 10]}
+  audit-logger:
+    audit.sso_heartbeat_failures: {randint: [1, 20]}
+    audit.session_force_logout_events: {randint: [1, 50]}

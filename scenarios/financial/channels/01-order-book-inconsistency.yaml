@@ -10,8 +10,13 @@ cascade_services:
 - risk-calculator
 - audit-logger
 description: Order book bid/ask levels out of sync between primary and replica shards
-investigation_notes: ''
-remediation_action: ''
+investigation_notes: |-
+  1. Check order-gateway logs for OMS-BOOK-IMBALANCE — note book_id, instrument, and bid_ask_spread value.
+  2. Query FROM logs.otel.financial.* | WHERE body.text LIKE "*OMS-BOOK-IMBALANCE*" | STATS count() BY service.name, instrument to identify recurrence.
+  3. Inspect matching-engine replica sync lag — if replica_sync_lag_us > 50000 the book is stale and must be rebuilt from primary.
+  4. Verify market-data-feed is publishing fresh ticks for the affected instrument — a stale feed drives spread widening.
+  5. If book_id shows repeated IMBALANCED state, trigger force_book_resync on matching-engine to rebuild from primary sequence.
+remediation_action: force_book_resync
 error_message: '[OMS] OMS-BOOK-IMBALANCE: instrument={instrument} bid_ask_spread={spread}ticks max_spread={max_spread}ticks
   book={book_id}'
 stack_trace: |-
@@ -36,4 +41,16 @@ fault_params:
     format: "BOOK-{t}-{n:02d}"
     t: {choice: [EQ, FI, FX, DRV]}
     n: {randint: [1, 50]}
-rca_clues: {}
+rca_clues:
+  order-gateway:
+    oms.book_spread_ticks: {randint: [5, 50]}
+    oms.order_reject_rate_pct: {uniform: [8.0, 45.0], round: 1}
+  matching-engine:
+    engine.replica_sync_lag_us: {randint: [40000, 200000]}
+    engine.book_imbalance_count: {randint: [1, 20]}
+  risk-calculator:
+    risk.halted_instruments_count: {randint: [1, 10]}
+    risk.stale_book_exposure_usd: {randint: [500000, 5000000]}
+  audit-logger:
+    audit.book_event_queue_depth: {randint: [100, 5000]}
+    audit.imbalance_alert_count: {randint: [1, 50]}

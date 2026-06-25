@@ -42,7 +42,7 @@ Brief YAML format
         cloud_platform: aws_ec2          # aws_ec2 | gcp_compute_engine | azure_vm
         cloud_availability_zone: us-east-1a
         subsystem: order_management
-        language: java                   # python | java | go | dotnet | rust | cpp | nodejs
+        language: java                   # python | java | go | dotnet | rust | cpp
         entry_service: true             # exactly one: the sort_order:1 service
         kpi_emitter: false              # exactly one must be true
         generates_traces: true          # omit to default true; false for infra-only DBs
@@ -132,6 +132,29 @@ _CLOUD_PLATFORM_MAP = {
     "azure": "azure_vm",
 }
 
+# k8s cluster schema (matches the shape consumed by base.py and real scenario YAMLs)
+_K8S_PLATFORM_MAP = {
+    "aws": "aws_eks",
+    "gcp": "gcp_gke",
+    "azure": "azure_aks",
+}
+_K8S_OS_MAP = {
+    "aws": "Amazon Linux 2",
+    "gcp": "Container-Optimized OS",
+    "azure": "Ubuntu 22.04",
+}
+
+# KPI emission value ranges keyed by the field-name suffix.
+# Heuristic defaults so the executive dashboard shows plausible numbers out of the box.
+# Authors should still adjust ranges to match their vertical in Phase 5.
+_KPI_RANGE_BY_SUFFIX: dict[str, tuple[list[float], int]] = {
+    "throughput_rpm":  ([1000.0, 50000.0], 0),
+    "error_rate_pct":  ([0.0, 5.0],        2),
+    "latency_p99_ms":  ([50.0, 500.0],     0),
+    "availability_pct": ([99.0, 100.0],    2),
+}
+_KPI_RANGE_DEFAULT: tuple[list[float], int] = ([100.0, 1000.0], 1)
+
 
 # ---------------------------------------------------------------------------
 # YAML dump helpers — produce clean, readable output
@@ -163,7 +186,7 @@ def _dump_block(data: Any) -> str:
 # Host generation
 # ---------------------------------------------------------------------------
 
-def _build_hosts(services: list[dict]) -> list[dict]:
+def _build_hosts(services: list[dict], namespace: str) -> list[dict]:
     """Build 3 host dicts, one per cloud provider, based on the services list."""
     # Collect one region+az per provider (first occurrence wins)
     provider_info: dict[str, dict[str, str]] = {}
@@ -206,9 +229,8 @@ def _build_hosts(services: list[dict]) -> list[dict]:
             host_ip = ["10.0.2.10", "10.0.2.11"]
             host_mac = ["00:0d:3a:1b:2c:3d", "00:0d:3a:1b:2c:3e"]
 
-        ns = ""  # filled from scenario_id via caller — not available here; placeholder
         host: dict[str, Any] = {
-            "host.name": f"scaffold-{provider}-host-{idx:02d}",
+            "host.name": f"{namespace}-{provider}-host-{idx:02d}",
             "host.id": host_id,
             **{k: v for k, v in tmpl.items() if k.startswith("host.")},
             "host.ip": host_ip,
@@ -236,13 +258,21 @@ def _build_hosts(services: list[dict]) -> list[dict]:
 def _build_k8s_clusters(
     services: list[dict], namespace: str
 ) -> list[dict]:
-    """Build 3 k8s cluster dicts, one per cloud provider (k8s-eligible services only)."""
+    """Build 3 k8s cluster dicts, one per cloud provider (k8s-eligible services only).
+
+    Emits the schema expected by base.py and all existing scenarios:
+    provider / platform / region / zones / os_description / services.
+    """
     # Services with generates_traces enabled (i.e. not infra-only) go on k8s clusters
     provider_svcs: dict[str, list[str]] = defaultdict(list)
+    provider_zones: dict[str, set[str]] = defaultdict(set)
     for svc in services:
         if not svc.get("generates_traces", True):
             continue
-        provider_svcs[svc["cloud_provider"]].append(svc["name"])
+        p = svc["cloud_provider"]
+        provider_svcs[p].append(svc["name"])
+        if svc.get("cloud_availability_zone"):
+            provider_zones[p].add(svc["cloud_availability_zone"])
 
     clusters = []
     for provider in ("aws", "gcp", "azure"):
@@ -251,11 +281,15 @@ def _build_k8s_clusters(
             (s for s in services if s["cloud_provider"] == provider), None
         )
         region = region_info["cloud_region"] if region_info else f"{provider}-region-1"
+        zones = sorted(provider_zones.get(provider, set()))
 
         cluster: dict[str, Any] = {
             "name": f"{namespace}-{provider}-k8s",
-            "cloud_provider": provider,
-            "cloud_region": region,
+            "provider": provider,
+            "platform": _K8S_PLATFORM_MAP.get(provider, f"{provider}_k8s"),
+            "region": region,
+            "zones": zones,
+            "os_description": _K8S_OS_MAP.get(provider, "Linux"),
             "services": svc_list,
         }
         clusters.append(cluster)
@@ -470,7 +504,7 @@ def _build_scenario_yaml(brief: dict, services: list[dict]) -> str:
         error_type_list=error_type_list,
     ).strip()
 
-    hosts = _build_hosts(services)
+    hosts = _build_hosts(services, namespace)
     k8s_clusters = _build_k8s_clusters(services, namespace)
 
     # Scaffold KPI sections/emissions/charts in sync
@@ -488,14 +522,15 @@ def _build_scenario_yaml(brief: dict, services: list[dict]) -> str:
             "specs": [[title, field] for title, field in kpi_section_field_pairs],
         }
     ]
-    executive_kpi_emissions = [
-        {
+    executive_kpi_emissions = []
+    for _, field in kpi_section_field_pairs:
+        suffix = field.split(".")[-1]
+        kpi_range, kpi_round = _KPI_RANGE_BY_SUFFIX.get(suffix, _KPI_RANGE_DEFAULT)
+        executive_kpi_emissions.append({
             "name": field.replace("metrics.", ""),
-            "value": {"uniform": [0.0, 100.0], "round": 2},
+            "value": {"uniform": kpi_range, "round": kpi_round},
             "unit": "TODO",
-        }
-        for _, field in kpi_section_field_pairs
-    ]
+        })
     executive_trend_charts = [
         {"title": "Primary KPI trend", "field": "metrics.business.primary_kpi", "y_label": "TODO"},
         {"title": "Throughput trend", "field": "metrics.business.throughput_rpm", "y_label": "req/min"},
@@ -524,9 +559,15 @@ def _build_scenario_yaml(brief: dict, services: list[dict]) -> str:
         "hosts": hosts,
         "k8s_clusters": k8s_clusters,
         "agent_config": {
+            "id": f"{namespace}-analyst",
+            "name": f"{scenario_name} Operations Analyst",
+            "assessment_tool_name": f"{namespace}_readiness_assessment",
             "system_prompt": system_prompt,
         },
-        "assessment_tool_config": {},
+        "assessment_tool_config": {
+            "id": f"{namespace}_readiness_assessment",
+            "description": f"TODO: describe the overall {scenario_name} operational assessment — what it evaluates, key health dimensions, and how it surfaces risk.",
+        },
         "executive_kpi_emitter_service_name": kpi_emitter_name,
         "executive_dashboard_intro": (
             brief.get("executive_dashboard_intro")

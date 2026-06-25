@@ -10,8 +10,13 @@ cascade_services:
 - risk-calculator
 - customer-portal
 description: Market data feed missing price ticks for one or more instruments
-investigation_notes: ''
-remediation_action: ''
+investigation_notes: |-
+  1. Check market-data-feed logs for MDF-PRICE-GAP — note symbol, exchange, gap_ms, and missing sequence range.
+  2. Query FROM logs.otel.financial.* | WHERE body.text LIKE "*MDF-PRICE-GAP*" | STATS max(gap_ms) BY symbol, exchange to find worst-affected instruments.
+  3. Inspect the multicast group for packet loss — if the retransmit channel shows no response within 500ms the feed handler must failover.
+  4. Check matching-engine for stale_instruments count — any book marked STALE must halt new orders until fresh ticks arrive.
+  5. If primary feed remains silent, trigger failover to backup feed and request retransmission from exchange for the missing sequence window.
+remediation_action: failover_to_backup_feed
 error_message: '[MDF] MDF-PRICE-GAP: symbol={symbol} gap_ms={gap_ms} exchange={exchange} seq_start={seq_start} seq_end={seq_end}'
 stack_trace: |-
   === FEED HANDLER SEQUENCE ANALYSIS ===
@@ -32,4 +37,16 @@ fault_params:
   exchange: {choice: [NYSE, NASDAQ, CBOE, CME, ICE, BATS, IEX]}
   seq_start: {randint: [1000000, 9999999]}
   seq_end: {randint: [1000000, 9999999]}
-rca_clues: {}
+rca_clues:
+  market-data-feed:
+    feed.gap_duration_ms: {randint: [500, 10000]}
+    feed.stale_instruments_count: {randint: [1, 50]}
+  matching-engine:
+    engine.stale_book_count: {randint: [1, 20]}
+    engine.halted_on_stale_feed: {randint: [1, 10]}
+  risk-calculator:
+    risk.pricing_gap_exposure_usd: {randint: [100000, 2000000]}
+    risk.stale_price_calcs: {randint: [5, 100]}
+  customer-portal:
+    portal.indicative_price_views: {randint: [10, 500]}
+    portal.feed_gap_alerts_shown: {randint: [1, 30]}

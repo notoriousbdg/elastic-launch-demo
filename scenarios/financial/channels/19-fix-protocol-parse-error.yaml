@@ -10,8 +10,13 @@ cascade_services:
 - matching-engine
 - compliance-monitor
 description: FIX 4.4 message parsing failure due to malformed tags or checksum errors
-investigation_notes: ''
-remediation_action: ''
+investigation_notes: |-
+  1. Check order-gateway logs for FIX-PARSE-REJECT — note fix_session, msg_type, bad_tag, and the checksum mismatch between expected and actual values.
+  2. Query FROM logs.otel.financial.* | WHERE body.text LIKE "*FIX-PARSE-REJECT*" | STATS count() BY fix_session, bad_tag to find the session and field combination causing most rejections.
+  3. Inspect the raw FIX message dump for body_length vs computed_length mismatch — a length discrepancy indicates tag 9 is being set incorrectly by the counterparty's OMS.
+  4. Check audit-logger for the parse_errors count trend on this session — if error rate is rising, the counterparty may have deployed a new OMS version with a protocol deviation.
+  5. Send a FIX Reject (35=3) back to the counterparty with a clear text explanation; coordinate with the counterparty's FIX connectivity team to fix the malformed tag before resuming the session.
+remediation_action: send_fix_reject_and_notify_counterparty
 error_message: '[FIX] FIX-PARSE-REJECT: session={fix_session} msg_type={msg_type} tag={bad_tag} checksum_expected={expected_checksum}
   checksum_actual={actual_checksum}'
 stack_trace: |-
@@ -43,4 +48,16 @@ fault_params:
   actual_checksum:
     format: "{n:03d}"
     n: {randint: [0, 255]}
-rca_clues: {}
+rca_clues:
+  order-gateway:
+    oms.fix_parse_error_rate_pct: {uniform: [0.01, 5.0], round: 3}
+    oms.fix_reject_msg_count: {randint: [1, 200]}
+  audit-logger:
+    audit.fix_session_error_events: {randint: [1, 100]}
+    audit.bad_tag_frequency: {randint: [1, 50]}
+  matching-engine:
+    engine.orders_dropped_parse_error: {randint: [0, 100]}
+    engine.fix_session_resets: {randint: [0, 10]}
+  compliance-monitor:
+    compliance.fix_protocol_violation_flags: {randint: [0, 20]}
+    compliance.session_audit_gaps_from_rejects: {randint: [0, 10]}

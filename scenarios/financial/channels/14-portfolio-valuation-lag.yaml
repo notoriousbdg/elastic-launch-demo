@@ -9,8 +9,13 @@ affected_services:
 cascade_services:
 - compliance-monitor
 description: Real-time portfolio valuation falling behind, showing stale P&L to clients
-investigation_notes: ''
-remediation_action: ''
+investigation_notes: |-
+  1. Check customer-portal logs for PORTAL-VALUATION-LAG — note portfolio_id, lag_s, and position_count to assess scope of stale P&L exposure.
+  2. Query FROM logs.otel.financial.* | WHERE body.text LIKE "*PORTAL-VALUATION-LAG*" | STATS max(lag_s), count() BY portfolio_id to find most-affected portfolios.
+  3. Inspect the valuation pipeline bottleneck — fx_conversion stage SLOW indicates a currency rate provider timeout; check which FX pairs are affected.
+  4. Check risk-calculator for stale_risk_calcs — if risk calcs are also stale, the issue is upstream at market-data-feed, not the portal itself.
+  5. Trigger priority revaluation for the largest portfolios; display the stale data banner to clients and update disclaimer_shown=true to meet MiFID II best-execution disclosure requirements.
+remediation_action: trigger_priority_portfolio_revaluation
 error_message: '[PORTAL] PORTAL-VALUATION-LAG: portfolio={portfolio_id} lag_s={lag_s} max_lag_s={max_lag_s} pending_positions={position_count}'
 stack_trace: |-
   === PORTFOLIO VALUATION STATS ===
@@ -35,4 +40,13 @@ fault_params:
   lag_s: {uniform: [30.0, 300.0], round: 1}
   max_lag_s: 15.0
   position_count: {randint: [50, 500]}
-rca_clues: {}
+rca_clues:
+  customer-portal:
+    portal.valuation_lag_s: {uniform: [30.0, 300.0], round: 1}
+    portal.stale_pnl_positions: {randint: [50, 500]}
+  risk-calculator:
+    risk.stale_greeks_count: {randint: [10, 200]}
+    risk.fx_conversion_timeout_ms: {randint: [1000, 10000]}
+  compliance-monitor:
+    compliance.best_execution_disclosure_missing: true
+    compliance.stale_data_client_views: {randint: [10, 500]}

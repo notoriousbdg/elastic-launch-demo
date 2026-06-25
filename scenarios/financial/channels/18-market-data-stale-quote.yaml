@@ -10,8 +10,13 @@ cascade_services:
 - matching-engine
 - customer-portal
 description: Cached market quotes exceeding staleness threshold affecting pricing
-investigation_notes: ''
-remediation_action: ''
+investigation_notes: |-
+  1. Check market-data-feed logs for MDF-STALE-QUOTE — note symbol, data_source, stale_ms vs quote_max_age_ms, and whether failover was triggered.
+  2. Query FROM logs.otel.financial.* | WHERE body.text LIKE "*MDF-STALE-QUOTE*" | STATS count(), max(stale_ms) BY symbol, data_source to identify which feed and symbols are most affected.
+  3. Inspect the primary feed connection status — if primary_feed status=CONNECTED but last_msg is old, the feed is silently stalled and must be recycled.
+  4. Check risk-calculator for stale_risk_calcs count — risk calculations using stale quotes produce incorrect VaR and Greeks; confirm the stale banner is raised.
+  5. Mark affected quotes as INDICATIVE in the cache; trigger failover to backup feed if primary remains silent for > 2x max_age_ms; notify customer-portal to display stale warning.
+remediation_action: mark_indicative_and_trigger_feed_failover
 error_message: '[MDF] MDF-STALE-QUOTE: symbol={symbol} stale_ms={stale_ms} max_age_ms={quote_max_age_ms} source={data_source}'
 stack_trace: |-
   === QUOTE CACHE STATS ===
@@ -33,4 +38,16 @@ fault_params:
   stale_ms: {randint: [5000, 60000]}
   quote_max_age_ms: 3000
   data_source: {choice: [Bloomberg-B-PIPE, Reuters-Elektron, CQS-SIP, OPRA, CME-MDP3]}
-rca_clues: {}
+rca_clues:
+  market-data-feed:
+    feed.quote_staleness_ms: {randint: [5000, 60000]}
+    feed.primary_feed_silent_ms: {randint: [5000, 60000]}
+  risk-calculator:
+    risk.stale_quote_risk_calcs: {randint: [5, 100]}
+    risk.indicative_price_var_usd: {randint: [50000, 1000000]}
+  matching-engine:
+    engine.stale_quote_dependent_books: {randint: [1, 10]}
+    engine.indicative_pricing_active: true
+  customer-portal:
+    portal.stale_quote_warnings_shown: {randint: [10, 500]}
+    portal.client_views_affected: {randint: [10, 200]}

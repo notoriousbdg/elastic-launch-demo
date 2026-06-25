@@ -10,8 +10,13 @@ cascade_services:
 - compliance-monitor
 - customer-portal
 description: Fraud detection model generating excessive false positive alerts blocking legitimate orders
-investigation_notes: ''
-remediation_action: ''
+investigation_notes: |-
+  1. Check fraud-detector logs for COMPL-FRAUD-FP-STORM — note pattern_id, fp_rate, blocked_orders, and feature_drift score.
+  2. Query FROM logs.otel.financial.* | WHERE body.text LIKE "*COMPL-FRAUD-FP-STORM*" | STATS count(), avg(fp_rate) BY pattern_id to identify which pattern is misfiring.
+  3. Inspect the feature drift report — if top_feature=txn_velocity_5m and drift_score > 0.8 the model has encountered an out-of-distribution trading session (e.g. options expiry).
+  4. Check order-gateway for the queue of blocked legitimate orders — assess revenue_impact and determine if manual approval bypass is warranted.
+  5. Raise the fraud classification threshold for the affected pattern_id and route blocked orders to manual review queue; retrain the model on recent clean data after session close.
+remediation_action: raise_fraud_threshold_and_queue_manual_review
 error_message: '[COMPL] COMPL-FRAUD-FP-STORM: blocked={blocked_orders} window={window_s}s fp_rate={fp_rate}% pattern={pattern_id}'
 stack_trace: |-
   === FRAUD DETECTION MODEL STATS ===
@@ -37,4 +42,16 @@ fault_params:
     format: "FRD-{t}-{n:02d}"
     t: {choice: [VELOCITY, GEOLOC, AMOUNT, PATTERN, WASH]}
     n: {randint: [1, 99]}
-rca_clues: {}
+rca_clues:
+  fraud-detector:
+    fraud.false_positive_rate_pct: {uniform: [15.0, 85.0], round: 1}
+    fraud.feature_drift_score: {uniform: [0.70, 0.99], round: 3}
+  order-gateway:
+    oms.blocked_legitimate_orders: {randint: [50, 500]}
+    oms.fraud_hold_queue_depth: {randint: [10, 300]}
+  compliance-monitor:
+    compliance.fraud_fp_storm_active: true
+    compliance.manual_review_queue_depth: {randint: [50, 1000]}
+  customer-portal:
+    portal.order_rejection_complaints: {randint: [5, 100]}
+    portal.blocked_revenue_usd_hr: {randint: [100000, 2000000]}

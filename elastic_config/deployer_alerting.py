@@ -93,6 +93,8 @@ class AlertingMixin:
                 rule_name = f"{self.scenario.scenario_name} CH{num_str}: {name} (Auto-Remediate)"
             else:
                 rule_name = f"{self.scenario.scenario_name} CH{num_str}: {name}"
+            # Kibana Cases API enforces a 160-char title limit; rule name becomes the case title
+            rule_name = rule_name[:160]
 
             es_query = json.dumps({
                 "query": {

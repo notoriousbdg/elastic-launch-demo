@@ -10,8 +10,13 @@ cascade_services:
 - audit-logger
 - compliance-monitor
 description: Multilateral netting calculation produces inconsistent net obligations
-investigation_notes: ''
-remediation_action: ''
+investigation_notes: |-
+  1. Check settlement-processor logs for SETTLE-NETTING-CALC — note batch_id, currency, net_mismatch amount, and counterparty_count.
+  2. Query FROM logs.otel.financial.* | WHERE body.text LIKE "*SETTLE-NETTING-CALC*" | STATS max(net_mismatch) BY batch_id to find the largest imbalanced batches.
+  3. Inspect the per-counterparty deliver/receive totals — any single counterparty with deliver != receive (when summed across all pairs) is the likely source of the mismatch.
+  4. Check audit-logger for late trade amendments submitted after the netting batch cutoff — these are frequently missed in the batch computation.
+  5. Recompute the batch with risk-calculator cross-validation before resubmitting to NSCC CNS; do not release the settlement hold until net_mismatch < $0.01.
+remediation_action: recompute_netting_batch
 error_message: '[SETTLE] SETTLE-NETTING-CALC: batch={batch_id} net_mismatch=${net_mismatch} counterparties={counterparty_count}
   currency={currency}'
 stack_trace: |-
@@ -37,4 +42,16 @@ fault_params:
   net_mismatch: {uniform: [10000, 5000000], round: 2}
   counterparty_count: {randint: [3, 20]}
   currency: {choice: [USD, EUR, GBP, JPY, CHF]}
-rca_clues: {}
+rca_clues:
+  settlement-processor:
+    settlement.net_mismatch_usd: {uniform: [10000, 5000000], round: 2}
+    settlement.nscc_cns_rejection_count: {randint: [1, 10]}
+  risk-calculator:
+    risk.netting_reduction_pct: {uniform: [60.0, 74.9], round: 1}
+    risk.counterparty_net_exposure_usd: {randint: [500000, 10000000]}
+  audit-logger:
+    audit.late_amendment_count: {randint: [1, 20]}
+    audit.post_cutoff_trade_changes: {randint: [0, 10]}
+  compliance-monitor:
+    compliance.netting_integrity_flags: {randint: [1, 5]}
+    compliance.batch_hold_duration_s: {randint: [60, 3600]}

@@ -10,8 +10,13 @@ cascade_services:
 - customer-portal
 - compliance-monitor
 description: Margin requirement calculation fails due to stale collateral valuations
-investigation_notes: ''
-remediation_action: ''
+investigation_notes: |-
+  1. Check risk-calculator logs for RISK-MARGIN-CALL — note account_id, margin_ratio, and valuation_age_s for stale collateral.
+  2. Query FROM logs.otel.financial.* | WHERE body.text LIKE "*RISK-MARGIN-CALL*" | STATS count() BY account_id to identify accounts with repeated margin calls.
+  3. Inspect settlement-processor for pending collateral transfers — a funding shortfall here often compounds the equity deficiency.
+  4. Check customer-portal for unsatisfied margin call notifications — the client may not have received the T+1 deadline alert.
+  5. If valuation_age_s > 3600 force a collateral revaluation; if shortfall persists initiate liquidation of lowest-haircut assets first.
+remediation_action: force_collateral_revaluation
 error_message: '[RISK] RISK-MARGIN-CALL: account={account_id} margin_ratio={margin_ratio} maintenance_ratio={maintenance_ratio}
   valuation_age_s={valuation_age_s}'
 stack_trace: |-
@@ -37,4 +42,16 @@ fault_params:
   margin_ratio: {uniform: [0.05, 0.20], round: 3}
   maintenance_ratio: 0.25
   valuation_age_s: {randint: [300, 3600]}
-rca_clues: {}
+rca_clues:
+  risk-calculator:
+    risk.margin_breach_count: {randint: [1, 20]}
+    risk.collateral_staleness_s: {randint: [300, 3600]}
+  settlement-processor:
+    settlement.collateral_transfer_pending: {randint: [1, 10]}
+    settlement.equity_deficiency_usd: {randint: [500000, 5000000]}
+  customer-portal:
+    portal.margin_call_notifications_unseen: {randint: [1, 5]}
+    portal.account_restricted: true
+  compliance-monitor:
+    compliance.margin_call_regulatory_flags: {randint: [1, 10]}
+    compliance.collateral_valuation_age_s: {randint: [300, 3600]}

@@ -10,8 +10,13 @@ cascade_services:
 - order-gateway
 - customer-portal
 description: Anti-money laundering screening service exceeds response time SLA
-investigation_notes: ''
-remediation_action: ''
+investigation_notes: |-
+  1. Check compliance-monitor logs for COMPL-AML-SCREENING — note transaction_id, jurisdiction, screening_ms, and which watchlist check timed out.
+  2. Query FROM logs.otel.financial.* | WHERE body.text LIKE "*COMPL-AML-SCREENING*" | STATS avg(screening_ms) BY jurisdiction to determine if a specific jurisdiction's provider is slow.
+  3. Inspect the PEP_DATABASE check elapsed time — PEP hits with pep_hit_score > 0.7 require MLRO escalation regardless of timeout; do not auto-clear.
+  4. Check fraud-detector for correlated alerts on the same transaction_id — overlapping fraud and AML signals may indicate a sanctioned-entity order attempt.
+  5. Hold the transaction and escalate to MLRO; if ADVERSE_MEDIA check timed out, run it synchronously before releasing the hold.
+remediation_action: hold_transaction_and_escalate_mlro
 error_message: '[COMPL] COMPL-AML-SCREENING: transaction={transaction_id} screening_ms={screening_ms} sla_ms={aml_sla_ms}
   jurisdiction={jurisdiction}'
 stack_trace: |-
@@ -34,4 +39,16 @@ fault_params:
   screening_ms: {randint: [5000, 30000]}
   aml_sla_ms: 3000
   jurisdiction: {choice: [US-SEC, US-CFTC, UK-FCA, EU-ESMA, SG-MAS, JP-FSA]}
-rca_clues: {}
+rca_clues:
+  compliance-monitor:
+    compliance.aml_screening_timeout_ms: {randint: [5000, 30000]}
+    compliance.pep_hit_score: {uniform: [0.50, 0.99], round: 2}
+  fraud-detector:
+    fraud.correlated_aml_flags: {randint: [0, 5]}
+    fraud.sanction_entity_match_score: {uniform: [0.0, 0.95], round: 2}
+  order-gateway:
+    oms.aml_hold_queue_depth: {randint: [1, 50]}
+    oms.transactions_pending_aml: {randint: [1, 100]}
+  customer-portal:
+    portal.aml_hold_notifications_pending: {randint: [1, 20]}
+    portal.account_aml_restricted: true

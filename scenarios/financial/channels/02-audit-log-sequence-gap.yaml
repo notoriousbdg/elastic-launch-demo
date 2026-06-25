@@ -9,8 +9,13 @@ affected_services:
 cascade_services:
 - settlement-processor
 description: Audit trail event sequence numbers have gaps indicating lost events
-investigation_notes: ''
-remediation_action: ''
+investigation_notes: |-
+  1. Check audit-logger logs for AUDIT-SEQ-GAP — note audit_stream, expected_seq, and gap_count.
+  2. Query FROM logs.otel.financial.* | WHERE body.text LIKE "*AUDIT-SEQ-GAP*" | STATS count(), sum(gap_count) BY audit_stream to assess total event loss.
+  3. Inspect Kafka consumer lag on the affected stream — if kafka_consumer_lag > 5000 the pipeline cannot keep up with ingestion rate.
+  4. Check compliance-monitor for downstream hash chain validation errors — a broken chain invalidates the immutability proof for SEC-17a4.
+  5. If replay_source=kafka is available, trigger replay from expected_seq to close the gap before the regulatory audit window closes.
+remediation_action: replay_audit_stream
 error_message: '[AUDIT] AUDIT-SEQ-GAP: stream={audit_stream} expected={expected_seq} received={last_seq} gap_count={gap_count}'
 stack_trace: |-
   === AUDIT PIPELINE STATUS ===
@@ -35,4 +40,13 @@ fault_params:
   expected_seq: {randint: [1000000, 9999999]}
   last_seq: {randint: [1000000, 9999999]}
   gap_count: {randint: [1, 100]}
-rca_clues: {}
+rca_clues:
+  audit-logger:
+    audit.seq_gap_count: {randint: [1, 100]}
+    audit.kafka_consumer_lag: {randint: [500, 20000]}
+  compliance-monitor:
+    compliance.hash_chain_broken: true
+    compliance.immutability_violations: {randint: [1, 10]}
+  settlement-processor:
+    settlement.audit_hold_count: {randint: [0, 25]}
+    settlement.pending_reg_review: {randint: [1, 50]}

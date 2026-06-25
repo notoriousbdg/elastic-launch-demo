@@ -339,4 +339,59 @@ raw_log_profile:
   change_point_path: /api/v1/orders
 trace_attributes:
   base: {}
-  services: {}
+  services:
+    order-gateway:
+      order.instrument_class: {choice: [equity, fixed_income, fx, derivative, commodity]}
+      order.side: {choice: [buy, sell, short_sell, cover]}
+      order.validity_type: {choice: [day, gtc, fok, ioc, moc]}
+      order.destination: {choice: [lit_venue, dark_pool, si, mtf]}
+      svc.version: {choice: [3.4.0, 3.4.1, 3.5.0]}
+      svc.environment: {choice: [prod, prod, staging]}
+    matching-engine:
+      engine.partition_id: {choice: [P-00, P-01, P-02, P-03, P-04, P-05]}
+      engine.match_algorithm: {choice: [price_time, pro_rata, fifo_allocation]}
+      oms.book_type: {choice: [central_limit, market_maker, dark]}
+      svc.version: {choice: [5.1.0, 5.1.1, 5.2.0]}
+      svc.environment: {choice: [prod, prod, staging]}
+    risk-calculator:
+      risk.model_type: {choice: [historical_var, monte_carlo, parametric]}
+      risk.desk_class: {choice: [flow, prop, market_making, agency]}
+      risk.asset_class: {choice: [equity, fixed_income, fx, derivatives, commodities]}
+      svc.version: {choice: [2.8.0, 2.8.1, 2.9.0]}
+      svc.environment: {choice: [prod, prod, staging]}
+    settlement-processor:
+      settlement.method: {choice: [dvp, fop, rfd, rtgs]}
+      settlement.depository: {choice: [DTC, EUROCLEAR, CLEARSTREAM, JASDEC]}
+      settlement.currency: {choice: [USD, EUR, GBP, JPY, CHF]}
+      svc.version: {choice: [4.2.0, 4.2.1, 4.3.0]}
+      svc.environment: {choice: [prod, prod, staging]}
+    market-data-feed:
+      feed.exchange: {choice: [NYSE, NASDAQ, CBOE, CME, ICE, BATS, IEX]}
+      mdf.protocol: {choice: [FAST, FIX, ITCH, MDP3, OPRA]}
+      mdf.feed_type: {choice: [primary, backup, consolidated]}
+      svc.version: {choice: [1.6.0, 1.6.1, 1.7.0]}
+      svc.environment: {choice: [prod, prod, staging]}
+    fraud-detector:
+      fraud.model_version: {choice: [v3.1.0, v3.2.0, v3.2.1]}
+      fraud.pattern_class: {choice: [velocity, geolocation, amount, wash_trade, spoofing]}
+      fraud.jurisdiction: {choice: [US-SEC, US-CFTC, UK-FCA, EU-ESMA, SG-MAS]}
+      svc.version: {choice: [2.3.0, 2.3.1, 2.4.0]}
+      svc.environment: {choice: [prod, prod, staging]}
+    compliance-monitor:
+      compliance.regulation: {choice: [EMIR, MiFID-II, CAT, SFTR, SEC-13F, FINRA-CAT]}
+      compliance.report_type: {choice: [transaction, position, best_execution, aml]}
+      compliance.jurisdiction: {choice: [US, EU, UK, SG, JP]}
+      svc.version: {choice: [3.1.0, 3.1.1, 3.2.0]}
+      svc.environment: {choice: [prod, prod, staging]}
+    audit-logger:
+      audit.stream: {choice: [orders, trades, settlements, risk-events, compliance-alerts]}
+      audit.retention_class: {choice: [sec17a4, mifid2, sftr, internal]}
+      audit.immutability_proof: {choice: [hash_chain, merkle_tree, blockchain_anchor]}
+      svc.version: {choice: [1.9.0, 1.9.1, 2.0.0]}
+      svc.environment: {choice: [prod, prod, staging]}
+    customer-portal:
+      portal.account_class: {choice: [retail, prime, institutional, family_office]}
+      session.auth_method: {choice: [sso_saml, totp_mfa, hardware_token, biometric]}
+      portal.view: {choice: [portfolio, order_blotter, risk_summary, positions, market_data]}
+      svc.version: {choice: [8.2.0, 8.2.1, 8.3.0]}
+      svc.environment: {choice: [prod, prod, staging]}
