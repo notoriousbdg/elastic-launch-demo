@@ -3,6 +3,10 @@
 
 Checks performed for each scenario:
   1.  scenario.yaml loads without errors
+  1b. schema_version: if present, must parse as MAJOR.MINOR; malformed → error.
+      Missing → warning only (treated as '1.0', compatible with current engine).
+      If older MAJOR than engine → error (upgrade_required).
+      If same MAJOR, older MINOR → warning (outdated_compatible).
   2.  channel count == 20; numbers are contiguous 01–20
   3.  each channel has required fields (name, error_type, affected_services,
       error_message, stack_trace, fault_params)
@@ -102,6 +106,35 @@ def check_scenario(scenario_id: str) -> tuple[list[str], list[str]]:
         s = load_yaml_scenario(scenario_dir)
     except Exception as exc:
         return [f"load_yaml_scenario() raised: {exc}"], []
+
+    # ── Check 1b: schema_version ──────────────────────────────────────────────
+    # Missing is a warning (treated as 1.0, compatible). Malformed is an error.
+    sv = s.schema_version
+    if sv is None:
+        warnings.append(
+            "schema_version is not set in scenario.yaml "
+            "(treated as '1.0' — run upgrade-scenario to add it)"
+        )
+    else:
+        try:
+            from scenario_engine.schema_version import parse_version, version_status
+            parse_version(sv)  # raises ValueError if malformed
+            status = version_status(sv)
+            if status == "upgrade_required":
+                from scenario_engine.schema_version import CURRENT_SCHEMA_VERSION
+                errors.append(
+                    f"schema_version '{sv}' is incompatible with the current engine "
+                    f"schema '{CURRENT_SCHEMA_VERSION}' (upgrade_required — "
+                    "run upgrade-scenario before launching)"
+                )
+            elif status == "outdated_compatible":
+                from scenario_engine.schema_version import CURRENT_SCHEMA_VERSION
+                warnings.append(
+                    f"schema_version '{sv}' is behind current '{CURRENT_SCHEMA_VERSION}' "
+                    "(outdated_compatible — consider running upgrade-scenario)"
+                )
+        except ValueError as exc:
+            errors.append(f"schema_version '{sv}' is malformed: {exc}")
 
     # ── Check 2+3: Channels count, contiguity, required fields ───────────────
     reg = s.channel_registry           # filtered view (display fields only)

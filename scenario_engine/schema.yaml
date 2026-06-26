@@ -1,0 +1,34 @@
+# Scenario schema version registry.
+#
+# current            — the schema version all bundled scenarios ship at.
+# default_unversioned — a scenario.yaml with no schema_version key is treated
+#                      as this version (same MAJOR as current, so it is
+#                      "outdated_compatible", never "upgrade_required").
+# migrations         — ordered list of schema transitions.  Each entry describes
+#                      what changed and how to apply it.  The upgrade-scenario
+#                      skill walks this list to bring any scenario up to current.
+#
+# Migration entry fields:
+#   to        (str)  — the version this migration produces
+#   breaking  (bool) — true → MAJOR bump (scenario is "upgrade_required" and
+#                      its Launch button is disabled until migrated);
+#                      false → MINOR bump (scenario still runs, just "outdated_compatible")
+#   summary   (str)  — one-line description shown in the version status table
+#   guidance  (str)  — step-by-step instructions the skill follows when applying
+#                      this migration to a scenario folder
+#   needs_input (bool) — true → skill must AskUserQuestion to gather a value
+#                        before it can apply this migration
+
+current: "1.1"
+default_unversioned: "1.0"
+
+migrations:
+  - to: "1.1"
+    breaking: false
+    summary: "Add the schema_version field to scenario.yaml"
+    guidance: |
+      Add a top-level `schema_version: "1.1"` key to scenario.yaml, immediately
+      after the `sort_order` line (or after `scenario_icon` if sort_order is
+      absent). No other edits are required. This is the only structural
+      difference between an unversioned (1.0) scenario and a 1.1 scenario.
+    needs_input: false

@@ -127,6 +127,11 @@ class YamlScenario(BaseScenario):
     def apm_ml_bucket_span(self) -> str:
         return self._data.get("apm_ml_bucket_span", "15m")
 
+    @property
+    def schema_version(self) -> "str | None":
+        """Raw schema_version from scenario.yaml, or None if absent (treated as 1.0)."""
+        return self._data.get("schema_version")
+
     # ── Executive KPIs ───────────────────────────────────────────────────
 
     @property

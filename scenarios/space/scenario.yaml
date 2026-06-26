@@ -5,6 +5,7 @@ scenario_description: Orbital insertion mission with rocket propulsion, guidance
 namespace: nova7
 scenario_icon: 🚀
 sort_order: 1
+schema_version: "1.1"
 nominal_label: NOMINAL
 hosts:
 - host.name: nova7-aws-host-01

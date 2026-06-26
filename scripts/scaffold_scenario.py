@@ -73,6 +73,12 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 import yaml  # noqa: E402  (after sys.path modification)
+from scenario_engine.schema_version import CURRENT_SCHEMA_VERSION as _CURRENT_SCHEMA_VERSION  # noqa: E402
+
+
+def _current_schema_version() -> str:
+    """Return the current schema version from the engine registry."""
+    return _CURRENT_SCHEMA_VERSION
 
 # ---------------------------------------------------------------------------
 # Host templates — one per cloud provider
@@ -555,6 +561,7 @@ def _build_scenario_yaml(brief: dict, services: list[dict]) -> str:
         "scenario_icon": brief.get("scenario_icon", "🔧"),
         "sort_order": brief["sort_order"],
         "nominal_label": brief.get("nominal_label", "NORMAL"),
+        "schema_version": _current_schema_version(),
         "apm_ml_bucket_span": brief.get("apm_ml_bucket_span", "1m"),
         "hosts": hosts,
         "k8s_clusters": k8s_clusters,

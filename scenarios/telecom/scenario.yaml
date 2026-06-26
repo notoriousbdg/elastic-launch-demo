@@ -5,6 +5,7 @@ scenario_description: 5G subscriber activation platform serving 45M subscribers 
 namespace: meridian
 scenario_icon: "🗼"
 sort_order: 5
+schema_version: "1.1"
 nominal_label: ONLINE
 apm_ml_bucket_span: 1m
 hosts:

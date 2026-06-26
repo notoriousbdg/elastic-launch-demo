@@ -260,6 +260,30 @@
             color: rgba(28, 30, 35, 0.35);
             cursor: not-allowed;
         }
+        .card-btn-upgrade-required {
+            background: rgba(160, 160, 160, 0.14);
+            color: rgba(28, 30, 35, 0.40);
+            cursor: not-allowed;
+            border-color: rgba(160, 160, 160, 0.30);
+        }
+        .scenario-version-pill {
+            display: inline-block;
+            margin-left: 6px;
+            font-size: 10px;
+            font-family: 'Space Mono', 'Consolas', monospace;
+            font-weight: 700;
+            padding: 1px 6px;
+            border-radius: 4px;
+            vertical-align: middle;
+        }
+        .scenario-version-pill.outdated {
+            background: rgba(255, 160, 0, 0.14);
+            color: #b36a00;
+        }
+        .scenario-version-pill.upgrade-required {
+            background: rgba(189, 39, 30, 0.12);
+            color: #BD271E;
+        }
         .card-error {
             margin-top: 10px;
             color: var(--light-poppy);
@@ -810,6 +834,10 @@
                     <a class="card-btn card-btn-chaos" href="/chaos?deployment_id=${dep.deployment_id}">Chaos</a>
                     <button class="card-btn card-btn-teardown" onclick="stopAndTeardown('${dep.deployment_id}')">Stop &amp; Teardown</button>
                 `;
+            } else if (s.version_status === 'upgrade_required') {
+                actions = `<button class="card-btn card-btn-upgrade-required" disabled
+                    title="Schema v${s.effective_schema_version} is incompatible with engine v${s.current_schema_version}. Run the upgrade-scenario skill to migrate.">
+                    &#9888; Upgrade required</button>`;
             } else {
                 actions = `<button class="card-btn card-btn-launch" onclick="launchScenario('${s.id}')">&#9654; Launch</button>`;
             }
@@ -832,7 +860,13 @@
                         </button>
                     </div>
                     <p>${s.description}</p>
-                    <span class="scenario-ns">${s.namespace}</span>
+                    <span class="scenario-ns">${s.namespace}</span>${
+                        s.version_status === 'upgrade_required'
+                            ? `<span class="scenario-version-pill upgrade-required" title="Schema v${s.effective_schema_version} — upgrade required before launch">v${s.effective_schema_version} &#9888;</span>`
+                        : s.version_status === 'outdated_compatible'
+                            ? `<span class="scenario-version-pill outdated" title="Schema v${s.effective_schema_version} — update available (v${s.current_schema_version})">v${s.effective_schema_version} &#8593;</span>`
+                        : ''
+                    }
                 </div>
                 <div class="scenario-actions">${actions}</div>
                 ${errorBlock}

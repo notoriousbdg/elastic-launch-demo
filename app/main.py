@@ -1028,6 +1028,23 @@ async def launch_setup(body: dict):
     explicit_otlp = body.get("otlp_url") or ""
 
     scenario = _get_scenario_by_id(scenario_id)
+
+    # Schema-version guard: refuse to launch scenarios that require a breaking migration.
+    from scenario_engine.schema_version import version_status as _version_status, CURRENT_SCHEMA_VERSION as _current_sv
+    _sv_status = _version_status(getattr(scenario, "schema_version", None))
+    if _sv_status == "upgrade_required":
+        _sv = getattr(scenario, "schema_version", None) or "<unversioned>"
+        return JSONResponse(
+            status_code=409,
+            content={
+                "error": (
+                    f"Scenario '{scenario_id}' has schema version {_sv!r} which is "
+                    f"incompatible with the current engine schema {_current_sv!r}. "
+                    "Run the upgrade-scenario skill to migrate it before launching."
+                )
+            },
+        )
+
     cloud_api_key = (body.get("cloud_api_key") or "").strip()
     deployer = ScenarioDeployer(
         scenario, elastic_url, kibana_url, api_key,
