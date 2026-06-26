@@ -611,6 +611,36 @@ async def upload_scenario(request: Request):
     return result
 
 
+@app.post("/api/scenarios/fetch-github")
+async def fetch_github_scenarios(request: Request):
+    """Fetch all scenarios from a GitHub repo and import them.
+
+    The repo must have a top-level ``scenarios/`` directory that mirrors the
+    demo's own layout — one subfolder per scenario, each containing
+    ``scenario.yaml``.  All discovered scenarios are imported (overwriting any
+    existing scenario with the same id).
+
+    Request body JSON:
+        repo_url  (str, required) — https://github.com/<owner>/<repo>
+        token     (str, optional) — GitHub PAT for private repos; never stored
+    """
+    from scenario_engine import fetch_github_zipball, import_scenarios_from_archive
+
+    body = await request.json()
+    repo_url = (body.get("repo_url") or "").strip()
+    token = (body.get("token") or "").strip() or None
+
+    if not repo_url:
+        return JSONResponse({"error": "repo_url is required"}, status_code=400)
+
+    try:
+        data = fetch_github_zipball(repo_url, token)
+        result = import_scenarios_from_archive(data)
+    except (ValueError, zipfile.BadZipFile) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    return result
+
+
 @app.get("/api/scenario")
 async def current_scenario(deployment_id: Optional[str] = None):
     """Return active scenario metadata."""
