@@ -5,6 +5,7 @@ scenario_description: Orbital insertion mission with rocket propulsion, guidance
 namespace: nova7
 scenario_icon: 🚀
 sort_order: 1
+schema_version: "1.1"
 nominal_label: NOMINAL
 hosts:
 - host.name: nova7-aws-host-01
@@ -343,27 +344,45 @@ trace_attributes:
     fuel-system:
       propulsion.engine_id: {choice: [E1-MAIN, E2-MAIN, E3-VERNIER]}
       propulsion.chamber_pressure_psi: {uniform: [2400, 2650], round: 1}
+      propulsion.fuel_type: {choice: [lox_rp1, lox_lh2, hypergolic, solid]}
+      propulsion.thrust_pct: {uniform: [0.0, 100.0], round: 1}
     navigation:
       gnc.nav_mode: {choice: [GPS_PRIMARY, IMU_PRIMARY, STAR_TRACKER, BLENDED]}
       orbit.altitude_km: {uniform: [180, 420], round: 1}
+      orbit.inclination_deg: {uniform: [0.0, 98.0], round: 1}
+      orbit.period_min: {uniform: [88.0, 120.0], round: 1}
     comms-array:
       comms.link_type: {choice: [S-BAND, X-BAND, UHF]}
       comms.signal_margin_db: {uniform: [2.0, 12.0], round: 1}
+      comms.frequency_band: {choice: [S, X, Ka, UHF, L]}
+      comms.data_rate_mbps: {uniform: [0.01, 100.0], round: 2}
     mission-control:
       mcc.operator_console: {choice: [FLIGHT, CAPCOM, GNC, PROP, EECOM]}
       mcc.telemetry_rate_hz: {choice: [1, 5, 10, 25]}
+      mcc.mission_phase: {choice: [countdown, ascent, orbit_insertion, on_orbit, transit, landing, recovery]}
+      mcc.anomaly_count: {randint: [0, 20]}
     ground-systems:
       ground.pad_id: {choice: [LC-39A, LC-39B, SLC-40]}
       ground.weather_go: {choice: [true, true, true, false]}
+      ground.wind_speed_kts: {uniform: [0.0, 25.0], round: 1}
+      ground.lightning_clearance_mi: {uniform: [5.0, 20.0], round: 1}
     payload-monitor:
       payload.bay_temp_c: {uniform: [18.0, 28.0], round: 1}
       payload.vibration_grms: {uniform: [0.1, 1.2], round: 2}
+      payload.power_mode: {choice: [nominal, safe_mode, low_power, emergency]}
+      payload.data_volume_gb: {uniform: [0.0, 500.0], round: 1}
     sensor-validator:
       validation.pipeline_stage: {choice: [ingest, calibration, correlation, output]}
       validation.queue_depth: {randint: [0, 200]}
+      validation.sensor_type: {choice: [imu, star_tracker, gyroscope, accelerometer, temperature]}
+      validation.pass_rate_pct: {uniform: [95.0, 100.0], round: 2}
     telemetry-relay:
       relay.hop_count: {randint: [1, 4]}
       relay.buffer_pct: {uniform: [10.0, 85.0], round: 1}
+      relay.protocol: {choice: [CCSDS, ECSS, TMTC, custom]}
+      relay.latency_ms: {randint: [200, 2000]}
     range-safety:
       safety.fts_arm_state: {choice: [SAFED, SAFED, SAFED, ARMED]}
       safety.tracking_radars_active: {randint: [2, 3]}
+      safety.trajectory_status: {choice: [nominal, off_nominal, impact_zone_clear, corrective_action]}
+      safety.self_destruct_inhibit: {choice: [armed, inhibited, safe]}

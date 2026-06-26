@@ -10,8 +10,13 @@ cascade_services:
 - matching-engine
 - compliance-monitor
 description: Trading desk risk exposure exceeds configured limit thresholds
-investigation_notes: ''
-remediation_action: ''
+investigation_notes: |-
+  1. Check risk-calculator logs for RISK-LIMIT-BREACH — note desk_id, asset_class, exposure, and utilization percentage.
+  2. Query FROM logs.otel.financial.* | WHERE body.text LIKE "*RISK-LIMIT-BREACH*" | STATS max(exposure) BY desk_id to identify the highest breach.
+  3. Inspect order-gateway kill_switch state — confirm new_orders_blocked=true is active to prevent further exposure growth.
+  4. Check matching-engine for any in-flight orders on the breaching desk that have not yet been risk-checked.
+  5. Notify compliance-monitor to log the breach event; if utilization exceeds 300% escalate to desk head and initiate liquidation queue.
+remediation_action: engage_kill_switch_and_liquidate
 error_message: '[RISK] RISK-LIMIT-BREACH: desk={desk_id} exposure=${exposure} limit=${risk_limit} asset_class={asset_class}'
 stack_trace: |-
   === RISK CALCULATION REPORT ===
@@ -40,4 +45,16 @@ fault_params:
     format: "{n}M"
     n: {randint: [5, 100]}
   asset_class: {choice: [equity, fixed_income, fx, derivatives, commodities]}
-rca_clues: {}
+rca_clues:
+  risk-calculator:
+    risk.limit_utilization_pct: {uniform: [200.0, 400.0], round: 1}
+    risk.var_99_usd: {randint: [10000000, 50000000]}
+  order-gateway:
+    oms.kill_switch_active: true
+    oms.blocked_orders_count: {randint: [10, 500]}
+  matching-engine:
+    engine.inflight_risk_pending: {randint: [0, 100]}
+    engine.orders_awaiting_risk_check: {randint: [5, 200]}
+  compliance-monitor:
+    compliance.risk_breach_events: {randint: [1, 20]}
+    compliance.desk_limit_violations: {randint: [1, 5]}

@@ -10,8 +10,13 @@ cascade_services:
 - compliance-monitor
 - audit-logger
 description: Trade settlement fails due to insufficient securities or funding
-investigation_notes: ''
-remediation_action: ''
+investigation_notes: |-
+  1. Check settlement-processor logs for SETTLE-FAIL — note trade_id, instrument, quantity, and failure_reason (e.g. insufficient_securities or SSI_mismatch).
+  2. Query FROM logs.otel.financial.* | WHERE body.text LIKE "*SETTLE-FAIL*" | STATS count() BY failure_reason to determine if the cause is systemic.
+  3. Inspect risk-calculator for the counterparty credit exposure — a counterparty_default failure_reason requires immediate credit event notification.
+  4. Check compliance-monitor for SWIFT MT548 processing — confirm the LACK reject code was received and logged for regulatory recordkeeping.
+  5. If auto_borrow=ATTEMPTED and borrow_result=UNAVAILABLE, initiate securities lending desk escalation or recycle the instruction with an extended settlement date.
+remediation_action: initiate_securities_borrow_and_recycle
 error_message: '[SETTLE] SETTLE-FAIL: trade={trade_id} instrument={instrument} qty={quantity} reason={failure_reason} counterparty={counterparty}'
 stack_trace: |-
   === SWIFT MT548 SETTLEMENT STATUS ===
@@ -42,4 +47,16 @@ fault_params:
   settlement_id:
     format: "STL-{n}"
     n: {randint: [100000, 999999]}
-rca_clues: {}
+rca_clues:
+  settlement-processor:
+    settlement.fail_code_lack_count: {randint: [1, 30]}
+    settlement.auto_borrow_failures: {randint: [1, 15]}
+  risk-calculator:
+    risk.counterparty_exposure_usd: {randint: [1000000, 50000000]}
+    risk.credit_hold_active: true
+  compliance-monitor:
+    compliance.swift_mt548_rejections: {randint: [1, 20]}
+    compliance.settle_fail_reg_events: {randint: [1, 10]}
+  audit-logger:
+    audit.settle_fail_trail_entries: {randint: [3, 30]}
+    audit.recycled_instruction_count: {randint: [0, 5]}

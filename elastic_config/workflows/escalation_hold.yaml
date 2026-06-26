@@ -5,6 +5,9 @@ description: >
   Implements the hold protocol: escalate -> hold -> investigate -> resolve -> resume.
   All state transitions are logged for post-mission review.
 
+tags:
+  - "__NS__"
+
 triggers:
   - type: manual
 

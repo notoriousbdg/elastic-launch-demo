@@ -8,6 +8,9 @@ description: >
   immediately, runs AI root cause analysis, creates a case, then automatically
   queues remediation and closes the case.
 
+tags:
+  - "__NS__"
+
 triggers:
   - type: alert
 

@@ -3,6 +3,10 @@
 
 Checks performed for each scenario:
   1.  scenario.yaml loads without errors
+  1b. schema_version: if present, must parse as MAJOR.MINOR; malformed → error.
+      Missing → warning only (treated as '1.0', compatible with current engine).
+      If older MAJOR than engine → error (upgrade_required).
+      If same MAJOR, older MINOR → warning (outdated_compatible).
   2.  channel count == 20; numbers are contiguous 01–20
   3.  each channel has required fields (name, error_type, affected_services,
       error_message, stack_trace, fault_params)
@@ -67,7 +71,7 @@ _IDENTITY_KEYS = (
 )
 
 _ALLOWED_LANGUAGES = frozenset(
-    {"python", "java", "go", "dotnet", "rust", "cpp", "nodejs"}
+    {"python", "java", "go", "dotnet", "rust", "cpp"}
 )
 
 _CHANNEL_REQUIRED_FIELDS = (
@@ -102,6 +106,35 @@ def check_scenario(scenario_id: str) -> tuple[list[str], list[str]]:
         s = load_yaml_scenario(scenario_dir)
     except Exception as exc:
         return [f"load_yaml_scenario() raised: {exc}"], []
+
+    # ── Check 1b: schema_version ──────────────────────────────────────────────
+    # Missing is a warning (treated as 1.0, compatible). Malformed is an error.
+    sv = s.schema_version
+    if sv is None:
+        warnings.append(
+            "schema_version is not set in scenario.yaml "
+            "(treated as '1.0' — run upgrade-scenario to add it)"
+        )
+    else:
+        try:
+            from scenario_engine.schema_version import parse_version, version_status
+            parse_version(sv)  # raises ValueError if malformed
+            status = version_status(sv)
+            if status == "upgrade_required":
+                from scenario_engine.schema_version import CURRENT_SCHEMA_VERSION
+                errors.append(
+                    f"schema_version '{sv}' is incompatible with the current engine "
+                    f"schema '{CURRENT_SCHEMA_VERSION}' (upgrade_required — "
+                    "run upgrade-scenario before launching)"
+                )
+            elif status == "outdated_compatible":
+                from scenario_engine.schema_version import CURRENT_SCHEMA_VERSION
+                warnings.append(
+                    f"schema_version '{sv}' is behind current '{CURRENT_SCHEMA_VERSION}' "
+                    "(outdated_compatible — consider running upgrade-scenario)"
+                )
+        except ValueError as exc:
+            errors.append(f"schema_version '{sv}' is malformed: {exc}")
 
     # ── Check 2+3: Channels count, contiguity, required fields ───────────────
     reg = s.channel_registry           # filtered view (display fields only)
@@ -210,9 +243,34 @@ def check_scenario(scenario_id: str) -> tuple[list[str], list[str]]:
                     f"k8s cluster '{cluster.get('name')}': service '{svc}' not in services"
                 )
 
-    # ── Check 12: system_prompt ↔ error_types (bidirectional) ─────────────────
+    # ── Check 12: assessment_tool_config completeness ─────────────────────────
+    atc = s._data.get("assessment_tool_config")
+    if not atc or not isinstance(atc, dict):
+        errors.append(
+            "assessment_tool_config is missing or empty — must have 'id' and 'description'"
+        )
+    else:
+        if not atc.get("id"):
+            errors.append("assessment_tool_config.id is missing or empty")
+        if not atc.get("description"):
+            errors.append("assessment_tool_config.description is missing or empty")
+
+    # ── Check 12a: agent_config completeness + cross-consistency ──────────────
     agent_cfg = s.agent_config
-    system_prompt = agent_cfg.get("system_prompt", "") if agent_cfg else ""
+    for field in ("id", "name", "assessment_tool_name", "system_prompt"):
+        if not (agent_cfg or {}).get(field):
+            errors.append(f"agent_config.{field} is missing or empty")
+    if atc and isinstance(atc, dict) and agent_cfg:
+        atc_id = atc.get("id", "")
+        atn = agent_cfg.get("assessment_tool_name", "")
+        if atc_id and atn and atn != atc_id:
+            errors.append(
+                f"agent_config.assessment_tool_name '{atn}' must equal "
+                f"assessment_tool_config.id '{atc_id}'"
+            )
+
+    # ── Check 12b: system_prompt ↔ error_types (bidirectional) ────────────────
+    system_prompt = (agent_cfg or {}).get("system_prompt", "")
     channel_error_types = {
         ch.get("error_type") for ch in reg.values() if ch.get("error_type")
     }
@@ -222,6 +280,25 @@ def check_scenario(scenario_id: str) -> tuple[list[str], list[str]]:
                 errors.append(
                     f"agent_config.system_prompt does not mention channel error_type '{et}'"
                 )
+
+    # ── Check 12c: leftover TODO placeholders in scenario YAML files ───────────
+    scenario_dir = SCENARIOS_DIR / scenario_id
+    todo_files = [scenario_dir / "scenario.yaml"]
+    todo_files += sorted((scenario_dir / "channels").glob("*.yaml"))
+    todo_files += sorted((scenario_dir / "services").glob("*.yaml"))
+    for fpath in todo_files:
+        if not fpath.exists():
+            continue
+        raw = fpath.read_text(encoding="utf-8")
+        if "TODO" in raw:
+            # Report the first hit with a snippet so the author knows exactly where to look
+            for lineno, line in enumerate(raw.splitlines(), 1):
+                if "TODO" in line:
+                    rel = fpath.relative_to(scenario_dir)
+                    errors.append(
+                        f"leftover TODO placeholder in {rel} line {lineno}: "
+                        f"{line.strip()[:80]}"
+                    )
 
     # ── Check 13: trace_attributes.services keys ──────────────────────────────
     trace_cfg = s._data.get("trace_attributes", {})
@@ -336,6 +413,85 @@ def check_scenario(scenario_id: str) -> tuple[list[str], list[str]]:
                 f"cloud_provider distribution is unbalanced: {dict(provider_counts)} "
                 f"(aim for ~3/3/3)"
             )
+
+    # ── Check 20: k8s_clusters schema completeness ────────────────────────────
+    # Scaffolder used to emit `cloud_provider`/`cloud_region`; runtime expects
+    # `provider`/`region`/`platform`.  Catch the mismatch before deploy.
+    for i, cluster in enumerate(s.k8s_clusters):
+        cname = cluster.get("name", f"[{i}]")
+        for req_field in ("provider", "region", "platform"):
+            if not cluster.get(req_field):
+                errors.append(
+                    f"k8s_clusters '{cname}': missing or empty '{req_field}' "
+                    f"(scaffold may have emitted 'cloud_{req_field}' — wrong key)"
+                )
+
+    # ── Check 21 (warning): host names must not use the generic scaffold- default ──
+    # Branded persona prefixes (finserv, meridian, nova7, …) are unique and intentional;
+    # only the generic "scaffold-" default causes cross-scenario log collisions.
+    for host in s._data.get("hosts", []):
+        hname = host.get("host.name", "")
+        if hname.startswith("scaffold-"):
+            warnings.append(
+                f"host.name '{hname}' uses the generic 'scaffold-' prefix — these collide "
+                f"across simultaneously-deployed scenarios; rename to a unique prefix "
+                f"(e.g. '{scenario_id}-<provider>-host-NN')"
+            )
+            break  # one warning is enough
+
+    # ── Check 22 (warning): rca_clues completeness ────────────────────────────
+    # NOTE: s.channel_registry is a filtered display-only view that EXCLUDES rca_clues;
+    # must use s._channels (raw channel dicts keyed 1..20) to inspect this field.
+    channels_with_rca = sum(
+        1 for ch in s._channels.values()
+        if ch.get("rca_clues") and isinstance(ch["rca_clues"], dict) and ch["rca_clues"]
+    )
+    if channels_with_rca == 0:
+        warnings.append(
+            "all 20 channels have empty rca_clues — the AI agent will have no "
+            "domain-specific investigation signals; add 2–3 per-service clues to "
+            "each channel (see SKILL.md Phase 5 and an ecommerce channel for examples)"
+        )
+
+    # ── Check 23 (warning): topology coverage ─────────────────────────────────
+    svcs_with_topology = sum(
+        1 for spec in svc_specs.values() if spec.get("topology")
+    )
+    if svcs_with_topology == 0:
+        warnings.append(
+            "all services have empty topology — APM service map will show no call "
+            "edges; build realistic call chains in Phase 5 using the "
+            "[downstream-service, endpoint, METHOD] DSL"
+        )
+
+    # ── Check 24 (warning): entry_endpoints are not generic stubs ─────────────
+    if entry_svc_name:
+        all_eps = s.entry_endpoints
+        eps = all_eps.get(entry_svc_name, [])
+        if eps:
+            ep_path_endings = {
+                e[0].rstrip("/").split("/")[-1]
+                for e in eps if isinstance(e, (list, tuple)) and e
+            }
+            if ep_path_endings.issubset({"health", "process"}):
+                warnings.append(
+                    f"sort_order:1 service '{entry_svc_name}' still has the generic "
+                    f"stub entry_endpoints (health/process only) — replace with 4–6 "
+                    f"real business routes in Phase 5 (e.g. /checkout, /search)"
+                )
+
+    # ── Check 25 (warning): trace_attributes richness ─────────────────────────
+    trace_svc_attrs = s._data.get("trace_attributes", {}).get("services", {})
+    thin_svcs = sorted(
+        svc for svc in svc_keys if len(trace_svc_attrs.get(svc, {})) < 3
+    )
+    if thin_svcs:
+        sample = ", ".join(thin_svcs[:3]) + ("…" if len(thin_svcs) > 3 else "")
+        warnings.append(
+            f"{len(thin_svcs)} service(s) have fewer than 3 trace_attributes "
+            f"({sample}) — CONTRACT.md recommends 4–5 per service; expand in Phase 5 "
+            f"(e.g. add tier, feature flags, customer segment, region)"
+        )
 
     return errors, warnings
 

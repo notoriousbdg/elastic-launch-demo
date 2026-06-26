@@ -5,6 +5,7 @@ scenario_description: Live multiplayer gaming platform with game servers, matchm
 namespace: gaming
 scenario_icon: 🎮
 sort_order: 5
+schema_version: "1.1"
 nominal_label: NORMAL
 hosts:
 - host.name: gaming-aws-host-01
@@ -348,27 +349,45 @@ trace_attributes:
       game.tick_rate: {choice: [64, 128, 30, 60]}
       game.active_players: {randint: [10, 100]}
       game.map_id: {choice: [MAP-NEON-CITY, MAP-WASTELAND, MAP-SKY-ARENA, MAP-DEEP-SEA]}
+      game.mode: {choice: [battle_royale, team_deathmatch, capture_the_flag, domination]}
+      game.server_region: {choice: [us-east-1, us-west-2, eu-central-1, ap-east-1]}
     matchmaking-engine:
       matchmaking.queue_region: {choice: [us-east-1, us-west-2, eu-west-1, ap-southeast-1]}
       matchmaking.skill_bracket: {choice: [bronze, silver, gold, platinum, diamond]}
+      matchmaking.wait_time_s: {randint: [5, 120]}
+      matchmaking.match_quality_score: {uniform: [0.60, 1.00], round: 2}
     content-delivery:
       cdn.cache_hit_ratio: {uniform: [0.60, 0.99], round: 2}
       cdn.edge_pop: {choice: [IAD, SFO, FRA, NRT, SYD, GRU]}
+      cdn.content_type: {choice: [textures, models, audio, video, shader]}
+      cdn.origin_latency_ms: {randint: [5, 150]}
     chat-service:
       chat.channel_type: {choice: [global, guild, party, whisper, system]}
       chat.message_rate: {randint: [10, 500]}
+      chat.concurrent_users: {randint: [100, 50000]}
+      chat.toxicity_score: {uniform: [0.0, 1.0], round: 2}
     leaderboard-api:
       leaderboard.season_id: {choice: [S12, S13, S14]}
       leaderboard.update_lag_ms: {randint: [5, 250]}
+      leaderboard.region_scope: {choice: [global, na, eu, ap]}
+      leaderboard.rank_tier: {choice: [bronze, silver, gold, diamond, master]}
     auth-gateway:
       auth.method: {choice: [oauth-google, oauth-discord, oauth-steam, email-password]}
       auth.session_ttl_min: {choice: [15, 30, 60, 120, 1440]}
+      auth.platform: {choice: [pc, ps5, xbox, mobile, switch]}
+      auth.mfa_required: {choice: [true, false]}
     payment-processor:
       payment.provider: {choice: [stripe, paypal, apple-iap, google-play]}
       payment.currency: {choice: [USD, EUR, GBP, JPY, BRL]}
+      payment.item_type: {choice: [cosmetic, loot_box, battle_pass, dlc, subscription]}
+      payment.amount_usd: {uniform: [0.99, 99.99], round: 2}
     analytics-pipeline:
       analytics.event_type: {choice: [player_action, match_result, purchase, session_start, session_end]}
       analytics.pipeline_lag_ms: {randint: [50, 5000]}
+      analytics.session_length_min: {randint: [5, 180]}
+      analytics.source_platform: {choice: [pc, console, mobile]}
     moderation-engine:
       moderation.queue_depth: {randint: [0, 10000]}
       moderation.model_version: {choice: [automod-v3.1, automod-v3.2, automod-v4.0-beta]}
+      moderation.content_type: {choice: [chat, username, screenshot, video_clip]}
+      moderation.action_taken: {choice: [none, warn, mute_1h, mute_24h, ban]}

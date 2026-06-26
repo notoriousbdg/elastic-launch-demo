@@ -10,8 +10,13 @@ cascade_services:
 - compliance-monitor
 - risk-calculator
 description: Cross-region audit log replication falling behind, DR site stale
-investigation_notes: ''
-remediation_action: ''
+investigation_notes: |-
+  1. Check audit-logger logs for AUDIT-REPLICATION-LAG — note source_region, dest_region, lag_ms, pending_events, and which channels are BEHIND.
+  2. Query FROM logs.otel.financial.* | WHERE body.text LIKE "*AUDIT-REPLICATION-LAG*" | STATS max(lag_ms), sum(pending_events) BY source_region to quantify the RPO breach.
+  3. Inspect network utilization between regions — if bandwidth utilization > 90% and tcp_retransmits is high, the WAN link is saturating under the replication load.
+  4. Check settlement-processor for any settlements that depend on DR-site audit confirmation — if the DR site is stale, settlement authorizations may be blocked.
+  5. Increase replication batch size to reduce per-message overhead; if lag exceeds RPO threshold, declare failover_ready=false and alert the DR team before market open.
+remediation_action: increase_replication_batch_size
 error_message: '[AUDIT] AUDIT-REPLICATION-LAG: source={source_region} dest={dest_region} lag_ms={lag_ms} max_ms={max_lag_ms}
   pending={pending_events}'
 stack_trace: |-
@@ -36,4 +41,16 @@ fault_params:
   lag_ms: {randint: [5000, 60000]}
   max_lag_ms: 3000
   pending_events: {randint: [100, 10000]}
-rca_clues: {}
+rca_clues:
+  audit-logger:
+    audit.replication_lag_ms: {randint: [5000, 60000]}
+    audit.pending_replication_events: {randint: [100, 10000]}
+  settlement-processor:
+    settlement.dr_audit_confirmation_pending: {randint: [1, 50]}
+    settlement.cross_region_hold_count: {randint: [0, 20]}
+  compliance-monitor:
+    compliance.rpo_breach_ms: {randint: [2000, 57000]}
+    compliance.dr_site_staleness_alerts: {randint: [1, 20]}
+  risk-calculator:
+    risk.dr_site_risk_state_age_ms: {randint: [5000, 60000]}
+    risk.failover_readiness_pct: {uniform: [0.0, 80.0], round: 1}

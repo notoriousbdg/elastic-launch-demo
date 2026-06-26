@@ -14,7 +14,7 @@ logger = logging.getLogger("deployer")
 class DashboardMixin:
 
     def _deploy_dashboard(self, client: httpx.Client, notify: ProgressCallback):
-        step = self._step(12)
+        step = self._step(13)
         step.status = "running"
         notify(self.progress)
 

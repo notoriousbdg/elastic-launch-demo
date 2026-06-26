@@ -5,6 +5,7 @@ scenario_description: Hospital clinical systems including EHR, patient monitorin
 namespace: healthcare
 scenario_icon: 🏥
 sort_order: 4
+schema_version: "1.1"
 nominal_label: NORMAL
 hosts:
 - host.name: healthcare-aws-host-01
@@ -341,30 +342,48 @@ trace_attributes:
     ehr-system:
       patient.acuity_level: {choice: [1, 2, 3, 4, 5]}
       patient.department: {choice: [Emergency, ICU, MedSurg, Oncology, Pediatrics, Cardiology]}
+      patient.encounter_type: {choice: [inpatient, outpatient, emergency, telehealth]}
+      patient.payer_type: {choice: [medicare, medicaid, commercial, self_pay]}
     patient-monitor:
       vitals.sampling_rate_hz: {choice: [1, 2, 5, 10]}
       vitals.bed_id:
         format: "{ward}-{num}"
         ward: {choice: [A, B, C, D]}
         num: {randint: [101, 450]}
+      vitals.alarm_priority: {choice: [advisory, caution, crisis, no_alarm]}
+      vitals.trend: {choice: [stable, improving, deteriorating, fluctuating]}
     lab-integration:
       lab.specimen_type: {choice: [serum, plasma, whole_blood, urine, csf, tissue]}
       lab.turnaround_min: {randint: [15, 120]}
+      lab.priority: {choice: [routine, stat, critical, add_on]}
+      lab.instrument_id: {choice: [COBAS-001, SYSMEX-002, LUMINEX-003, BECKMAN-004]}
     pharmacy-system:
       pharmacy.medication_class: {choice: [antibiotic, anticoagulant, analgesic, antihypertensive, vasopressor, sedative]}
       pharmacy.interaction_score: {uniform: [0.0, 10.0], round: 1}
+      pharmacy.dispense_mode: {choice: [automated, manual, blister_pack, unit_dose]}
+      pharmacy.formulary_tier: {randint: [1, 4]}
     imaging-service:
       imaging.modality: {choice: [CT, MRI, XR, US, MG, NM, PET]}
       imaging.study_priority: {choice: [STAT, URGENT, ROUTINE, ELECTIVE]}
+      imaging.body_part: {choice: [chest, abdomen, head, spine, extremity, pelvis]}
+      imaging.compression_ratio: {uniform: [2.0, 8.0], round: 1}
     scheduling-api:
       scheduling.appointment_type: {choice: [new_patient, follow_up, procedure, consult, telehealth]}
       scheduling.provider_load: {randint: [4, 24]}
+      scheduling.wait_days: {randint: [0, 60]}
+      scheduling.channel: {choice: [online, phone, clinic, referral, walk_in]}
     billing-processor:
       billing.claim_type: {choice: [professional, institutional, dental, pharmacy]}
       billing.payer_category: {choice: [commercial, medicare, medicaid, tricare, self_pay]}
+      billing.amount_usd: {uniform: [50.0, 25000.0], round: 2}
+      billing.denial_reason: {choice: [none, authorization, eligibility, coding, duplicate]}
     clinical-alerts:
       alerts.rule_category: {choice: [sepsis, fall_risk, vte_prophylaxis, drug_interaction, critical_lab]}
       alerts.priority_level: {choice: [critical, high, medium, low, informational]}
+      alerts.source_system: {choice: [ehr, patient_monitor, lab, pharmacy, imaging]}
+      alerts.acknowledged: {choice: [true, false]}
     data-warehouse:
       compliance.audit_scope: {choice: [phi_access, order_modification, medication_override, record_amendment]}
       compliance.hipaa_zone: {choice: [treatment, payment, operations, research, restricted]}
+      compliance.query_type: {choice: [analytics, reporting, ml_training, audit]}
+      compliance.record_count: {randint: [1000, 5000000]}

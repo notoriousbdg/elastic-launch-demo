@@ -229,7 +229,7 @@ class IntegrationsMixin:
         )
 
     def _install_integrations(self, client: httpx.Client, notify: ProgressCallback):
-        step = self._step(18)
+        step = self._step(19)
         step.status = "running"
         step.items_total = len(INTEGRATIONS)
         step.items_done = 0

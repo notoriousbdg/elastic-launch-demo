@@ -87,7 +87,7 @@ services:       # exactly 9, in desired sort_order
     cloud_platform: aws_ec2 | gcp_compute_engine | azure_vm
     cloud_availability_zone: <az>
     subsystem: <subsystem>
-    language: python | java | go | dotnet | rust | cpp | nodejs
+    language: python | java | go | dotnet | rust | cpp
     entry_service: true      # exactly one — gets 4× trace-entry weighting
     kpi_emitter: false       # exactly one must be true
     generates_traces: false  # only for infra-only services (DBs, etc.)
@@ -281,7 +281,7 @@ cloud_region: eastus
 cloud_platform: azure_vm         # aws_ec2 | gcp_compute_engine | azure_vm
 cloud_availability_zone: eastus-1
 subsystem: payments
-language: java                   # python | java | go | dotnet | rust | cpp | nodejs
+language: java                   # python | java | go | dotnet | rust | cpp
 topology:
   - [fraud-detector, /api/v1/fraud/check, POST]
 entry_endpoints:
@@ -331,12 +331,34 @@ The `services/` directory must contain **only `.yaml` files** — no Python file
 ## Phase 5: Flesh out all properties
 
 Work through [CONTRACT.md](CONTRACT.md) top-to-bottom. Pay extra attention to:
-- Language allowlist (python|java|go|dotnet|rust|cpp|nodejs)
+- Language allowlist (python|java|go|dotnet|rust|cpp)
 - `fault_params` parity: every `{placeholder}` in `error_message` + `stack_trace` must have a matching key in `fault_params` of the **same channel file** — this is locally visible now
 - `k8s_clusters[].services` must contain exactly the 3 service keys for that cloud
 
 One property not in CONTRACT.md:
 - **`raw_log_profile.change_point_path`**: the highest-revenue path (checkout, payment, etc.)
+
+### Completion checklist — replace every scaffold stub
+
+**Zero `TODO` tokens may remain in any generated file.** The Phase 6 verifier enforces this as a hard failure. Work through this list before running it:
+
+| Field | What to write |
+|---|---|
+| `assessment_tool_config.description` | Domain-specific description of what the assessment evaluates (health dimensions, risk surfaces). ≥2 sentences. |
+| `agent_config.id` / `.name` / `.assessment_tool_name` | Auto-derived from namespace — verify they read naturally for the vertical. |
+| `scenario_description` | 1–2 sentences describing the platform and its operational context. |
+| `executive_dashboard_intro` | Bold label + brief description of the KPIs shown and their thresholds/significance. |
+| `executive_kpi_sections[].header` | Replace `"TODO: rename to match your vertical"` with a vertical-specific section title. |
+| KPI spec titles (e.g. `"Primary KPI (unit)"`) | Replace with real metric names and units (e.g. `"Orders per Hour (ord/hr)"`). |
+| `executive_kpi_emissions[].unit` | Replace every `TODO` unit with the real unit string (e.g. `"ord/hr"`, `"%"`, `"ms"`). |
+| `executive_kpi_emissions[].value` ranges | Scaffolder now seeds realistic ranges by field name (throughput→[1000,50000], latency→[50,500], etc.). Verify they're plausible for your vertical and adjust if needed. |
+| `executive_trend_charts[0].y_label` | Replace `TODO` with the primary KPI unit (same as its emission unit). |
+| `raw_log_profile.paths` / `.change_point_path` | Replace `/api/v1/TODO` paths with real API paths for the vertical. |
+| Every service `steps:` body | Replace the stub skeleton (latency sample → generic metric → health_check log) with domain-specific telemetry, metrics, and log messages. Remove the `# TODO: Replace these stub steps...` comment. |
+| Every channel `rca_clues` | Add 2–3 per-service key/value clues for each affected/cascade service (e.g. `db.active_connections: {randint: [32, 64]}`). These surface in the AI agent's investigation context. See any ecommerce channel for examples. |
+| Every service `topology` | Replace `[]` with realistic downstream call edges: `[[downstream-svc, /api/path, GET], ...]`. Build call chains that match your primary workflow (e.g. storefront → recommendation → catalog → inventory). |
+| Sort_order:1 service `entry_endpoints` | Replace the stub `/health`+`/process` routes with 4–6 real business endpoints (e.g. `/api/v1/checkout`, `/api/v1/search`). All traces root here. |
+| Every service `trace_attributes.services[<svc>]` | Expand from 2 to 4–5 domain-specific attributes (e.g. `svc.tier`, `svc.feature_flag_*`, `svc.customer_segment`, `svc.region`). |
 
 ---
 
@@ -361,14 +383,25 @@ python3 scripts/verify_yaml_scenarios.py <id>
 This verifies all structural invariants including:
 - 20 channels (contiguous 01–20) each with required fields (`fault_params`, `error_message`, etc.)
 - 9 services, `sort_order` values are exactly {1..9}, all identity keys present on every service
-- Language is in allowed set (python/java/go/dotnet/rust/cpp/nodejs)
+- Language is in allowed set (`python | java | go | dotnet | rust | cpp`)
+- `assessment_tool_config` has a non-empty `id` and `description`
+- `agent_config` has all four fields (`id`, `name`, `assessment_tool_name`, `system_prompt`); `assessment_tool_name` equals `assessment_tool_config.id`
 - `agent_config.system_prompt` mentions all 20 channel `error_type`s
+- **Zero `TODO` placeholders** in `scenario.yaml`, all `channels/*.yaml`, and all `services/*.yaml`
+- `k8s_clusters` entries have `provider`, `region`, and `platform` (not the old `cloud_provider`/`cloud_region` shape)
 - `trace_attributes.services` keys match actual service names
 - `executive_kpi_emitter_service_name` names a real service; KPI sections/emissions in sync
 - Sort_order:1 service has `entry_endpoints` defined
 - `affected_services`/`cascade_services`/`k8s_clusters.services` reference real service names
 - All `{placeholder}`s in `error_message`+`stack_trace` have a matching `fault_params` key
 - Every service has a non-empty `steps:` body (unless `generates_traces: false AND emit_fault_logs: false`)
+
+Warnings (exit 0, but fix before demo):
+- Host names should start with `{scenario_id}-` to avoid log cross-contamination
+- All 20 channels should have populated `rca_clues` (not empty `{}`)
+- At least one service should have a non-empty `topology`
+- Sort_order:1 entry_endpoints should not be the generic `health`/`process` stubs
+- Each service should have ≥ 3 `trace_attributes` entries
 
 Iterate until the verifier exits 0 before calling the work done.
 

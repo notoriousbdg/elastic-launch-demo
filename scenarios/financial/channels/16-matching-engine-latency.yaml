@@ -10,8 +10,13 @@ cascade_services:
 - risk-calculator
 - settlement-processor
 description: Matching engine order processing latency exceeds SLA threshold
-investigation_notes: ''
-remediation_action: ''
+investigation_notes: |-
+  1. Check matching-engine logs for ME-LATENCY-SLA — note order_id, partition_id, latency_us vs sla_us, and which pipeline phase is the bottleneck.
+  2. Query FROM logs.otel.financial.* | WHERE body.text LIKE "*ME-LATENCY-SLA*" | STATS avg(latency_us), count() BY partition_id to identify hot partitions.
+  3. Inspect the price_time_match phase elapsed_us — if it exceeds 10000us the book has excessive queue_depth; check lock_contention_ns for spinlock contention.
+  4. Check order-gateway for order submission rate — a sudden burst (e.g. algorithmic wash trading) drives queue_depth > 10000 and locks the matching thread.
+  5. Throttle inbound order rate at order-gateway for the affected partition; if CPU affinity shows a single core saturated, re-balance partitions across cores.
+remediation_action: throttle_inbound_and_rebalance_partitions
 error_message: '[ME] ME-LATENCY-SLA: order={order_id} latency_us={latency_us} sla_us={sla_us} partition={partition_id}'
 stack_trace: |-
   === MATCHING ENGINE PERF DUMP ===
@@ -36,4 +41,16 @@ fault_params:
   partition_id:
     format: "P-{n}"
     n: {randint: [0, 15]}
-rca_clues: {}
+rca_clues:
+  matching-engine:
+    engine.match_latency_us: {randint: [500, 50000]}
+    engine.queue_depth: {randint: [5000, 30000]}
+  order-gateway:
+    oms.order_submission_rate_per_s: {randint: [1000, 50000]}
+    oms.latency_sla_breach_pct: {uniform: [1.0, 25.0], round: 1}
+  risk-calculator:
+    risk.latency_impacted_orders: {randint: [10, 1000]}
+    risk.pre_trade_check_delay_us: {randint: [100, 5000]}
+  settlement-processor:
+    settlement.fill_processing_backlog: {randint: [0, 500]}
+    settlement.late_fill_reports: {randint: [0, 100]}

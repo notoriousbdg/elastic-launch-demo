@@ -5,6 +5,7 @@ scenario_description: Enterprise infrastructure and network operations for verti
 namespace: fanatics
 scenario_icon: 🏈
 sort_order: 2
+schema_version: "1.1"
 nominal_label: NORMAL
 hosts:
 - host.name: fanatics-aws-host-01

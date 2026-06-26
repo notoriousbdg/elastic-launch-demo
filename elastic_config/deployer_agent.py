@@ -176,7 +176,35 @@ class AgentMixin:
 - Use **{p_investigation}** for ES|QL investigation, field name guidance, and root cause analysis
 - Use **{p_channel_runbook}** to look up fault channel procedures or identify the remediation action_type
 - Use **{p_remediation_guide}** before executing any remediation or escalation action
-- Use **visualization-creation** to create charts, graphs, or visual breakdowns of data
+
+## Creating Visualizations
+Use the **visualization-creation** tool to create Lens charts and dashboards. Always provide complete,
+specific parameters — vague requests will produce empty panels.
+
+**Data views** (always use these exact IDs):
+- Traces/APM: `traces.otel.{ns}`  — fields: `@timestamp`, `duration`, `status.code`,
+  `resource.attributes.service.name`, `span.name`, `trace.id`
+- Logs: `logs.otel.{ns}` — fields: `@timestamp`, `body.text`, `severity_text`, `service.name`,
+  `trace.id`, `span.id`
+- Metrics: `metrics.otel.{ns}` — fields: `@timestamp`, `metrics.k8s.node.cpu.utilization`,
+  `metrics.k8s.pod.memory.usage`, `metrics.system.cpu.load_average.1m`,
+  `metrics.system.filesystem.utilization`, `resource.attributes.k8s.cluster.name`,
+  `resource.attributes.service.name`, `host.name`
+
+**Proven visualization patterns**:
+- Error rate over time → bar_stacked on `traces.otel.{ns}`, x=`@timestamp` (30s), y=count with
+  `status.code: Error` filter, split by `resource.attributes.service.name`
+- P99 latency by service → area on `traces.otel.{ns}`, x=`@timestamp`, y=percentile(duration,99),
+  split by `resource.attributes.service.name`
+- Log volume → area on `logs.otel.{ns}`, x=`@timestamp` (30s), y=count, filter by `severity_text`
+- CPU utilization → metric tile on `metrics.otel.{ns}`, average of
+  `metrics.k8s.node.cpu.utilization`
+- Service health → metric tile on `traces.otel.{ns}`, count with
+  `status.code: Error AND resource.attributes.service.name: "<name>"`
+
+When asked to create a dashboard, always specify: data view ID, chart type, x-axis field with
+interval, y-axis metric, split field (if any), and any KQL filter. Ask for clarification only if
+the user's intent is genuinely ambiguous.
 
 ## Available Services
 {svc_names}"""

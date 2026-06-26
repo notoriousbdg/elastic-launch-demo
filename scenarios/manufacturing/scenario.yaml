@@ -6,6 +6,7 @@ scenario_description: Multi-site discrete manufacturing with MES, SCADA/OT, OEE 
 namespace: mfg
 scenario_icon: 🏭
 sort_order: 8
+schema_version: "1.1"
 nominal_label: RUNNING
 hosts:
 - host.name: mfg-aws-host-01
@@ -346,27 +347,45 @@ trace_attributes:
     mes-controller:
       mes.line: {choice: [LINE-01, LINE-02, LINE-03, LINE-04, LINE-05]}
       mes.product_family: {choice: [bracket, housing, shaft, pcb_assy, valve]}
+      mes.shift: {choice: [A, B, C, weekend]}
+      mes.units_completed: {randint: [0, 1000]}
     scada-gateway:
       scada.protocol: {choice: [opcua, opcua, modbus_tcp, ethernet_ip]}
       scada.subscription_count: {randint: [120, 320]}
+      scada.device_type: {choice: [plc, hmi, rtu, vfd, sensor]}
+      scada.scan_rate_ms: {choice: [100, 250, 500, 1000]}
     ot-historian:
       historian.archive_tier: {choice: [hot, warm, cold]}
       historian.compression: {choice: [lz4, zstd]}
+      historian.write_rate_pts_s: {randint: [100, 10000]}
+      historian.storage_fill_pct: {uniform: [40.0, 95.0], round: 1}
     oee-analytics:
       oee.calc_window_min: {choice: [5, 15, 60]}
       oee.line: {choice: [LINE-01, LINE-02, LINE-03, LINE-04, LINE-05]}
+      oee.score_pct: {uniform: [45.0, 98.0], round: 1}
+      oee.downtime_reason: {choice: [changeover, breakdown, planned_maintenance, quality_hold, no_downtime]}
     quality-inspector:
       quality.station_type: {choice: [vision, cmm, torque, leak_test]}
       quality.characteristic: {choice: [LENGTH_MM, DIAMETER_MM, TORQUE_NM, WEIGHT_G]}
+      quality.defect_type: {choice: [dimensional, cosmetic, functional, missing_component, none]}
+      quality.sampling_rate_pct: {uniform: [2.0, 20.0], round: 1}
     maintenance-scheduler:
       maintenance.asset_class: {choice: [A, A, B, C]}
       maintenance.work_type: {choice: [preventive, corrective, predictive]}
+      maintenance.priority: {choice: [emergency, urgent, routine, predictive]}
+      maintenance.estimated_hours: {randint: [1, 48]}
     erp-bridge:
       erp.system: SAP-ECC
       erp.idoc_type: {choice: [ORDERS05, DELVRY07, MATMAS05, INVOIC02]}
+      erp.transaction_type: {choice: [goods_receipt, stock_transfer, purchase_order, production_order, sales_order]}
+      erp.plant: {choice: [P001, P002, P003, P004]}
     inventory-sync:
       inventory.warehouse: {choice: [WH-A-01, WH-B-02, WH-RAW-01]}
       inventory.material_class: {choice: [raw, wip, fg, spare]}
+      inventory.qty_on_hand: {randint: [0, 50000]}
+      inventory.replenishment_triggered: {choice: [true, false]}
     shopfloor-portal:
       portal.kiosk_type: {choice: [kiosk, tablet, mobile_scanner]}
       portal.line: {choice: [LINE-01, LINE-02, LINE-03, LINE-04, LINE-05]}
+      portal.operator_action: {choice: [login, scan_part, submit_inspection, report_issue, logout]}
+      portal.session_duration_s: {randint: [30, 3600]}

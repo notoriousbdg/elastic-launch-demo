@@ -12,7 +12,7 @@ from elastic_config.deployer_base import _kibana_headers, _retry_http, ProgressC
 class DataViewsMixin:
 
     def _deploy_data_views(self, client: httpx.Client, notify: ProgressCallback):
-        step = self._step(11)
+        step = self._step(12)
         step.status = "running"
         notify(self.progress)
 
@@ -57,7 +57,7 @@ class DataViewsMixin:
             },
             {
                 "data_view": {
-                    "id": "traces-*",
+                    "id": f"traces.otel.{self.ns}",
                     "title": "traces-*",
                     "name": f"{self.scenario.scenario_name} Traces",
                     "timeFieldName": "@timestamp",
@@ -66,7 +66,7 @@ class DataViewsMixin:
             },
             {
                 "data_view": {
-                    "id": "metrics-*",
+                    "id": f"metrics.otel.{self.ns}",
                     "title": "metrics-*",
                     "name": f"{self.scenario.scenario_name} Metrics",
                     "timeFieldName": "@timestamp",

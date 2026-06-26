@@ -10,8 +10,13 @@ cascade_services:
 - risk-calculator
 - compliance-monitor
 description: Trade settlement fails to complete within T+2 SLA window
-investigation_notes: ''
-remediation_action: ''
+investigation_notes: |-
+  1. Check settlement-processor logs for SETTLE-T2-TIMEOUT — note trade_id, settlement_id, counterparty, and pending_hours vs sla_hours.
+  2. Query FROM logs.otel.financial.* | WHERE body.text LIKE "*SETTLE-T2-TIMEOUT*" | STATS count() BY counterparty to identify if one counterparty is blocking multiple settlements.
+  3. Inspect NSCC CNS match status — if NSCC_CNS_match=PENDING the instruction may have been rejected by the depository; check DTC delivery leg.
+  4. Check audit-logger for the full settlement lifecycle trail — confirm affirmation and netting completed before the DTCC submission cutoff.
+  5. Escalate to counterparty operations and file a SEC-15c6 exception report; if DTC delivery can be recycled, do so before the next business day cutoff.
+remediation_action: recycle_settlement_instruction
 error_message: '[SETTLE] SETTLE-T2-TIMEOUT: trade={trade_id} settlement={settlement_id} pending_hours={pending_hours}h sla={sla_hours}h
   counterparty={counterparty}'
 stack_trace: |-
@@ -39,4 +44,16 @@ fault_params:
   pending_hours: {uniform: [48.5, 96.0], round: 1}
   sla_hours: 48
   counterparty: {choice: [Goldman Sachs, Morgan Stanley, JP Morgan, Citadel Securities, Virtu Financial, Jane Street]}
-rca_clues: {}
+rca_clues:
+  settlement-processor:
+    settlement.t2_breach_hours: {uniform: [0.5, 48.0], round: 1}
+    settlement.nscc_match_pending_count: {randint: [1, 50]}
+  audit-logger:
+    audit.settlement_lifecycle_gaps: {randint: [0, 5]}
+    audit.dtc_delivery_events_missing: {randint: [0, 3]}
+  risk-calculator:
+    risk.failed_settlement_exposure_usd: {randint: [500000, 20000000]}
+    risk.counterparty_credit_hold: true
+  compliance-monitor:
+    compliance.sec15c6_exceptions: {randint: [1, 10]}
+    compliance.settlement_breach_reports: {randint: [1, 5]}

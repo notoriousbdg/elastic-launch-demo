@@ -5,7 +5,6 @@ from __future__ import annotations
 import concurrent.futures
 import json
 import logging
-import time
 from typing import TYPE_CHECKING
 
 import httpx
@@ -28,7 +27,7 @@ class AlertingMixin:
         _workflow_ids: dict[str, str]
 
     def _deploy_alerting(self, client: httpx.Client, notify: ProgressCallback):
-        step = self._step(13)
+        step = self._step(14)
         step.status = "running"
         notify(self.progress)
 
@@ -93,6 +92,8 @@ class AlertingMixin:
                 rule_name = f"{self.scenario.scenario_name} CH{num_str}: {name} (Auto-Remediate)"
             else:
                 rule_name = f"{self.scenario.scenario_name} CH{num_str}: {name}"
+            # Kibana Cases API enforces a 160-char title limit; rule name becomes the case title
+            rule_name = rule_name[:160]
 
             es_query = json.dumps({
                 "query": {
@@ -273,31 +274,9 @@ class AlertingMixin:
             with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
                 deleted = sum(pool.map(_delete_one, rule_ids))
 
-        # Verify: count rules still matching this scenario. Kibana's saved-object
-        # index has eventual consistency so we retry a few times with backoff
-        # before reporting a non-zero remaining count.
-        remaining = 0
-        for attempt in range(3):
-            if attempt > 0:
-                time.sleep(2 ** attempt)  # 2s, 4s
-            verify = _retry_http(
-                lambda: client.get(
-                    f"{self.kibana_url}/api/alerting/rules/_find",
-                    params={"per_page": 100, "page": 1, "search_fields": "name", "search": scenario_name},
-                    headers=_kibana_headers(self.api_key),
-                ),
-                label="verify alerts cleanup",
-            )
-            if verify is None or verify.status_code >= 300:
-                break
-            try:
-                remaining = sum(
-                    1 for r in verify.json().get("data", [])
-                    if scenario_name in r.get("name", "")
-                )
-            except Exception:
-                break
-            if remaining == 0:
-                break
-
+        # remaining is derived directly from delete responses — no post-delete
+        # search verify. Kibana's saved-object search index is eventually
+        # consistent and returns stale results for seconds after deletion,
+        # causing false "still present" failures when all deletes succeeded.
+        remaining = len(rule_ids) - deleted
         return deleted, remaining
