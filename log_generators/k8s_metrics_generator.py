@@ -281,6 +281,8 @@ def _generate_pod_metrics(svc: str, state: K8sState, rng: random.Random) -> list
     metrics.append(_gauge("k8s.pod.memory_limit_utilization", "1", rng.uniform(0.25, 0.85), ts=ts))
     metrics.append(_gauge("k8s.pod.memory.node.utilization", "1", rng.uniform(0.001, 0.05), ts=ts))
     metrics.append(_gauge("k8s.pod.memory.working_set", "By", rng.randint(80_000_000, 600_000_000), is_int=True, ts=ts))
+    metrics.append(_gauge("k8s.pod.memory.rss", "By", rng.randint(50_000_000, 400_000_000), is_int=True, ts=ts))
+    metrics.append(_gauge("k8s.pod.memory.available", "By", rng.randint(100_000_000, 600_000_000), is_int=True, ts=ts))
 
     # Pod Network (cumulative)
     metrics.append(_cumulative_sum("k8s.pod.network.rx", "By", state.net_rx[svc], ts=ts))
@@ -293,6 +295,7 @@ def _generate_pod_metrics(svc: str, state: K8sState, rng: random.Random) -> list
     container_attrs = {"container.name": f"{svc}-container"}
     metrics.append(_gauge("k8s.container.cpu.usage", "ns", rng.randint(10_000_000, 600_000_000), is_int=True, attributes=container_attrs, ts=ts))
     metrics.append(_gauge("k8s.container.memory.working_set", "By", rng.randint(100_000_000, 400_000_000), is_int=True, attributes=container_attrs, ts=ts))
+    metrics.append(_gauge("container.memory.major_page_faults", "1", rng.randint(0, 50), is_int=True, attributes=container_attrs, ts=ts))
 
     return metrics
 
@@ -385,6 +388,7 @@ def _generate_daemonset_metrics(rng: random.Random, num_nodes: int) -> list:
         _gauge("k8s.daemonset.desired_scheduled_nodes", "1", desired, is_int=True, ts=ts),
         _gauge("k8s.daemonset.ready_nodes", "1", ready, is_int=True, ts=ts),
         _gauge("k8s.daemonset.current_scheduled_nodes", "1", desired, is_int=True, ts=ts),
+        _gauge("k8s.daemonset.misscheduled_nodes", "1", 0, is_int=True, ts=ts),
     ]
 
 
@@ -410,6 +414,7 @@ def _generate_statefulset_metrics(rng: random.Random) -> list:
         _gauge("k8s.statefulset.desired_pods", "1", desired, is_int=True, ts=ts),
         _gauge("k8s.statefulset.ready_pods", "1", ready, is_int=True, ts=ts),
         _gauge("k8s.statefulset.current_pods", "1", desired, is_int=True, ts=ts),
+        _gauge("k8s.statefulset.updated_pods", "1", desired, is_int=True, ts=ts),
     ]
 
 
@@ -502,11 +507,48 @@ def _generate_container_metrics(svc: str, state: K8sState, rng: random.Random) -
     """
     ts = _now_ns()
     return [
-        _cumulative_sum("k8s.container.restarts", "{restart}", state.restarts[svc], ts=ts),
+        _gauge("k8s.container.restarts", "{restart}", state.restarts[svc], is_int=True, ts=ts),
         _gauge("k8s.container.cpu_request", "{cpu}", rng.uniform(0.1, 1.0), ts=ts),
         _gauge("k8s.container.cpu_limit", "{cpu}", rng.uniform(0.5, 2.0), ts=ts),
         _gauge("k8s.container.memory_request", "By", rng.randint(128 * 2**20, 512 * 2**20), is_int=True, ts=ts),
         _gauge("k8s.container.memory_limit", "By", rng.randint(256 * 2**20, 1024 * 2**20), is_int=True, ts=ts),
+    ]
+
+
+# ── Volume resource (kubeletstatsreceiver) ────────────────────────────────────
+
+def _build_volume_resource(svc: str, vol_name: str, pod_data: dict, cluster: dict, namespace: str = NAMESPACE) -> dict:
+    """Build OTLP resource for a pod volume (kubeletstatsreceiver).
+
+    k8s.volume.name is a resource attribute — the real receiver creates one
+    resource per volume, enabling the dashboard to filter by volume name.
+    """
+    p = pod_data["pods"][svc]
+    attrs = {
+        "k8s.volume.name": vol_name,
+        "k8s.volume.type": "persistentVolumeClaim",
+        "k8s.pod.name": p["pod_name"],
+        "k8s.pod.uid": p["pod_uid"],
+        "k8s.namespace.name": namespace,
+        "k8s.node.name": p["node_name"],
+        "k8s.cluster.name": cluster["name"],
+        "cloud.provider": cluster["provider"],
+        "cloud.platform": cluster["platform"],
+        "cloud.region": cluster["region"],
+        "data_stream.type": "metrics",
+        "data_stream.dataset": "kubeletstatsreceiver",
+        "data_stream.namespace": "default",
+    }
+    return {"attributes": _format_attributes(attrs), "schemaUrl": SCHEMA_URL}
+
+
+def _generate_volume_metrics(rng: random.Random) -> list:
+    ts = _now_ns()
+    capacity = rng.randint(10_000_000_000, 50_000_000_000)
+    available = rng.randint(1_000_000_000, capacity)
+    return [
+        _gauge("k8s.volume.capacity", "By", capacity, is_int=True, ts=ts),
+        _gauge("k8s.volume.available", "By", available, is_int=True, ts=ts),
     ]
 
 
@@ -851,12 +893,21 @@ def run(client: OTLPClient, stop_event: threading.Event, scenario_data: dict | N
                         state.restarts[svc] += 1
                         for m in container_metrics:
                             if m["name"] == "k8s.container.restarts":
-                                m["sum"]["dataPoints"][0]["asInt"] = str(state.restarts[svc])
+                                m["gauge"]["dataPoints"][0]["asInt"] = str(state.restarts[svc])
 
                 resource_metrics.append({
                     "resource": container_res,
                     "scopeMetrics": [{"scope": {"name": CLUSTER_SCOPE, "version": SCOPE_VERSION}, "metrics": container_metrics}],
                 })
+
+                # ── Volume metrics (kubeletstatsreceiver) ────────────────────
+                for vol_suffix in ["data-pvc", "config-vol"]:
+                    vol_res = _build_volume_resource(svc, f"{svc}-{vol_suffix}", pod_data, cluster, _namespace)
+                    vol_metrics = _generate_volume_metrics(rng)
+                    resource_metrics.append({
+                        "resource": vol_res,
+                        "scopeMetrics": [{"scope": {"name": KUBELET_SCOPE, "version": SCOPE_VERSION}, "metrics": vol_metrics}],
+                    })
 
                 # Emit OOMKilled event log for spiked pods (probabilistic)
                 if is_spiked and rng.random() < 0.15 * intensity_ratio:
