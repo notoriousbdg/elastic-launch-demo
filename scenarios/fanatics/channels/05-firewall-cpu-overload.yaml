@@ -54,3 +54,12 @@ rca_clues:
   digital-marketplace:
     marketplace.page_load_ms: {randint: [3000, 15000]}
     marketplace.ssl_handshake_failures: {randint: [10, 100]}
+business_impact:
+  - kpi: business.app_sessions_per_min
+    factor: {uniform: [0.25, 0.55]}
+  - kpi: business.page_views_per_min
+    factor: {uniform: [0.25, 0.55]}
+  - kpi: business.merch_gmv_usd_per_min
+    factor: {uniform: [0.20, 0.50]}
+  - kpi: business.ad_revenue_usd_per_min
+    factor: {uniform: [0.25, 0.55]}

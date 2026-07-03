@@ -48,3 +48,12 @@ rca_clues:
     oee.line_stalled_min: {randint: [5, 35]}
   shopfloor-portal:
     portal.operator_actions_held: {randint: [4, 25]}
+business_impact:
+  - kpi: business.oee_overall_pct
+    factor: {uniform: [0.30, 0.60]}
+  - kpi: business.throughput_units_per_hour
+    factor: {uniform: [0.25, 0.55]}
+  - kpi: business.on_time_delivery_pct
+    factor: {uniform: [0.35, 0.65]}
+  - kpi: business.unplanned_downtime_min_per_shift
+    factor: {uniform: [2.0, 4.5]}

@@ -51,3 +51,12 @@ rca_clues:
     telemetry.tracking_status: degraded
   navigation:
     gnc.external_tracking: unavailable
+business_impact:
+  - kpi: business.launch_readiness_index_0_100
+    factor: {uniform: [0.30, 0.55]}
+  - kpi: business.mission_success_probability_pct
+    factor: {uniform: [0.55, 0.78]}
+  - kpi: business.schedule_variance_days
+    factor: {uniform: [2.0, 5.0]}
+  - kpi: business.risk_burn_down_rate
+    factor: {uniform: [0.15, 0.40]}

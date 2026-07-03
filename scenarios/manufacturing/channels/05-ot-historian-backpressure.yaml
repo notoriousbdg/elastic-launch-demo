@@ -41,3 +41,10 @@ rca_clues:
     scada.write_retry_count: {randint: [10, 200]}
   oee-analytics:
     oee.tag_feed_lag_s: {randint: [5, 30]}
+business_impact:
+  - kpi: business.oee_overall_pct
+    factor: {uniform: [0.40, 0.70]}
+  - kpi: business.throughput_units_per_hour
+    factor: {uniform: [0.45, 0.75]}
+  - kpi: business.unplanned_downtime_min_per_shift
+    factor: {uniform: [1.5, 3.0]}

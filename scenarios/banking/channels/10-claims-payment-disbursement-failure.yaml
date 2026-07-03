@@ -60,3 +60,12 @@ rca_clues:
   document-vault:
     document.w9_on_file: {choice: [true, false]}
     document.tax_1099_status: BLOCKED
+business_impact:
+  - kpi: business.fee_revenue_usd_per_min
+    factor: {uniform: [0.35, 0.65]}
+  - kpi: business.net_satisfaction_proxy_nps
+    factor: {uniform: [0.30, 0.60]}
+  - kpi: business.complaint_tickets_per_min
+    factor: {uniform: [2.5, 5.0]}
+  - kpi: business.churn_risk_index_0_100
+    factor: {uniform: [2.0, 4.0]}

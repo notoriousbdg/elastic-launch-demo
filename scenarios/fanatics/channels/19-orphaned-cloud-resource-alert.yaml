@@ -56,3 +56,8 @@ rca_clues:
   firewall-gateway:
     firewall.orphan_nat_rules: {randint: [2, 20]}
     firewall.stale_address_objects: {randint: [10, 100]}
+business_impact:
+  - kpi: business.api_data_partner_revenue_usd_per_min
+    factor: {uniform: [0.30, 0.60]}
+  - kpi: business.ad_revenue_usd_per_min
+    factor: {uniform: [0.35, 0.65]}

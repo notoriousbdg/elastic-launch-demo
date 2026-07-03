@@ -48,3 +48,12 @@ rca_clues:
   digital-marketplace:
     marketplace.order_delay_notification_count: {randint: [50, 500]}
     marketplace.printing_backlog_hours: {randint: [4, 48]}
+business_impact:
+  - kpi: business.merch_gmv_usd_per_min
+    factor: {uniform: [0.25, 0.55]}
+  - kpi: business.loyalty_points_redeemed_per_min
+    factor: {uniform: [0.30, 0.60]}
+  - kpi: business.churn_risk_index_0_100
+    factor: {uniform: [1.8, 3.8]}
+  - kpi: business.net_satisfaction_proxy_nps
+    factor: {uniform: [0.20, 0.50]}

@@ -60,3 +60,12 @@ rca_clues:
   provisioning-service:
     provisioning.billing_check_failed: true
     provisioning.queue_depth: {randint: [100, 500]}
+business_impact:
+  - kpi: business.revenue_usd_per_min
+    factor: {uniform: [0.20, 0.45]}
+  - kpi: business.activations_per_min
+    factor: {uniform: [0.25, 0.55]}
+  - kpi: business.trouble_to_billing_ratio_pct
+    factor: {uniform: [3.0, 6.0]}
+  - kpi: business.voluntary_churn_rate_pct
+    factor: {uniform: [1.5, 3.5]}

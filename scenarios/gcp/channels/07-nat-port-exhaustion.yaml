@@ -54,3 +54,12 @@ rca_clues:
     lb.external_api_timeouts: {randint: [20, 100]}
   cloud-dns-resolver:
     dns.external_resolution_failures: {randint: [10, 80]}
+business_impact:
+  - kpi: business.nat_port_exhaustion_rate_pct
+    factor: {uniform: [8.0, 20.0]}
+  - kpi: business.api_success_rate_pct
+    factor: {uniform: [0.55, 0.80]}
+  - kpi: business.requests_per_min
+    factor: {uniform: [0.50, 0.75]}
+  - kpi: business.uptime_pct
+    factor: {uniform: [0.88, 0.96]}

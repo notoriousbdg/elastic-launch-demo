@@ -57,3 +57,10 @@ rca_clues:
   analytics-pipeline:
     analytics.ad_event_backlog: {randint: [1000, 50000]}
     analytics.attribution_lag_min: {randint: [5, 60]}
+business_impact:
+  - kpi: business.ad_revenue_usd_per_min
+    factor: {uniform: [0.05, 0.20]}
+  - kpi: business.gmv_usd_per_min
+    factor: {uniform: [0.30, 0.55]}
+  - kpi: business.conversion_rate_pct
+    factor: {uniform: [0.35, 0.60]}

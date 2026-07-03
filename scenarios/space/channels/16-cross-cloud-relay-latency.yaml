@@ -51,3 +51,12 @@ rca_clues:
     telemetry.data_freshness: stale
   comms-array:
     comms.upstream_relay_status: congested
+business_impact:
+  - kpi: business.uplink_latency_ms
+    factor: {uniform: [4.0, 10.0]}
+  - kpi: business.telemetry_coverage_pct
+    factor: {uniform: [0.55, 0.78]}
+  - kpi: business.command_acceptance_rate_pct
+    factor: {uniform: [0.60, 0.82]}
+  - kpi: business.contact_window_utilization_pct
+    factor: {uniform: [0.60, 0.80]}

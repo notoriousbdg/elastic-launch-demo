@@ -63,3 +63,12 @@ rca_clues:
     chat.appeal_queue_depth: {randint: [200, 2000]}
   analytics-pipeline:
     analytics.moderation_accuracy_alert: true
+business_impact:
+  - kpi: business.chat_messages_per_min
+    factor: {uniform: [0.25, 0.55]}
+  - kpi: business.toxic_report_rate_pct
+    factor: {uniform: [2.0, 4.5]}
+  - kpi: business.content_moderation_queue_size
+    factor: {uniform: [2.5, 5.0]}
+  - kpi: business.churn_risk_index_0_100
+    factor: {uniform: [1.5, 3.0]}

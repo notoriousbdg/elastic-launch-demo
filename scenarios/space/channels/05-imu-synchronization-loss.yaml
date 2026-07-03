@@ -49,3 +49,12 @@ rca_clues:
     telemetry.imu_status: sync_loss
   range-safety:
     safety.nav_solution_status: degraded
+business_impact:
+  - kpi: business.maneuver_accuracy_pct
+    factor: {uniform: [0.45, 0.72]}
+  - kpi: business.trajectory_deviation_meters
+    factor: {uniform: [4.0, 10.0]}
+  - kpi: business.orbital_period_drift_ms
+    factor: {uniform: [3.5, 8.0]}
+  - kpi: business.mission_success_probability_pct
+    factor: {uniform: [0.65, 0.85]}

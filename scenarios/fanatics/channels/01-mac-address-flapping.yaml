@@ -62,3 +62,12 @@ rca_clues:
   wifi-controller:
     wifi.client_roam_storm: true
     wifi.affected_ssid: Fanatics-Warehouse
+business_impact:
+  - kpi: business.app_sessions_per_min
+    factor: {uniform: [0.30, 0.60]}
+  - kpi: business.page_views_per_min
+    factor: {uniform: [0.35, 0.65]}
+  - kpi: business.churn_risk_index_0_100
+    factor: {uniform: [1.5, 3.0]}
+  - kpi: business.net_satisfaction_proxy_nps
+    factor: {uniform: [0.30, 0.60]}

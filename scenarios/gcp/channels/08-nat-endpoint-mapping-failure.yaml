@@ -52,3 +52,12 @@ rca_clues:
   cloud-cdn-service:
     cdn.origin_fetch_via_nat: failing
     cdn.stale_content_served: true
+business_impact:
+  - kpi: business.nat_port_exhaustion_rate_pct
+    factor: {uniform: [5.0, 12.0]}
+  - kpi: business.cdn_cache_hit_rate_pct
+    factor: {uniform: [0.60, 0.82]}
+  - kpi: business.origin_offload_pct
+    factor: {uniform: [0.55, 0.78]}
+  - kpi: business.api_success_rate_pct
+    factor: {uniform: [0.65, 0.85]}

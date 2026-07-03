@@ -51,3 +51,12 @@ rca_clues:
     telemetry.pad_status: caution
   fuel-system:
     propulsion.ground_power_status: unstable
+business_impact:
+  - kpi: business.launch_readiness_index_0_100
+    factor: {uniform: [0.35, 0.60]}
+  - kpi: business.critical_system_uptime_pct
+    factor: {uniform: [0.55, 0.78]}
+  - kpi: business.schedule_variance_days
+    factor: {uniform: [2.5, 6.0]}
+  - kpi: business.fault_events_per_min
+    factor: {uniform: [3.0, 7.0]}

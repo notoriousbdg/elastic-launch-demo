@@ -53,3 +53,12 @@ rca_clues:
   patient-monitor:
     vitals.alert_evaluation_stale: true
     vitals.sepsis_screen_pending: {randint: [2, 10]}
+business_impact:
+  - kpi: business.patient_safety_events_per_min
+    factor: {uniform: [2.0, 5.0]}
+  - kpi: business.readmission_risk_index_0_100
+    factor: {uniform: [1.8, 3.5]}
+  - kpi: business.medication_reconciliation_rate_pct
+    factor: {uniform: [0.20, 0.50]}
+  - kpi: business.hcahps_proxy_score
+    factor: {uniform: [0.25, 0.55]}

@@ -51,3 +51,12 @@ rca_clues:
   mission-control:
     upstream.degraded_subsystem: safety
     telemetry.launch_hold: FTS
+business_impact:
+  - kpi: business.launch_readiness_index_0_100
+    factor: {uniform: [0.30, 0.55]}
+  - kpi: business.schedule_variance_days
+    factor: {uniform: [2.0, 5.0]}
+  - kpi: business.mission_success_probability_pct
+    factor: {uniform: [0.55, 0.78]}
+  - kpi: business.risk_burn_down_rate
+    factor: {uniform: [0.20, 0.45]}

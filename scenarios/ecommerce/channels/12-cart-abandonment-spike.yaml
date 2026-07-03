@@ -53,3 +53,12 @@ rca_clues:
   ad-platform:
     ads.retargeting_triggered: true
     ads.cart_abandonment_audience_size: {randint: [1000, 50000]}
+business_impact:
+  - kpi: business.conversion_rate_pct
+    factor: {uniform: [0.15, 0.40]}
+  - kpi: business.orders_placed_per_min
+    factor: {uniform: [0.15, 0.40]}
+  - kpi: business.gmv_usd_per_min
+    factor: {uniform: [0.20, 0.45]}
+  - kpi: business.cart_adds_per_min
+    factor: {uniform: [0.20, 0.45]}

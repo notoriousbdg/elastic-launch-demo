@@ -68,3 +68,12 @@ rca_clues:
   chat-service:
     chat.voice_server_colocated: true
     chat.voice_quality_impacted: true
+business_impact:
+  - kpi: business.matches_played_per_min
+    factor: {uniform: [0.15, 0.40]}
+  - kpi: business.server_tick_lag_ms
+    factor: {uniform: [3.0, 6.0]}
+  - kpi: business.crash_rate_pct
+    factor: {uniform: [2.5, 5.0]}
+  - kpi: business.net_satisfaction_proxy_nps
+    factor: {uniform: [0.15, 0.40]}

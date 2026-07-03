@@ -60,3 +60,12 @@ rca_clues:
   auction-engine:
     auction.listing_sync_gap: {randint: [10, 200]}
     auction.phantom_listings: {randint: [2, 30]}
+business_impact:
+  - kpi: business.page_views_per_min
+    factor: {uniform: [0.30, 0.60]}
+  - kpi: business.merch_gmv_usd_per_min
+    factor: {uniform: [0.25, 0.55]}
+  - kpi: business.app_sessions_per_min
+    factor: {uniform: [0.30, 0.60]}
+  - kpi: business.churn_risk_index_0_100
+    factor: {uniform: [1.5, 3.5]}

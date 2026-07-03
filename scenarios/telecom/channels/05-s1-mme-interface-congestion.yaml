@@ -61,3 +61,12 @@ rca_clues:
   notification-service:
     notification.paging_storm_detected: true
     notification.throttle_active: true
+business_impact:
+  - kpi: business.activations_per_min
+    factor: {uniform: [0.25, 0.55]}
+  - kpi: business.handover_success_pct
+    factor: {uniform: [0.30, 0.60]}
+  - kpi: business.ran_latency_p95_ms
+    factor: {uniform: [3.0, 6.0]}
+  - kpi: business.data_session_success_pct
+    factor: {uniform: [0.30, 0.60]}

@@ -60,3 +60,10 @@ rca_clues:
   policy-manager:
     policy.dec_page_storage_blocked: true
     policy.renewal_docs_delayed: {randint: [100, 400]}
+business_impact:
+  - kpi: business.self_service_deflection_pct
+    factor: {uniform: [0.30, 0.60]}
+  - kpi: business.loan_origination_usd_per_min
+    factor: {uniform: [0.40, 0.70]}
+  - kpi: business.complaint_tickets_per_min
+    factor: {uniform: [2.0, 4.0]}

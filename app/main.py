@@ -715,7 +715,7 @@ async def remove_deployment(deployment_id: str):
 
 
 @app.post("/api/chaos/trigger")
-async def chaos_trigger(body: dict):
+async def chaos_trigger(request: Request, body: dict):
     deployment_id = body.get("deployment_id")
     inst = _get_instance(deployment_id)
     if not inst:
@@ -724,7 +724,7 @@ async def chaos_trigger(body: dict):
     mode = body.get("mode", "calibration")
     se_name = body.get("se_name", "")
     callback_url = body.get("callback_url", "")
-    user_email = body.get("user_email", "")
+    user_email = body.get("user_email", "") or request.headers.get("X-Forwarded-User", "") or os.environ.get("INSTRUQT_USER_EMAIL", "")
     session_id = body.get("session_id", "")
     result = inst.chaos_controller.trigger(
         channel,

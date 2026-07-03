@@ -484,6 +484,33 @@ class BaseScenario(ABC):
             },
         ]
 
+        tools.append(
+            {
+                "id": self.prefixed_tool_id("verify_recovery"),
+                "type": "esql",
+                "description": (
+                    "Confirm whether a fault has cleared after remediation. Returns "
+                    "error/warning counts per service over a short recent window (last "
+                    "3 minutes only) — zero results, or all counts at zero, means the "
+                    "system has recovered. Use this instead of the 15-minute tools when "
+                    "checking remediation/recovery status: the 15-minute tools are for "
+                    "investigating active incidents and will keep showing pre-fix errors "
+                    "as residual history for several minutes after a fix lands."
+                ),
+                "configuration": {
+                    "query": (
+                        f"FROM logs.otel.{self.namespace},logs.otel.{self.namespace}.* "
+                        "| WHERE @timestamp > NOW() - 3 MINUTES "
+                        'AND severity_text IN ("ERROR", "WARN") '
+                        '| STATS error_count = COUNT(*) WHERE severity_text == "ERROR", '
+                        'warn_count = COUNT(*) WHERE severity_text == "WARN" '
+                        "BY service.name | SORT error_count DESC"
+                    ),
+                    "params": {},
+                },
+            }
+        )
+
         # Add scenario-specific assessment tool
         assessment = self.assessment_tool_config
         tools.append(
@@ -535,6 +562,7 @@ class BaseScenario(ABC):
         p_trace_anomaly      = self.prefixed_tool_id("trace_anomaly_propagation")
         p_remediation_action = self.prefixed_tool_id("remediation_action")
         p_escalation_action  = self.prefixed_tool_id("escalation_action")
+        p_verify_recovery    = self.prefixed_tool_id("verify_recovery")
 
         return [
             self._investigation_playbook_skill(
@@ -542,7 +570,9 @@ class BaseScenario(ABC):
                 p_subsystem_health, p_search_known, p_trace_anomaly, assessment_tool,
             ),
             self._channel_runbook_skill(ns, p_search_known),
-            self._remediation_guide_skill(ns, p_remediation_action, p_escalation_action),
+            self._remediation_guide_skill(
+                ns, p_remediation_action, p_escalation_action, p_verify_recovery,
+            ),
         ]
 
     def _investigation_playbook_skill(
@@ -689,12 +719,14 @@ The `remediation_action` value below is the `action_type` to pass to the remedia
         ns: str,
         p_remediation_action: str,
         p_escalation_action: str,
+        p_verify_recovery: str,
     ) -> dict[str, Any]:
         description = (
-            f"Remediate confirmed anomalies, escalate critical incidents, or manage "
-            f"operational holds for {self.scenario_name}. Use after root cause analysis "
-            f"to execute remediation, request holds, or escalate. Includes correct "
-            f"parameters for remediation and escalation workflow tools."
+            f"Remediate confirmed anomalies, escalate critical incidents, manage "
+            f"operational holds, or confirm recovery for {self.scenario_name}. Use after "
+            f"root cause analysis to execute remediation, request holds, escalate, or "
+            f"verify that a fix actually resolved the issue. Includes correct parameters "
+            f"for remediation, escalation, and recovery-verification tools."
         )
         content = f"""## Remediation Decision Framework
 
@@ -721,9 +753,26 @@ Use `{p_remediation_action}` with these parameters:
 - `case_id` — **ALWAYS** pass this if you retrieved a case ID earlier in the conversation; never rely on tag-based search to find the case
 - `approval_mode` — **string** `required` or `skip`; see HITL vs auto-remediate rules below
 
-Once `{p_remediation_action}` returns successfully, report remediation as complete.
-Do NOT re-query logs to verify — the fix takes several minutes to propagate through the system.
+Once `{p_remediation_action}` returns successfully, remediation has been executed —
+but do not declare the incident resolved yet.
 Do NOT execute remediation unless the user or workflow explicitly asks you to invoke the tool.
+
+## How to Confirm Recovery
+
+The fix typically propagates within 1–2 minutes. When the user asks whether remediation
+was successful, or before you report an incident as resolved:
+
+1. Wait for propagation if the remediation tool call just returned (a minute or two is enough).
+2. Call `{p_verify_recovery}` — it checks only the last few minutes, so it reflects current
+   state rather than the incident's full history.
+3. If `{p_verify_recovery}` shows zero (or near-zero) error/warn counts for the affected
+   services, report the incident as **resolved**.
+4. Do NOT use the 15-minute investigation tools (`search_error_logs`, `search_subsystem_health`,
+   `browse_recent_errors`, etc.) to judge current status — they intentionally cover a wider
+   window and will keep showing the pre-remediation errors as residual history for several
+   minutes after the fix. That is expected and does NOT mean the fault is still active.
+5. If `{p_verify_recovery}` still shows active errors after ~2 minutes, treat the incident as
+   still ongoing and continue investigating rather than assuming propagation delay.
 
 ## How to Escalate
 
@@ -748,5 +797,8 @@ message explicitly includes it. Always pass `dry_run: false`.
             "name": f"{self.scenario_name} Remediation Guide",
             "description": description,
             "content": content,
-            "tool_ids": [p_remediation_action, p_escalation_action, "platform.core.cases"],
+            "tool_ids": [
+                p_remediation_action, p_escalation_action, p_verify_recovery,
+                "platform.core.cases",
+            ],
         }

@@ -68,3 +68,12 @@ rca_clues:
   api-gateway:
     gateway.enterprise_error_rate: {uniform: [0.03, 0.15], round: 2}
     gateway.mvno_error_rate: {uniform: [0.02, 0.1], round: 2}
+business_impact:
+  - kpi: business.enterprise_arpu_usd
+    factor: {uniform: [0.15, 0.45]}
+  - kpi: business.mvno_partner_revenue_usd_per_min
+    factor: {uniform: [0.20, 0.50]}
+  - kpi: business.voluntary_churn_rate_pct
+    factor: {uniform: [2.0, 4.5]}
+  - kpi: business.nps
+    factor: {uniform: [0.25, 0.55]}

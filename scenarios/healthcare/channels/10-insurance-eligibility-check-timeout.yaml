@@ -52,3 +52,12 @@ rca_clues:
     sched.self_pay_fallback: true
   ehr-system:
     ehr.unverified_insurance_count: {randint: [5, 25]}
+business_impact:
+  - kpi: business.clean_claim_rate_pct
+    factor: {uniform: [0.20, 0.50]}
+  - kpi: business.denials_per_min
+    factor: {uniform: [2.0, 5.0]}
+  - kpi: business.accounts_receivable_days
+    factor: {uniform: [1.5, 2.8]}
+  - kpi: business.collections_usd_per_min
+    factor: {uniform: [0.20, 0.45]}

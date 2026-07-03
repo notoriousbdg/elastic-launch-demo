@@ -46,3 +46,12 @@ rca_clues:
     lb.pending_ip_requests: {randint: [5, 20]}
   cloud-cdn-service:
     cdn.origin_health_check_ip: exhausted
+business_impact:
+  - kpi: business.load_balancer_rps
+    factor: {uniform: [0.55, 0.80]}
+  - kpi: business.requests_per_min
+    factor: {uniform: [0.50, 0.78]}
+  - kpi: business.api_success_rate_pct
+    factor: {uniform: [0.72, 0.90]}
+  - kpi: business.nat_port_exhaustion_rate_pct
+    factor: {uniform: [3.0, 6.0]}

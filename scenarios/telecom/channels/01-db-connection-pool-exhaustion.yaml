@@ -71,3 +71,12 @@ rca_clues:
   api-gateway:
     upstream.degraded_subsystem: activation
     gateway.5xx_rate: {uniform: [0.1, 0.5], round: 2}
+business_impact:
+  - kpi: business.activations_per_min
+    factor: {uniform: [0.20, 0.50]}
+  - kpi: business.revenue_usd_per_min
+    factor: {uniform: [0.25, 0.55]}
+  - kpi: business.support_tickets_per_min
+    factor: {uniform: [2.0, 4.5]}
+  - kpi: business.trouble_to_billing_ratio_pct
+    factor: {uniform: [2.5, 5.0]}

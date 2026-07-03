@@ -41,3 +41,12 @@ rca_clues:
   cloud-nat-gateway:
     nat.egress_route_affected: true
     nat.fallback_route: default-igw
+business_impact:
+  - kpi: business.uptime_pct
+    factor: {uniform: [0.92, 0.97]}
+  - kpi: business.api_success_rate_pct
+    factor: {uniform: [0.85, 0.94]}
+  - kpi: business.network_sla_compliance_pct
+    factor: {uniform: [0.80, 0.92]}
+  - kpi: business.customer_sla_breach_count
+    factor: {uniform: [2.0, 5.0]}

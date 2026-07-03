@@ -59,3 +59,12 @@ rca_clues:
   payment-engine:
     payment.mfa_blocked_transactions: {randint: [500, 2000]}
     payment.step_up_auth_failures: {randint: [100, 500]}
+business_impact:
+  - kpi: business.mobile_logins_per_min
+    factor: {uniform: [0.20, 0.50]}
+  - kpi: business.active_digital_sessions
+    factor: {uniform: [0.30, 0.60]}
+  - kpi: business.failed_auth_attempts_per_min
+    factor: {uniform: [3.0, 6.0]}
+  - kpi: business.digital_transaction_pct
+    factor: {uniform: [0.40, 0.65]}

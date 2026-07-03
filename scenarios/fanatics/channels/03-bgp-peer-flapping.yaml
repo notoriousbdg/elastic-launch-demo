@@ -67,3 +67,12 @@ rca_clues:
   cloud-inventory-scanner:
     cloud_scan.cross_cloud_route_missing: true
     cloud_scan.affected_provider: {choice: [aws, azure]}
+business_impact:
+  - kpi: business.app_sessions_per_min
+    factor: {uniform: [0.20, 0.50]}
+  - kpi: business.page_views_per_min
+    factor: {uniform: [0.20, 0.50]}
+  - kpi: business.ad_revenue_usd_per_min
+    factor: {uniform: [0.25, 0.55]}
+  - kpi: business.betting_handle_usd_per_min
+    factor: {uniform: [0.25, 0.55]}

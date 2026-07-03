@@ -55,3 +55,12 @@ rca_clues:
   customer-portal:
     portal.order_rejection_complaints: {randint: [5, 100]}
     portal.blocked_revenue_usd_hr: {randint: [100000, 2000000]}
+business_impact:
+  - kpi: business.order_flow_per_min
+    factor: {uniform: [0.20, 0.50]}
+  - kpi: business.rejected_orders_per_min
+    factor: {uniform: [3.0, 8.0]}
+  - kpi: business.fill_rate_pct
+    factor: {uniform: [0.25, 0.55]}
+  - kpi: business.notional_value_usd_per_min
+    factor: {uniform: [0.20, 0.45]}

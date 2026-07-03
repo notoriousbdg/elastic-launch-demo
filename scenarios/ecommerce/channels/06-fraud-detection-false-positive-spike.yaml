@@ -55,3 +55,12 @@ rca_clues:
   storefront-gateway:
     storefront.checkout_decline_shown: true
     storefront.retry_rate_pct: {uniform: [20, 60], round: 1}
+business_impact:
+  - kpi: business.conversion_rate_pct
+    factor: {uniform: [0.25, 0.50]}
+  - kpi: business.orders_placed_per_min
+    factor: {uniform: [0.25, 0.50]}
+  - kpi: business.gmv_usd_per_min
+    factor: {uniform: [0.25, 0.50]}
+  - kpi: business.churn_risk_index_0_100
+    factor: {uniform: [1.5, 3.0]}

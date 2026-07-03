@@ -56,3 +56,12 @@ rca_clues:
   lab-integration:
     lis.specimen_routing_stale: true
     lis.misrouted_results: {randint: [2, 10]}
+business_impact:
+  - kpi: business.admits_per_min
+    factor: {uniform: [0.20, 0.50]}
+  - kpi: business.discharges_per_min
+    factor: {uniform: [0.20, 0.50]}
+  - kpi: business.hl7_messages_per_min
+    factor: {uniform: [0.20, 0.45]}
+  - kpi: business.unbilled_charges_usd_per_min
+    factor: {uniform: [1.8, 3.5]}

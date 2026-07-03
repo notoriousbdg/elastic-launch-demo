@@ -55,3 +55,12 @@ rca_clues:
     cdn.serving_stale_from_unhealthy: true
   cloud-armor-waf:
     armor.backend_protection_gap: true
+business_impact:
+  - kpi: business.load_balancer_rps
+    factor: {uniform: [0.30, 0.60]}
+  - kpi: business.uptime_pct
+    factor: {uniform: [0.72, 0.88]}
+  - kpi: business.availability_index_0_100
+    factor: {uniform: [0.65, 0.85]}
+  - kpi: business.customer_sla_breach_count
+    factor: {uniform: [3.5, 8.0]}

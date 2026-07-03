@@ -47,3 +47,12 @@ rca_clues:
     relay.x_band_retransmits: {randint: [100, 500]}
   mission-control:
     upstream.degraded_subsystem: communications
+business_impact:
+  - kpi: business.downlink_data_rate_mbps
+    factor: {uniform: [0.30, 0.60]}
+  - kpi: business.packet_loss_rate_pct
+    factor: {uniform: [3.0, 8.0]}
+  - kpi: business.telemetry_coverage_pct
+    factor: {uniform: [0.55, 0.80]}
+  - kpi: business.contact_window_utilization_pct
+    factor: {uniform: [0.60, 0.82]}

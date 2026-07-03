@@ -66,3 +66,12 @@ rca_clues:
   activation-service:
     activation.auth_blocked: true
     activation.queue_depth: {randint: [500, 2000]}
+business_impact:
+  - kpi: business.activations_per_min
+    factor: {uniform: [0.10, 0.35]}
+  - kpi: business.revenue_usd_per_min
+    factor: {uniform: [0.10, 0.40]}
+  - kpi: business.voluntary_churn_rate_pct
+    factor: {uniform: [2.0, 4.5]}
+  - kpi: business.support_tickets_per_min
+    factor: {uniform: [2.5, 5.0]}

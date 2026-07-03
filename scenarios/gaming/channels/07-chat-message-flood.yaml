@@ -56,3 +56,12 @@ rca_clues:
   auth-gateway:
     auth.new_account_rate: {randint: [50, 200]}
     auth.captcha_challenge_rate: {uniform: [0.1, 5.0], round: 1}
+business_impact:
+  - kpi: business.chat_messages_per_min
+    factor: {uniform: [2.5, 5.0]}
+  - kpi: business.toxic_report_rate_pct
+    factor: {uniform: [2.0, 4.5]}
+  - kpi: business.content_moderation_queue_size
+    factor: {uniform: [3.0, 6.0]}
+  - kpi: business.net_satisfaction_proxy_nps
+    factor: {uniform: [0.25, 0.55]}

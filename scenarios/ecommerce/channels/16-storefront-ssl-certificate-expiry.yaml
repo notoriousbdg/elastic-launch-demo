@@ -50,3 +50,12 @@ rca_clues:
   payment-processor:
     payment.pci_tls_validation_failed: true
     payment.secure_channel_degraded: true
+business_impact:
+  - kpi: business.sessions_per_min
+    factor: {uniform: [0.10, 0.30]}
+  - kpi: business.conversion_rate_pct
+    factor: {uniform: [0.10, 0.25]}
+  - kpi: business.orders_placed_per_min
+    factor: {uniform: [0.10, 0.25]}
+  - kpi: business.gmv_usd_per_min
+    factor: {uniform: [0.10, 0.25]}

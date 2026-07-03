@@ -39,3 +39,10 @@ rca_clues:
     oee.correction_window_min: {randint: [15, 240]}
   shopfloor-portal:
     portal.oee_tile_stale: true
+business_impact:
+  - kpi: business.oee_overall_pct
+    factor: {uniform: [0.45, 0.75]}
+  - kpi: business.oee_availability_pct
+    factor: {uniform: [0.45, 0.75]}
+  - kpi: business.throughput_units_per_hour
+    factor: {uniform: [0.45, 0.75]}

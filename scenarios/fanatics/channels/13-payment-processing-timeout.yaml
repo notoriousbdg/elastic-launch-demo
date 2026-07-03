@@ -52,3 +52,12 @@ rca_clues:
   firewall-gateway:
     firewall.outbound_https_throttled: {choice: [true, false]}
     firewall.payment_gateway_sessions: {randint: [500, 5000]}
+business_impact:
+  - kpi: business.merch_gmv_usd_per_min
+    factor: {uniform: [0.10, 0.40]}
+  - kpi: business.live_event_ticketing_usd_per_min
+    factor: {uniform: [0.10, 0.40]}
+  - kpi: business.churn_risk_index_0_100
+    factor: {uniform: [2.5, 5.0]}
+  - kpi: business.net_satisfaction_proxy_nps
+    factor: {uniform: [0.10, 0.35]}

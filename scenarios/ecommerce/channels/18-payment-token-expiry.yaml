@@ -44,3 +44,10 @@ rca_clues:
   order-management:
     order.subscription_renewal_failures: {randint: [50, 5000]}
     order.churn_risk_count: {randint: [10, 1000]}
+business_impact:
+  - kpi: business.subscription_mrr_usd_per_min
+    factor: {uniform: [0.20, 0.45]}
+  - kpi: business.churn_risk_index_0_100
+    factor: {uniform: [2.0, 4.5]}
+  - kpi: business.gmv_usd_per_min
+    factor: {uniform: [0.30, 0.55]}

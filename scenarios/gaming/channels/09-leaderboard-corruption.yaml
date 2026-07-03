@@ -59,3 +59,12 @@ rca_clues:
     analytics.rank_anomaly_events: {randint: [100, 500]}
   moderation-engine:
     moderation.rank_exploit_check: inconclusive
+business_impact:
+  - kpi: business.daily_retention_rate_pct
+    factor: {uniform: [0.25, 0.55]}
+  - kpi: business.matches_played_per_min
+    factor: {uniform: [0.30, 0.55]}
+  - kpi: business.churn_risk_index_0_100
+    factor: {uniform: [1.8, 3.5]}
+  - kpi: business.net_satisfaction_proxy_nps
+    factor: {uniform: [0.20, 0.45]}

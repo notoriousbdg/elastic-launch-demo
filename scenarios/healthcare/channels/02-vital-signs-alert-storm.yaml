@@ -51,3 +51,12 @@ rca_clues:
   ehr-system:
     upstream.vitals_feed_status: flooded
     ehr.cds_queue_depth: {randint: [100, 500]}
+business_impact:
+  - kpi: business.patient_safety_events_per_min
+    factor: {uniform: [2.0, 5.0]}
+  - kpi: business.hcahps_proxy_score
+    factor: {uniform: [0.25, 0.55]}
+  - kpi: business.staff_compliance_rate_pct
+    factor: {uniform: [0.30, 0.60]}
+  - kpi: business.readmission_risk_index_0_100
+    factor: {uniform: [1.5, 2.8]}

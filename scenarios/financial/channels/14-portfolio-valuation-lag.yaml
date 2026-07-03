@@ -50,3 +50,12 @@ rca_clues:
   compliance-monitor:
     compliance.best_execution_disclosure_missing: true
     compliance.stale_data_client_views: {randint: [10, 500]}
+business_impact:
+  - kpi: business.mark_to_market_pnl_usd_per_min
+    factor: {uniform: [0.20, 0.50]}
+  - kpi: business.best_execution_pct
+    factor: {uniform: [0.75, 0.92]}
+  - kpi: business.portfolio_var_usd
+    factor: {uniform: [1.5, 3.0]}
+  - kpi: business.system_availability_pct
+    factor: {uniform: [0.88, 0.97]}

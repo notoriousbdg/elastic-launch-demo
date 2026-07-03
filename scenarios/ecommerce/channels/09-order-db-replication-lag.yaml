@@ -55,3 +55,12 @@ rca_clues:
   fulfillment-orchestrator:
     fulfillment.order_status_stale: true
     fulfillment.double_ship_risk_orders: {randint: [1, 20]}
+business_impact:
+  - kpi: business.orders_placed_per_min
+    factor: {uniform: [0.25, 0.50]}
+  - kpi: business.conversion_rate_pct
+    factor: {uniform: [0.30, 0.55]}
+  - kpi: business.cancel_rate_pct
+    factor: {uniform: [2.0, 4.5]}
+  - kpi: business.csat_score_0_5
+    factor: {uniform: [0.30, 0.55]}

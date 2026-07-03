@@ -53,3 +53,12 @@ rca_clues:
   network-intelligence:
     ni.dns_path_test: FAIL
     ni.dnssec_chain_broken: true
+business_impact:
+  - kpi: business.api_success_rate_pct
+    factor: {uniform: [0.55, 0.80]}
+  - kpi: business.requests_per_min
+    factor: {uniform: [0.50, 0.75]}
+  - kpi: business.uptime_pct
+    factor: {uniform: [0.85, 0.95]}
+  - kpi: business.customer_sla_breach_count
+    factor: {uniform: [3.0, 7.0]}

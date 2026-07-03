@@ -44,3 +44,12 @@ rca_clues:
     k8s.image_tag: 1.18.3-broken
   mes-controller:
     mes.operator_action_lag_s: {randint: [30, 240]}
+business_impact:
+  - kpi: business.throughput_units_per_hour
+    factor: {uniform: [0.35, 0.65]}
+  - kpi: business.oee_overall_pct
+    factor: {uniform: [0.40, 0.70]}
+  - kpi: business.rework_hours_per_shift
+    factor: {uniform: [1.8, 3.5]}
+  - kpi: business.unplanned_downtime_min_per_shift
+    factor: {uniform: [1.5, 3.0]}

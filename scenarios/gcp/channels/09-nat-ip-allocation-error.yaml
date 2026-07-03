@@ -52,3 +52,12 @@ rca_clues:
     vpc.orphaned_static_ips: {randint: [2, 8]}
   cloud-interconnect:
     interconnect.nat_failover_path: unavailable
+business_impact:
+  - kpi: business.nat_port_exhaustion_rate_pct
+    factor: {uniform: [6.0, 15.0]}
+  - kpi: business.requests_per_min
+    factor: {uniform: [0.60, 0.82]}
+  - kpi: business.cloud_spend_usd_per_min
+    factor: {uniform: [1.4, 2.8]}
+  - kpi: business.network_sla_compliance_pct
+    factor: {uniform: [0.70, 0.88]}

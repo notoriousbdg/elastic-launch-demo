@@ -44,3 +44,12 @@ rca_clues:
   cloud-interconnect:
     interconnect.onprem_traffic_blocked: true
     interconnect.affected_fw_rule: deny-egress-default
+business_impact:
+  - kpi: business.api_success_rate_pct
+    factor: {uniform: [0.60, 0.82]}
+  - kpi: business.vpc_flow_anomalies_per_min
+    factor: {uniform: [4.0, 9.0]}
+  - kpi: business.network_sla_compliance_pct
+    factor: {uniform: [0.65, 0.85]}
+  - kpi: business.customer_sla_breach_count
+    factor: {uniform: [3.0, 7.0]}

@@ -55,3 +55,12 @@ rca_clues:
     analytics.entity_density: critical
   matchmaking-engine:
     matchmaking.affected_matches: {randint: [5, 30]}
+business_impact:
+  - kpi: business.matches_played_per_min
+    factor: {uniform: [0.15, 0.40]}
+  - kpi: business.crash_rate_pct
+    factor: {uniform: [3.0, 6.0]}
+  - kpi: business.server_tick_lag_ms
+    factor: {uniform: [2.0, 4.0]}
+  - kpi: business.player_bug_reports_per_min
+    factor: {uniform: [2.5, 5.0]}

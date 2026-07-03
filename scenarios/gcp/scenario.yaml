@@ -6,7 +6,7 @@ scenario_description: 'GCP-native network operations across three regions: us-ce
 namespace: gcpnet
 scenario_icon: ☁️
 sort_order: 9
-schema_version: "1.1"
+schema_version: "1.2"
 nominal_label: NORMAL
 hosts:
 - host.name: gcpnet-host-central1

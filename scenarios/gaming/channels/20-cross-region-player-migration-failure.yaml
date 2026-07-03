@@ -75,3 +75,12 @@ rca_clues:
     leaderboard.cross_region_sync: stalled
   analytics-pipeline:
     analytics.migration_failure_events: {randint: [10, 100]}
+business_impact:
+  - kpi: business.sessions_per_min
+    factor: {uniform: [0.25, 0.55]}
+  - kpi: business.matches_played_per_min
+    factor: {uniform: [0.20, 0.50]}
+  - kpi: business.churn_risk_index_0_100
+    factor: {uniform: [1.5, 3.0]}
+  - kpi: business.net_satisfaction_proxy_nps
+    factor: {uniform: [0.25, 0.50]}

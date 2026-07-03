@@ -56,3 +56,12 @@ rca_clues:
   network-intelligence:
     ni.vpn_path_test: DOWN
     ni.latency_via_backup_ms: {randint: [20, 120]}
+business_impact:
+  - kpi: business.interconnect_utilization_pct
+    factor: {uniform: [1.5, 3.0]}
+  - kpi: business.network_sla_compliance_pct
+    factor: {uniform: [0.55, 0.80]}
+  - kpi: business.bytes_egress_gib_per_min
+    factor: {uniform: [0.40, 0.70]}
+  - kpi: business.incident_mttr_min
+    factor: {uniform: [2.5, 5.5]}

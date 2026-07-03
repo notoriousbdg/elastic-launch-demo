@@ -69,3 +69,12 @@ rca_clues:
   notification-service:
     notification.activation_confirm_delayed: true
     notification.queue_depth: {randint: [500, 2000]}
+business_impact:
+  - kpi: business.activations_per_min
+    factor: {uniform: [0.15, 0.40]}
+  - kpi: business.esim_provisions_per_min
+    factor: {uniform: [0.10, 0.35]}
+  - kpi: business.port_ins_per_min
+    factor: {uniform: [0.25, 0.55]}
+  - kpi: business.support_tickets_per_min
+    factor: {uniform: [2.0, 4.5]}

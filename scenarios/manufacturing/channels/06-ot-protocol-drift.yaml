@@ -44,3 +44,12 @@ rca_clues:
     mes.implausible_tag_value_count: {randint: [2, 25]}
   ot-historian:
     historian.tag_quality_bad_count: {randint: [5, 80]}
+business_impact:
+  - kpi: business.oee_quality_pct
+    factor: {uniform: [0.35, 0.65]}
+  - kpi: business.defect_ppm
+    factor: {uniform: [2.0, 5.0]}
+  - kpi: business.scrap_rate_pct
+    factor: {uniform: [2.0, 4.5]}
+  - kpi: business.first_pass_yield_pct
+    factor: {uniform: [0.40, 0.70]}

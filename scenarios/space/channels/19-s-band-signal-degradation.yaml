@@ -52,3 +52,12 @@ rca_clues:
     telemetry.comm_status: degraded
   telemetry-relay:
     relay.s_band_quality: poor
+business_impact:
+  - kpi: business.downlink_data_rate_mbps
+    factor: {uniform: [0.25, 0.55]}
+  - kpi: business.contact_window_utilization_pct
+    factor: {uniform: [0.50, 0.75]}
+  - kpi: business.packet_loss_rate_pct
+    factor: {uniform: [4.0, 9.0]}
+  - kpi: business.ground_station_availability_pct
+    factor: {uniform: [0.60, 0.82]}

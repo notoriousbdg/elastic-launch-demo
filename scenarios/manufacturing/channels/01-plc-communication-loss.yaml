@@ -53,3 +53,12 @@ rca_clues:
     oee.stale_window_count: {randint: [2, 12]}
   shopfloor-portal:
     portal.work_order_status_stale: true
+business_impact:
+  - kpi: business.oee_overall_pct
+    factor: {uniform: [0.25, 0.55]}
+  - kpi: business.oee_availability_pct
+    factor: {uniform: [0.30, 0.60]}
+  - kpi: business.throughput_units_per_hour
+    factor: {uniform: [0.20, 0.50]}
+  - kpi: business.unplanned_downtime_min_per_shift
+    factor: {uniform: [2.5, 5.0]}

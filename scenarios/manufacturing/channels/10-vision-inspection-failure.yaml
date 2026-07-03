@@ -43,3 +43,12 @@ rca_clues:
     mes.unverified_parts_count: {randint: [20, 300]}
   oee-analytics:
     oee.quality_pct: {uniform: [80.0, 92.0], round: 1}
+business_impact:
+  - kpi: business.oee_quality_pct
+    factor: {uniform: [0.25, 0.55]}
+  - kpi: business.first_pass_yield_pct
+    factor: {uniform: [0.30, 0.60]}
+  - kpi: business.defect_ppm
+    factor: {uniform: [2.5, 5.5]}
+  - kpi: business.customer_complaints_per_day
+    factor: {uniform: [2.0, 4.5]}

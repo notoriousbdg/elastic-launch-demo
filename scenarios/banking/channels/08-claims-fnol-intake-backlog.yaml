@@ -57,3 +57,12 @@ rca_clues:
   member-portal:
     portal.fnol_self_service_enabled: true
     portal.claims_status_queries_spike: {randint: [3000, 10000]}
+business_impact:
+  - kpi: business.net_satisfaction_proxy_nps
+    factor: {uniform: [0.30, 0.60]}
+  - kpi: business.csat_score_0_5
+    factor: {uniform: [0.40, 0.65]}
+  - kpi: business.complaint_tickets_per_min
+    factor: {uniform: [3.0, 6.0]}
+  - kpi: business.churn_risk_index_0_100
+    factor: {uniform: [2.0, 4.0]}

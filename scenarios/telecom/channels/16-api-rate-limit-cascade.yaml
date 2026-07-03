@@ -62,3 +62,12 @@ rca_clues:
   auth-service:
     auth.rate_limited_requests: {randint: [200, 2000]}
     auth.legitimate_blocked_pct: {uniform: [30.0, 70.0], round: 0}
+business_impact:
+  - kpi: business.activations_per_min
+    factor: {uniform: [0.20, 0.50]}
+  - kpi: business.revenue_usd_per_min
+    factor: {uniform: [0.20, 0.50]}
+  - kpi: business.support_tickets_per_min
+    factor: {uniform: [2.0, 4.5]}
+  - kpi: business.first_call_resolution_pct
+    factor: {uniform: [0.30, 0.60]}

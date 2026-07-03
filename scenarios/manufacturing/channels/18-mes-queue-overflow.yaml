@@ -37,3 +37,12 @@ rca_clues:
     mes.worker_count: {randint: [4, 8]}
   oee-analytics:
     oee.event_intake_lag_s: {randint: [15, 75]}
+business_impact:
+  - kpi: business.throughput_units_per_hour
+    factor: {uniform: [0.30, 0.60]}
+  - kpi: business.oee_performance_pct
+    factor: {uniform: [0.35, 0.65]}
+  - kpi: business.cycle_time_seconds
+    factor: {uniform: [1.5, 3.0]}
+  - kpi: business.on_time_delivery_pct
+    factor: {uniform: [0.40, 0.70]}

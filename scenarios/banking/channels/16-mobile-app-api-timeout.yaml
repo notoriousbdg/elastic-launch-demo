@@ -55,3 +55,12 @@ rca_clues:
   payment-engine:
     payment.upstream_timeout_count: {randint: [50, 200]}
     payment.circuit_breaker_state: HALF_OPEN
+business_impact:
+  - kpi: business.active_digital_sessions
+    factor: {uniform: [0.25, 0.55]}
+  - kpi: business.mobile_logins_per_min
+    factor: {uniform: [0.20, 0.50]}
+  - kpi: business.api_calls_per_min
+    factor: {uniform: [0.15, 0.45]}
+  - kpi: business.digital_transaction_pct
+    factor: {uniform: [0.35, 0.65]}

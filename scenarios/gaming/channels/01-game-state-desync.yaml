@@ -58,3 +58,12 @@ rca_clues:
   analytics-pipeline:
     analytics.desync_event_rate: {randint: [50, 200]}
     analytics.data_quality: degraded
+business_impact:
+  - kpi: business.matches_played_per_min
+    factor: {uniform: [0.20, 0.45]}
+  - kpi: business.sessions_per_min
+    factor: {uniform: [0.30, 0.55]}
+  - kpi: business.server_tick_lag_ms
+    factor: {uniform: [2.5, 5.0]}
+  - kpi: business.crash_rate_pct
+    factor: {uniform: [2.0, 4.5]}

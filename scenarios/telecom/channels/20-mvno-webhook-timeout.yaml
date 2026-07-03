@@ -66,3 +66,12 @@ rca_clues:
   bss-billing:
     billing.unacknowledged_activations: {randint: [20, 200]}
     billing.wholesale_reconciliation: BLOCKED
+business_impact:
+  - kpi: business.mvno_net_adds_per_min
+    factor: {uniform: [0.15, 0.45]}
+  - kpi: business.mvno_partner_revenue_usd_per_min
+    factor: {uniform: [0.15, 0.45]}
+  - kpi: business.port_ins_per_min
+    factor: {uniform: [0.25, 0.55]}
+  - kpi: business.trouble_to_billing_ratio_pct
+    factor: {uniform: [2.5, 5.0]}

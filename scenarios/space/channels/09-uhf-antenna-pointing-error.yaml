@@ -45,3 +45,12 @@ rca_clues:
     validation.servo_status: fault
   mission-control:
     upstream.degraded_subsystem: communications
+business_impact:
+  - kpi: business.contact_window_utilization_pct
+    factor: {uniform: [0.45, 0.72]}
+  - kpi: business.uplink_latency_ms
+    factor: {uniform: [2.5, 5.5]}
+  - kpi: business.command_acceptance_rate_pct
+    factor: {uniform: [0.55, 0.78]}
+  - kpi: business.ground_station_availability_pct
+    factor: {uniform: [0.60, 0.82]}
