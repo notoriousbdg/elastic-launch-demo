@@ -55,3 +55,12 @@ rca_clues:
     cdn.origin_resolution_mismatch: true
   network-intelligence:
     ni.dns_consistency_check: INCONSISTENT
+business_impact:
+  - kpi: business.api_success_rate_pct
+    factor: {uniform: [0.65, 0.85]}
+  - kpi: business.cdn_cache_hit_rate_pct
+    factor: {uniform: [0.60, 0.82]}
+  - kpi: business.load_balancer_rps
+    factor: {uniform: [0.58, 0.80]}
+  - kpi: business.edge_latency_p50_ms
+    factor: {uniform: [2.5, 6.0]}

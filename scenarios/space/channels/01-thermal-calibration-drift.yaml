@@ -48,3 +48,12 @@ rca_clues:
     telemetry.quality: degraded
   range-safety:
     safety.propulsion_status: degraded
+business_impact:
+  - kpi: business.mission_success_probability_pct
+    factor: {uniform: [0.75, 0.92]}
+  - kpi: business.spacecraft_health_index_0_100
+    factor: {uniform: [0.65, 0.85]}
+  - kpi: business.launch_readiness_index_0_100
+    factor: {uniform: [0.60, 0.80]}
+  - kpi: business.fault_events_per_min
+    factor: {uniform: [2.5, 5.0]}

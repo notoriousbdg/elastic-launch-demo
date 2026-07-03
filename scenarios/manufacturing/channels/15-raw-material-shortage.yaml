@@ -49,3 +49,14 @@ rca_clues:
     mes.work_orders_at_risk: {randint: [3, 18]}
   oee-analytics:
     oee.starvation_risk_pct: {uniform: [15.0, 65.0], round: 1}
+business_impact:
+  - kpi: business.throughput_units_per_hour
+    factor: {uniform: [0.15, 0.45]}
+  - kpi: business.on_time_delivery_pct
+    factor: {uniform: [0.25, 0.55]}
+  - kpi: business.inventory_turns
+    factor: {uniform: [0.30, 0.60]}
+  - kpi: business.oee_availability_pct
+    factor: {uniform: [0.30, 0.60]}
+  - kpi: business.material_variance_usd
+    factor: {uniform: [2.5, 5.0]}

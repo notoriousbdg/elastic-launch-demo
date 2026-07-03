@@ -61,3 +61,12 @@ rca_clues:
   compliance-monitor:
     compliance.fix_protocol_violation_flags: {randint: [0, 20]}
     compliance.session_audit_gaps_from_rejects: {randint: [0, 10]}
+business_impact:
+  - kpi: business.order_flow_per_min
+    factor: {uniform: [0.25, 0.55]}
+  - kpi: business.rejected_orders_per_min
+    factor: {uniform: [3.0, 7.0]}
+  - kpi: business.executed_trades_per_min
+    factor: {uniform: [0.25, 0.55]}
+  - kpi: business.cancel_replace_rate_pct
+    factor: {uniform: [2.0, 5.0]}

@@ -52,3 +52,12 @@ rca_clues:
   clinical-alerts:
     alerts.critical_lab_pending: {randint: [3, 15]}
     alerts.tat_breach_count: {randint: [5, 25]}
+business_impact:
+  - kpi: business.lab_critical_notification_pct
+    factor: {uniform: [0.15, 0.45]}
+  - kpi: business.order_turnaround_min
+    factor: {uniform: [2.0, 4.0]}
+  - kpi: business.patient_safety_events_per_min
+    factor: {uniform: [1.8, 3.5]}
+  - kpi: business.medication_reconciliation_rate_pct
+    factor: {uniform: [0.25, 0.55]}

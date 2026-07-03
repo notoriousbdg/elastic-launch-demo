@@ -65,3 +65,12 @@ rca_clues:
     moderation.fraud_investigation_queued: true
   analytics-pipeline:
     analytics.ledger_discrepancy_count: {randint: [10, 200]}
+business_impact:
+  - kpi: business.revenue_usd_per_min
+    factor: {uniform: [0.15, 0.40]}
+  - kpi: business.in_app_purchases_per_min
+    factor: {uniform: [0.20, 0.45]}
+  - kpi: business.loot_opens_per_min
+    factor: {uniform: [0.20, 0.50]}
+  - kpi: business.churn_risk_index_0_100
+    factor: {uniform: [2.0, 4.5]}

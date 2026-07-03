@@ -55,3 +55,12 @@ rca_clues:
   pharmacy-system:
     pharmacy.patient_merge_pending: true
     pharmacy.orders_held: {randint: [3, 12]}
+business_impact:
+  - kpi: business.ehr_response_time_ms
+    factor: {uniform: [1.8, 3.5]}
+  - kpi: business.patient_safety_events_per_min
+    factor: {uniform: [2.0, 4.0]}
+  - kpi: business.admits_per_min
+    factor: {uniform: [0.25, 0.55]}
+  - kpi: business.readmission_risk_index_0_100
+    factor: {uniform: [1.5, 2.8]}

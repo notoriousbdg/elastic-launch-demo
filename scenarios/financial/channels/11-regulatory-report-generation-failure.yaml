@@ -49,3 +49,12 @@ rca_clues:
   settlement-processor:
     settlement.stale_trade_price_age_s: {randint: [86400, 259200]}
     settlement.report_blocked_trades: {randint: [100, 5000]}
+business_impact:
+  - kpi: business.reporting_latency_sec
+    factor: {uniform: [4.0, 10.0]}
+  - kpi: business.ops_alerts_per_min
+    factor: {uniform: [2.5, 6.0]}
+  - kpi: business.system_availability_pct
+    factor: {uniform: [0.90, 0.98]}
+  - kpi: business.settlement_success_rate_pct
+    factor: {uniform: [0.80, 0.95]}

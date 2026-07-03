@@ -5,7 +5,7 @@ scenario_description: Real-time trading operations with order management, matchi
 namespace: finserv
 scenario_icon: 💹
 sort_order: 3
-schema_version: "1.1"
+schema_version: "1.2"
 nominal_label: NORMAL
 hosts:
 - host.name: finserv-aws-host-01

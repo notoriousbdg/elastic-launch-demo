@@ -79,6 +79,7 @@ class YamlScenario(BaseScenario):
                     "sensor_type", "affected_services", "cascade_services",
                     "description", "investigation_notes", "remediation_action",
                     "error_message", "stack_trace", "infrastructure_events",
+                    "business_impact",
                 )
                 if k in ch
             }
@@ -377,6 +378,26 @@ def emit_executive_business_metrics_if_eligible(service: Any) -> None:
     Called once per telemetry cycle from the designated emitter service
     via ``app/services/telemetry_dsl.py``. The service's scenario must be
     a :class:`YamlScenario`; all other scenario types are silently skipped.
+
+    Fault-channel impact
+    --------------------
+    When one or more fault channels are active, any channel that declares a
+    ``business_impact:`` list in its YAML will shift the KPIs it references.
+    Each impact entry is one of:
+
+    .. code-block:: yaml
+
+        # factor form (preferred) — scales the nominal random draw
+        - kpi: business.conversion_rate_pct
+          factor: {uniform: [0.15, 0.45]}   # <1 degrades, >1 inflates
+
+        # value form — absolute override replacing the nominal draw
+        - kpi: business.fulfillment_sla_pct
+          value: {uniform: [55.0, 72.0], round: 2}
+
+    When multiple active channels map the same KPI, the **strongest single
+    deviation from the nominal value** wins (no compounding).  KPIs not
+    referenced by any active channel are emitted at their nominal value.
     """
     ctx = getattr(service, "_ctx", None)
     if not ctx:
@@ -391,15 +412,60 @@ def emit_executive_business_metrics_if_eligible(service: Any) -> None:
     if not want or want != service.SERVICE_NAME:
         return
 
+    rng = random.Random()
+
+    # Collect per-KPI impact candidates from every active fault channel.
+    # Structure: { kpi_name -> [candidate_value, ...] }
+    impact_candidates: dict[str, list[float]] = {}
+    controller = getattr(service, "chaos_controller", None)
+    if controller is not None:
+        active_channels = getattr(controller, "get_active_channels", lambda: [])()
+        registry: dict[int, dict] = getattr(scenario, "_channel_registry", {})
+        for ch_id in active_channels:
+            ch_entry = registry.get(ch_id, {})
+            for impact in ch_entry.get("business_impact", []):
+                kpi_name = impact.get("kpi")
+                if not kpi_name:
+                    continue
+                if kpi_name not in impact_candidates:
+                    impact_candidates[kpi_name] = []
+                impact_candidates[kpi_name].append(impact)
+
     # Build all KPI gauges in one pass then send in a single OTLP POST.
     # Previously each emit_metric() call issued its own POST, serialized behind
     # _send_lock, causing tiles to trickle onto the dashboard one at a time.
-    rng = random.Random()
-    metrics = [
-        service.otlp.build_gauge(
-            kpi["name"], float(resolve(kpi["value"], rng)), kpi.get("unit", "")
+    metrics = []
+    for kpi in scenario._kpi_emissions:
+        kpi_name = kpi["name"]
+        value_spec = kpi["value"]
+        nominal = float(resolve(value_spec, rng))
+        round_digits = value_spec.get("round") if isinstance(value_spec, dict) else None
+
+        impacts = impact_candidates.get(kpi_name)
+        if impacts:
+            # Resolve each impact entry to a candidate value, then keep the
+            # one that deviates most from nominal (strongest-deviation rule).
+            candidates: list[float] = []
+            for impact in impacts:
+                if "value" in impact:
+                    candidates.append(float(resolve(impact["value"], rng)))
+                elif "factor" in impact:
+                    candidates.append(nominal * float(resolve(impact["factor"], rng)))
+            if candidates:
+                final = max(candidates, key=lambda c: abs(c - nominal))
+            else:
+                final = nominal
+        else:
+            final = nominal
+
+        # Match the nominal spec's precision regardless of which branch (or
+        # impact factor/value) produced the final number.
+        if round_digits is not None:
+            final = round(final, int(round_digits))
+
+        metrics.append(
+            service.otlp.build_gauge(kpi_name, final, kpi.get("unit", ""))
         )
-        for kpi in scenario._kpi_emissions
-    ]
+
     if metrics:
         service.otlp.send_metrics(service.resource, metrics)

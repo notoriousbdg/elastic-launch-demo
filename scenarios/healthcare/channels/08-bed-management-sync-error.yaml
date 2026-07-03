@@ -53,3 +53,12 @@ rca_clues:
   clinical-alerts:
     alerts.patient_location_stale: true
     alerts.affected_units: {randint: [1, 4]}
+business_impact:
+  - kpi: business.admits_per_min
+    factor: {uniform: [0.20, 0.50]}
+  - kpi: business.discharges_per_min
+    factor: {uniform: [0.25, 0.55]}
+  - kpi: business.ed_door_to_provider_min
+    factor: {uniform: [1.5, 3.0]}
+  - kpi: business.hcahps_proxy_score
+    factor: {uniform: [0.30, 0.60]}

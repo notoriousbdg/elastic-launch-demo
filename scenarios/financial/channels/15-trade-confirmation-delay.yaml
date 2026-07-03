@@ -56,3 +56,12 @@ rca_clues:
   compliance-monitor:
     compliance.confirmation_reg_breach_count: {randint: [1, 100]}
     compliance.mifid_disclosure_delay_s: {uniform: [300, 7200], round: 1}
+business_impact:
+  - kpi: business.reporting_latency_sec
+    factor: {uniform: [5.0, 12.0]}
+  - kpi: business.settlement_success_rate_pct
+    factor: {uniform: [0.80, 0.95]}
+  - kpi: business.ops_alerts_per_min
+    factor: {uniform: [2.0, 5.0]}
+  - kpi: business.system_availability_pct
+    factor: {uniform: [0.85, 0.96]}

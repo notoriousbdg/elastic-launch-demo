@@ -57,3 +57,12 @@ rca_clues:
     chat.report_button_clicks: {randint: [1000, 10000]}
   auth-gateway:
     auth.flagged_account_backlog: {randint: [100, 1000]}
+business_impact:
+  - kpi: business.content_moderation_queue_size
+    factor: {uniform: [3.0, 6.0]}
+  - kpi: business.toxic_report_rate_pct
+    factor: {uniform: [2.0, 4.5]}
+  - kpi: business.chat_messages_per_min
+    factor: {uniform: [0.30, 0.60]}
+  - kpi: business.net_satisfaction_proxy_nps
+    factor: {uniform: [0.20, 0.45]}

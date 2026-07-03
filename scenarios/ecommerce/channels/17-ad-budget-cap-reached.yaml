@@ -51,3 +51,10 @@ rca_clues:
   analytics-pipeline:
     analytics.ad_revenue_drop_detected: true
     analytics.revenue_delta_usd_hr: {randint: [-5000, -500]}
+business_impact:
+  - kpi: business.ad_revenue_usd_per_min
+    factor: {uniform: [0.05, 0.15]}
+  - kpi: business.gmv_usd_per_min
+    factor: {uniform: [0.30, 0.55]}
+  - kpi: business.conversion_rate_pct
+    factor: {uniform: [0.35, 0.60]}

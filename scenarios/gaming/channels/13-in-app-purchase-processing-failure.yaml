@@ -65,3 +65,12 @@ rca_clues:
     auth.token_valid: true
   analytics-pipeline:
     analytics.failed_txn_count: {randint: [100, 2000]}
+business_impact:
+  - kpi: business.revenue_usd_per_min
+    factor: {uniform: [0.10, 0.35]}
+  - kpi: business.in_app_purchases_per_min
+    factor: {uniform: [0.10, 0.35]}
+  - kpi: business.battle_pass_conversions_per_min
+    factor: {uniform: [0.15, 0.40]}
+  - kpi: business.churn_risk_index_0_100
+    factor: {uniform: [2.0, 4.5]}

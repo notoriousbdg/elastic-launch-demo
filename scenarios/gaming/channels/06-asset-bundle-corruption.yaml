@@ -68,3 +68,12 @@ rca_clues:
     game.client_redownloads: {randint: [20, 200]}
   moderation-engine:
     moderation.asset_scan_status: bypassed
+business_impact:
+  - kpi: business.sessions_per_min
+    factor: {uniform: [0.20, 0.45]}
+  - kpi: business.crash_rate_pct
+    factor: {uniform: [3.0, 6.0]}
+  - kpi: business.player_bug_reports_per_min
+    factor: {uniform: [2.5, 5.0]}
+  - kpi: business.churn_risk_index_0_100
+    factor: {uniform: [1.5, 3.0]}

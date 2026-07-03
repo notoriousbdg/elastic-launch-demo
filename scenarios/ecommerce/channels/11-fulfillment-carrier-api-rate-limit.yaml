@@ -44,3 +44,12 @@ rca_clues:
   analytics-pipeline:
     analytics.fulfillment_event_lag: true
     analytics.on_time_metric_stale: true
+business_impact:
+  - kpi: business.fulfillment_sla_pct
+    factor: {uniform: [0.20, 0.45]}
+  - kpi: business.same_day_eligible_pct
+    factor: {uniform: [0.15, 0.40]}
+  - kpi: business.cancel_rate_pct
+    factor: {uniform: [2.0, 4.0]}
+  - kpi: business.orders_placed_per_min
+    factor: {uniform: [0.35, 0.60]}

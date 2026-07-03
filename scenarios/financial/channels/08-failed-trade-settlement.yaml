@@ -60,3 +60,12 @@ rca_clues:
   audit-logger:
     audit.settle_fail_trail_entries: {randint: [3, 30]}
     audit.recycled_instruction_count: {randint: [0, 5]}
+business_impact:
+  - kpi: business.settlement_success_rate_pct
+    factor: {uniform: [0.55, 0.82]}
+  - kpi: business.settlement_fails_in_queue
+    factor: {uniform: [2.5, 6.0]}
+  - kpi: business.notional_value_usd_per_min
+    factor: {uniform: [0.25, 0.55]}
+  - kpi: business.counterparty_credit_risk_usd
+    factor: {uniform: [2.0, 4.5]}

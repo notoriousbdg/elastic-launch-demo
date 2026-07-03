@@ -51,3 +51,12 @@ rca_clues:
     upstream.degraded_subsystem: payload
   range-safety:
     safety.structural_status: monitor
+business_impact:
+  - kpi: business.mission_success_probability_pct
+    factor: {uniform: [0.55, 0.78]}
+  - kpi: business.launch_readiness_index_0_100
+    factor: {uniform: [0.45, 0.70]}
+  - kpi: business.spacecraft_health_index_0_100
+    factor: {uniform: [0.60, 0.82]}
+  - kpi: business.schedule_variance_days
+    factor: {uniform: [1.5, 4.0]}

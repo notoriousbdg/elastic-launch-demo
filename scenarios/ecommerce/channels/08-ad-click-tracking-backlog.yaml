@@ -53,3 +53,10 @@ rca_clues:
   recommendation-engine:
     reco.click_signal_stale: true
     reco.behavioral_features_lag_min: {randint: [10, 60]}
+business_impact:
+  - kpi: business.ad_revenue_usd_per_min
+    factor: {uniform: [0.25, 0.55]}
+  - kpi: business.conversion_rate_pct
+    factor: {uniform: [0.35, 0.60]}
+  - kpi: business.gmv_usd_per_min
+    factor: {uniform: [0.35, 0.60]}

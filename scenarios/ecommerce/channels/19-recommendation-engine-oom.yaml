@@ -45,3 +45,12 @@ rca_clues:
   product-catalog:
     catalog.reco_lookup_errors: {randint: [100, 1000]}
     catalog.featured_fallback_active: true
+business_impact:
+  - kpi: business.conversion_rate_pct
+    factor: {uniform: [0.30, 0.55]}
+  - kpi: business.page_views_per_min
+    factor: {uniform: [0.35, 0.60]}
+  - kpi: business.cart_adds_per_min
+    factor: {uniform: [0.25, 0.50]}
+  - kpi: business.sessions_per_min
+    factor: {uniform: [0.35, 0.60]}

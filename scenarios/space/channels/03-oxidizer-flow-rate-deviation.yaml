@@ -46,3 +46,12 @@ rca_clues:
     validation.sensor_type: flow_rate
   mission-control:
     upstream.degraded_subsystem: propulsion
+business_impact:
+  - kpi: business.mission_success_probability_pct
+    factor: {uniform: [0.60, 0.82]}
+  - kpi: business.delta_v_budget_remaining_mps
+    factor: {uniform: [0.70, 0.88]}
+  - kpi: business.spacecraft_health_index_0_100
+    factor: {uniform: [0.68, 0.87]}
+  - kpi: business.fault_events_per_min
+    factor: {uniform: [3.0, 6.5]}

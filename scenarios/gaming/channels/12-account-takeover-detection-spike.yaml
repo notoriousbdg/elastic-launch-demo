@@ -63,3 +63,12 @@ rca_clues:
     moderation.ato_flagged_accounts: {randint: [20, 200]}
   analytics-pipeline:
     analytics.security_event_surge: true
+business_impact:
+  - kpi: business.revenue_usd_per_min
+    factor: {uniform: [0.25, 0.55]}
+  - kpi: business.in_app_purchases_per_min
+    factor: {uniform: [0.20, 0.50]}
+  - kpi: business.churn_risk_index_0_100
+    factor: {uniform: [2.0, 4.5]}
+  - kpi: business.new_registrations_per_min
+    factor: {uniform: [0.30, 0.60]}

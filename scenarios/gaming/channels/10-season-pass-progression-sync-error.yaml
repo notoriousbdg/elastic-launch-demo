@@ -62,3 +62,12 @@ rca_clues:
     payment.refund_risk: {choice: [low, medium, high]}
   analytics-pipeline:
     analytics.xp_pipeline_lag_s: {randint: [30, 300]}
+business_impact:
+  - kpi: business.battle_pass_conversions_per_min
+    factor: {uniform: [0.20, 0.45]}
+  - kpi: business.revenue_usd_per_min
+    factor: {uniform: [0.25, 0.50]}
+  - kpi: business.churn_risk_index_0_100
+    factor: {uniform: [1.8, 3.5]}
+  - kpi: business.quests_completed_per_min
+    factor: {uniform: [0.25, 0.55]}

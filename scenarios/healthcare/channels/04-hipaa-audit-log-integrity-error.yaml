@@ -60,3 +60,12 @@ rca_clues:
   billing-processor:
     billing.audit_gap_in_claims: true
     billing.cms_reporting_risk: {choice: [low, medium, high]}
+business_impact:
+  - kpi: business.staff_compliance_rate_pct
+    factor: {uniform: [0.20, 0.50]}
+  - kpi: business.clean_claim_rate_pct
+    factor: {uniform: [0.30, 0.60]}
+  - kpi: business.collections_usd_per_min
+    factor: {uniform: [0.25, 0.55]}
+  - kpi: business.denials_per_min
+    factor: {uniform: [2.0, 4.5]}

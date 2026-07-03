@@ -46,3 +46,12 @@ rca_clues:
     validation.optics_contamination: {choice: [true, false]}
   mission-control:
     upstream.degraded_subsystem: guidance
+business_impact:
+  - kpi: business.maneuver_accuracy_pct
+    factor: {uniform: [0.50, 0.75]}
+  - kpi: business.trajectory_deviation_meters
+    factor: {uniform: [3.5, 9.0]}
+  - kpi: business.mission_success_probability_pct
+    factor: {uniform: [0.70, 0.88]}
+  - kpi: business.autonomous_recovery_rate_pct
+    factor: {uniform: [0.60, 0.82]}

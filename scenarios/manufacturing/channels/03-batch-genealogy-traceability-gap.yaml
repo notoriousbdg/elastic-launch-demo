@@ -53,3 +53,12 @@ rca_clues:
     quality.batch_under_review: true
   ot-historian:
     historian.consumption_event_gap: true
+business_impact:
+  - kpi: business.first_pass_yield_pct
+    factor: {uniform: [0.35, 0.65]}
+  - kpi: business.customer_complaints_per_day
+    factor: {uniform: [2.5, 5.5]}
+  - kpi: business.cost_of_poor_quality_usd_per_min
+    factor: {uniform: [2.0, 4.0]}
+  - kpi: business.on_time_delivery_pct
+    factor: {uniform: [0.40, 0.70]}

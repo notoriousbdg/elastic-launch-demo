@@ -54,3 +54,12 @@ rca_clues:
   audit-logger:
     audit.book_event_queue_depth: {randint: [100, 5000]}
     audit.imbalance_alert_count: {randint: [1, 50]}
+business_impact:
+  - kpi: business.order_flow_per_min
+    factor: {uniform: [0.30, 0.60]}
+  - kpi: business.fill_rate_pct
+    factor: {uniform: [0.25, 0.55]}
+  - kpi: business.rejected_orders_per_min
+    factor: {uniform: [2.5, 6.0]}
+  - kpi: business.avg_spread_bps
+    factor: {uniform: [2.0, 5.0]}

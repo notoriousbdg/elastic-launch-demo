@@ -58,3 +58,12 @@ rca_clues:
   member-portal:
     portal.balance_inconsistency_reports: {randint: [50, 200]}
     portal.overdraft_risk_elevated: true
+business_impact:
+  - kpi: business.active_digital_sessions
+    factor: {uniform: [0.45, 0.70]}
+  - kpi: business.digital_transaction_pct
+    factor: {uniform: [0.40, 0.65]}
+  - kpi: business.chargeback_rate_pct
+    factor: {uniform: [1.8, 3.5]}
+  - kpi: business.complaint_tickets_per_min
+    factor: {uniform: [2.0, 4.0]}

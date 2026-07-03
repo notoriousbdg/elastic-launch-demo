@@ -36,3 +36,12 @@ rca_clues:
     scada.leaked_session_count: {randint: [15, 45]}
   mes-controller:
     mes.scada_connection_refused_count: {randint: [3, 25]}
+business_impact:
+  - kpi: business.oee_overall_pct
+    factor: {uniform: [0.30, 0.60]}
+  - kpi: business.oee_availability_pct
+    factor: {uniform: [0.30, 0.60]}
+  - kpi: business.throughput_units_per_hour
+    factor: {uniform: [0.25, 0.55]}
+  - kpi: business.unplanned_downtime_min_per_shift
+    factor: {uniform: [2.0, 4.5]}

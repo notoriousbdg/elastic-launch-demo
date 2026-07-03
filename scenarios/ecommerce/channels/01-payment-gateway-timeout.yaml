@@ -56,3 +56,12 @@ rca_clues:
   fulfillment-orchestrator:
     fulfillment.pending_payment_orders: {randint: [20, 200]}
     fulfillment.hold_queue_depth: {randint: [10, 100]}
+business_impact:
+  - kpi: business.conversion_rate_pct
+    factor: {uniform: [0.15, 0.40]}
+  - kpi: business.orders_placed_per_min
+    factor: {uniform: [0.20, 0.45]}
+  - kpi: business.gmv_usd_per_min
+    factor: {uniform: [0.20, 0.45]}
+  - kpi: business.cancel_rate_pct
+    factor: {uniform: [2.5, 5.0]}

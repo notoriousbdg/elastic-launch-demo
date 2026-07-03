@@ -50,3 +50,12 @@ rca_clues:
   clinical-alerts:
     alerts.ehr_integration_status: stale_data
     alerts.suppressed_count: {randint: [5, 30]}
+business_impact:
+  - kpi: business.hl7_messages_per_min
+    factor: {uniform: [0.20, 0.45]}
+  - kpi: business.ehr_response_time_ms
+    factor: {uniform: [1.8, 3.5]}
+  - kpi: business.order_turnaround_min
+    factor: {uniform: [1.6, 3.0]}
+  - kpi: business.patient_safety_events_per_min
+    factor: {uniform: [1.5, 3.0]}

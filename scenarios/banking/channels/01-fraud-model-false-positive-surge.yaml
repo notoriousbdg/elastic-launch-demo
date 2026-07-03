@@ -60,3 +60,12 @@ rca_clues:
   auth-gateway:
     auth.pcs_whitelist_status: NOT_APPLIED
     auth.geo_velocity_alerts: {randint: [500, 2000]}
+business_impact:
+  - kpi: business.fee_revenue_usd_per_min
+    factor: {uniform: [0.25, 0.55]}
+  - kpi: business.card_interchange_usd_per_min
+    factor: {uniform: [0.20, 0.50]}
+  - kpi: business.chargeback_rate_pct
+    factor: {uniform: [1.8, 3.5]}
+  - kpi: business.complaint_tickets_per_min
+    factor: {uniform: [2.5, 5.0]}

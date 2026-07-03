@@ -61,3 +61,12 @@ rca_clues:
     matchmaking.auth_timeout_pct: {uniform: [10.0, 50.0], round: 1}
   chat-service:
     chat.disconnected_users: {randint: [500, 5000]}
+business_impact:
+  - kpi: business.sessions_per_min
+    factor: {uniform: [0.15, 0.40]}
+  - kpi: business.daily_active_users
+    factor: {uniform: [0.25, 0.50]}
+  - kpi: business.new_registrations_per_min
+    factor: {uniform: [0.20, 0.45]}
+  - kpi: business.churn_risk_index_0_100
+    factor: {uniform: [2.0, 4.0]}

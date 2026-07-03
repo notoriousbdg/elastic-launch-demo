@@ -51,3 +51,12 @@ rca_clues:
   customer-portal:
     portal.stale_quote_warnings_shown: {randint: [10, 500]}
     portal.client_views_affected: {randint: [10, 200]}
+business_impact:
+  - kpi: business.order_flow_per_min
+    factor: {uniform: [0.35, 0.65]}
+  - kpi: business.avg_spread_bps
+    factor: {uniform: [2.0, 5.5]}
+  - kpi: business.slippage_cost_usd_per_min
+    factor: {uniform: [2.0, 5.0]}
+  - kpi: business.best_execution_pct
+    factor: {uniform: [0.68, 0.88]}

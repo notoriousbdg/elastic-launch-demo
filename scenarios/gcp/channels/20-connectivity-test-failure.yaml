@@ -71,3 +71,12 @@ rca_clues:
     vpn.cross_network_test: FAIL
   cloud-interconnect:
     interconnect.hybrid_path_test: FAIL
+business_impact:
+  - kpi: business.uptime_pct
+    factor: {uniform: [0.80, 0.93]}
+  - kpi: business.availability_index_0_100
+    factor: {uniform: [0.70, 0.88]}
+  - kpi: business.incident_mttd_min
+    factor: {uniform: [1.5, 3.5]}
+  - kpi: business.network_sla_compliance_pct
+    factor: {uniform: [0.62, 0.82]}

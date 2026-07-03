@@ -61,3 +61,12 @@ rca_clues:
   wifi-controller:
     wifi.uplink_state: flapping
     wifi.ap_isolation_triggered: {randint: [2, 10]}
+business_impact:
+  - kpi: business.app_sessions_per_min
+    factor: {uniform: [0.25, 0.55]}
+  - kpi: business.page_views_per_min
+    factor: {uniform: [0.25, 0.55]}
+  - kpi: business.live_concurrent_viewers
+    factor: {uniform: [0.30, 0.60]}
+  - kpi: business.churn_risk_index_0_100
+    factor: {uniform: [1.8, 3.5]}

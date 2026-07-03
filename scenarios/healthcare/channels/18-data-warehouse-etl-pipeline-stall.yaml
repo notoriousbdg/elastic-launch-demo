@@ -46,3 +46,12 @@ rca_clues:
   ehr-system:
     ehr.oltp_contention_detected: true
     ehr.query_timeout_count: {randint: [5, 30]}
+business_impact:
+  - kpi: business.collections_usd_per_min
+    factor: {uniform: [0.20, 0.50]}
+  - kpi: business.unbilled_charges_usd_per_min
+    factor: {uniform: [2.0, 4.0]}
+  - kpi: business.staff_compliance_rate_pct
+    factor: {uniform: [0.25, 0.55]}
+  - kpi: business.accounts_receivable_days
+    factor: {uniform: [1.5, 2.8]}

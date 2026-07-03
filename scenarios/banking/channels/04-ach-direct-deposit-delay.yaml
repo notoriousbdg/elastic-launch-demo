@@ -58,3 +58,12 @@ rca_clues:
   fraud-sentinel:
     fraud.ach_screening_queue_depth: {randint: [5000, 15000]}
     fraud.ofac_response_ms: {randint: [30000, 60000]}
+business_impact:
+  - kpi: business.deposit_growth_usd_per_min
+    factor: {uniform: [0.10, 0.35]}
+  - kpi: business.net_interest_income_usd_per_min
+    factor: {uniform: [0.60, 0.80]}
+  - kpi: business.complaint_tickets_per_min
+    factor: {uniform: [2.5, 5.0]}
+  - kpi: business.csat_score_0_5
+    factor: {uniform: [0.45, 0.70]}

@@ -52,3 +52,12 @@ rca_clues:
     propulsion.calibration_confidence: low
   navigation:
     gnc.calibration_confidence: low
+business_impact:
+  - kpi: business.telemetry_coverage_pct
+    factor: {uniform: [0.50, 0.72]}
+  - kpi: business.maneuver_accuracy_pct
+    factor: {uniform: [0.60, 0.82]}
+  - kpi: business.spacecraft_health_index_0_100
+    factor: {uniform: [0.65, 0.85]}
+  - kpi: business.mission_success_probability_pct
+    factor: {uniform: [0.70, 0.88]}

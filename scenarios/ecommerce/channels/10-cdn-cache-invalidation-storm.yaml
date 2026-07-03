@@ -50,3 +50,10 @@ rca_clues:
   analytics-pipeline:
     analytics.page_view_spike_detected: true
     analytics.ingest_backpressure: true
+business_impact:
+  - kpi: business.sessions_per_min
+    factor: {uniform: [0.30, 0.55]}
+  - kpi: business.page_views_per_min
+    factor: {uniform: [0.20, 0.45]}
+  - kpi: business.conversion_rate_pct
+    factor: {uniform: [0.30, 0.55]}

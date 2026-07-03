@@ -56,3 +56,12 @@ rca_clues:
   card-printing-system:
     print.reprint_triggered_by_desync: {randint: [3, 30]}
     print.inventory_hold: true
+business_impact:
+  - kpi: business.merch_gmv_usd_per_min
+    factor: {uniform: [0.30, 0.60]}
+  - kpi: business.loyalty_points_redeemed_per_min
+    factor: {uniform: [0.35, 0.65]}
+  - kpi: business.churn_risk_index_0_100
+    factor: {uniform: [1.5, 3.0]}
+  - kpi: business.net_satisfaction_proxy_nps
+    factor: {uniform: [0.25, 0.55]}

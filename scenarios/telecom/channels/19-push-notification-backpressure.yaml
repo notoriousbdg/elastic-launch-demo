@@ -62,3 +62,12 @@ rca_clues:
   provisioning-service:
     provisioning.notification_dependency_timeout: true
     provisioning.async_queue_building: true
+business_impact:
+  - kpi: business.activations_per_min
+    factor: {uniform: [0.25, 0.55]}
+  - kpi: business.esim_provisions_per_min
+    factor: {uniform: [0.25, 0.55]}
+  - kpi: business.support_tickets_per_min
+    factor: {uniform: [2.0, 4.0]}
+  - kpi: business.nps
+    factor: {uniform: [0.35, 0.65]}

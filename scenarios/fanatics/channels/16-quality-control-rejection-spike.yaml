@@ -60,3 +60,12 @@ rca_clues:
   auction-engine:
     auction.delayed_shipment_auctions: {randint: [2, 20]}
     auction.buyer_dispute_count: {randint: [1, 10]}
+business_impact:
+  - kpi: business.merch_gmv_usd_per_min
+    factor: {uniform: [0.25, 0.55]}
+  - kpi: business.loyalty_points_redeemed_per_min
+    factor: {uniform: [0.30, 0.60]}
+  - kpi: business.churn_risk_index_0_100
+    factor: {uniform: [2.0, 4.0]}
+  - kpi: business.net_satisfaction_proxy_nps
+    factor: {uniform: [0.20, 0.50]}

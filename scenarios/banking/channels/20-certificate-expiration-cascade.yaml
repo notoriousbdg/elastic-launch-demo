@@ -63,3 +63,12 @@ rca_clues:
   member-portal:
     portal.cert_status: DEGRADED
     portal.pinned_cert_fallback_active: true
+business_impact:
+  - kpi: business.active_digital_sessions
+    factor: {uniform: [0.10, 0.35]}
+  - kpi: business.mobile_logins_per_min
+    factor: {uniform: [0.10, 0.35]}
+  - kpi: business.api_calls_per_min
+    factor: {uniform: [0.10, 0.30]}
+  - kpi: business.digital_transaction_pct
+    factor: {uniform: [0.15, 0.40]}

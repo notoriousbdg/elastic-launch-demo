@@ -52,3 +52,12 @@ rca_clues:
   customer-portal:
     portal.aml_hold_notifications_pending: {randint: [1, 20]}
     portal.account_aml_restricted: true
+business_impact:
+  - kpi: business.order_flow_per_min
+    factor: {uniform: [0.25, 0.55]}
+  - kpi: business.rejected_orders_per_min
+    factor: {uniform: [2.0, 5.0]}
+  - kpi: business.notional_value_usd_per_min
+    factor: {uniform: [0.30, 0.60]}
+  - kpi: business.reporting_latency_sec
+    factor: {uniform: [2.5, 6.0]}

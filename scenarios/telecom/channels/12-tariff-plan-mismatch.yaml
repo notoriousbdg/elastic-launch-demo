@@ -63,3 +63,12 @@ rca_clues:
   activation-service:
     activation.billing_rejection_rate: {uniform: [0.05, 0.3], round: 2}
     activation.manual_reconciliation_needed: true
+business_impact:
+  - kpi: business.activations_per_min
+    factor: {uniform: [0.20, 0.50]}
+  - kpi: business.revenue_usd_per_min
+    factor: {uniform: [0.20, 0.50]}
+  - kpi: business.trouble_to_billing_ratio_pct
+    factor: {uniform: [3.0, 6.0]}
+  - kpi: business.esim_provisions_per_min
+    factor: {uniform: [0.20, 0.50]}

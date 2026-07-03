@@ -48,3 +48,12 @@ rca_clues:
     telemetry.validation_status: stalled
   telemetry-relay:
     relay.upstream_backpressure: true
+business_impact:
+  - kpi: business.telemetry_coverage_pct
+    factor: {uniform: [0.40, 0.65]}
+  - kpi: business.spacecraft_health_index_0_100
+    factor: {uniform: [0.60, 0.80]}
+  - kpi: business.autonomous_recovery_rate_pct
+    factor: {uniform: [0.50, 0.75]}
+  - kpi: business.fault_events_per_min
+    factor: {uniform: [3.5, 7.0]}

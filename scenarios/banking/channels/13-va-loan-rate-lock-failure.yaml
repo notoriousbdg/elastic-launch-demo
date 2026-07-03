@@ -61,3 +61,12 @@ rca_clues:
   document-vault:
     document.coe_document_on_file: true
     document.loan_package_generation: BLOCKED
+business_impact:
+  - kpi: business.loan_origination_usd_per_min
+    factor: {uniform: [0.15, 0.40]}
+  - kpi: business.net_interest_income_usd_per_min
+    factor: {uniform: [0.55, 0.80]}
+  - kpi: business.fee_revenue_usd_per_min
+    factor: {uniform: [0.25, 0.55]}
+  - kpi: business.account_openings_per_min
+    factor: {uniform: [0.20, 0.50]}

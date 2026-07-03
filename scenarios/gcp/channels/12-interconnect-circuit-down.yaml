@@ -55,3 +55,12 @@ rca_clues:
   network-intelligence:
     ni.interconnect_path_test: UNREACHABLE
     ni.failover_status: IN_PROGRESS
+business_impact:
+  - kpi: business.interconnect_utilization_pct
+    factor: {uniform: [0.10, 0.35]}
+  - kpi: business.bytes_egress_gib_per_min
+    factor: {uniform: [0.25, 0.55]}
+  - kpi: business.network_sla_compliance_pct
+    factor: {uniform: [0.45, 0.72]}
+  - kpi: business.customer_sla_breach_count
+    factor: {uniform: [4.0, 9.0]}

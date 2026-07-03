@@ -64,3 +64,12 @@ rca_clues:
   auction-engine:
     auction.wss_handshake_failures: {randint: [10, 100]}
     auction.bidder_disconnects: {randint: [5, 80]}
+business_impact:
+  - kpi: business.app_sessions_per_min
+    factor: {uniform: [0.20, 0.50]}
+  - kpi: business.merch_gmv_usd_per_min
+    factor: {uniform: [0.20, 0.50]}
+  - kpi: business.subscription_mrr_usd_per_min
+    factor: {uniform: [0.25, 0.55]}
+  - kpi: business.churn_risk_index_0_100
+    factor: {uniform: [2.0, 4.5]}

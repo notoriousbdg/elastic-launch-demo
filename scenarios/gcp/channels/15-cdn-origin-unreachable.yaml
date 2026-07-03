@@ -50,3 +50,12 @@ rca_clues:
     lb.healthy_backends: 0
   cloud-armor-waf:
     armor.origin_path_blocked: {choice: [true, false]}
+business_impact:
+  - kpi: business.cdn_cache_hit_rate_pct
+    factor: {uniform: [0.10, 0.35]}
+  - kpi: business.cdn_error_rate_pct
+    factor: {uniform: [4.0, 12.0]}
+  - kpi: business.requests_per_min
+    factor: {uniform: [0.20, 0.50]}
+  - kpi: business.uptime_pct
+    factor: {uniform: [0.75, 0.90]}

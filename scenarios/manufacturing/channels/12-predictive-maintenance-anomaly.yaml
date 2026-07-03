@@ -45,3 +45,12 @@ rca_clues:
     mes.asset_at_risk: true
   scada-gateway:
     scada.thermal_dt_c: {uniform: [8.0, 18.0], round: 1}
+business_impact:
+  - kpi: business.mtbf_hours
+    factor: {uniform: [0.25, 0.55]}
+  - kpi: business.mttr_minutes
+    factor: {uniform: [2.0, 4.5]}
+  - kpi: business.spare_parts_stockout_risk_pct
+    factor: {uniform: [2.0, 4.0]}
+  - kpi: business.oee_availability_pct
+    factor: {uniform: [0.40, 0.70]}

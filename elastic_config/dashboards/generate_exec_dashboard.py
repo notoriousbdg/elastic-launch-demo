@@ -374,6 +374,74 @@ PALETTE_CPU = make_metric_palette([
 ])
 
 
+# ── Data-driven palettes for executive business KPI tiles ─────────────────────
+# Business KPIs (business.*) don't have hand-tuned palettes per metric — instead
+# thresholds are derived from each KPI's own nominal range (executive_kpi_emissions
+# `value:` spec), so a fault that pushes a KPI's factor/value outside its normal
+# band is the only thing that ever triggers yellow/red.
+
+# Substrings that mark a KPI as "lower raw value is better" (errors, latency,
+# deviation-style metrics). Anything not matched defaults to "higher is better"
+# (revenue, conversion, uptime, success-rate style metrics). This is a heuristic,
+# not a per-KPI declaration — asymmetric metrics (e.g. schedule_variance_days,
+# where negative is actually good) won't be perfectly modeled, but the resulting
+# tile is still far more useful than a single static color.
+_LOWER_IS_BETTER_KEYWORDS = (
+    "cancel", "return", "churn", "complaint", "chargeback", "aml_flag",
+    "regulatory_breach", "risk", "deviation", "drift", "variance",
+    "packet_loss", "latency", "downtime", "delay", "backlog", "error",
+    "incident", "defect", "dispute", "delinquen", "fraud_loss",
+    "fault_events", "bounce_rate", "failed", "outage", "breach",
+)
+
+
+def _kpi_is_lower_better(kpi_name: str) -> bool:
+    return any(kw in kpi_name for kw in _LOWER_IS_BETTER_KEYWORDS)
+
+
+def _kpi_nominal_range(value_spec) -> "tuple[float, float] | None":
+    """Extract (lo, hi) from a KPI's `value:` DSL spec, or None if not derivable."""
+    if not isinstance(value_spec, dict):
+        return None
+    bounds = value_spec.get("uniform") or value_spec.get("randint")
+    if not bounds or len(bounds) != 2:
+        return None
+    lo, hi = float(bounds[0]), float(bounds[1])
+    return (lo, hi) if hi > lo else None
+
+
+def kpi_palette(kpi_name: str, value_spec) -> "dict | None":
+    """Derive a green/yellow/red palette from a KPI's own nominal range.
+
+    Returns None when the range can't be derived (e.g. a `choice` spec) so
+    callers can fall back to a flat color rather than a misleading palette.
+    """
+    bounds = _kpi_nominal_range(value_spec)
+    if bounds is None:
+        return None
+    lo, hi = bounds
+    span = hi - lo
+    sentinel = max(hi, lo) * 4 + 1_000_000  # comfortably above any degraded/inflated value
+
+    if _kpi_is_lower_better(kpi_name):
+        # Nominal band (up to hi) is green; a fault pushing the raw value
+        # above hi (e.g. more errors, more drift) turns the tile yellow/red.
+        return make_metric_palette([
+            ("#54B399", hi + 0.05 * span),
+            ("#D6BF57", hi + 0.30 * span),
+            ("#E7664C", sentinel),
+        ])
+    # Higher-is-better: nominal band (from lo up) is green; a fault dragging
+    # the value below lo (e.g. lower conversion, lower uptime) turns it red.
+    # Clamp to 0 since business KPIs are non-negative and palette stops must
+    # stay within the (rangeMin=0) range Kibana expects.
+    return make_metric_palette([
+        ("#E7664C", max(0.0, lo - 0.30 * span)),
+        ("#D6BF57", max(0.0, lo - 0.05 * span)),
+        ("#54B399", sentinel),
+    ])
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Main generation function
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1259,6 +1327,13 @@ def _build_business_executive_dashboard_ndjson(scenario) -> str:
     svc_kql = f'resource.attributes.service.name: "{svc}"'
     intro = scenario.executive_dashboard_intro
 
+    # KPI name (e.g. "business.mission_success_probability_pct") -> nominal
+    # `value:` spec, used to derive a fault-aware palette per tile below.
+    kpi_value_spec_by_name = {
+        kpi["name"]: kpi.get("value")
+        for kpi in getattr(scenario, "_kpi_emissions", [])
+    }
+
     panels: list[dict] = []
 
     def _eb_metric_tile(panel_index: str, x: int, y: int, w: int, title: str, source_field: str):
@@ -1266,14 +1341,19 @@ def _build_business_executive_dashboard_ndjson(scenario) -> str:
         cid = uid()
         columns = {cid: col_average(source_field, label=title)}
         layer = make_layer(lid, [cid], columns, DATA_VIEW_ID_METRICS)
+        # source_field looks like "metrics.business.foo_pct"; the KPI's own
+        # name (as declared in executive_kpi_emissions) drops the "metrics." prefix.
+        kpi_name = source_field.removeprefix("metrics.")
+        palette = kpi_palette(kpi_name, kpi_value_spec_by_name.get(kpi_name))
+        metric_style = {"palette": palette} if palette else {"color": "#00BFB3"}
         state = make_state(
             layer,
             {
                 "layerId": lid,
                 "layerType": "data",
                 "metricAccessor": cid,
-                "color": "#00BFB3",
                 "subtitle": svc,
+                **metric_style,
             },
             query=svc_kql,
         )

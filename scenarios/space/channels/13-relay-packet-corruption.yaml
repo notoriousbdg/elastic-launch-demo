@@ -46,3 +46,12 @@ rca_clues:
     validation.corrupt_route: {choice: [AWS-GCP-01, GCP-AZ-01]}
   mission-control:
     upstream.degraded_subsystem: relay
+business_impact:
+  - kpi: business.telemetry_coverage_pct
+    factor: {uniform: [0.50, 0.75]}
+  - kpi: business.packet_loss_rate_pct
+    factor: {uniform: [4.0, 9.0]}
+  - kpi: business.downlink_data_rate_mbps
+    factor: {uniform: [0.55, 0.80]}
+  - kpi: business.spacecraft_health_index_0_100
+    factor: {uniform: [0.70, 0.88]}

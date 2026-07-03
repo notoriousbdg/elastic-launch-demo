@@ -45,3 +45,12 @@ rca_clues:
   order-management:
     order.price_dispute_risk_count: {randint: [10, 200]}
     order.price_validation_failures: {randint: [5, 100]}
+business_impact:
+  - kpi: business.conversion_rate_pct
+    factor: {uniform: [0.30, 0.55]}
+  - kpi: business.orders_placed_per_min
+    factor: {uniform: [0.30, 0.55]}
+  - kpi: business.cancel_rate_pct
+    factor: {uniform: [2.0, 4.0]}
+  - kpi: business.csat_score_0_5
+    factor: {uniform: [0.35, 0.60]}

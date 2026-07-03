@@ -61,3 +61,12 @@ rca_clues:
   firewall-gateway:
     firewall.ipsec_esp_drops: {randint: [100, 5000]}
     firewall.dpd_timeout_count: {randint: [5, 50]}
+business_impact:
+  - kpi: business.app_sessions_per_min
+    factor: {uniform: [0.20, 0.50]}
+  - kpi: business.page_views_per_min
+    factor: {uniform: [0.20, 0.50]}
+  - kpi: business.betting_handle_usd_per_min
+    factor: {uniform: [0.25, 0.55]}
+  - kpi: business.api_data_partner_revenue_usd_per_min
+    factor: {uniform: [0.25, 0.55]}

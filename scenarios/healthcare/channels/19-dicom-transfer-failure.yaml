@@ -54,3 +54,12 @@ rca_clues:
   data-warehouse:
     etl.imaging_archive_stalled: true
     etl.pending_studies: {randint: [20, 100]}
+business_impact:
+  - kpi: business.imaging_worklist_size
+    factor: {uniform: [2.5, 5.5]}
+  - kpi: business.order_turnaround_min
+    factor: {uniform: [2.0, 4.0]}
+  - kpi: business.patient_safety_events_per_min
+    factor: {uniform: [1.5, 3.0]}
+  - kpi: business.hcahps_proxy_score
+    factor: {uniform: [0.25, 0.55]}

@@ -46,3 +46,12 @@ rca_clues:
     alerts.storage_critical_fired: true
   ehr-system:
     ehr.new_study_routing: blocked
+business_impact:
+  - kpi: business.imaging_worklist_size
+    factor: {uniform: [2.0, 4.5]}
+  - kpi: business.order_turnaround_min
+    factor: {uniform: [1.8, 3.5]}
+  - kpi: business.hcahps_proxy_score
+    factor: {uniform: [0.30, 0.60]}
+  - kpi: business.patient_safety_events_per_min
+    factor: {uniform: [1.5, 3.0]}

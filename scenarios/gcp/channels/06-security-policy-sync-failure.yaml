@@ -55,3 +55,10 @@ rca_clues:
   cloud-load-balancer:
     lb.policy_enforcement_gap: true
     lb.backends_without_policy: {randint: [1, 4]}
+business_impact:
+  - kpi: business.api_success_rate_pct
+    factor: {uniform: [0.78, 0.94]}
+  - kpi: business.network_sla_compliance_pct
+    factor: {uniform: [0.72, 0.90]}
+  - kpi: business.vpc_flow_anomalies_per_min
+    factor: {uniform: [2.5, 5.5]}

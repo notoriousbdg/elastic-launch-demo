@@ -50,3 +50,12 @@ rca_clues:
   settlement-processor:
     settlement.audit_hold_count: {randint: [0, 25]}
     settlement.pending_reg_review: {randint: [1, 50]}
+business_impact:
+  - kpi: business.reporting_latency_sec
+    factor: {uniform: [3.0, 8.0]}
+  - kpi: business.settlement_success_rate_pct
+    factor: {uniform: [0.85, 0.97]}
+  - kpi: business.ops_alerts_per_min
+    factor: {uniform: [2.0, 5.0]}
+  - kpi: business.reconciliation_breaks
+    factor: {uniform: [2.0, 4.5]}

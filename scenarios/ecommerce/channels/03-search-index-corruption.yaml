@@ -44,3 +44,12 @@ rca_clues:
   recommendation-engine:
     reco.catalog_data_stale: true
     reco.fallback_to_trending: true
+business_impact:
+  - kpi: business.search_queries_per_min
+    factor: {uniform: [0.25, 0.50]}
+  - kpi: business.sessions_per_min
+    factor: {uniform: [0.30, 0.55]}
+  - kpi: business.conversion_rate_pct
+    factor: {uniform: [0.25, 0.50]}
+  - kpi: business.page_views_per_min
+    factor: {uniform: [0.30, 0.55]}

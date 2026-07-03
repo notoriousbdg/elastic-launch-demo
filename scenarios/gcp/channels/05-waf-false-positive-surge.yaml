@@ -49,3 +49,12 @@ rca_clues:
     cdn.cache_miss_from_blocks: true
   cloud-load-balancer:
     lb.legitimate_traffic_dropped_pct: {uniform: [5, 25], round: 1}
+business_impact:
+  - kpi: business.requests_per_min
+    factor: {uniform: [0.45, 0.75]}
+  - kpi: business.api_success_rate_pct
+    factor: {uniform: [0.50, 0.78]}
+  - kpi: business.cdn_cache_hit_rate_pct
+    factor: {uniform: [0.55, 0.80]}
+  - kpi: business.customer_sla_breach_count
+    factor: {uniform: [2.5, 5.5]}

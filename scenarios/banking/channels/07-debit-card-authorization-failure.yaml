@@ -63,3 +63,12 @@ rca_clues:
   member-portal:
     portal.card_decline_notification_sent: true
     portal.merchant_mcc: {choice: ['5411', '5541', '5999', '7011']}
+business_impact:
+  - kpi: business.card_interchange_usd_per_min
+    factor: {uniform: [0.15, 0.40]}
+  - kpi: business.digital_transaction_pct
+    factor: {uniform: [0.40, 0.65]}
+  - kpi: business.chargeback_rate_pct
+    factor: {uniform: [2.0, 4.5]}
+  - kpi: business.complaint_tickets_per_min
+    factor: {uniform: [2.5, 5.0]}

@@ -59,3 +59,12 @@ rca_clues:
     game.event_drop_rate_pct: {uniform: [1.0, 15.0], round: 1}
   leaderboard-api:
     leaderboard.rank_update_delay_s: {randint: [30, 300]}
+business_impact:
+  - kpi: business.sessions_per_min
+    factor: {uniform: [0.30, 0.60]}
+  - kpi: business.matches_played_per_min
+    factor: {uniform: [0.30, 0.55]}
+  - kpi: business.daily_retention_rate_pct
+    factor: {uniform: [0.30, 0.60]}
+  - kpi: business.quests_completed_per_min
+    factor: {uniform: [0.25, 0.55]}

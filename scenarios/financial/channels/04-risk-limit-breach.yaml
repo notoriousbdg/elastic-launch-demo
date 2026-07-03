@@ -58,3 +58,12 @@ rca_clues:
   compliance-monitor:
     compliance.risk_breach_events: {randint: [1, 20]}
     compliance.desk_limit_violations: {randint: [1, 5]}
+business_impact:
+  - kpi: business.order_flow_per_min
+    factor: {uniform: [0.15, 0.40]}
+  - kpi: business.notional_value_usd_per_min
+    factor: {uniform: [0.20, 0.50]}
+  - kpi: business.position_limit_breaches
+    factor: {uniform: [3.0, 8.0]}
+  - kpi: business.margin_utilization_pct
+    factor: {uniform: [1.5, 3.0]}

@@ -56,3 +56,12 @@ rca_clues:
   fraud-sentinel:
     fraud.notification_anomaly_detected: true
     fraud.alert_source: transaction_processor_replay
+business_impact:
+  - kpi: business.active_digital_sessions
+    factor: {uniform: [0.55, 0.80]}
+  - kpi: business.app_session_duration_sec
+    factor: {uniform: [0.40, 0.65]}
+  - kpi: business.complaint_tickets_per_min
+    factor: {uniform: [3.0, 6.0]}
+  - kpi: business.churn_risk_index_0_100
+    factor: {uniform: [1.5, 3.0]}

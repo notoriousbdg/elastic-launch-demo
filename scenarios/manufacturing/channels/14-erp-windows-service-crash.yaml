@@ -47,3 +47,12 @@ rca_clues:
     mes.erp_link_status: down
   inventory-sync:
     inventory.erp_master_sync_lag_s: {randint: [120, 900]}
+business_impact:
+  - kpi: business.on_time_delivery_pct
+    factor: {uniform: [0.30, 0.60]}
+  - kpi: business.inventory_turns
+    factor: {uniform: [0.40, 0.70]}
+  - kpi: business.material_variance_usd
+    factor: {uniform: [2.0, 4.5]}
+  - kpi: business.throughput_units_per_hour
+    factor: {uniform: [0.40, 0.70]}

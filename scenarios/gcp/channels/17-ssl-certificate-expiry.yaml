@@ -50,3 +50,12 @@ rca_clues:
     cdn.fallback_to_http: {choice: [true, false]}
   cloud-armor-waf:
     armor.ssl_policy_affected: true
+business_impact:
+  - kpi: business.api_success_rate_pct
+    factor: {uniform: [0.25, 0.55]}
+  - kpi: business.requests_per_min
+    factor: {uniform: [0.20, 0.50]}
+  - kpi: business.uptime_pct
+    factor: {uniform: [0.68, 0.88]}
+  - kpi: business.customer_sla_breach_count
+    factor: {uniform: [5.0, 12.0]}

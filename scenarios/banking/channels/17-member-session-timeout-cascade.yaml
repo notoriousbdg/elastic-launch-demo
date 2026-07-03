@@ -58,3 +58,12 @@ rca_clues:
   payment-engine:
     payment.in_flight_txn_orphaned: {randint: [50, 300]}
     payment.session_dependent_holds: {randint: [20, 100]}
+business_impact:
+  - kpi: business.active_digital_sessions
+    factor: {uniform: [0.10, 0.35]}
+  - kpi: business.mobile_logins_per_min
+    factor: {uniform: [0.15, 0.40]}
+  - kpi: business.digital_transaction_pct
+    factor: {uniform: [0.20, 0.50]}
+  - kpi: business.net_satisfaction_proxy_nps
+    factor: {uniform: [0.25, 0.55]}

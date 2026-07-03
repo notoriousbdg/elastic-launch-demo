@@ -54,3 +54,12 @@ rca_clues:
   risk-calculator:
     risk.dr_site_risk_state_age_ms: {randint: [5000, 60000]}
     risk.failover_readiness_pct: {uniform: [0.0, 80.0], round: 1}
+business_impact:
+  - kpi: business.system_availability_pct
+    factor: {uniform: [0.85, 0.97]}
+  - kpi: business.reporting_latency_sec
+    factor: {uniform: [3.0, 8.0]}
+  - kpi: business.reconciliation_breaks
+    factor: {uniform: [2.0, 5.0]}
+  - kpi: business.ops_alerts_per_min
+    factor: {uniform: [2.5, 5.5]}

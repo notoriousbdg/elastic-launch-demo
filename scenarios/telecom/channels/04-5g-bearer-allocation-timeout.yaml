@@ -69,3 +69,12 @@ rca_clues:
   api-gateway:
     gateway.activation_latency_p99_ms: {randint: [15000, 45000]}
     gateway.timeout_rate: {uniform: [0.05, 0.2], round: 2}
+business_impact:
+  - kpi: business.activations_per_min
+    factor: {uniform: [0.20, 0.50]}
+  - kpi: business.data_session_success_pct
+    factor: {uniform: [0.25, 0.55]}
+  - kpi: business.ran_latency_p95_ms
+    factor: {uniform: [2.5, 5.0]}
+  - kpi: business.throughput_p50_mbps
+    factor: {uniform: [0.20, 0.50]}

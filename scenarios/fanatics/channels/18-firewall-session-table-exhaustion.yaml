@@ -64,3 +64,12 @@ rca_clues:
   auction-engine:
     auction.websocket_failures: {randint: [20, 200]}
     auction.bid_timeouts: {randint: [5, 50]}
+business_impact:
+  - kpi: business.app_sessions_per_min
+    factor: {uniform: [0.15, 0.45]}
+  - kpi: business.page_views_per_min
+    factor: {uniform: [0.15, 0.45]}
+  - kpi: business.merch_gmv_usd_per_min
+    factor: {uniform: [0.15, 0.45]}
+  - kpi: business.betting_handle_usd_per_min
+    factor: {uniform: [0.15, 0.45]}

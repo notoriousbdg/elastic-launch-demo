@@ -50,3 +50,12 @@ rca_clues:
     lb.backend_cpu_spike: true
   vpc-network-manager:
     vpc.egress_bandwidth_spike: true
+business_impact:
+  - kpi: business.cdn_cache_hit_rate_pct
+    factor: {uniform: [0.15, 0.40]}
+  - kpi: business.origin_offload_pct
+    factor: {uniform: [0.20, 0.45]}
+  - kpi: business.edge_latency_p50_ms
+    factor: {uniform: [3.0, 8.0]}
+  - kpi: business.cloud_spend_usd_per_min
+    factor: {uniform: [2.0, 4.5]}

@@ -58,3 +58,12 @@ rca_clues:
   scheduling-api:
     sched.telehealth_to_inperson_conversions: {randint: [1, 5]}
     sched.rebooking_queue: {randint: [2, 10]}
+business_impact:
+  - kpi: business.patient_satisfaction_nps
+    factor: {uniform: [0.20, 0.50]}
+  - kpi: business.appointment_no_show_rate_pct
+    factor: {uniform: [1.8, 3.5]}
+  - kpi: business.hcahps_proxy_score
+    factor: {uniform: [0.25, 0.55]}
+  - kpi: business.admits_per_min
+    factor: {uniform: [0.25, 0.55]}

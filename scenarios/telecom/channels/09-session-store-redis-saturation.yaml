@@ -67,3 +67,12 @@ rca_clues:
   activation-service:
     activation.auth_dependency_blocked: true
     activation.queue_building: true
+business_impact:
+  - kpi: business.activations_per_min
+    factor: {uniform: [0.15, 0.45]}
+  - kpi: business.revenue_usd_per_min
+    factor: {uniform: [0.15, 0.45]}
+  - kpi: business.voluntary_churn_rate_pct
+    factor: {uniform: [2.0, 5.0]}
+  - kpi: business.support_tickets_per_min
+    factor: {uniform: [3.0, 6.0]}

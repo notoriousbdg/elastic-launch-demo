@@ -54,3 +54,12 @@ rca_clues:
   settlement-processor:
     settlement.fill_processing_backlog: {randint: [0, 500]}
     settlement.late_fill_reports: {randint: [0, 100]}
+business_impact:
+  - kpi: business.latency_sla_breach_rate_pct
+    factor: {uniform: [5.0, 15.0]}
+  - kpi: business.executed_trades_per_min
+    factor: {uniform: [0.20, 0.50]}
+  - kpi: business.fill_rate_pct
+    factor: {uniform: [0.30, 0.60]}
+  - kpi: business.best_execution_pct
+    factor: {uniform: [0.65, 0.85]}

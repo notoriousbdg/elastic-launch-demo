@@ -53,3 +53,12 @@ rca_clues:
     fulfillment.manual_review_queue: {randint: [5, 50]}
   storefront-gateway:
     storefront.in_stock_inaccuracy_pct: {uniform: [2, 15], round: 1}
+business_impact:
+  - kpi: business.cancel_rate_pct
+    factor: {uniform: [2.5, 5.0]}
+  - kpi: business.returns_per_min
+    factor: {uniform: [2.0, 4.0]}
+  - kpi: business.fulfillment_sla_pct
+    factor: {uniform: [0.25, 0.50]}
+  - kpi: business.inventory_turn_rate
+    factor: {uniform: [0.30, 0.55]}

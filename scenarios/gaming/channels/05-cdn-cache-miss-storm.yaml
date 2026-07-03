@@ -55,3 +55,12 @@ rca_clues:
     game.client_crash_rate: {uniform: [0.5, 3.0], round: 1}
   analytics-pipeline:
     analytics.cdn_error_events: {randint: [1000, 5000]}
+business_impact:
+  - kpi: business.sessions_per_min
+    factor: {uniform: [0.25, 0.55]}
+  - kpi: business.matches_played_per_min
+    factor: {uniform: [0.20, 0.45]}
+  - kpi: business.crash_rate_pct
+    factor: {uniform: [2.0, 4.0]}
+  - kpi: business.new_registrations_per_min
+    factor: {uniform: [0.25, 0.55]}

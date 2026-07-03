@@ -59,3 +59,12 @@ rca_clues:
     auth.concurrent_sessions: {randint: [50000, 150000]}
   analytics-pipeline:
     analytics.queue_depth_trend: exponential_growth
+business_impact:
+  - kpi: business.matches_played_per_min
+    factor: {uniform: [0.10, 0.35]}
+  - kpi: business.sessions_per_min
+    factor: {uniform: [0.25, 0.50]}
+  - kpi: business.churn_risk_index_0_100
+    factor: {uniform: [1.8, 3.5]}
+  - kpi: business.net_satisfaction_proxy_nps
+    factor: {uniform: [0.20, 0.45]}

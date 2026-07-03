@@ -62,3 +62,12 @@ rca_clues:
   notification-service:
     notification.usage_alert_delayed: true
     notification.enterprise_reporting_blocked: true
+business_impact:
+  - kpi: business.revenue_usd_per_min
+    factor: {uniform: [0.20, 0.50]}
+  - kpi: business.data_overage_charges_usd_per_min
+    factor: {uniform: [0.15, 0.45]}
+  - kpi: business.trouble_to_billing_ratio_pct
+    factor: {uniform: [2.5, 5.0]}
+  - kpi: business.enterprise_arpu_usd
+    factor: {uniform: [0.25, 0.55]}

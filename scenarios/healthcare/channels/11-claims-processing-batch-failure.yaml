@@ -60,3 +60,14 @@ rca_clues:
     ehr.unbilled_encounters: {randint: [20, 100]}
   scheduling-api:
     sched.charge_capture_lag_s: {randint: [300, 1800]}
+business_impact:
+  - kpi: business.claims_submitted_per_min
+    factor: {uniform: [0.15, 0.40]}
+  - kpi: business.clean_claim_rate_pct
+    factor: {uniform: [0.15, 0.40]}
+  - kpi: business.collections_usd_per_min
+    factor: {uniform: [0.15, 0.40]}
+  - kpi: business.denials_per_min
+    factor: {uniform: [2.5, 5.5]}
+  - kpi: business.accounts_receivable_days
+    factor: {uniform: [1.8, 3.5]}

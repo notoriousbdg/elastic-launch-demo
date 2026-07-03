@@ -52,3 +52,12 @@ rca_clues:
   audit-logger:
     audit.sso_heartbeat_failures: {randint: [1, 20]}
     audit.session_force_logout_events: {randint: [1, 50]}
+business_impact:
+  - kpi: business.order_flow_per_min
+    factor: {uniform: [0.30, 0.60]}
+  - kpi: business.cancel_replace_rate_pct
+    factor: {uniform: [2.0, 4.5]}
+  - kpi: business.system_availability_pct
+    factor: {uniform: [0.88, 0.97]}
+  - kpi: business.ops_alerts_per_min
+    factor: {uniform: [2.0, 4.5]}

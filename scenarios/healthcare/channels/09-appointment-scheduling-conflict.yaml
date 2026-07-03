@@ -55,3 +55,12 @@ rca_clues:
   billing-processor:
     billing.duplicate_encounter_charge: true
     billing.held_claims: {randint: [2, 10]}
+business_impact:
+  - kpi: business.appointment_no_show_rate_pct
+    factor: {uniform: [1.5, 3.0]}
+  - kpi: business.patient_satisfaction_nps
+    factor: {uniform: [0.25, 0.55]}
+  - kpi: business.claims_submitted_per_min
+    factor: {uniform: [0.30, 0.60]}
+  - kpi: business.denials_per_min
+    factor: {uniform: [1.8, 3.5]}

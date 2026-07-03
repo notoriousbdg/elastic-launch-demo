@@ -49,3 +49,12 @@ rca_clues:
     validation.mli_status: {choice: [INTACT, SUSPECT]}
   mission-control:
     upstream.degraded_subsystem: payload
+business_impact:
+  - kpi: business.mission_success_probability_pct
+    factor: {uniform: [0.60, 0.82]}
+  - kpi: business.spacecraft_health_index_0_100
+    factor: {uniform: [0.55, 0.78]}
+  - kpi: business.launch_readiness_index_0_100
+    factor: {uniform: [0.55, 0.78]}
+  - kpi: business.fault_events_per_min
+    factor: {uniform: [2.5, 5.5]}

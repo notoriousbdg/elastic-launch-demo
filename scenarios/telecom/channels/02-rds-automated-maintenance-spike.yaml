@@ -72,3 +72,12 @@ rca_clues:
   bss-billing:
     billing.subscriber_lookup_blocked: true
     billing.pending_activations: {randint: [50, 300]}
+business_impact:
+  - kpi: business.activations_per_min
+    factor: {uniform: [0.15, 0.45]}
+  - kpi: business.revenue_usd_per_min
+    factor: {uniform: [0.20, 0.50]}
+  - kpi: business.esim_provisions_per_min
+    factor: {uniform: [0.20, 0.50]}
+  - kpi: business.support_tickets_per_min
+    factor: {uniform: [2.5, 5.0]}

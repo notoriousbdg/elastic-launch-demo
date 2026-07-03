@@ -61,3 +61,12 @@ rca_clues:
   analytics-pipeline:
     analytics.session_event_spike: true
     analytics.ingest_rate_multiplier: {uniform: [3, 10], round: 1}
+business_impact:
+  - kpi: business.conversion_rate_pct
+    factor: {uniform: [0.20, 0.45]}
+  - kpi: business.orders_placed_per_min
+    factor: {uniform: [0.25, 0.50]}
+  - kpi: business.sessions_per_min
+    factor: {uniform: [0.30, 0.55]}
+  - kpi: business.cancel_rate_pct
+    factor: {uniform: [2.0, 4.0]}
