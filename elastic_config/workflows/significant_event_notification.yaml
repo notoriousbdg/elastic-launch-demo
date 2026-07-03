@@ -3,9 +3,9 @@ name: __SCENARIO_NAME__ Significant Event Notification (Human in the Loop)
 description: >
   Notify launch operations team when a significant event is detected on a
   HITL channel (1-15). Triggered by alert rules — uses event.rule.tags[1] for
-  the error_type search, extracts user_email from event_name, sends email
-  notification immediately, runs AI root cause analysis and creates a case,
-  then asks the agent to propose remediation. The agent invokes the
+  the error_type search, extracts user_email from event_name, runs AI root
+  cause analysis, creates a case, attaches the alert to the case, then sends
+  an email notification requesting human approval. The agent invokes the
   remediation_action workflow tool which pauses at a waitForInput step;
   Agent Builder surfaces the approval prompt inside the conversation for the
   operator to approve or deny.
@@ -21,7 +21,7 @@ steps:
     type: elasticsearch.esql.query
     with:
       query: >
-        FROM logs.otel.__NS__,logs.otel.__NS__.* | WHERE KQL("body.text: \"{{ event.rule.tags[1] }}\" AND severity_text: \"ERROR\"") AND event_name IS NOT NULL | SORT @timestamp DESC | KEEP event_name | LIMIT 1
+        FROM logs.otel.__NS__,logs.otel.__NS__.* | WHERE event_name IS NOT NULL | SORT @timestamp DESC | KEEP event_name | LIMIT 1
       format: json
 
   - name: count_errors
@@ -38,28 +38,6 @@ steps:
     with:
       var:
         - event_meta: "${{ steps.enrich_context.output.values[0][0] | json_parse }}"
-
-  - name: send_notification
-    type: email
-    connector-id: Elastic-Cloud-SMTP
-    if: "${{ steps.parse_event_meta.output.var[0].event_meta.user_email != '' and steps.parse_event_meta.output.var[0].event_meta.user_email != null }}"
-    with:
-      to:
-        - "{{ steps.parse_event_meta.output.var[0].event_meta.user_email }}"
-      subject: "__SCENARIO_NAME__ Alert: {{ event.rule.name }}"
-      message: >
-        Significant event detected in __SCENARIO_NAME__ mission:
-
-        Rule: {{ event.rule.name }}
-        Error Type: {{ event.rule.tags[1] }}
-        Total errors (15m): {{ steps.count_errors.output.values[0][0] }}
-
-        An AI root cause analysis is underway. A case will be created with the
-        agent's findings and a proposed remediation. Approve or deny the
-        remediation in the Agent Builder conversation linked from the case.
-
-        Open Kibana to investigate:
-        __KIBANA_URL__/app/dashboards#/view/__NS__-exec-dashboard
 
   - name: run_rca
     type: kibana.request
@@ -115,6 +93,37 @@ steps:
           id: "{{ event.rule.id }}"
           name: "{{ event.rule.name }}"
         owner: "observability"
+
+  - name: send_notification
+    type: email
+    connector-id: elastic-cloud-email
+    if: "${{ steps.parse_event_meta.output.var[0].event_meta.user_email != '' and steps.parse_event_meta.output.var[0].event_meta.user_email != null }}"
+    with:
+      to:
+        - "{{ steps.parse_event_meta.output.var[0].event_meta.user_email }}"
+      subject: "__SCENARIO_NAME__ — Approval required: {{ event.rule.name }}"
+      message: |
+        ## Approval Required — __SCENARIO_NAME__
+
+        **Rule:** {{ event.rule.name }}
+        **Error Type:** {{ event.rule.tags[1] }}
+        **Total errors (15m):** {{ steps.count_errors.output.values[0][0] }}
+
+        ---
+
+        A significant event was identified and an AI root cause analysis has completed. A case has been created with the agent's findings and a proposed remediation. **The remediation REQUIRES YOUR APPROVAL before it runs.**
+
+        **Conversation (approve/deny here):**
+        __KIBANA_URL__/app/agent_builder/conversations/{{ steps.run_rca.output.conversation_id }}
+
+        **Case (RCA + linked alert):**
+        __KIBANA_URL__/app/observability/cases/{{ steps.create_case.output.id }}
+
+        **Operations dashboard:**
+        __KIBANA_URL__/app/dashboards#/view/__NS__-exec-dashboard
+
+        **Executive dashboard:**
+        __KIBANA_URL__/app/dashboards#/view/__NS__-business-exec-dashboard
 
   - name: request_remediation
     type: kibana.request
