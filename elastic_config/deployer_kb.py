@@ -128,5 +128,8 @@ class KbMixin:
 - Verify if errors correlate with infrastructure events
 
 ## Remediation
-When the user asks you to fix or remediate this issue, use `{self.scenario.prefixed_tool_id("remediation_action")}` with action_type: {remediation_action}, channel: {ch_num}, approval_mode: {approval_mode}, dry_run: false, and a justification. Channels 1–15 must use approval_mode: required (workflow pauses for operator approval). Only pass approval_mode: skip when the Auto-Remediate notification workflow explicitly requests it. Once the tool returns successfully, report remediation as complete. Do NOT search for errors after remediation — the fix takes several minutes to propagate, so residual errors are expected immediately after.
+When the user asks you to fix or remediate this issue, use `{self.scenario.prefixed_tool_id("remediation_action")}` with action_type: {remediation_action}, channel: {ch_num}, approval_mode: {approval_mode}, dry_run: false, and a justification. Channels 1–15 must use approval_mode: required (workflow pauses for operator approval). Only pass approval_mode: skip when the Auto-Remediate notification workflow explicitly requests it. Once the tool returns successfully, remediation has been executed, but do not declare the incident resolved yet.
+
+## Confirming Recovery
+The fix takes a minute or two to propagate. To confirm remediation actually succeeded, wait briefly then use `{self.scenario.prefixed_tool_id("verify_recovery")}`, which checks only the last few minutes of telemetry. Zero (or near-zero) error/warn counts there means the incident is resolved. Do NOT rely on `{self.scenario.prefixed_tool_id("search_error_logs")}` or other wide-window (15-minute) tools to judge current status immediately after remediation — they will keep showing the pre-fix errors as residual history for several minutes, which does not mean the fault is still active.
 """
