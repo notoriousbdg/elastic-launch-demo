@@ -40,31 +40,27 @@ steps:
         - event_meta: "${{ steps.enrich_context.output.values[0][0] | json_parse }}"
 
   - name: run_rca
-    type: kibana.request
-    with:
-      method: POST
-      path: "/api/agent_builder/converse"
-      headers:
-        kbn-xsrf: "true"
-      body:
-        agent_id: __AGENT_ID__
-        input: >
-          Significant event detected: {{ event.rule.name }}.
-          Error type: {{ event.rule.tags[1] }}.
-          Total errors in last 15 minutes: {{ steps.count_errors.output.values[0][0] }}.
-          Perform a root cause analysis only. Search logs for this error type,
-          identify affected services, trace the fault propagation, and provide
-          your structured RCA report. Do NOT execute any remediation actions.
+    type: ai.agent
+    agent-id: __AGENT_ID__
+    create-conversation: true
     timeout: 10m
+    with:
+      message: >
+        Significant event detected: {{ event.rule.name }}.
+        Error type: {{ event.rule.tags[1] }}.
+        Total errors in last 15 minutes: {{ steps.count_errors.output.values[0][0] }}.
+        Perform a root cause analysis only. Search logs for this error type,
+        identify affected services, trace the fault propagation, and provide
+        your structured RCA report. Do NOT execute any remediation actions.
 
   - name: create_case
-    type: kibana.createCaseDefaultSpace
+    type: cases.createCase
     with:
       title: "{{ event.rule.name }}"
       description: |
        [View Full Conversation](/app/agent_builder/conversations/{{ steps.run_rca.output.conversation_id }})
 
-       {{ steps.run_rca.output.response.message }}
+       {{ steps.run_rca.output.message }}
       tags:
         - "__NS__"
         - "{{ event.rule.tags[1] }}"
@@ -72,17 +68,12 @@ steps:
       owner: "observability"
       settings:
         syncAlerts: false
-      connector:
-        id: "none"
-        name: "none"
-        type: ".none"
-        fields: null
 
   - name: attach_alert_to_case
     type: kibana.request
     with:
       method: POST
-      path: "/api/cases/{{ steps.create_case.output.id }}/comments"
+      path: "/api/cases/{{ steps.create_case.output.case.id }}/comments"
       headers:
         kbn-xsrf: "true"
       body:
@@ -117,7 +108,7 @@ steps:
         __KIBANA_URL__/app/agent_builder/conversations/{{ steps.run_rca.output.conversation_id }}
 
         **Case (RCA + linked alert):**
-        __KIBANA_URL__/app/observability/cases/{{ steps.create_case.output.id }}
+        __KIBANA_URL__/app/observability/cases/{{ steps.create_case.output.case.id }}
 
         **Operations dashboard:**
         __KIBANA_URL__/app/dashboards#/view/__NS__-exec-dashboard
@@ -136,14 +127,14 @@ steps:
         agent_id: __AGENT_ID__
         conversation_id: "{{ steps.run_rca.output.conversation_id }}"
         input: >
-          Case {{ steps.create_case.output.id }} has been opened. Invoke the
+          Case {{ steps.create_case.output.case.id }} has been opened. Invoke the
           remediation_action workflow tool (do not queue remediation yourself).
           You MUST pass approval_mode: required (string) — never skip on HITL.
           Parameters:
           - action_type: {{ event.rule.tags[2] }}
           - channel: {{ event.rule.tags[3] }}
           - error_type: {{ event.rule.tags[1] }}
-          - case_id: {{ steps.create_case.output.id }}
+          - case_id: {{ steps.create_case.output.case.id }}
           - dry_run: false
           - approval_mode: required
           - justification: Operator approval requested via Agent Builder

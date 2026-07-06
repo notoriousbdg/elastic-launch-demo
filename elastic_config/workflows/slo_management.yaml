@@ -26,10 +26,10 @@ steps:
     type: kibana.request
     on-failure:
       continue: true
+    timeout: 60s
     with:
       method: GET
       path: /api/observability/slos?perPage=500
-      timeout: '60'
       headers:
         Content-Type: application/json
         Accept: application/json
