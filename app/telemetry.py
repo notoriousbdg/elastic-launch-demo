@@ -372,28 +372,41 @@ class OTLPClient:
             if time.time() % backoff > 1:
                 return
 
-        with self._send_lock:
-            try:
-                response = self.client.post(url, content=json.dumps(payload))
-                response.raise_for_status()
+        # httpx.Client is thread-safe and multiplexes concurrent requests over
+        # HTTP/2, so the network call itself is intentionally NOT serialized —
+        # holding a lock around it would force every service thread in the
+        # process through one request at a time, starving whichever threads
+        # lose the race (observed: some services stalled 80-240s between
+        # emissions despite a 1.5-3s tick loop). The lock is only used below
+        # to keep the failure counter's read-modify-write atomic.
+        try:
+            response = self.client.post(url, content=json.dumps(payload))
+            response.raise_for_status()
+            with self._send_lock:
                 self.consecutive_failures = 0
-            except httpx.RequestError as exc:
+        except httpx.RequestError as exc:
+            with self._send_lock:
                 self.consecutive_failures += 1
-                if self.consecutive_failures <= 3:
-                    logger.warning("OTLP %s send failed (connection): %s", signal_name, exc)
-            except httpx.HTTPStatusError as exc:
+                failures = self.consecutive_failures
+            if failures <= 3:
+                logger.warning("OTLP %s send failed (connection): %s", signal_name, exc)
+        except httpx.HTTPStatusError as exc:
+            with self._send_lock:
                 self.consecutive_failures += 1
-                if self.consecutive_failures <= 3:
-                    logger.warning(
-                        "OTLP %s send failed (HTTP %d): %s",
-                        signal_name,
-                        exc.response.status_code,
-                        exc.response.text[:200],
-                    )
-            except Exception as exc:
+                failures = self.consecutive_failures
+            if failures <= 3:
+                logger.warning(
+                    "OTLP %s send failed (HTTP %d): %s",
+                    signal_name,
+                    exc.response.status_code,
+                    exc.response.text[:200],
+                )
+        except Exception as exc:
+            with self._send_lock:
                 self.consecutive_failures += 1
-                if self.consecutive_failures <= 3:
-                    logger.warning("OTLP %s send failed: %s", signal_name, exc)
+                failures = self.consecutive_failures
+            if failures <= 3:
+                logger.warning("OTLP %s send failed: %s", signal_name, exc)
 
     def close(self) -> None:
         if self.client:

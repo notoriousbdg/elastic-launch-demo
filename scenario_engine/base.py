@@ -750,12 +750,31 @@ Use `{p_remediation_action}` with these parameters:
 - `error_type` — the error type identifier
 - `justification` — brief explanation
 - `dry_run` — `false` for actual remediation (required for the chaos controller to resolve the fault)
-- `case_id` — **ALWAYS** pass this if you retrieved a case ID earlier in the conversation; never rely on tag-based search to find the case
+- `case_id` — **REQUIRED whenever a case exists for this incident.** Pass the case ID
+  you retrieved earlier in the conversation; never rely on tag-based search to find the case.
 - `approval_mode` — **string** `required` or `skip`; see HITL vs auto-remediate rules below
 
 Once `{p_remediation_action}` returns successfully, remediation has been executed —
 but do not declare the incident resolved yet.
 Do NOT execute remediation unless the user or workflow explicitly asks you to invoke the tool.
+
+## Case Handling — read before calling {p_remediation_action}
+
+- **Never call {p_remediation_action} with no case in context.** If you weren't handed
+  a case ID and don't have one open in this conversation, use `platform.core.cases` to
+  find or open the matching case for the `channel`/`error_type` you're about to remediate
+  *before* invoking {p_remediation_action} — or ask the operator to confirm there's no
+  case to close. Do not invoke the tool caseless "to be safe"; an empty `case_id` closes
+  nothing and the incident's real case is left open.
+- **The `channel`/`error_type` you remediate must match the case you're working.** If
+  your root-cause analysis points to a different upstream channel than the one the open
+  case is about, do not silently remediate that other channel instead. Say so explicitly,
+  get the operator's confirmation, and — if they agree — remediate it against *that*
+  channel's own case (find/open one), not the original case.
+- **Never leave the case you were handed unresolved.** After remediating, the case you
+  were given must end up commented and closed, or explicitly left open with a reason. If
+  you pivot to a different root-cause channel, still resolve the original case's status —
+  don't just abandon it.
 
 ## How to Confirm Recovery
 

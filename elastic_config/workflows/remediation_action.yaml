@@ -82,7 +82,7 @@ steps:
         steps:
           - name: comment_denial
             type: if
-            condition: "inputs.case_id : *"
+            condition: 'inputs.case_id : * AND NOT inputs.case_id : ""'
             steps:
               - name: post_denial_comment
                 type: kibana.request
@@ -146,98 +146,101 @@ steps:
         with:
           message: "Remediation QUEUED for channel {{ inputs.channel }}. Backend will process shortly."
 
-      # Path A: case_id provided — use it directly, no search needed
-      - name: close_provided_case
-        type: if
-        condition: "inputs.case_id : *"
-        steps:
-          - name: add_comment_to_provided_case
-            type: kibana.request
-            with:
-              method: POST
-              path: "/api/cases/{{ inputs.case_id }}/comments"
-              headers:
-                kbn-xsrf: "true"
-              body:
-                type: "user"
-                comment: |
-                  ## Remediation Performed
-
-                  - **Action:** {{ inputs.action_type }}
-                  - **Target Service:** {{ inputs.target_service }}
-                  - **Error Type:** {{ inputs.error_type }}
-                  - **Channel:** {{ inputs.channel }}
-                  - **Dry Run:** {{ inputs.dry_run }}
-                  - **Justification:** {{ inputs.justification }}
-                owner: "observability"
-
-          - name: refetch_provided_case
-            type: kibana.request
-            with:
-              method: GET
-              path: "/api/cases/{{ inputs.case_id }}"
-
-          - name: update_provided_case_closed
-            type: kibana.updateCase
-            with:
-              cases:
-                - id: "{{ steps.refetch_provided_case.output.id }}"
-                  version: "{{ steps.refetch_provided_case.output.version }}"
-                  status: "closed"
-
-      # Path B: no case_id — fall back to tag-based search
-      - name: find_open_case
-        type: if
-        condition: "NOT inputs.case_id : *"
-        steps:
-          - name: search_open_case
-            type: kibana.request
-            with:
-              method: GET
-              path: "/api/cases/_find?tags=__NS__&tags={{ inputs.error_type }}&status=open&sortField=createdAt&sortOrder=desc&perPage=1&owner=observability"
-
+      # Path A: case_id provided and non-empty — use it directly, no search needed.
+      # "inputs.case_id : *" alone also matches an empty string (the input's
+      # default), which is what let a blank case_id crash this step with
+      # "Failed to get case id: : Error: Not Found" instead of falling through
+      # to the tag-search fallback below.
       - name: close_case
         type: if
-        condition: "NOT inputs.case_id : * AND steps.search_open_case.output.cases.0.id : *"
+        condition: 'inputs.case_id : * AND NOT inputs.case_id : ""'
         steps:
-          - name: add_remediation_comment
-            type: kibana.request
+          - name: add_comment_to_provided_case
+            type: cases.addComment
+            on-failure:
+              continue: true
             with:
-              method: POST
-              path: "/api/cases/{{ steps.search_open_case.output.cases[0].id }}/comments"
-              headers:
-                kbn-xsrf: "true"
-              body:
-                type: "user"
-                comment: |
-                  ## Remediation Performed
+              case_id: "{{ inputs.case_id }}"
+              comment: |
+                ## Remediation Performed
 
-                  - **Action:** {{ inputs.action_type }}
-                  - **Target Service:** {{ inputs.target_service }}
-                  - **Error Type:** {{ inputs.error_type }}
-                  - **Channel:** {{ inputs.channel }}
-                  - **Dry Run:** {{ inputs.dry_run }}
-                  - **Justification:** {{ inputs.justification }}
-                owner: "observability"
+                - **Action:** {{ inputs.action_type }}
+                - **Target Service:** {{ inputs.target_service }}
+                - **Error Type:** {{ inputs.error_type }}
+                - **Channel:** {{ inputs.channel }}
+                - **Dry Run:** {{ inputs.dry_run }}
+                - **Justification:** {{ inputs.justification }}
 
-          - name: refetch_case
-            type: kibana.request
+          - name: update_provided_case_closed
+            type: cases.closeCase
+            on-failure:
+              continue: true
             with:
-              method: GET
-              path: "/api/cases/{{ steps.search_open_case.output.cases[0].id }}"
+              case_id: "{{ inputs.case_id }}"
 
-          - name: update_case_closed
-            type: kibana.updateCase
+          - name: log_case_closed
+            type: console
             with:
-              cases:
-                - id: "{{ steps.refetch_case.output.id }}"
-                  version: "{{ steps.refetch_case.output.version }}"
-                  status: "closed"
+              message: "Case {{ inputs.case_id }} closed for {{ inputs.error_type }} (channel {{ inputs.channel }})."
 
-      - name: log_case_closed
-        type: console
-        with:
-          message: "Case closed for {{ inputs.error_type }} (channel {{ inputs.channel }})."
+        # Path B: no case_id (missing or empty) — fall back to tag-based search.
+        else:
+          # NOTE: cases.findCases matches ANY tag in this array (OR), not all of
+          # them — passing both the namespace tag and error_type here previously
+          # matched any open case in the namespace, not just ones about this
+          # error_type. Every case already carries the namespace tag, so it adds
+          # no filtering power; search on error_type alone for a precise match.
+          - name: search_open_case
+            type: cases.findCases
+            with:
+              tags:
+                - "{{ inputs.error_type }}"
+              status: "open"
+              owner: "observability"
+              sortField: "createdAt"
+              sortOrder: "desc"
+              perPage: 1
+
+          - name: close_found_case
+            type: if
+            condition: "steps.search_open_case.output.cases.0.id : *"
+            steps:
+              - name: add_remediation_comment
+                type: cases.addComment
+                on-failure:
+                  continue: true
+                with:
+                  case_id: "{{ steps.search_open_case.output.cases[0].id }}"
+                  comment: |
+                    ## Remediation Performed
+
+                    - **Action:** {{ inputs.action_type }}
+                    - **Target Service:** {{ inputs.target_service }}
+                    - **Error Type:** {{ inputs.error_type }}
+                    - **Channel:** {{ inputs.channel }}
+                    - **Dry Run:** {{ inputs.dry_run }}
+                    - **Justification:** {{ inputs.justification }}
+
+              - name: update_case_closed
+                type: cases.closeCase
+                on-failure:
+                  continue: true
+                with:
+                  case_id: "{{ steps.search_open_case.output.cases[0].id }}"
+
+              - name: log_case_closed_via_search
+                type: console
+                with:
+                  message: "Case {{ steps.search_open_case.output.cases[0].id }} closed for {{ inputs.error_type }} (channel {{ inputs.channel }})."
+
+            # No case_id was given and no open case matches these tags — remediation
+            # was still queued above; there's simply nothing to close. Log instead
+            # of failing the run.
+            else:
+              - name: log_no_case_found
+                type: console
+                with:
+                  message: "No open case found to close for {{ inputs.error_type }} (channel {{ inputs.channel }}). Remediation was queued regardless."
 
       - name: audit_log
         type: elasticsearch.index
@@ -251,6 +254,5 @@ steps:
             dry_run: "{{ inputs.dry_run }}"
             status: "resolved"
             approval_mode: "{{ inputs.approval_mode }}"
-            case_closed: true
             mission_id: "__SCENARIO_NAME__"
           refresh: wait_for

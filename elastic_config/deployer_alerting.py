@@ -119,6 +119,18 @@ class AlertingMixin:
                 #   tags[3] = channel number
                 "tags": [self.ns, error_type, ch_data.get("remediation_action", ""), str(ch_int)],
                 "schedule": {"interval": "1m"},
+                # Rule-level notify_when, NOT per-action "frequency": Kibana
+                # silently strips a "frequency" block on system-connector
+                # actions (id "system-connector-.workflows") — it's accepted by
+                # the create API but absent from the stored rule and has no
+                # effect. onActionGroupChange fires the action only on the
+                # transition into the alert state; the previous default
+                # (no notify_when set, effectively onActiveAlert) re-ran the
+                # action on every 1m check for as long as the fault stayed
+                # active, producing a fresh case every ~1-2 minutes per
+                # triggered channel.
+                "notify_when": "onActionGroupChange",
+                "throttle": None,
                 "params": {
                     "searchType": "esQuery",
                     "esQuery": es_query,
@@ -133,11 +145,6 @@ class AlertingMixin:
                 "actions": [{
                     "group": "query matched",
                     "id": "system-connector-.workflows",
-                    "frequency": {
-                        "summary": False,
-                        "notify_when": "onActiveAlert",
-                        "throttle": None,
-                    },
                     "params": {
                         "subAction": "run",
                         "subActionParams": {
