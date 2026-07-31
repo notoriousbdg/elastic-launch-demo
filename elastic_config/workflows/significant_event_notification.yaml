@@ -10,6 +10,15 @@ description: >
   Agent Builder surfaces the approval prompt inside the conversation for the
   operator to approve or deny.
 
+  Kibana does NOT scope .workflows system-connector actions to a specific
+  action group (a "group" key on the action is accepted by the create API
+  but silently dropped), so this workflow fires on every action-group
+  transition the rule goes through — including when the alert recovers, not
+  just when it becomes active. It self-gates on
+  event.alerts[0].kibana.alert.action_group so a recovery transition doesn't
+  spuriously create a duplicate case; see significant_event_case_close.yaml
+  for the mirrored guard on the close side.
+
 tags:
   - "__NS__"
 
@@ -17,144 +26,157 @@ triggers:
   - type: alert
 
 steps:
-  - name: enrich_context
-    type: elasticsearch.esql.query
-    with:
-      query: >
-        FROM logs.otel.__NS__,logs.otel.__NS__.* | WHERE event_name IS NOT NULL | SORT @timestamp DESC | KEEP event_name | LIMIT 1
-      format: json
+  - name: on_alert_active
+    type: if
+    condition: 'NOT event.alerts[0].kibana.alert.action_group : recovered'
+    steps:
+      - name: enrich_context
+        type: elasticsearch.esql.query
+        with:
+          query: >
+            FROM logs.otel.__NS__,logs.otel.__NS__.* | WHERE event_name IS NOT NULL | SORT @timestamp DESC | KEEP event_name | LIMIT 1
+          format: json
 
-  - name: count_errors
-    type: elasticsearch.esql.query
-    with:
-      query: >
-        FROM logs.otel.__NS__,logs.otel.__NS__.*
-        | WHERE @timestamp > NOW() - 15 MINUTES AND severity_text == "ERROR"
-        | STATS total_errors = COUNT(*)
-      format: json
+      - name: count_errors
+        type: elasticsearch.esql.query
+        with:
+          query: >
+            FROM logs.otel.__NS__,logs.otel.__NS__.*
+            | WHERE @timestamp > NOW() - 15 MINUTES AND severity_text == "ERROR"
+            | STATS total_errors = COUNT(*)
+          format: json
 
-  - name: parse_event_meta
-    type: data.set
-    with:
-      var:
-        - event_meta: "${{ steps.enrich_context.output.values[0][0] | json_parse }}"
+      - name: parse_event_meta
+        type: data.set
+        with:
+          var:
+            - event_meta: "${{ steps.enrich_context.output.values[0][0] | json_parse }}"
 
-  - name: run_rca
-    type: ai.agent
-    agent-id: __AGENT_ID__
-    create-conversation: true
-    timeout: 10m
-    with:
-      message: >
-        Significant event detected: {{ event.rule.name }}.
-        Error type: {{ event.rule.tags[1] }}.
-        Total errors in last 15 minutes: {{ steps.count_errors.output.values[0][0] }}.
-        Perform a root cause analysis only. Search logs for this error type,
-        identify affected services, trace the fault propagation, and provide
-        your structured RCA report. Do NOT execute any remediation actions.
+      - name: run_rca
+        type: ai.agent
+        agent-id: __AGENT_ID__
+        create-conversation: true
+        timeout: 10m
+        with:
+          message: >
+            Significant event detected: {{ event.rule.name }}.
+            Error type: {{ event.rule.tags[1] }}.
+            Total errors in last 15 minutes: {{ steps.count_errors.output.values[0][0] }}.
+            Perform a root cause analysis only. Search logs for this error type,
+            identify affected services, trace the fault propagation, and provide
+            your structured RCA report. Do NOT execute any remediation actions.
 
-  - name: create_case
-    type: cases.createCase
-    with:
-      title: "{{ event.rule.name }}"
-      description: |
-       [View Full Conversation](/app/agent_builder/conversations/{{ steps.run_rca.output.conversation_id }})
+      - name: create_case
+        type: cases.createCase
+        with:
+          title: "{{ event.rule.name }}"
+          description: |
+           [View Full Conversation](/app/agent_builder/conversations/{{ steps.run_rca.output.conversation_id }})
 
-       {{ steps.run_rca.output.message }}
-      tags:
-        - "__NS__"
-        - "{{ event.rule.tags[1] }}"
-      severity: "high"
-      owner: "observability"
-      settings:
-        syncAlerts: false
+           {{ steps.run_rca.output.message }}
+          tags:
+            - "__NS__"
+            - "{{ event.rule.tags[1] }}"
+          severity: "high"
+          owner: "observability"
+          settings:
+            syncAlerts: false
 
-  - name: attach_alert_to_case
-    type: kibana.request
-    with:
-      method: POST
-      path: "/api/cases/{{ steps.create_case.output.case.id }}/comments"
-      headers:
-        kbn-xsrf: "true"
-      body:
-        type: "alert"
-        alertId: "{{ event.alerts[0]._id }}"
-        index: "{{ event.alerts[0]._index }}"
-        rule:
-          id: "{{ event.rule.id }}"
-          name: "{{ event.rule.name }}"
-        owner: "observability"
+      - name: attach_alert_to_case
+        type: kibana.request
+        with:
+          method: POST
+          path: "/api/cases/{{ steps.create_case.output.case.id }}/comments"
+          headers:
+            kbn-xsrf: "true"
+          body:
+            type: "alert"
+            alertId: "{{ event.alerts[0]._id }}"
+            index: "{{ event.alerts[0]._index }}"
+            rule:
+              id: "{{ event.rule.id }}"
+              name: "{{ event.rule.name }}"
+            owner: "observability"
 
-  - name: send_notification
-    type: email
-    connector-id: elastic-cloud-email
-    if: "${{ steps.parse_event_meta.output.var[0].event_meta.user_email != '' and steps.parse_event_meta.output.var[0].event_meta.user_email != null }}"
-    with:
-      to:
-        - "{{ steps.parse_event_meta.output.var[0].event_meta.user_email }}"
-      subject: "__SCENARIO_NAME__ — Approval required: {{ event.rule.name }}"
-      message: |
-        ## Approval Required — __SCENARIO_NAME__
+      - name: send_notification
+        type: email
+        connector-id: elastic-cloud-email
+        if: "${{ steps.parse_event_meta.output.var[0].event_meta.user_email != '' and steps.parse_event_meta.output.var[0].event_meta.user_email != null }}"
+        with:
+          to:
+            - "{{ steps.parse_event_meta.output.var[0].event_meta.user_email }}"
+          subject: "__SCENARIO_NAME__ — Approval required: {{ event.rule.name }}"
+          message: |
+            ## Approval Required — __SCENARIO_NAME__
 
-        **Rule:** {{ event.rule.name }}
-        **Error Type:** {{ event.rule.tags[1] }}
-        **Total errors (15m):** {{ steps.count_errors.output.values[0][0] }}
+            **Rule:** {{ event.rule.name }}
+            **Error Type:** {{ event.rule.tags[1] }}
+            **Total errors (15m):** {{ steps.count_errors.output.values[0][0] }}
 
-        ---
+            ---
 
-        A significant event was identified and an AI root cause analysis has completed. A case has been created with the agent's findings and a proposed remediation. **The remediation REQUIRES YOUR APPROVAL before it runs.**
+            A significant event was identified and an AI root cause analysis has completed. A case has been created with the agent's findings and a proposed remediation. **The remediation REQUIRES YOUR APPROVAL before it runs.**
 
-        **Conversation (approve/deny here):**
-        __KIBANA_URL__/app/agent_builder/conversations/{{ steps.run_rca.output.conversation_id }}
+            **Conversation (approve/deny here):**
+            __KIBANA_URL__/app/agent_builder/conversations/{{ steps.run_rca.output.conversation_id }}
 
-        **Case (RCA + linked alert):**
-        __KIBANA_URL__/app/observability/cases/{{ steps.create_case.output.case.id }}
+            **Case (RCA + linked alert):**
+            __KIBANA_URL__/app/observability/cases/{{ steps.create_case.output.case.id }}
 
-        **Operations dashboard:**
-        __KIBANA_URL__/app/dashboards#/view/__NS__-exec-dashboard
+            **Operations dashboard:**
+            __KIBANA_URL__/app/dashboards#/view/__NS__-exec-dashboard
 
-        **Executive dashboard:**
-        __KIBANA_URL__/app/dashboards#/view/__NS__-business-exec-dashboard
+            **Executive dashboard:**
+            __KIBANA_URL__/app/dashboards#/view/__NS__-business-exec-dashboard
 
-  - name: request_remediation
-    type: kibana.request
-    with:
-      method: POST
-      path: "/api/agent_builder/converse"
-      headers:
-        kbn-xsrf: "true"
-      body:
-        agent_id: __AGENT_ID__
-        conversation_id: "{{ steps.run_rca.output.conversation_id }}"
-        input: >
-          Case {{ steps.create_case.output.case.id }} has been opened. Invoke the
-          remediation_action workflow tool (do not queue remediation yourself).
-          You MUST pass approval_mode: required (string) — never skip on HITL.
-          Parameters:
-          - action_type: {{ event.rule.tags[2] }}
-          - channel: {{ event.rule.tags[3] }}
-          - error_type: {{ event.rule.tags[1] }}
-          - case_id: {{ steps.create_case.output.case.id }}
-          - dry_run: false
-          - approval_mode: required
-          - justification: Operator approval requested via Agent Builder
+      - name: request_remediation
+        type: kibana.request
+        with:
+          method: POST
+          path: "/api/agent_builder/converse"
+          headers:
+            kbn-xsrf: "true"
+          body:
+            agent_id: __AGENT_ID__
+            conversation_id: "{{ steps.run_rca.output.conversation_id }}"
+            input: >
+              Case {{ steps.create_case.output.case.id }} has been opened. Invoke the
+              remediation_action workflow tool (do not queue remediation yourself).
+              You MUST pass approval_mode: required (string) — never skip on HITL.
+              Parameters:
+              - action_type: {{ event.rule.tags[2] }}
+              - channel: {{ event.rule.tags[3] }}
+              - error_type: {{ event.rule.tags[1] }}
+              - case_id: {{ steps.create_case.output.case.id }}
+              - dry_run: false
+              - approval_mode: required
+              - justification: Operator approval requested via Agent Builder
 
-          The remediation workflow pauses at waitForInput until the operator
-          approves in Agent Builder. Do not pass approval_mode: skip.
-          If the operator denies, add a brief case comment — do not retry.
-          If approved, the workflow queues remediation and closes the case.
-    timeout: 30m
+              The remediation workflow pauses at waitForInput until the operator
+              approves in Agent Builder. Do not pass approval_mode: skip.
+              If the operator denies, add a brief case comment — do not retry.
+              If approved, the workflow queues remediation. The case closes
+              automatically once the alert recovers — do not close it yourself.
+        timeout: 30m
 
-  - name: audit_log
-    type: elasticsearch.index
-    with:
-      index: "__NS__-significant-events-audit"
-      document:
-        rule_name: "{{ event.rule.name }}"
-        error_type: "{{ event.rule.tags[1] }}"
-        total_errors: "{{ steps.count_errors.output.values[0][0] }}"
-        rca_case_created: true
-        auto_remediated: false
-        approval_requested: true
-        mission_id: "__SCENARIO_NAME__"
-      refresh: wait_for
+      - name: audit_log
+        type: elasticsearch.index
+        with:
+          index: "__NS__-significant-events-audit"
+          document:
+            rule_name: "{{ event.rule.name }}"
+            error_type: "{{ event.rule.tags[1] }}"
+            total_errors: "{{ steps.count_errors.output.values[0][0] }}"
+            rca_case_created: true
+            auto_remediated: false
+            approval_requested: true
+            mission_id: "__SCENARIO_NAME__"
+          refresh: wait_for
+
+    # This firing is for the alert's recovery transition — the Case
+    # Auto-Close workflow handles closing the case; nothing to do here.
+    else:
+      - name: log_skipped_recovery
+        type: console
+        with:
+          message: "Skipping notification — {{ event.rule.name }} recovered (handled by Case Auto-Close workflow)."

@@ -7,50 +7,52 @@ description: >
 tags:
   - "__NS__"
 
+# Kibana 9.5+: inputs MUST live under the manual trigger (not root-level).
+# Root-level inputs leave Agent Builder workflow tools with an empty schema
+# (elastic/kibana#269992), so every tool call arrives with inputs: {}.
 triggers:
   - type: manual
-
-inputs:
-  - name: error_type
-    type: string
-    required: true
-    description: "Error type to remediate"
-  - name: channel
-    type: number
-    required: true
-    description: "Fault channel being remediated (1-20)"
-  - name: action_type
-    type: string
-    required: true
-    description: "Remediation action to execute (scenario-specific, e.g. restart_mobile_gateway, reset_vpc_peering)"
-  - name: target_service
-    type: string
-    default: ""
-    description: "Service to target for restart/failover actions"
-  - name: justification
-    type: string
-    required: true
-    description: "Reason for executing this remediation"
-  - name: dry_run
-    type: boolean
-    default: true
-  - name: case_id
-    type: string
-    default: ""
-    description: "Direct case ID to close (skips tag search when provided — always pass this when remediating from a case context)"
-  - name: approval_mode
-    type: string
-    default: "required"
-    description: "required = pause at waitForInput for operator approval; skip = queue immediately (auto-remediate alerts only)"
-  - name: requires_approval
-    type: boolean
-    default: true
-    description: "Deprecated — use approval_mode. If true and approval_mode omitted, approval is required."
+    inputs:
+      - name: error_type
+        type: string
+        required: true
+        description: "Error type to remediate"
+      - name: channel
+        type: number
+        required: true
+        description: "Fault channel being remediated (1-20)"
+      - name: action_type
+        type: string
+        required: true
+        description: "Remediation action to execute (scenario-specific, e.g. restart_mobile_gateway, reset_vpc_peering)"
+      - name: target_service
+        type: string
+        default: ""
+        description: "Service to target for restart/failover actions"
+      - name: justification
+        type: string
+        required: true
+        description: "Reason for executing this remediation"
+      - name: dry_run
+        type: boolean
+        default: true
+        description: "If true, poller records the command without resolving the fault. Pass false to remediate."
+      - name: case_id
+        type: string
+        default: ""
+        description: "Direct case ID to close (skips tag search when provided — always pass this when remediating from a case context)"
+      - name: approval_mode
+        type: string
+        default: "required"
+        description: "required (default) = HITL waitForInput; skip = queue immediately (auto-remediate alerts only). Direct/agent calls default to HITL."
+      - name: requires_approval
+        type: boolean
+        default: true
+        description: "Deprecated — use approval_mode. If true and approval_mode omitted, approval is required."
 
 steps:
-  # Approval gate — runs unless approval_mode is explicitly skip. Uses string
-  # KQL (inputs.approval_mode : skip) because boolean requires_approval does
-  # not match reliably in workflow if conditions.
+  # HITL path — runs unless approval_mode is explicitly skip.
+  # String KQL on approval_mode (booleans do not match reliably from Agent Builder).
   - name: approval_flow
     type: if
     condition: "NOT inputs.approval_mode : skip"
@@ -76,9 +78,12 @@ steps:
                 title: "Notes (optional)"
             required: ["approved"]
 
-      - name: handle_denial
+      # On 9.5, waitForInput stores the resume payload under output.response
+      # (e.g. {response: {approved, notes}, respondedBy}), not flat on output.
+      # Deny on explicit false; else (approve) queues remediation.
+      - name: handle_decision
         type: if
-        condition: "steps.await_operator_approval.output.approved : false"
+        condition: "steps.await_operator_approval.output.response.approved : false"
         steps:
           - name: comment_denial
             type: if
@@ -100,7 +105,7 @@ steps:
                       - **Target service:** {{ inputs.target_service }}
                       - **Error type:** {{ inputs.error_type }}
                       - **Channel:** {{ inputs.channel }}
-                      - **Operator notes:** {{ steps.await_operator_approval.output.notes }}
+                      - **Operator notes:** {{ steps.await_operator_approval.output.response.notes }}
 
                       The case remains open for manual follow-up.
                     owner: "observability"
@@ -120,12 +125,72 @@ steps:
                 mission_id: "__SCENARIO_NAME__"
               refresh: wait_for
 
-  # Auto path: approval_mode skip. HITL path: operator approved true.
-  - name: execute_remediation
+        else:
+          - name: queue_remediation_hitl
+            type: elasticsearch.index
+            with:
+              index: "__NS__-remediation-queue"
+              document:
+                channel: "{{ inputs.channel }}"
+                action_type: "{{ inputs.action_type }}"
+                target_service: "{{ inputs.target_service }}"
+                justification: "{{ inputs.justification }}"
+                dry_run: "{{ inputs.dry_run }}"
+                error_type: "{{ inputs.error_type }}"
+                namespace: "__NS__"
+                status: "pending"
+                mission_id: "__SCENARIO_NAME__"
+              refresh: wait_for
+
+          - name: log_queued_hitl
+            type: console
+            with:
+              message: "Remediation QUEUED for channel {{ inputs.channel }} (HITL approved). Backend will process shortly."
+
+          - name: comment_case_hitl
+            type: if
+            condition: 'inputs.case_id : * AND NOT inputs.case_id : ""'
+            steps:
+              - name: add_comment_hitl
+                type: cases.addComment
+                on-failure:
+                  continue: true
+                with:
+                  case_id: "{{ inputs.case_id }}"
+                  comment: |
+                    ## Remediation Initiated
+
+                    - **Action:** {{ inputs.action_type }}
+                    - **Target Service:** {{ inputs.target_service }}
+                    - **Error Type:** {{ inputs.error_type }}
+                    - **Channel:** {{ inputs.channel }}
+                    - **Dry Run:** {{ inputs.dry_run }}
+                    - **Justification:** {{ inputs.justification }}
+
+                    The case will close automatically once the alert clears.
+
+          - name: audit_log_hitl
+            type: elasticsearch.index
+            with:
+              index: "__NS__-remediation-audit"
+              document:
+                channel: "{{ inputs.channel }}"
+                action_type: "{{ inputs.action_type }}"
+                target_service: "{{ inputs.target_service }}"
+                justification: "{{ inputs.justification }}"
+                dry_run: "{{ inputs.dry_run }}"
+                status: "remediation_queued"
+                approval_mode: "{{ inputs.approval_mode }}"
+                mission_id: "__SCENARIO_NAME__"
+              refresh: wait_for
+
+  # Auto path — approval_mode skip (string). Used when Agent Builder passes
+  # inputs correctly, or when invoked via workflow run API.
+  - name: execute_auto
     type: if
-    condition: "inputs.approval_mode : skip OR steps.await_operator_approval.output.approved : true"
+    condition: "inputs.approval_mode : skip"
     steps:
-      - name: queue_remediation
+      - name: queue_remediation_auto
         type: elasticsearch.index
         with:
           index: "__NS__-remediation-queue"
@@ -141,28 +206,23 @@ steps:
             mission_id: "__SCENARIO_NAME__"
           refresh: wait_for
 
-      - name: log_queued
+      - name: log_queued_auto
         type: console
         with:
-          message: "Remediation QUEUED for channel {{ inputs.channel }}. Backend will process shortly."
+          message: "Remediation QUEUED for channel {{ inputs.channel }} (auto). Backend will process shortly."
 
-      # Path A: case_id provided and non-empty — use it directly, no search needed.
-      # "inputs.case_id : *" alone also matches an empty string (the input's
-      # default), which is what let a blank case_id crash this step with
-      # "Failed to get case id: : Error: Not Found" instead of falling through
-      # to the tag-search fallback below.
-      - name: close_case
+      - name: comment_case_auto
         type: if
         condition: 'inputs.case_id : * AND NOT inputs.case_id : ""'
         steps:
-          - name: add_comment_to_provided_case
+          - name: add_comment_auto
             type: cases.addComment
             on-failure:
               continue: true
             with:
               case_id: "{{ inputs.case_id }}"
               comment: |
-                ## Remediation Performed
+                ## Remediation Initiated
 
                 - **Action:** {{ inputs.action_type }}
                 - **Target Service:** {{ inputs.target_service }}
@@ -171,25 +231,14 @@ steps:
                 - **Dry Run:** {{ inputs.dry_run }}
                 - **Justification:** {{ inputs.justification }}
 
-          - name: update_provided_case_closed
-            type: cases.closeCase
-            on-failure:
-              continue: true
-            with:
-              case_id: "{{ inputs.case_id }}"
+                The case will close automatically once the alert clears.
 
-          - name: log_case_closed
+          - name: log_case_updated_auto
             type: console
             with:
-              message: "Case {{ inputs.case_id }} closed for {{ inputs.error_type }} (channel {{ inputs.channel }})."
+              message: "Remediation recorded on case {{ inputs.case_id }} for {{ inputs.error_type }} (channel {{ inputs.channel }}); case stays open until alert clears."
 
-        # Path B: no case_id (missing or empty) — fall back to tag-based search.
         else:
-          # NOTE: cases.findCases matches ANY tag in this array (OR), not all of
-          # them — passing both the namespace tag and error_type here previously
-          # matched any open case in the namespace, not just ones about this
-          # error_type. Every case already carries the namespace tag, so it adds
-          # no filtering power; search on error_type alone for a precise match.
           - name: search_open_case
             type: cases.findCases
             with:
@@ -201,7 +250,7 @@ steps:
               sortOrder: "desc"
               perPage: 1
 
-          - name: close_found_case
+          - name: comment_found_case
             type: if
             condition: "steps.search_open_case.output.cases.0.id : *"
             steps:
@@ -212,7 +261,7 @@ steps:
                 with:
                   case_id: "{{ steps.search_open_case.output.cases[0].id }}"
                   comment: |
-                    ## Remediation Performed
+                    ## Remediation Initiated
 
                     - **Action:** {{ inputs.action_type }}
                     - **Target Service:** {{ inputs.target_service }}
@@ -221,28 +270,15 @@ steps:
                     - **Dry Run:** {{ inputs.dry_run }}
                     - **Justification:** {{ inputs.justification }}
 
-              - name: update_case_closed
-                type: cases.closeCase
-                on-failure:
-                  continue: true
-                with:
-                  case_id: "{{ steps.search_open_case.output.cases[0].id }}"
+                    The case will close automatically once the alert clears.
 
-              - name: log_case_closed_via_search
-                type: console
-                with:
-                  message: "Case {{ steps.search_open_case.output.cases[0].id }} closed for {{ inputs.error_type }} (channel {{ inputs.channel }})."
-
-            # No case_id was given and no open case matches these tags — remediation
-            # was still queued above; there's simply nothing to close. Log instead
-            # of failing the run.
             else:
               - name: log_no_case_found
                 type: console
                 with:
-                  message: "No open case found to close for {{ inputs.error_type }} (channel {{ inputs.channel }}). Remediation was queued regardless."
+                  message: "No open case found for {{ inputs.error_type }} (channel {{ inputs.channel }}). Remediation was queued regardless."
 
-      - name: audit_log
+      - name: audit_log_auto
         type: elasticsearch.index
         with:
           index: "__NS__-remediation-audit"
@@ -252,7 +288,7 @@ steps:
             target_service: "{{ inputs.target_service }}"
             justification: "{{ inputs.justification }}"
             dry_run: "{{ inputs.dry_run }}"
-            status: "resolved"
+            status: "remediation_queued"
             approval_mode: "{{ inputs.approval_mode }}"
             mission_id: "__SCENARIO_NAME__"
           refresh: wait_for

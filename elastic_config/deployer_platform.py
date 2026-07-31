@@ -144,7 +144,7 @@ class PlatformMixin:
             except Exception as exc:
                 errors.append(f"workflows UI ({exc})")
 
-        # 6. Hide Kibana new-tab announcement popup (9.4.0+ moved this to a global setting)
+        # 6. Hide Kibana new-tab announcement popup (9.4+/9.5: global setting)
         try:
             resp = client.post(
                 f"{self.kibana_url}/api/kibana/settings",

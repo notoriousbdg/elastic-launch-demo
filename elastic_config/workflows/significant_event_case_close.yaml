@@ -1,0 +1,92 @@
+version: "1"
+name: __SCENARIO_NAME__ Case Auto-Close (Alert Recovered)
+description: >
+  Periodically closes any open significant-event case whose underlying alert
+  has recovered (the fault cleared and errors stopped).
+
+  This runs on a schedule rather than off the alert rule's "recovered"
+  action group. The .workflows system-connector action only actually
+  invokes its target workflow when a rule execution's alert summary has a
+  non-empty "new" bucket — "ongoing" and "recovered"-only summary batches
+  are reported as successful (0-byte, no-op) action executions but never
+  reach the workflow at all. Confirmed via .kibana-event-log-*: 100+
+  "ongoing" ticks and a genuine "recovered" tick for the same rule all
+  logged num_succeeded_actions > 0 with zero corresponding workflow
+  executions. Only the very first "new" transition ever produced a real
+  execution. Polling for rule status sidesteps that connector limitation
+  entirely — see significant_event_notification(.auto_remediate).yaml for
+  the still-relevant guard on the create side (new-alert delivery works
+  fine, that guard just protects against a future connector fix making
+  recovered batches deliverable too).
+
+tags:
+  - "__NS__"
+
+triggers:
+  - type: scheduled
+    with:
+      every: "1m"
+  - type: manual
+
+steps:
+  - name: get_open_cases
+    type: cases.findCases
+    with:
+      status: "open"
+      owner: "observability"
+      tags:
+        - "__NS__"
+      perPage: 100
+
+  - name: loop_open_cases
+    type: foreach
+    foreach: "{{ steps.get_open_cases.output.cases }}"
+    on-failure:
+      continue: true
+    steps:
+      # Case tags are always [namespace, error_type] — see create_case in
+      # significant_event_notification(.auto_remediate).yaml.
+      - name: check_rule_status
+        type: kibana.request
+        on-failure:
+          continue: true
+        with:
+          method: GET
+          path: "/api/alerting/rules/_find?per_page=1&filter=alert.attributes.tags:{{ foreach.item.tags[1] }}"
+          headers:
+            kbn-xsrf: "true"
+
+      - name: close_if_recovered
+        type: if
+        condition: 'NOT steps.check_rule_status.output.data.0.execution_status.status : active'
+        steps:
+          - name: add_recovery_comment
+            type: cases.addComment
+            on-failure:
+              continue: true
+            with:
+              case_id: "{{ foreach.item.id }}"
+              comment: |
+                ## Alert Recovered
+
+                The alert for **{{ foreach.item.tags[1] }}** has recovered — errors have
+                stopped and the underlying fault has cleared. Closing this case.
+
+          - name: close_case
+            type: cases.closeCase
+            on-failure:
+              continue: true
+            with:
+              case_id: "{{ foreach.item.id }}"
+
+          - name: log_case_closed
+            type: console
+            with:
+              message: "Case {{ foreach.item.id }} closed — {{ foreach.item.tags[1] }} alert recovered."
+
+        # Rule still shows an active alert — leave the case open, check again next tick.
+        else:
+          - name: log_still_active
+            type: console
+            with:
+              message: "Case {{ foreach.item.id }} ({{ foreach.item.tags[1] }}) — alert still active, leaving open."

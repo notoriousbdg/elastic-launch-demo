@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import time
-import uuid as _uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -385,13 +384,15 @@ class StreamsMixin:
                 "expires_at": expiry_iso,
             })
 
-        # Stamp every feature with the required stream_name and a deterministic
-        # uuid (UUIDv5 from stream+id) so re-deploys upsert rather than duplicate.
-        _ns = _uuid.UUID("6ba7b810-9dad-11d1-80b4-00c04fd430c8")  # URL namespace
+        # Stamp stream_name. Kibana 9.5 features/_bulk rejects status, last_seen,
+        # and uuid as excess write keys (server-owned / removed from write schema).
+        # Upserts key off feature id within the stream.
         stream_name = self._stream_name
         for feat in features:
             feat["stream_name"] = stream_name
-            feat["uuid"] = str(_uuid.uuid5(_ns, f"{stream_name}/{feat['id']}"))
+            feat.pop("status", None)
+            feat.pop("last_seen", None)
+            feat.pop("uuid", None)
 
         return features
 
