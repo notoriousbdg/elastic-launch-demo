@@ -668,7 +668,14 @@ se_response=$(kb_get "/api/streams/${se_stream}/queries")
 se_code=$(echo "$se_response" | tail -1)
 se_body=$(echo "$se_response" | sed '$d')
 
-if [[ "$se_code" -ge 200 && "$se_code" -lt 300 ]]; then
+# A 403 "not available in this environment" means significant events are
+# disabled by the streams.significantEventsAvailable feature flag (e.g. on
+# serverless).  Treat as skipped — not a deployment error.
+se_unavailable=$(echo "$se_body" | grep -c "not available in this environment" 2>/dev/null || echo "0")
+
+if [[ "$se_code" -eq 403 && "$se_unavailable" -gt 0 ]]; then
+    info "Significant Events skipped — streams.significantEventsAvailable not enabled in this environment"
+elif [[ "$se_code" -ge 200 && "$se_code" -lt 300 ]]; then
     se_count=$(echo "$se_body" | python3 -c "
 import sys, json
 try:

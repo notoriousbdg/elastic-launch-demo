@@ -1,8 +1,8 @@
 version: "1"
 name: __SCENARIO_NAME__ Daily Update Report
 description: >
-  Generate and email a daily system health report using the Observability
-  AI Assistant.  Triggered manually from the chaos controller UI.
+  Generate and email a daily system health report using the scenario's
+  Agent Builder agent. Triggered manually from the chaos controller UI.
 
 tags:
   - "__NS__"
@@ -39,7 +39,7 @@ steps:
 
   - name: generate_report
     type: ai.agent
-    agent-id: observability.agent
+    agent-id: __AGENT_ID__
     with:
       message: >
         You are generating a Daily System Health Report for __SCENARIO_NAME__.

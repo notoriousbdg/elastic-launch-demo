@@ -28,7 +28,13 @@ Read the target channel file `scenarios/<id>/channels/NN-<slug>.yaml` in full. E
 
 1. The **current channel** fields: name, subsystem, error_type, error_message, fault_params, rca_clues
 2. The **valid service keys** — list the filenames under `scenarios/<id>/services/` (each filename stem is a service key)
-3. The **agent_config.system_prompt** in `scenarios/<id>/scenario.yaml` — to locate the error_type list that needs updating
+3. The **agent_config.system_prompt** from `scenarios/<id>/scenario.yaml` — use a targeted read to avoid loading the full 15KB file:
+
+```bash
+grep -n "agent_config\|system_prompt" scenarios/<id>/scenario.yaml | head -5
+```
+
+Then `Read` only the `agent_config:` block (use `offset`/`limit` from the line numbers returned above). You need only the `system_prompt` string to locate the `error_type` list.
 
 Also read [CONTRACT.md](CONTRACT.md) now as a generation checklist.
 
@@ -100,6 +106,7 @@ Run the CONTRACT.md checklist inline (no external script needed — inspect the 
 3. **Channel count** — run `ls scenarios/<id>/channels/*.yaml | wc -l` → must be 20.
 4. **HITL/auto-remediate** — channel ≤ 15: HITL action; channel 16–20: plausible auto-runbook action.
 5. **system_prompt sync** — new `error_type` appears in the prompt; old `error_type` (if changed) does not.
+6. **business_impact preserved** — if the old channel had a `business_impact` list, the new channel also has one (values may differ; see CONTRACT.md for guidance on choosing appropriate KPIs).
 
 **Full integrity check:**
 ```bash

@@ -9,7 +9,7 @@ from typing import Any
 
 import httpx
 
-from elastic_config.deployer_base import _es_headers, _kibana_headers, _retry_http, ProgressCallback
+from elastic_config.deployer_base import _es_headers, _kibana_headers, _retry_http, ProgressCallback, StepIdx
 from scenario_engine.runtimes import RUNTIME_BY_LANGUAGE
 
 logger = logging.getLogger("deployer")
@@ -396,26 +396,77 @@ class StreamsMixin:
 
         return features
 
-    def _deploy_knowledge_indicators(self, client: httpx.Client, notify: ProgressCallback):
-        """Step: recreate the scenario stream and populate its knowledge indicators.
+    def _significant_events_available(self, client: httpx.Client) -> bool:
+        """Probe whether significant events are enabled on the target cluster.
 
-        Must run before _deploy_significant_events (which writes ES|QL queries
-        to the same stream) since this step owns the stream lifecycle
-        (delete-old + fork-new).
+        A 403 carrying "not available in this environment" is the definitive
+        "feature disabled" signal — distinct from a privilege 403 or any other
+        error.  Any non-403 status is treated as available (fail-open) so genuine
+        write errors still surface rather than being silently masked as skipped.
+
+        Cached on first call per deploy so the probe is made at most once.
         """
-        step = self._step(10)
+        cached = getattr(self, "_se_available_cache", None)
+        if cached is not None:
+            return cached
+
+        try:
+            resp = client.get(
+                f"{self.kibana_url}/api/streams/{self._stream_name}/queries",
+                headers=_kibana_headers(self.api_key),
+            )
+            if resp.status_code == 403 and "not available in this environment" in resp.text:
+                result = False
+            else:
+                result = True
+        except Exception:
+            result = True  # fail-open
+        self._se_available_cache = result  # type: ignore[attr-defined]
+        return result
+
+    _SE_UNAVAILABLE_DETAIL = (
+        "Significant events not available in this environment — "
+        "requires the streams.significantEventsAvailable feature flag "
+        "(enabled Elastic-side; not configurable on serverless)."
+    )
+
+    def _deploy_scenario_stream(self, client: httpx.Client, notify: ProgressCallback):
+        """Step: (re)create the per-scenario stream partition.
+
+        Always runs, regardless of whether significant events are available —
+        later steps (data views, ECS backfill) depend on the stream existing.
+        Reports its own ok/failed; never silently skipped.
+        """
+        step = self._step(StepIdx.STREAM_CREATE)
         step.status = "running"
         notify(self.progress)
 
-        # Clean slate: delete any existing stream then recreate it.
         self._delete_stream(client)
-        if not self._create_stream(client):
+        if self._create_stream(client):
+            step.status = "ok"
+            step.detail = f"Forked {self._stream_name} from logs.otel"
+        else:
             step.detail = (
                 f"Failed to fork {self._stream_name} from logs.otel after "
                 f"{_STREAM_FORK_ROUNDS} attempts (namespace={self.ns}). "
                 "Check Streams is enabled and OTLP data is flowing into logs.otel."
             )
             step.status = "failed"
+        notify(self.progress)
+
+    def _deploy_knowledge_indicators(self, client: httpx.Client, notify: ProgressCallback):
+        """Step: populate knowledge indicators on the scenario stream.
+
+        Stream creation is owned by _deploy_scenario_stream (the preceding step).
+        This step only writes the features/_bulk payload.
+        """
+        step = self._step(StepIdx.KNOWLEDGE_INDICATORS)
+        step.status = "running"
+        notify(self.progress)
+
+        if not self._significant_events_available(client):
+            step.status = "skipped"
+            step.detail = self._SE_UNAVAILABLE_DETAIL
             notify(self.progress)
             return
 
@@ -433,6 +484,12 @@ class StreamsMixin:
                 step.detail = (
                     f"Created {len(features)} knowledge indicators on {self._stream_name}"
                 )
+            elif resp.status_code == 403 and "not available in this environment" in resp.text:
+                # Backstop: availability changed between probe and write.
+                step.status = "skipped"
+                step.detail = self._SE_UNAVAILABLE_DETAIL
+                notify(self.progress)
+                return
             else:
                 logger.warning(
                     "Knowledge indicators bulk create failed: %s", resp.text[:500]
@@ -447,12 +504,18 @@ class StreamsMixin:
     def _deploy_significant_events(self, client: httpx.Client, notify: ProgressCallback):
         """Step: create ES|QL significant-event queries on the scenario stream.
 
-        Assumes the stream already exists — _deploy_knowledge_indicators (the
-        preceding step) owns stream creation and must run first.
+        Assumes the stream already exists (_deploy_scenario_stream runs first).
+        Skipped when the streams.significantEventsAvailable feature flag is off.
         """
-        step = self._step(11)
+        step = self._step(StepIdx.SIGNIFICANT_EVENTS)
         step.status = "running"
         notify(self.progress)
+
+        if not self._significant_events_available(client):
+            step.status = "skipped"
+            step.detail = self._SE_UNAVAILABLE_DETAIL
+            notify(self.progress)
+            return
 
         # Build bulk operations — one ES|QL query per fault channel
         operations = []
@@ -484,6 +547,12 @@ class StreamsMixin:
             if resp.status_code < 300:
                 step.items_done = len(operations)
                 step.detail = f"Created {len(operations)} stream queries on {self._stream_name}"
+            elif resp.status_code == 403 and "not available in this environment" in resp.text:
+                # Backstop: availability changed between probe and write.
+                step.status = "skipped"
+                step.detail = self._SE_UNAVAILABLE_DETAIL
+                notify(self.progress)
+                return
             else:
                 logger.warning("Significant events bulk create failed: %s", resp.text[:500])
                 step.detail = f"Bulk create failed (HTTP {resp.status_code})"

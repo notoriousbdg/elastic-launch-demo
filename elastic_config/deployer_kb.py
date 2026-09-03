@@ -7,13 +7,13 @@ from typing import Any
 
 import httpx
 
-from elastic_config.deployer_base import _es_headers, ProgressCallback
+from elastic_config.deployer_base import _es_headers, ProgressCallback, StepIdx
 
 
 class KbMixin:
 
     def _deploy_knowledge_base(self, client: httpx.Client, notify: ProgressCallback):
-        step = self._step(7)
+        step = self._step(StepIdx.KNOWLEDGE_BASE)
         step.status = "running"
         notify(self.progress)
 

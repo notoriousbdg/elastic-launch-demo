@@ -284,9 +284,7 @@
         .card-btn-ops:hover { opacity: 1; }
         .card-btn-chaos { background: var(--yellow); color: var(--dark-ink); border-color: var(--yellow); }
         .card-btn-chaos:hover { background: #e6b310; border-color: #e6b310; }
-        .card-btn-slides { background: #6E4CFF; color: #fff; border-color: #6E4CFF; }
-        .card-btn-slides:hover { background: #5a3ce0; border-color: #5a3ce0; }
-        .card-btn-teardown { background: #BD271E; color: #fff; }
+.card-btn-teardown { background: #BD271E; color: #fff; }
         .card-btn-teardown:hover { background: #a8221a; }
         .card-btn-teardown[disabled] {
             background: rgba(189, 39, 30, 0.18);
@@ -666,15 +664,6 @@
         // Load scenarios (no-store ensures back-navigation re-fetches fresh data)
         try {
             scenarios = await (await fetch('/api/scenarios', { cache: 'no-store' })).json();
-            await Promise.all(scenarios.map(async (s) => {
-                try {
-                    const r = await fetch(`/api/setup/has-slides?scenario_id=${s.id}`, { cache: 'no-store' });
-                    const d = await r.json();
-                    s.has_slides = !!d.has_slides;
-                } catch (e) {
-                    s.has_slides = false;
-                }
-            }));
         } catch (e) {
             scenarios = [];
         }
@@ -990,11 +979,7 @@
             } else if (isTearingDown) {
                 actions = `<button class="card-btn card-btn-teardown" disabled>${teardownLabel}</button>`;
             } else if (dep) {
-                const slidesBtn = s.has_slides
-                    ? `<a class="card-btn card-btn-slides" href="/slides?deployment_id=${dep.deployment_id}" target="_blank" rel="noopener">Slides</a>`
-                    : '';
                 actions = `
-                    ${slidesBtn}
                     <a class="card-btn card-btn-exec" href="${dep.kibana_display_url}/app/dashboards#/view/${dep.namespace}-business-exec-dashboard" target="_blank" rel="noopener">Business Dashboard</a>
                     <a class="card-btn card-btn-ops" href="${dep.kibana_display_url}/app/dashboards#/view/${dep.namespace}-exec-dashboard" target="_blank" rel="noopener">Operations Dashboard</a>
                     <a class="card-btn card-btn-chaos" href="/chaos?deployment_id=${dep.deployment_id}">Chaos</a>
@@ -1403,15 +1388,6 @@
         if (!event.persisted) return;
         fetch('/api/scenarios', { cache: 'no-store' }).then(r => r.json()).then(async (data) => {
             scenarios = data;
-            await Promise.all(scenarios.map(async (s) => {
-                try {
-                    const r = await fetch(`/api/setup/has-slides?scenario_id=${s.id}`, { cache: 'no-store' });
-                    const d = await r.json();
-                    s.has_slides = !!d.has_slides;
-                } catch (e) {
-                    s.has_slides = false;
-                }
-            }));
             refreshDeployments();
         }).catch(() => {});
     });

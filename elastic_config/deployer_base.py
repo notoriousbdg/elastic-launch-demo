@@ -7,11 +7,55 @@ import json
 import logging
 import time
 from dataclasses import dataclass, field
+from enum import IntEnum
 from typing import Callable, Optional
 
 import httpx
 
 logger = logging.getLogger("deployer")
+
+# Indices written by elasticsearch.index workflow steps. Created at deploy so
+# the Workflows editor can resolve them (it errors when the target does not
+# exist yet, even though the step would auto-create the index at runtime).
+WORKFLOW_INDEX_SUFFIXES = (
+    "significant-events-audit",
+    "remediation-audit",
+    "escalation-audit",
+    "remediation-queue",
+    "daily-report-audit",
+)
+
+
+# ── Step index registry ─────────────────────────────────────────────────────
+
+class StepIdx(IntEnum):
+    """Canonical positions of each deploy step in DeployProgress.steps.
+
+    Keep these in sync with the DeployStep list in ScenarioDeployer.deploy_all().
+    Using an enum prevents the magic-number drift that broke _ecs_log_backfill's
+    docstring (it said "step 14" but returned 15).
+    """
+    CONNECTIVITY_CHECK   = 0
+    ES_URL               = 1
+    OTLP_ENDPOINT        = 2
+    CLEANUP              = 3
+    PLATFORM_SETTINGS    = 4
+    APM_ROLLUP           = 5
+    WORKFLOWS            = 6
+    KNOWLEDGE_BASE       = 7
+    AI_TOOLS             = 8
+    AI_AGENT             = 9
+    STREAM_CREATE        = 10
+    KNOWLEDGE_INDICATORS = 11
+    SIGNIFICANT_EVENTS   = 12
+    DATA_VIEWS           = 13
+    DASHBOARDS           = 14
+    ALERT_RULES          = 15
+    ECS_LOG_BACKFILL     = 16
+    APM_ANOMALY          = 17
+    LOGS_ML_JOBS         = 18
+    SLOS                 = 19
+    INTEGRATIONS         = 20
 
 
 # ── Progress reporting ──────────────────────────────────────────────────────

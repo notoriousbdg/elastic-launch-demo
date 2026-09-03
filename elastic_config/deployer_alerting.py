@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 
 import httpx
 
-from elastic_config.deployer_base import _kibana_headers, _retry_http, ProgressCallback
+from elastic_config.deployer_base import _kibana_headers, _retry_http, ProgressCallback, StepIdx
 
 if TYPE_CHECKING:
     from scenario_engine.base import BaseScenario
@@ -27,7 +27,7 @@ class AlertingMixin:
         _workflow_ids: dict[str, str]
 
     def _deploy_alerting(self, client: httpx.Client, notify: ProgressCallback):
-        step = self._step(14)
+        step = self._step(StepIdx.ALERT_RULES)
         step.status = "running"
         notify(self.progress)
 

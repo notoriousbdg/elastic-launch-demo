@@ -21,7 +21,7 @@ Which channel (1–20) to replace. Accept any of:
 - A subsystem area ("a propulsion fault", "something in the payments subsystem")
 - A description of what they want to change ("the GPS fault is too generic, I want something more realistic")
 
-If the user describes a fault area but not a number, read the current `channel_registry` and suggest the best-fit slot. Present the current channel and ask if they want to replace it.
+If the user describes a fault area but not a number, list `scenarios/<id>/channels/` — the filenames encode number and slug — and suggest the best-fit slot. Present the current channel name and ask if they want to replace it.
 
 ### 3. Fault description
 
@@ -41,7 +41,7 @@ Ask only if the channel number is 16–20 and the fault doesn't obviously fit th
 
 ### 5. Specific services to target
 
-Which of the 9 services should be `affected_services` (direct fault) vs `cascade_services` (downstream warning). Read the scenario's `services` dict to present options — don't ask the user to recall service names from memory.
+Which of the 9 services should be `affected_services` (direct fault) vs `cascade_services` (downstream warning). List `scenarios/<id>/services/` to present the filename stems as options — don't ask the user to recall service names from memory.
 
 ---
 

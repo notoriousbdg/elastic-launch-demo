@@ -176,7 +176,13 @@ Ask (via `AskUserQuestion`) if not obvious from context:
 ### Step 2: Review git diff for guidance
 
 ```bash
-git diff -- scenario_engine/ scripts/ app/
+git diff --stat -- scenario_engine/ scripts/ app/
+```
+
+Review the stat first. If `app/` churn dominates (UI changes), narrow the full diff to the engine paths only:
+
+```bash
+git diff -- scenario_engine/ scripts/
 ```
 
 Use the diff to understand exactly what changed. This will inform the `guidance` field of the new migration entry.
@@ -210,4 +216,35 @@ After registering the new version, offer to run Mode B across all bundled scenar
 
 > The registry is updated. Would you like me to upgrade all bundled scenarios in `scenarios/*/` to `<new-version>` now?
 
-If the user confirms, run Mode B for each scenario in turn. If the migration has `breaking: true`, make sure the user understands that any external (exported) scenarios will need upgrading before they can be re-imported and launched.
+If the migration has `breaking: true`, make sure the user understands that any external (exported) scenarios will need upgrading before they can be re-imported and launched.
+
+If the user confirms, **first collect any `needs_input` values** from the pending migration chain using `AskUserQuestion` — subagents cannot prompt the user mid-run, so gather all required values now and pass them into each subagent prompt.
+
+Then **dispatch one subagent per scenario in a single message** (they run concurrently; each scenario's files are disjoint). The 10 bundled scenarios are: `banking`, `ecommerce`, `fanatics`, `financial`, `gaming`, `gcp`, `healthcare`, `manufacturing`, `space`, `telecom`.
+
+**Subagent prompt template** (fill in `<ID>`, `<CURRENT>`, `<NEW>`, `<GUIDANCE>`, and any resolved `needs_input` values):
+
+```
+Apply schema migration to scenarios/<ID>/ to bring it from <CURRENT> to <NEW>.
+
+Migration guidance:
+<GUIDANCE>
+<If needs_input, paste: "Resolved value for <key>: <value>">
+
+Steps:
+1. Apply the guidance edits to files under scenarios/<ID>/.
+2. Run: python3 scripts/verify_yaml_scenarios.py <ID>
+   If it fails, fix and re-run (up to 2 attempts).
+3. Scope check: `git diff --name-only` must show only files under scenarios/<ID>/.
+4. Return one line only — no file contents:
+   "<ID>: migrated to <NEW>" on success, or "<ID>: FAILED — <reason>" on error.
+```
+
+After all subagents complete, present a summary table:
+
+| Scenario | Result |
+|---|---|
+| banking | migrated to &lt;NEW&gt; |
+| ecommerce | migrated to &lt;NEW&gt; |
+
+If any row shows FAILED, show the reason and ask the user whether to fix manually or retry that scenario alone.

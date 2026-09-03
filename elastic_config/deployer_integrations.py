@@ -9,6 +9,7 @@ import httpx
 
 from elastic_config.deployer_base import (
     DeployStep,
+    StepIdx,
     _kibana_headers,
     _retry_http,
     ProgressCallback,
@@ -229,7 +230,7 @@ class IntegrationsMixin:
         )
 
     def _install_integrations(self, client: httpx.Client, notify: ProgressCallback):
-        step = self._step(19)
+        step = self._step(StepIdx.INTEGRATIONS)
         step.status = "running"
         step.items_total = len(INTEGRATIONS)
         step.items_done = 0

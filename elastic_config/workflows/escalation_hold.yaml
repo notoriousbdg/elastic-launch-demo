@@ -55,7 +55,7 @@ steps:
       - name: escalate_search
         type: elasticsearch.search
         with:
-          index: "logs"
+          index: "logs.otel.__NS__"
           size: 2
           query:
             bool:
@@ -155,7 +155,7 @@ steps:
       - name: resume_safety_check
         type: elasticsearch.search
         with:
-          index: "logs"
+          index: "logs.otel.__NS__"
           size: 0
           query:
             bool:

@@ -33,10 +33,10 @@ node -e "
   const e = process.env;
 
   const settings = {
-    model: 'claude-sonnet',
+    model: 'claude-sonnet-5[1m]',
     theme: 'dark',
     permissions: {
-      defaultMode: 'auto',
+      defaultMode: 'plan',
       allow: [
         'Bash(*)',
         'mcp__elastic-agent-builder__*',
@@ -48,8 +48,7 @@ node -e "
     env: {
       IS_DEMO: '1',
       ANTHROPIC_BASE_URL: e.ANTHROPIC_BASE_URL || '',
-      ANTHROPIC_AUTH_TOKEN: e.ANTHROPIC_AUTH_TOKEN || '',
-      CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: '1'
+      ANTHROPIC_AUTH_TOKEN: e.ANTHROPIC_AUTH_TOKEN || ''
     }
   };
   fs.writeFileSync('/root/.claude/settings.json', JSON.stringify(settings, null, 2));
@@ -80,7 +79,7 @@ node -e "
               'Authorization:ApiKey ' + (e.ELASTICSEARCH_API_KEY || '')
             ],
             env: {
-              NODE_OPTIONS: '--import /usr/local/lib/node_modules/@elastic/opentelemetry-node/import.mjs',
+              NODE_OPTIONS: '--import /usr/lib/node_modules/@elastic/opentelemetry-node/import.mjs',
               OTEL_SERVICE_NAME: 'mcp-elastic-agent-builder',
               OTEL_EXPORTER_OTLP_PROTOCOL: 'http/protobuf',
               OTEL_EXPORTER_OTLP_ENDPOINT: e.INGEST_URL || '',
@@ -101,7 +100,7 @@ node -e "
               ELASTICSEARCH_API_KEY: e.ELASTICSEARCH_API_KEY || '',
               KIBANA_URL: e.KIBANA_URL || '',
               KIBANA_API_KEY: e.ELASTICSEARCH_API_KEY || '',
-              NODE_OPTIONS: '--import /usr/local/lib/node_modules/@elastic/opentelemetry-node/import.mjs',
+              NODE_OPTIONS: '--import /usr/lib/node_modules/@elastic/opentelemetry-node/import.mjs',
               OTEL_SERVICE_NAME: 'mcp-elastic-mcp-app-observability',
               OTEL_EXPORTER_OTLP_PROTOCOL: 'http/protobuf',
               OTEL_EXPORTER_OTLP_ENDPOINT: e.INGEST_URL || '',
@@ -119,7 +118,7 @@ node -e "
               ES_NODE: e.ELASTICSEARCH_URL || '',
               ES_API_KEY: e.ELASTICSEARCH_API_KEY || '',
               KIBANA_URL: e.KIBANA_URL || '',
-              NODE_OPTIONS: '--import /usr/local/lib/node_modules/@elastic/opentelemetry-node/import.mjs',
+              NODE_OPTIONS: '--import /usr/lib/node_modules/@elastic/opentelemetry-node/import.mjs',
               OTEL_SERVICE_NAME: 'mcp-elastic-mcp-dashbuilder',
               OTEL_LOG_LEVEL: 'error',
               OTEL_EXPORTER_OTLP_PROTOCOL: 'http/protobuf',
@@ -156,6 +155,7 @@ cat > /root/.local/share/code-server/User/settings.json << 'EOF'
   "extensions.autoCheckUpdates": false,
   "terminal.integrated.defaultProfile.linux": "bash",
   "claudeCode.disableLoginPrompt": true,
+  "claudeCode.initialPermissionMode": "plan",
   "remote.autoForwardPorts": false,
   "remote.autoForwardPortsSource": "output"
 }
@@ -212,6 +212,18 @@ node -e "
   fs.writeFileSync('/app/CLAUDE.md', md + '\\n');
 })().catch(err => { console.error(err); process.exit(1); });
 "
+
+# code-server SCM needs a git repo to mark edited files. /app is ephemeral
+# except PVC mounts, so re-init a baseline commit on every container start.
+if [ ! -d /app/.git ]; then
+  echo "Initializing /app as a git repo for code-server change tracking..."
+  git config --global --add safe.directory /app
+  git -C /app init -b main
+  git -C /app config user.email "demo@localhost"
+  git -C /app config user.name "Demo"
+  git -C /app add -A
+  git -C /app commit -m "Baseline" --quiet
+fi
 
 # Map staging env var names to what app/config.py reads.
 # The staging environment uses ELASTICSEARCH_API_KEY / ELASTICSEARCH_URL / INGEST_URL;

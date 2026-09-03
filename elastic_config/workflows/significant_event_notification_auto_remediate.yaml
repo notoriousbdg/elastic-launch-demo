@@ -32,154 +32,348 @@ triggers:
 #   tags[2] = action_type (remediation_action for this channel)
 #   tags[3] = channel number (as string)
 
+# Step-level `if` (not a nested type: if) keeps run_rca / create_case_title /
+# enrich_context as top-level steps so the Workflows editor can type-check
+# their outputs. Nested ai.agent and data.set outputs are untyped
+# ("type is unknown").
 steps:
-  - name: on_alert_active
-    type: if
-    condition: 'NOT event.alerts[0].kibana.alert.action_group : recovered'
-    steps:
-      - name: enrich_context
-        type: elasticsearch.esql.query
-        with:
-          query: >
-            FROM logs.otel.__NS__,logs.otel.__NS__.* | WHERE event_name IS NOT NULL | SORT @timestamp DESC | KEEP event_name | LIMIT 1
-          format: json
+  - name: enrich_context
+    type: elasticsearch.esql.query
+    if: "${{ event.alerts[0].kibana.alert.action_group != 'recovered' }}"
+    with:
+      query: >
+        FROM logs.otel.__NS__,logs.otel.__NS__.*
+        | WHERE event_name IS NOT NULL
+        | SORT @timestamp DESC
+        | GROK event_name """.*"user_email"\s*:\s*"(?<user_email>[^"]*)".*"""
+        | KEEP user_email
+        | LIMIT 1
+      format: json
 
-      - name: count_errors
-        type: elasticsearch.esql.query
-        with:
-          query: >
-            FROM logs.otel.__NS__,logs.otel.__NS__.*
-            | WHERE @timestamp > NOW() - 15 MINUTES AND severity_text == "ERROR"
-            | STATS total_errors = COUNT(*)
-          format: json
+  - name: count_errors
+    type: elasticsearch.esql.query
+    if: "${{ event.alerts[0].kibana.alert.action_group != 'recovered' }}"
+    with:
+      query: >
+        FROM logs.otel.__NS__,logs.otel.__NS__.*
+        | WHERE @timestamp > NOW() - 15 MINUTES AND severity_text == "ERROR"
+        | STATS total_errors = COUNT(*)
+      format: json
 
-      - name: parse_event_meta
-        type: data.set
-        with:
-          var:
-            - event_meta: "${{ steps.enrich_context.output.values[0][0] | json_parse }}"
+  - name: run_rca
+    type: ai.agent
+    agent-id: __AGENT_ID__
+    connector-id: "__SONNET_CONNECTOR_ID__"
+    create-conversation: true
+    timeout: 15m
+    on-failure:
+      retry:
+        max-attempts: 2
+        delay: "5s"
+    if: "${{ event.alerts[0].kibana.alert.action_group != 'recovered' }}"
+    with:
+      message: |
+        Investigate the following significant event and produce a polished root cause analysis.
+        Follow the investigation playbook and this output/links contract. Gather evidence with tools; do not rely only on the alert payload.
+        Do NOT execute any remediation actions in this step.
 
-      - name: run_rca
-        type: ai.agent
-        agent-id: __AGENT_ID__
-        create-conversation: true
-        timeout: 10m
-        with:
-          message: >
-            Significant event detected: {{ event.rule.name }}.
-            Error type: {{ event.rule.tags[1] }}.
-            Total errors in last 15 minutes: {{ steps.count_errors.output.values[0][0] }}.
-            Perform a root cause analysis only. Search logs for this error type,
-            identify affected services, trace the fault propagation, and provide
-            your structured RCA report. Do NOT execute any remediation actions.
+        Significant event: {{ event.rule.name }}
+        Error type: {{ event.rule.tags[1] }}
+        Total errors in last 15 minutes: {{ steps.count_errors.output.values[0][0] }}
 
-      - name: create_case
-        type: cases.createCase
-        with:
-          title: "{{ event.rule.name }}"
-          description: |
-           [View Full Conversation](/app/agent_builder/conversations/{{ steps.run_rca.output.conversation_id }})
+        ## Required checks
+        - Call the knowledge-base tool (`search_known_anomalies` or the channel runbook) for prior incidents and documented procedures matching this error type or affected services.
+        - Identify blast radius and earliest confirmed break point when evidence supports them; state when they cannot be determined confidently.
+        - Use compressed-output observability tools (topology, change points, correlations) when they help; parameterized log tools remain valid especially for this error type.
+        - Prefer the **alert** time window for Discover/APM links and any second-pass query. The 15-minute parameterized tools are fine as a first look while the alert is fresh; do not use NOW()-relative windows for evidence links.
 
-           {{ steps.run_rca.output.message }}
-          tags:
-            - "__NS__"
-            - "{{ event.rule.tags[1] }}"
-          severity: "high"
-          owner: "observability"
-          settings:
-            syncAlerts: false
+        ## Causality
+        - Use `confirmed` only when evidence directly demonstrates the cause; otherwise `likely`, `probable`, or `is consistent with`.
+        - Distinguish root cause, contributing factor, downstream impact, and correlation.
+        - Name missing evidence in the root-cause table Gaps column when confidence is reduced.
 
-      - name: attach_alert_to_case
-        type: kibana.request
-        with:
-          method: POST
-          path: "/api/cases/{{ steps.create_case.output.case.id }}/comments"
-          headers:
-            kbn-xsrf: "true"
-          body:
-            type: "alert"
-            alertId: "{{ event.alerts[0]._id }}"
-            index: "{{ event.alerts[0]._index }}"
-            rule:
-              id: "{{ event.rule.id }}"
-              name: "{{ event.rule.name }}"
-            owner: "observability"
+        ## Links
+        - Prefer tool-returned Kibana URLs verbatim. Strip UI suffixes such as `(external, opens in a new tab or window)`.
+        - Construct when needed:
+          - Service: `/app/apm/services/{name}`
+          - Service logs: `/app/apm/services/{name}/logs`
+          - Trace: `/app/apm/link-to/trace/{id}`
+          - Alerts: `/app/observability/alerts`
+          - Discover logs (time-scoped): `/app/discover#/?_g=(time:(from:'{start}',to:'{end}'))&_a=(index:'logs.otel.__NS__',query:(language:kuery,query:'{kql}'))`
+          - Discover traces: same pattern with `traces.otel.__NS__`
+          - Operations dashboard: `/app/dashboards#/view/__NS__-exec-dashboard`
+          - Executive dashboard: `/app/dashboards#/view/__NS__-business-exec-dashboard`
+        - Discover encoding: spaces → `%20`, quotes → `%22`; do not encode RISON `():'`. Always include `_g=(time:(from:'...',to:'...'))` for the alert window.
+        - Attribute each finding to its real source type (Traces | Logs | Metrics | Topology | ML | Alert | Other). Never relabel (spans are not logs).
+        - Include validated ES|QL only if you ran it; otherwise state why not.
 
-      - name: send_notification
-        type: email
-        connector-id: elastic-cloud-email
-        if: "${{ steps.parse_event_meta.output.var[0].event_meta.user_email != '' and steps.parse_event_meta.output.var[0].event_meta.user_email != null }}"
-        with:
-          to:
-            - "{{ steps.parse_event_meta.output.var[0].event_meta.user_email }}"
-          subject: "__SCENARIO_NAME__ — Auto-remediated: {{ event.rule.name }}"
-          message: |
-            ## Auto-Remediated — __SCENARIO_NAME__
+        ## Evidence links — REQUIRED
+        - Every evidence item MUST include an **Evidence links** subsection with at least one real Markdown hyperlink: `[label](/app/...)`.
+        - Plain-text bullets (e.g. "confirmed via logs") are not allowed — operators must be able to click through to the underlying data.
+        - Match link type to source type:
+          - Traces → key failing trace and/or service transactions
+          - Logs → service logs (with time window) or Discover on `logs.otel.__NS__`
+          - Metrics / Topology → service overview or relevant metrics view
+          - Alert → alert or rule deep link when available
+          - ML → ML explorer job link when an ML job is involved
+        - If a tool returned a URL, use it. If not, construct one of the patterns above from identifiers you observed (service name, trace id, KQL, time window).
+        - Do not invent IDs. If you truly cannot construct a valid URL for an item, say so explicitly under Evidence links and still provide the closest valid service/Discover link that shows related data.
 
-            **Rule:** {{ event.rule.name }}
-            **Error Type:** {{ event.rule.tags[1] }}
-            **Total errors (15m):** {{ steps.count_errors.output.values[0][0] }}
+        ## Output — REQUIRED
+        - Response MUST begin with `## What This Means` — nothing before it; do not wrap the report in a code fence.
+        - Exact section order and headings below. Omit optional sections only when their condition is unmet. Blank line after headings and around tables. Prefer tables over prose for comparisons.
 
-            ---
+          ## What This Means
 
-            A significant event was identified and an AI root cause analysis has completed. Automated remediation has been applied. **No action is required** — the case will close automatically.
+          <2–4 plain-English sentences for less-experienced IT staff — no jargon, no IDs, no abbreviations>
 
-            **Conversation:**
-            __KIBANA_URL__/app/agent_builder/conversations/{{ steps.run_rca.output.conversation_id }}
+          ---
 
-            **Case (RCA + linked alert):**
-            __KIBANA_URL__/app/observability/cases/{{ steps.create_case.output.case.id }}
+          ## Alert Summary
 
-            **Operations dashboard:**
-            __KIBANA_URL__/app/dashboards#/view/__NS__-exec-dashboard
+          | Field | Value |
+          |---|---|
+          | Alert Name | <value> |
+          | Alert Status | <value> |
+          | Error Type | <value> |
+          | Affected Services | <value — inline links: [service](/app/apm/services/service)> |
+          | Severity | <ADVISORY, CAUTION, WARNING, or CRITICAL> |
 
-            **Executive dashboard:**
-            __KIBANA_URL__/app/dashboards#/view/__NS__-business-exec-dashboard
+          ---
 
-      # Call the same remediation_action workflow the HITL path uses, via the
-      # agent tool — with approval_mode: skip so waitForInput is bypassed.
-      # Workflow inputs live under the manual trigger (9.5+) so the tool schema
-      # is non-empty and these params actually reach the workflow.
-      - name: request_remediation
-        type: kibana.request
-        with:
-          method: POST
-          path: "/api/agent_builder/converse"
-          headers:
-            kbn-xsrf: "true"
-          body:
-            agent_id: __AGENT_ID__
-            conversation_id: "{{ steps.run_rca.output.conversation_id }}"
-            input: >
-              Invoke the remediation_action workflow tool now (do not queue
-              remediation yourself). You MUST pass approval_mode: skip (string)
-              so remediation runs without waitForInput:
-              - action_type: {{ event.rule.tags[2] }}
-              - channel: {{ event.rule.tags[3] }}
-              - error_type: {{ event.rule.tags[1] }}
-              - case_id: {{ steps.create_case.output.case.id }}
-              - dry_run: false
-              - approval_mode: skip
-              - justification: Automated remediation triggered by alert rule
-        timeout: 10m
+          ## Executive Summary
 
-      - name: audit_log
-        type: elasticsearch.index
-        with:
-          index: "__NS__-significant-events-audit"
-          document:
-            rule_name: "{{ event.rule.name }}"
-            error_type: "{{ event.rule.tags[1] }}"
-            total_errors: "{{ steps.count_errors.output.values[0][0] }}"
-            rca_case_created: true
-            auto_remediated: true
-            mission_id: "__SCENARIO_NAME__"
-          refresh: wait_for
+          <short paragraph: primary root cause, impact, whether ongoing, blast radius if known, earliest confirmed break point if known, cascade/cross-cloud if known>
 
-    # This firing is for the alert's recovery transition — the Case
-    # Auto-Close workflow handles closing the case; nothing to do here.
-    else:
-      - name: log_skipped_recovery
-        type: console
-        with:
-          message: "Skipping notification — {{ event.rule.name }} recovered (handled by Case Auto-Close workflow)."
+          ## Quick Links
+
+          - [<primary affected service>](/app/apm/services/<service-name>)
+          - [Logs for <service>](/app/apm/services/<service-name>/logs)
+          - [Key trace](/app/apm/link-to/trace/<trace-id>)
+          - [Operations dashboard](/app/dashboards#/view/__NS__-exec-dashboard)
+          - [Executive dashboard](/app/dashboards#/view/__NS__-business-exec-dashboard)
+          - [View Full Conversation](__CONVERSATION_URL__)
+
+          Always include Quick Links; the last item MUST be the View Full Conversation line copied verbatim (including the placeholder). Omit other bullets you cannot construct correctly.
+
+          ---
+
+          ## Recommended Actions
+
+          ### Immediate
+          - <action>
+
+          ### Short-Term
+          - <action>
+
+          ---
+
+          ## Technical Detail
+
+          ### Cascade / Cross-Cloud
+          <propagation across services and clouds when evidence supports it>
+
+          ### Key Findings
+          **<bold title>**
+          <detail> *(Source: <Traces|Logs|Metrics|Topology|ML|Alert> — confidence <0.XX>)*
+
+          ### Possible Root Causes
+
+          | Hypothesis | Evidence | Confidence (0-100%) | Missing Evidence / Gaps |
+          |---|---|---:|---|
+
+          ### Incident Timeline
+
+          | Time (UTC) | Event | Source |
+          |---|---|---|
+
+          Include only when the sequence can be determined confidently.
+
+          ### Evidence & Validated Queries
+
+          **Evidence <n> —** <short title>
+          **Evidence for:** <finding/root cause>
+          **Source type:** Traces | Logs | Metrics | Topology | ML | Alert | Other
+
+          **Summary**
+          <paragraph with specific data>
+
+          **Evidence links** (REQUIRED — at least one real Markdown link; never plain text only)
+          - [descriptive label](/app/path/to/evidence)
+
+          **Validated ES|QL**
+          - `Not needed — confirmed via direct search results.` / `Attempted but validation failed.` / `Not possible to validate with available evidence.` / or a validated query in a fenced `esql` block
+
+          Separate evidence items with `---`. Never omit **Evidence links**.
+
+        ## Output rules
+        - No generic templates. Do not invent evidence. Return only the final RCA.
+        - Use plain service names in narrative text. Put detailed evidence in the final section, not the main narrative.
+
+        Alert (JSON):
+        {{ event | json }}
+
+  - name: create_case_title
+    type: ai.agent
+    agent-id: __AGENT_ID__
+    connector-id: "__HAIKU_CONNECTOR_ID__"
+    create-conversation: true
+    timeout: 2m
+    on-failure:
+      retry:
+        max-attempts: 3
+        delay: "5s"
+        strategy: exponential
+        multiplier: 2
+        max-delay: "60s"
+        jitter: true
+    if: "${{ event.alerts[0].kibana.alert.action_group != 'recovered' }}"
+    with:
+      message: |
+        Generate a concise, informative case title based on the root cause analysis provided at the end of this message.
+        Title rules:
+        - Return ONLY the title.
+        - Maximum 12 words.
+        - Maximum 160 characters (hard limit; longer titles fail case creation).
+        - Do not use markdown, quotes, or a trailing period.
+        - Prefer a title that is specific, short, and operationally useful.
+        - Prioritize:
+          1. primary symptom
+          2. affected service or scope
+          3. likely cause if strongly supported
+        - Prefer this structure:
+          <Primary symptom> on <service/host/environment> - <suspected cause>
+        - If the service, host, or environment is unknown, omit it rather than guessing.
+        - If the cause is uncertain, use a neutral ending such as:
+          - investigation required
+          - possible resource saturation
+          - possible log volume spike
+          - possible dependency latency
+        - Avoid filler words such as:
+          - issue
+          - problem
+          - incident
+          - anomaly
+          unless needed for clarity.
+        - Do not include IDs, raw JSON, or timestamps unless essential.
+
+        Root cause analysis to title:
+        {{ steps.run_rca.output.message }}
+
+  - name: create_case
+    type: cases.createCase
+    if: "${{ event.alerts[0].kibana.alert.action_group != 'recovered' }}"
+    with:
+      title: "{{ steps.create_case_title.output.message | strip | truncate: 160 }}"
+      description: |
+        {%- assign conv_url = context.kibanaUrl | append: "/app/agent_builder/conversations/" | append: steps.run_rca.output.conversation_id -%}
+        {%- assign rca = steps.run_rca.output.message | replace: "__CONVERSATION_URL__", conv_url -%}
+        {%- assign rca_parts = rca | split: "## What This Means" -%}
+        {%- if rca_parts.size > 1 -%}{%- assign rca = "## What This Means" | append: rca_parts.last -%}{%- endif -%}
+        {{ rca | strip }}
+
+        ---
+        [View Full Conversation]({{ conv_url }})
+      tags:
+        - "__NS__"
+        - "{{ event.rule.tags[1] }}"
+      severity: "high"
+      owner: "observability"
+      settings:
+        syncAlerts: false
+
+  - name: attach_alert_to_case
+    type: kibana.request
+    if: "${{ event.alerts[0].kibana.alert.action_group != 'recovered' }}"
+    with:
+      method: POST
+      path: "/api/cases/{{ steps.create_case.output.case.id }}/comments"
+      headers:
+        kbn-xsrf: "true"
+      body:
+        type: "alert"
+        alertId: "{{ event.alerts[0]._id }}"
+        index: "{{ event.alerts[0]._index }}"
+        rule:
+          id: "{{ event.rule.id }}"
+          name: "{{ event.rule.name }}"
+        owner: "observability"
+
+  - name: send_notification
+    type: email
+    connector-id: elastic-cloud-email
+    if: "${{ event.alerts[0].kibana.alert.action_group != 'recovered' and steps.enrich_context.output.values[0][0] != '' and steps.enrich_context.output.values[0][0] != null }}"
+    with:
+      to:
+        - "{{ steps.enrich_context.output.values[0][0] }}"
+      subject: "__SCENARIO_NAME__ — Auto-remediated: {{ event.rule.name }}"
+      message: |
+        ## Auto-Remediated — __SCENARIO_NAME__
+
+        **Rule:** {{ event.rule.name }}
+        **Error Type:** {{ event.rule.tags[1] }}
+        **Total errors (15m):** {{ steps.count_errors.output.values[0][0] }}
+
+        ---
+
+        A significant event was identified and an AI root cause analysis has completed. Automated remediation has been applied. **No action is required** — the case will close automatically.
+
+        **Conversation:**
+        __KIBANA_URL__/app/agent_builder/conversations/{{ steps.run_rca.output.conversation_id }}
+
+        **Case (RCA + linked alert):**
+        __KIBANA_URL__/app/observability/cases/{{ steps.create_case.output.case.id }}
+
+        **Operations dashboard:**
+        __KIBANA_URL__/app/dashboards#/view/__NS__-exec-dashboard
+
+        **Executive dashboard:**
+        __KIBANA_URL__/app/dashboards#/view/__NS__-business-exec-dashboard
+
+  # Call the same remediation_action workflow the HITL path uses, via the
+  # agent tool — with approval_mode: skip so waitForInput is bypassed.
+  # Workflow inputs live under the manual trigger (9.5+) so the tool schema
+  # is non-empty and these params actually reach the workflow.
+  - name: request_remediation
+    type: kibana.request
+    if: "${{ event.alerts[0].kibana.alert.action_group != 'recovered' }}"
+    timeout: 10m
+    with:
+      method: POST
+      path: "/api/agent_builder/converse"
+      headers:
+        kbn-xsrf: "true"
+      body:
+        agent_id: __AGENT_ID__
+        conversation_id: "{{ steps.run_rca.output.conversation_id }}"
+        input: >
+          Invoke the remediation_action workflow tool now (do not queue
+          remediation yourself). You MUST pass approval_mode: skip (string)
+          so remediation runs without waitForInput:
+          - action_type: {{ event.rule.tags[2] }}
+          - channel: {{ event.rule.tags[3] }}
+          - error_type: {{ event.rule.tags[1] }}
+          - case_id: {{ steps.create_case.output.case.id }}
+          - dry_run: false
+          - approval_mode: skip
+          - justification: Automated remediation triggered by alert rule
+
+  - name: audit_log
+    type: elasticsearch.index
+    if: "${{ event.alerts[0].kibana.alert.action_group != 'recovered' }}"
+    with:
+      index: "__NS__-significant-events-audit"
+      document:
+        rule_name: "{{ event.rule.name }}"
+        error_type: "{{ event.rule.tags[1] }}"
+        total_errors: "{{ steps.count_errors.output.values[0][0] }}"
+        rca_case_created: true
+        auto_remediated: true
+        mission_id: "__SCENARIO_NAME__"
+      refresh: wait_for
+
+  - name: log_skipped_recovery
+    type: console
+    if: "${{ event.alerts[0].kibana.alert.action_group == 'recovered' }}"
+    with:
+      message: "Skipping notification — {{ event.rule.name }} recovered (handled by Case Auto-Close workflow)."

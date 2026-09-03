@@ -9,7 +9,7 @@ import time
 
 import httpx
 
-from elastic_config.deployer_base import ProgressCallback, _es_headers, _kibana_headers
+from elastic_config.deployer_base import ProgressCallback, StepIdx, _es_headers, _kibana_headers
 
 # Tuning constants for the post-deploy SLO refresh worker.
 _SLO_REFRESH_INTERVAL = 15.0    # seconds between service-presence polls
@@ -24,7 +24,7 @@ class SloMixin:
 
     def _deploy_slos(self, client: httpx.Client, notify: ProgressCallback):
         """Create the three standard SLOs via the Kibana SLO API."""
-        step = self._step(18)
+        step = self._step(StepIdx.SLOS)
         step.status = "running"
         notify(self.progress)
 

@@ -595,8 +595,9 @@ class BaseScenario(ABC):
         description = (
             f"Investigate anomalies, errors, and faults in the {self.scenario_name} "
             f"environment. Use this skill to look up error patterns, trace cascade failures "
-            f"across services, and perform structured root cause analysis using the correct "
-            f"ES|QL field names and parameterized investigation tools."
+            f"across services, and perform structured root cause analysis with clickable "
+            f"Kibana evidence links, using the correct ES|QL field names, parameterized "
+            f"investigation tools, and built-in observability tools."
         )
         content = f"""## CRITICAL: Field Names
 
@@ -608,14 +609,18 @@ class BaseScenario(ABC):
 
 ## Tool Selection Guide
 
+Compressed-output observability tools (from `observability.rca` / `observability.investigation`) are first-class: use them for topology, change points, and correlations. Parameterized log tools remain valid, especially for a known `error_type`. Custom ES|QL is allowed when a builtin or parameterized tool cannot answer the question; include a query in the report only if you actually ran it.
+
 1. **Known error type** → `{p_search_error}` — parameterized, returns matching ERROR logs
 2. **Specific service** → `{p_search_service}` — parameterized by service name
 3. **General awareness** → `{p_browse_recent}` or `{p_subsystem_health}`
-4. **Historical patterns** → `{p_search_known}` — knowledge base lookup
+4. **Historical patterns** → `{p_search_known}` — knowledge base lookup (required during alert-driven RCA)
 5. **Cascade analysis** → `{p_trace_anomaly}` — cross-service propagation
 6. **Operational readiness** → `{assessment_tool}` — overall system health
 
-Do NOT write custom ES|QL queries. Use the parameterized tools.
+## Time windows
+
+When an alert payload is present, time-scope Discover/APM links and second-pass queries to the **alert** window (start/end from the alert), not `NOW()`. The 15-minute parameterized tools are fine as a first look while the alert is fresh.
 
 ## Root Cause Analysis Methodology
 
@@ -627,15 +632,28 @@ Do NOT write custom ES|QL queries. Use the parameterized tools.
 6. **Known Pattern Matching**: Check knowledge base for similar anomalies
 7. **Severity Classification**: ADVISORY, CAUTION, WARNING, or CRITICAL
 
+Use `confirmed` only when evidence directly demonstrates the cause; otherwise `likely`, `probable`, or `is consistent with`. Distinguish root cause, contributing factor, downstream impact, and correlation.
+
 ## Response Format
 
-1. **Summary** — One-sentence description
-2. **Affected Systems** — Impacted services and subsystems
-3. **Root Cause** — Underlying cause determination
-4. **Evidence** — Specific log entries, timestamps, field values
-5. **Cascade Risk** — Propagation assessment
-6. **Recommendation** — Prioritized remediation steps
-7. **Confidence** — HIGH/MEDIUM/LOW with reasoning
+Begin with `## What This Means`. Then:
+
+1. **What This Means** — 2–4 plain-English sentences
+2. **Alert Summary** — table with linked service names
+3. **Executive Summary** — root cause, impact, blast radius, cascade/cross-cloud
+4. **Quick Links** — service, logs, key trace, dashboards, View Full Conversation
+5. **Recommended Actions** — Immediate / Short-Term
+6. **Technical Detail** — cascade, key findings, possible root causes (with Gaps), timeline
+7. **Evidence & Validated Queries** — each item MUST include an **Evidence links** subsection with at least one real Markdown hyperlink `[label](/app/...)`. Plain-text "confirmed via logs" is not allowed.
+
+Construct links from identifiers you observed (do not invent IDs):
+- Service: `/app/apm/services/{{name}}`
+- Service logs: `/app/apm/services/{{name}}/logs`
+- Trace: `/app/apm/link-to/trace/{{id}}`
+- Discover logs (alert window): `/app/discover#/?_g=(time:(from:'{{start}}',to:'{{end}}'))&_a=(index:'logs.otel.{ns}',query:(language:kuery,query:'{{kql}}'))`
+- Discover traces: same pattern with `traces.otel.{ns}`
+- Operations dashboard: `/app/dashboards#/view/{ns}-exec-dashboard`
+- Executive dashboard: `/app/dashboards#/view/{ns}-business-exec-dashboard`
 """
         return {
             "id": f"{ns}-investigation-playbook",
