@@ -131,7 +131,7 @@ scenarios/<id>/services/
 
 The telemetry DSL is interpreted by `app/services/telemetry_dsl.py` (shared infra — see §11). **Never write a Python `BaseService` subclass for service telemetry.** The `services/` directory must contain only `.yaml` files (no `.py` files, no `__init__.py`).
 
-See the **Service telemetry DSL** section in CONTRACT.md for the full spec schema.
+See the **Service telemetry DSL** section in [contract/services.md](contract/services.md) for the full spec schema.
 
 ---
 
@@ -154,14 +154,20 @@ scenarios/<id>/
 
 ---
 
-## 11. `scenarios/fault_spec.py` and `scenarios/yaml_scenario.py` are shared infrastructure
+## 11. `scenario_engine/fault_spec.py` and `scenario_engine/yaml_scenario.py` are shared infrastructure
 
 These are shared across all scenarios. **Never modify them for a new scenario.**
 
 If you believe a change to these files is necessary, stop and ask the user. The default answer is no.
 
 These files live outside any scenario subfolder and are not scenario-specific:
-- `scenarios/fault_spec.py` — YAML DSL resolver for fault params / rca_clues / trace_attributes
-- `scenarios/yaml_scenario.py` — `YamlScenario` class + `load_yaml_scenario()` + `emit_executive_business_metrics_if_eligible()`
+- `scenario_engine/fault_spec.py` — YAML DSL resolver for fault params / rca_clues / trace_attributes
+- `scenario_engine/yaml_scenario.py` — `YamlScenario` class + `load_yaml_scenario()` + `emit_executive_business_metrics_if_eligible()`
 - `app/services/telemetry_dsl.py` — `YamlService` executor (interprets `services/<svc>.yaml` specs each cycle)
 - `app/services/expr.py` — sandboxed expression evaluator used by the DSL (`{expr: "..."}` values)
+
+---
+
+## Subagent mirroring note
+
+Rules §5, §6, §8, §9, §10, plus the fault_params parity rule and the zero-TODO rule, are inlined verbatim into the subagent prompt templates in SKILL.md's Phase 5. If you update any of those rules here, also update the corresponding lines in the subagent prompts in SKILL.md so they stay in sync.

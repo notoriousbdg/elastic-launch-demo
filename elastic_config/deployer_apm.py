@@ -8,7 +8,7 @@ from typing import Any
 
 import httpx
 
-from elastic_config.deployer_base import _es_headers, _kibana_headers, ProgressCallback
+from elastic_config.deployer_base import _es_headers, _kibana_headers, ProgressCallback, StepIdx
 
 logger = logging.getLogger("deployer")
 
@@ -19,7 +19,7 @@ class ApmMixin:
         """Step 4: Generate synthetic APM rollup data and deploy DB ingest pipeline."""
         from elastic_config.apm_rollup import ApmRollupGenerator
 
-        step = self._step(5)
+        step = self._step(StepIdx.APM_ROLLUP)
         step.status = "running"
         notify(self.progress)
 
@@ -145,7 +145,7 @@ class ApmMixin:
         - Composite aggregation (date_histogram + transaction.type + service.name)
         - summary_count_field_name: "doc_count" (composite bucket doc_count)
         """
-        step = self._step(16)
+        step = self._step(StepIdx.APM_ANOMALY)
         step.status = "running"
         self._apm_ml_started = False
         notify(self.progress)
@@ -426,7 +426,7 @@ class ApmMixin:
         _setup_apm_anomaly_detection, so ES has been processing the 12h backfill
         during the intervening deploy steps — by now the catch-up poll is usually
         near-instant."""
-        step = self._step(16)
+        step = self._step(StepIdx.APM_ANOMALY)
         if not getattr(self, "_apm_ml_started", False):
             return  # setup failed or was skipped — leave its status as-is
         try:

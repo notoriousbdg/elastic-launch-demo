@@ -1,4 +1,10 @@
-"""OTLP Telemetry Client — sends traces, metrics, and logs in OTLP JSON format.
+"""OTLP Telemetry Client — sends traces, metrics, and logs over OTLP/HTTP.
+
+Logs and traces use OTLP JSON against Elastic Cloud Managed OTLP (``/v1/logs``,
+``/v1/traces``). Metrics are encoded as protobuf and posted to Elasticsearch
+``/_otlp/v1/metrics``: on 9.5.1, mOTLP ``/v1/metrics`` returns HTTP 200 and then
+drops the points (JSON or protobuf). ES native OTLP indexes protobuf metrics
+into ``metrics-*.otel-*``.
 
 Adapted from otel-demo-gen/backend/generator.py. Uses httpx with auth headers,
 batching, and graceful failure when the collector is unavailable.
@@ -8,13 +14,19 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 import time
 from typing import Any, Optional
 
 import httpx
+from google.protobuf.json_format import ParseDict
+from opentelemetry.proto.collector.metrics.v1.metrics_service_pb2 import (
+    ExportMetricsServiceRequest,
+)
 
 from app.config import (
+    ELASTIC_URL,
     OTLP_API_KEY,
     OTLP_AUTH_TYPE,
     OTLP_ENDPOINT,
@@ -53,7 +65,7 @@ def _now_ns() -> str:
 
 
 class OTLPClient:
-    """Sends OTLP JSON payloads to an HTTP endpoint (typically an OTel Collector)."""
+    """Sends OTLP/HTTP payloads to Elastic Cloud Managed OTLP or a collector."""
 
     def __init__(
         self,
@@ -361,6 +373,31 @@ class OTLPClient:
                 break
         return res
 
+    @staticmethod
+    def _encode_otlp(payload: dict) -> tuple[bytes, dict[str, str]]:
+        """Serialize an OTLP payload.
+
+        Metrics must be protobuf for Elasticsearch ``/_otlp/v1/metrics``.
+        Logs and traces continue to use OTLP JSON on the managed ingest URL.
+        """
+        if "resourceMetrics" in payload:
+            msg = ParseDict(
+                payload,
+                ExportMetricsServiceRequest(),
+                ignore_unknown_fields=True,
+            )
+            return msg.SerializeToString(), {"Content-Type": "application/x-protobuf"}
+        return json.dumps(payload).encode(), {}
+
+    @staticmethod
+    def _metrics_otlp_url() -> str | None:
+        """ES native OTLP metrics path, or None if Elasticsearch is not configured."""
+        es = (
+            (ELASTIC_URL or "").strip()
+            or os.getenv("ELASTICSEARCH_URL", "").strip()
+        ).rstrip("/")
+        return f"{es}/_otlp/v1/metrics" if es else None
+
     def _send(self, url: str, payload: dict, signal_name: str) -> None:
         if not self.endpoint:
             return  # No endpoint configured yet; silently drop until reconfigure() is called
@@ -380,7 +417,11 @@ class OTLPClient:
         # emissions despite a 1.5-3s tick loop). The lock is only used below
         # to keep the failure counter's read-modify-write atomic.
         try:
-            response = self.client.post(url, content=json.dumps(payload))
+            body, extra_headers = self._encode_otlp(payload)
+            # mOTLP /v1/metrics acks then drops; ES native OTLP indexes protobuf.
+            if "resourceMetrics" in payload:
+                url = self._metrics_otlp_url() or url
+            response = self.client.post(url, content=body, headers=extra_headers or None)
             response.raise_for_status()
             with self._send_lock:
                 self.consecutive_failures = 0

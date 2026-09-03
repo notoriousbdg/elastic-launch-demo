@@ -6,13 +6,13 @@ import urllib.parse
 
 import httpx
 
-from elastic_config.deployer_base import _kibana_headers, _retry_http, ProgressCallback
+from elastic_config.deployer_base import _kibana_headers, _retry_http, ProgressCallback, StepIdx
 
 
 class DataViewsMixin:
 
     def _deploy_data_views(self, client: httpx.Client, notify: ProgressCallback):
-        step = self._step(12)
+        step = self._step(StepIdx.DATA_VIEWS)
         step.status = "running"
         notify(self.progress)
 

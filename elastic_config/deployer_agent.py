@@ -7,7 +7,7 @@ from typing import Any
 
 import httpx
 
-from elastic_config.deployer_base import _kibana_headers, ProgressCallback
+from elastic_config.deployer_base import _kibana_headers, ProgressCallback, StepIdx
 
 logger = logging.getLogger("deployer")
 
@@ -15,7 +15,7 @@ logger = logging.getLogger("deployer")
 class AgentMixin:
 
     def _deploy_tools(self, client: httpx.Client, notify: ProgressCallback):
-        step = self._step(8)
+        step = self._step(StepIdx.AI_TOOLS)
         step.status = "running"
         notify(self.progress)
 
@@ -77,7 +77,7 @@ class AgentMixin:
         notify(self.progress)
 
     def _deploy_agent(self, client: httpx.Client, notify: ProgressCallback):
-        step = self._step(9)
+        step = self._step(StepIdx.AI_AGENT)
         step.status = "running"
         notify(self.progress)
 

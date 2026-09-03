@@ -6,7 +6,7 @@ import logging
 
 import httpx
 
-from elastic_config.deployer_base import _kibana_headers, ProgressCallback
+from elastic_config.deployer_base import _kibana_headers, ProgressCallback, StepIdx
 
 logger = logging.getLogger("deployer")
 
@@ -44,7 +44,7 @@ class SkillsMixin:
         Appends all resolved skill IDs to self._created_skill_ids and
         updates step 8 progress items.
         """
-        step = self._step(8)
+        step = self._step(StepIdx.AI_TOOLS)
 
         builtin_ids = self._discover_builtin_skill_ids(client)
         self._created_skill_ids.extend(builtin_ids)

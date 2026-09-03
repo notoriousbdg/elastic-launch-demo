@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 import httpx
 
-from elastic_config.deployer_base import _es_headers, ProgressCallback
+from elastic_config.deployer_base import _es_headers, ProgressCallback, StepIdx
 
 _OTLP_RETRIES = 4          # attempts (initial + 3 retries)
 _OTLP_RETRY_DELAY = 5.0    # seconds between attempts
@@ -14,7 +14,7 @@ _OTLP_RETRY_DELAY = 5.0    # seconds between attempts
 class OtlpMixin:
 
     def _derive_otlp_step(self, client: httpx.Client, notify: ProgressCallback):
-        step = self._step(2)
+        step = self._step(StepIdx.OTLP_ENDPOINT)
         step.status = "running"
         notify(self.progress)
 

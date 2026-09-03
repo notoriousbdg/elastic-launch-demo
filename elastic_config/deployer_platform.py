@@ -11,7 +11,7 @@ from pathlib import Path
 
 import httpx
 
-from elastic_config.deployer_base import _kibana_headers, _es_headers, ProgressCallback
+from elastic_config.deployer_base import _kibana_headers, _es_headers, ProgressCallback, StepIdx
 
 logger = logging.getLogger("deployer-platform")
 
@@ -24,7 +24,7 @@ class PlatformMixin:
         self, client: httpx.Client, notify: ProgressCallback
     ):
         """Enable wired streams, significant events, agent builder, and AI docs."""
-        step = self._step(4)
+        step = self._step(StepIdx.PLATFORM_SETTINGS)
         step.status = "running"
         notify(self.progress)
 
@@ -46,25 +46,34 @@ class PlatformMixin:
             errors.append(f"wired streams ({exc})")
 
         # 2 & 3 & 5. Enable tech-preview UI settings.
-        # On Elastic Cloud with a Cloud API key, configure via the deployment
-        # plan's user_settings_yaml (internal/api/kibana/settings is blocked on
-        # Cloud for these uiSettings.overrides keys). Otherwise call the per-key
-        # settings endpoints below.
+        # On ECH with a Cloud API key, configure via the deployment plan's
+        # user_settings_yaml.  Serverless projects share the .kb.*.elastic.cloud
+        # URL pattern but use a different management API and do not expose
+        # user_settings_yaml — fall through to the per-key endpoints below.
         _did_cloud_settings = False
         if self._is_elastic_cloud() and self.cloud_api_key:
             cloud_ok, cloud_err = self._configure_cloud_settings(client)
             configured.extend(cloud_ok)
             errors.extend(cloud_err)
-            _did_cloud_settings = True
+            # Only block the fallback endpoints when the cloud path actually
+            # succeeded.  If it failed (e.g. deployment not found), the
+            # per-key endpoints below are still the best effort we can make.
+            if cloud_ok:
+                _did_cloud_settings = True
         elif self._is_elastic_cloud() and not self.cloud_api_key:
             logger.warning(
-                "Elastic Cloud detected but no Cloud API key provided. "
-                "Tech-preview settings may not be configurable."
+                "Elastic Cloud (ECH) detected but no Cloud API key provided. "
+                "Tech-preview settings may not be configurable via deployment plan."
             )
 
-        # 2. Enable significant events
-        # Use the public /api/kibana/settings endpoint (same one the Advanced Settings UI
-        # uses) rather than /internal/kibana/settings, which does not apply this setting.
+        # 2. Enable significant events — two independent vectors, both best-effort.
+        #
+        # Vector A: legacy uiSetting (works on 9.5; newer builds ignore it in
+        #   favour of the feature flag but it is safe to set both).
+        # Vector B: runtime feature-flag override via /internal/core/_settings
+        #   (required for 9.6+ where the feature gate moved to the flag).
+        #   This endpoint 404s on serverless (where the flag is control-plane
+        #   managed); treat 404 as "not available here" rather than an error.
         if not _did_cloud_settings:
             try:
                 resp = client.post(
@@ -95,6 +104,30 @@ class PlatformMixin:
                         )
             except Exception as exc:
                 errors.append(f"significant events ({exc})")
+
+            # Vector B: runtime feature-flag override — 9.6+ without a Cloud key.
+            # Skip on serverless (flag is control-plane managed; endpoint 404s).
+            if not self._is_serverless():
+                try:
+                    flag_resp = client.put(
+                        f"{self.kibana_url}/internal/core/_settings",
+                        headers=_kibana_headers(self.api_key),
+                        json={"feature_flags.overrides": {"streams.significantEventsAvailable": True}},
+                    )
+                    if flag_resp.status_code < 300:
+                        logger.info("streams.significantEventsAvailable feature flag set")
+                    elif flag_resp.status_code == 404:
+                        logger.debug(
+                            "/internal/core/_settings not available on this build "
+                            "(HTTP 404) — skipping feature flag override"
+                        )
+                    else:
+                        logger.warning(
+                            "Feature flag override failed (HTTP %s): %s",
+                            flag_resp.status_code, flag_resp.text[:200],
+                        )
+                except Exception as exc:
+                    logger.warning("Feature flag override raised: %s", exc)
 
         # 3. Enable agent builder as preferred chat experience
         if not _did_cloud_settings:
@@ -304,29 +337,40 @@ class PlatformMixin:
             errors.append(f"Cloud API read settings ({exc})")
             return configured, errors
 
-        # 3. Merge required settings into YAML string (idempotent, no PyYAML dependency)
+        # 3. Merge required settings into YAML string (idempotent, no PyYAML dependency).
+        # On Kibana >= 9.6 also inject feature_flags.overrides so the new gate
+        # (streams.significantEventsAvailable) is satisfied alongside the legacy
+        # uiSettings value.  On 9.5 the feature_flags key is unrecognised and
+        # would fail Kibana config validation after the plan write — omit it.
         required_lines = [
             "uiSettings.overrides:",
             "  workflows:ui:enabled: true",
             "  observability:streamsEnableSignificantEvents: true",
             "  aiAssistant:preferredChatExperience: agent",
         ]
+        if self._kibana_version_ge(9, 6):
+            required_lines += [
+                "feature_flags.overrides:",
+                "  streams.significantEventsAvailable: true",
+            ]
 
         if all(line in current_settings_yaml for line in required_lines):
             configured.append("Cloud kibana.yml (already configured)")
             return configured, errors
 
-        # Strip any existing uiSettings.overrides block and re-add it cleanly
+        # Strip any existing managed blocks and re-add them cleanly.
+        # Handles both uiSettings.overrides and feature_flags.overrides sections.
+        managed_prefixes = ("uiSettings.overrides:", "feature_flags.overrides:")
         filtered_lines = []
-        skip_overrides = False
+        skip_block = False
         for line in current_settings_yaml.splitlines():
-            if line.strip().startswith("uiSettings.overrides:"):
-                skip_overrides = True
+            if any(line.strip().startswith(p) for p in managed_prefixes):
+                skip_block = True
                 continue
-            if skip_overrides:
+            if skip_block:
                 if line.startswith("  ") or line.strip() == "":
                     continue
-                skip_overrides = False
+                skip_block = False
             filtered_lines.append(line)
 
         new_settings_yaml = "\n".join(filtered_lines).strip()

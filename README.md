@@ -10,19 +10,19 @@ Choose from 6 industry verticals — space launch, sports streaming, financial s
 
 ```
                  Elastic Observability Demo Platform
-  ┌──────────────────────────────────────────────────────────────┐
-  │                                                              │
-  │  ┌─ Scenario: 9 Simulated Microservices ──────────────────┐  │
-  │  │                                                        │  │
-  │  │  AWS us-east-1       GCP us-central1    Azure eastus   │  │
+  ┌─────────────────────────────────────────────────────────────┐
+  │                                                             │
+  │  ┌─ Scenario: 9 Simulated Microservices ─────────────────┐  │
+  │  │                                                       │  │
+  │  │  AWS us-east-1       GCP us-central1    Azure eastus  │  │
   │  │  ┌────────────┐     ┌────────────┐    ┌────────────┐  │  │
   │  │  │ Service 1  │     │ Service 4  │    │ Service 7  │  │  │
   │  │  │ Service 2  │     │ Service 5  │    │ Service 8  │  │  │
   │  │  │ Service 3  │     │ Service 6  │    │ Service 9  │  │  │
   │  │  └────────────┘     └────────────┘    └────────────┘  │  │
-  │  └────────────────────────────────────────────────────────┘  │
-  │                                                              │
-  │  FastAPI (:8080)                  OTLP/HTTP (direct)         │
+  │  └───────────────────────────────────────────────────────┘  │
+  │                                                             │
+  │  FastAPI (:8080)                  OTLP/HTTP (direct)        │
   │  ┌──────────────────┐            ┌──────────────────────┐   │
   │  │ Scenario Selector │──deploy──>│ Elastic Cloud        │   │
   │  │ Chaos Controller  │──OTLP───> │ ┌──────────────────┐ │   │
@@ -33,7 +33,7 @@ Choose from 6 industry verticals — space launch, sports streaming, financial s
   │  └──────────────────┘            │ │ Alerting Rules   │ │   │
   │                                  │ └──────────────────┘ │   │
   │                                  └──────────────────────┘   │
-  └──────────────────────────────────────────────────────────────┘
+  └─────────────────────────────────────────────────────────────┘
 ```
 
 **Key design:** The app sends OTLP telemetry directly to Elastic Cloud (no OTel Collector required). A built-in Python deployer configures all Elastic-side resources (agent, tools, workflows, alert rules, dashboards, significant events) automatically for each scenario.

@@ -66,6 +66,8 @@ elastic_config/dashboards/exec-dashboard.ndjson
 
 # ---------------------- Runtime data -----------------------
 data/
+*.sqlite
+*.sqlite3
 
 # ---------------------- Claude Code -------------------------
 # Track skills/ but ignore everything else under .claude/

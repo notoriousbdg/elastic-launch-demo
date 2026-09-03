@@ -26,6 +26,7 @@ Reference source: [`scenarios/ecommerce/channels/01-payment-gateway-timeout.yaml
 | `fault_params` | ✅ | `dict` | YAML DSL expressions for every `{placeholder}` in `error_message` + `stack_trace`. |
 | `rca_clues` | ✅ | `dict` | Per-service partial clues. Keys = service names from `affected_services` + `cascade_services`. |
 | `infrastructure_events` | optional | `list` | Extra infrastructure log events during the fault window. |
+| `business_impact` | optional | `list[str]` | 2–4 KPI names from `scenario.yaml`'s `executive_kpi_emissions:` list. Used by the ML/anomaly layer to link fault windows to business metrics. All existing scenarios carry this field (schema 1.2). When replacing a channel, **copy `business_impact` from the old channel if present** rather than dropping it. |
 
 ### `investigation_notes` shape
 
@@ -130,5 +131,6 @@ If the new channel adds a first fault in a new subsystem, add a new grouping lin
 - [ ] Old `error_type` removed from `system_prompt` (if it changed)
 - [ ] Channel number ≤ 15 → `remediation_action` is a HITL action
 - [ ] Channel number 16–20 → `remediation_action` is a plausible auto-runbook action
+- [ ] If the old channel had `business_impact`, the new channel also has it (values may differ; don't silently drop it)
 - [ ] `python3 scripts/verify_yaml_scenarios.py <id>` passes
 - [ ] `git diff --name-only` shows only files under `scenarios/<id>/`

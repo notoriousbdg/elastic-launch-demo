@@ -16,7 +16,7 @@ from typing import Any
 
 import httpx
 
-from elastic_config.deployer_base import _es_headers, ConcurrentBulkIndexer, ProgressCallback
+from elastic_config.deployer_base import _es_headers, ConcurrentBulkIndexer, ProgressCallback, StepIdx
 
 logger = logging.getLogger("deployer")
 
@@ -30,10 +30,6 @@ _BULK_BATCH_DOCS = 500
 
 class BackfillMixin:
 
-    def _ecs_log_backfill_step_index(self) -> int:
-        """Sub-classes can override if step layout shifts. Default: step 14."""
-        return 15
-
     def _deploy_ecs_log_backfill(self, client: httpx.Client, notify: ProgressCallback):
         """Bulk-index ~12h of synthetic raw ECS access logs to
         `logs-ecs.{ns}-default` so log-rate analysis and categorization have
@@ -45,7 +41,7 @@ class BackfillMixin:
             generate_record,
         )
 
-        step = self._step(self._ecs_log_backfill_step_index())
+        step = self._step(StepIdx.ECS_LOG_BACKFILL)
         step.status = "running"
         notify(self.progress)
 

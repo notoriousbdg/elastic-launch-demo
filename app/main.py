@@ -318,17 +318,6 @@ app.mount(
     name="selector-static",
 )
 
-# Mount per-scenario static dirs (for scenario-specific slides, images, etc.)
-_scenarios_root = os.path.join(os.path.dirname(__file__), "..", "scenarios")
-for _sid in sorted(os.listdir(_scenarios_root)):
-    _sdir = os.path.join(_scenarios_root, _sid, "static")
-    if os.path.isdir(_sdir):
-        app.mount(
-            f"/scenarios/{_sid}/static",
-            StaticFiles(directory=_sdir),
-            name=f"{_sid}-static",
-        )
-
 # ── Scenario helper ──────────────────────────────────────────────────────────
 
 
@@ -520,47 +509,6 @@ async def chaos_page(deployment_id: Optional[str] = None):
     with open(path) as f:
         html = f.read()
     return HTMLResponse(content=_inject_theme(html, deployment_id))
-
-
-@app.get("/slides", response_class=HTMLResponse)
-async def slides(deployment_id: Optional[str] = None):
-    """Per-scenario HTML slide deck. Looks up the deployment's scenario and
-    serves scenarios/<scenario_id>/static/slides.html, or 404 if none."""
-    if not deployment_id:
-        return JSONResponse(status_code=400, content={"error": "deployment_id required"})
-    inst = registry.get(deployment_id)
-    if inst:
-        scenario_id = inst.ctx.scenario.scenario_id
-    else:
-        rec = store.get(deployment_id)
-        if not rec:
-            return JSONResponse(status_code=404, content={"error": "deployment not found"})
-        scenario_id = rec["scenario_id"]
-    slides_path = os.path.join(
-        _base, "..", "scenarios", scenario_id, "static", "slides.html"
-    )
-    if not os.path.isfile(slides_path):
-        return JSONResponse(status_code=404, content={"error": f"no slides for scenario '{scenario_id}'"})
-    with open(slides_path) as f:
-        html = f.read()
-    return HTMLResponse(content=_inject_theme(html, deployment_id))
-
-
-@app.get("/api/setup/has-slides")
-async def has_slides(scenario_id: str):
-    """Return whether the given scenario has a slide deck."""
-    from scenario_engine import get_scenario
-    try:
-        get_scenario(scenario_id)
-    except KeyError:
-        return JSONResponse({"has_slides": False}, headers={"Cache-Control": "no-store"})
-    slides_path = os.path.join(
-        _base, "..", "scenarios", scenario_id, "static", "slides.html"
-    )
-    return JSONResponse(
-        {"has_slides": os.path.isfile(slides_path)},
-        headers={"Cache-Control": "no-store"},
-    )
 
 
 # ── Scenario API ───────────────────────────────────────────────────────────
