@@ -1,6 +1,6 @@
 # NOVA-7 Elastic Launch Demo — Learnings & API Reference
 
-## Kibana Agent Builder API (Serverless 9.4.0)
+## Kibana Agent Builder API (9.4+/9.5)
 
 ### Tool Schema
 ```
@@ -132,7 +132,7 @@ GET /api/agent_builder/skills    — List all skills (built-in + user-created)
 
 ---
 
-## Kibana Agent Builder — Skills API (Technical Preview, 9.4.0+)
+## Kibana Agent Builder — Skills API (Technical Preview, 9.4+/9.5)
 
 Skills are reusable instruction sets (markdown content) that can be attached to agents. They may also reference tools, giving the agent additional capabilities in a composable way.
 
@@ -235,7 +235,7 @@ GET /api/agent_builder/skills/{skill_id}          — Get a specific skill by ID
 
 ---
 
-## Kibana Saved Objects API (Serverless 9.4.0)
+## Kibana Saved Objects API (9.4+/9.5)
 
 ### Available Endpoints
 | Endpoint | Status |
@@ -248,7 +248,7 @@ GET /api/agent_builder/skills/{skill_id}          — Get a specific skill by ID
 
 ### Dashboard Import with Lens Panels — CRITICAL FIX
 
-**Problem:** Importing dashboards with by-value Lens panels (embeddableConfig.attributes) causes HTTP 500 on Kibana serverless 9.4.0.
+**Problem:** Importing dashboards with by-value Lens panels (embeddableConfig.attributes) causes HTTP 500 on Kibana serverless 9.4+/9.5 when the panel schema is wrong.
 
 **Root Cause:** Without migration version fields, Kibana cannot determine which migrations to run on the embedded Lens state and crashes instead of gracefully handling it.
 
@@ -648,7 +648,7 @@ All Streams endpoints require both:
 - `kbn-xsrf: true`
 - `x-elastic-internal-origin: kibana`
 
-### Query Schema — `esql` format (current, 9.4.0+)
+### Query Schema — `esql` format (current, 9.4+/9.5)
 
 ```json
 {
@@ -701,9 +701,9 @@ Count queries with your prefix to verify deployment.
 
 ---
 
-## Kibana Lens Panel Format (9.4.0) — By-Value formBased
+## Kibana Lens Panel Format (9.4+/9.5) — By-Value formBased
 
-When creating Lens by-value panels (embedded in panelsJSON), the format must exactly match what Kibana 9.4 expects. Export a working built-in [OTel] dashboard panel to see the reference format.
+When creating Lens by-value panels (embedded in panelsJSON), the format must exactly match what Kibana 9.4+/9.5 expects. Export a working built-in [OTel] dashboard panel to see the reference format.
 
 ### Layer Structure (inside `datasourceStates.formBased.layers`)
 ```json
@@ -805,7 +805,7 @@ Terms columns should include `missingBucket` and `otherBucket` params:
 The working OTel panels do NOT include `"description": null` or `"savedObjectId": null`. Omit these entirely rather than setting to null.
 
 ### Generator Script
-Use `elastic_config/dashboards/generate_exec_dashboard.py` to regenerate the NDJSON — it produces correct Kibana 9.4 format with random UUIDs for layer/column IDs.
+Use `elastic_config/dashboards/generate_exec_dashboard.py` to regenerate the NDJSON — it produces correct Kibana 9.4+/9.5 format with random UUIDs for layer/column IDs.
 
 ---
 
@@ -1100,7 +1100,7 @@ Reload updates the selector and the next **Launch** / deploy path (`get_scenario
 
 40. **Case steps migrated `kibana.*` → `cases.*` (9.4)** — `kibana.createCaseDefaultSpace` and `kibana.updateCase` are deprecated aliases in 9.4.2; the Workflows editor flags them and their outputs are untyped. Use `cases.createCase` (output at `steps.X.output.case.id`, NOT `output.id`) and `cases.closeCase` (takes `case_id`; `version` is optional — no need to GET-refetch the case first to read its version). `cases.findCases` replaces raw `kibana.request` GET to `/api/cases/_find` (typed `output.cases[]`), and `cases.addComment` (`case_id` + `comment`) replaces raw POST to `/api/cases/{id}/comments`. `attach_alert_to_case` (gotcha #42) stays on `kibana.request` — there's no typed `cases.addAlerts`-equivalent step in use here yet.
 
-41. **LLM self-remediates when given a case ID after RCA** — The HITL workflow tells the agent to call `remediation_action` with `approval_mode: required`; auto-remediate passes `approval_mode: skip`. **CRITICAL:** Workflow `if` conditions must use string KQL on `inputs.approval_mode` — boolean `inputs.requires_approval : true/false` does not match reliably from Agent Builder tool invocations, which skips both `waitForInput` and `execute_remediation`. Use `NOT inputs.approval_mode : skip` for the approval gate and `inputs.approval_mode : skip OR steps.await_operator_approval.output.approved : true` for execute.
+41. **HITL vs auto-remediate both call `remediation_action`** — HITL asks the agent to invoke the workflow tool with `approval_mode: required` (the default for direct/agent calls). Auto-remediate asks the agent to invoke the **same** tool with `approval_mode: skip` and `dry_run: false`. On Kibana 9.5, workflow tool schemas are empty unless `inputs` live under `triggers: [{ type: manual, inputs: [...] }]` ([kibana#269992](https://github.com/elastic/kibana/issues/269992)) — root-level `inputs:` must not be used. Workflow `if` conditions must use string KQL on `inputs.approval_mode` (booleans do not match reliably). After Agent Builder resume, `waitForInput` stores the payload under `steps.*.output.response` (e.g. `output.response.approved`); HITL deny checks `output.response.approved : false` and queues on the else (approve) path.
 
 42. **`attach_alert_to_case` must run immediately after `create_case`** — HTTP 400 "Alert cannot be attached to a closed case" occurs if this step runs after the case has already been closed by another step (e.g. `close_case` in the auto-remediate workflow, or via the `remediation_action` workflow tool). Place `attach_alert_to_case` as the very first step after `create_case`, before any AI agent calls, remediation steps, or case-management steps.
 

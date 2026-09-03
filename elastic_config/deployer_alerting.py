@@ -64,6 +64,12 @@ class AlertingMixin:
         if not auto_remediate_wf_id:
             logger.warning("Auto-remediate workflow not found; channels 16-20 will use HITL workflow")
 
+        # Note: the Case Auto-Close workflow is NOT wired into alert rule
+        # actions — see the notify_when comment below for why, and
+        # significant_event_case_close.yaml for how it actually runs
+        # (self-scheduled polling, deployed automatically by
+        # _deploy_workflows like any other workflow YAML).
+
         # Clean old rules
         self._cleanup_alerts(client)
 
@@ -123,12 +129,25 @@ class AlertingMixin:
                 # silently strips a "frequency" block on system-connector
                 # actions (id "system-connector-.workflows") — it's accepted by
                 # the create API but absent from the stored rule and has no
-                # effect. onActionGroupChange fires the action only on the
-                # transition into the alert state; the previous default
-                # (no notify_when set, effectively onActiveAlert) re-ran the
-                # action on every 1m check for as long as the fault stayed
-                # active, producing a fresh case every ~1-2 minutes per
-                # triggered channel.
+                # effect.
+                #
+                # notify_when does NOT meaningfully gate this action either.
+                # Confirmed via .kibana-event-log-*: the .workflows
+                # system-connector action fires on every rule tick regardless
+                # of onActionGroupChange, but only actually reaches the
+                # workflow (non-empty request) when the tick's alert summary
+                # has a non-empty "new" bucket — "ongoing" (repeat ticks of a
+                # still-active alert) and "recovered" summary batches report
+                # a successful, silent no-op action execution and never
+                # invoke the workflow at all. So in practice this only fires
+                # once, when the fault first goes active — which is exactly
+                # what we want for case creation, but means the alert's
+                # "recovered" transition can NEVER be used to trigger a
+                # workflow via this connector. Case-close is therefore a
+                # separate, independently *scheduled* workflow
+                # (significant_event_case_close.yaml) that polls open cases
+                # and closes them once their rule reports
+                # execution_status.status != "active" — see that file.
                 "notify_when": "onActionGroupChange",
                 "throttle": None,
                 "params": {

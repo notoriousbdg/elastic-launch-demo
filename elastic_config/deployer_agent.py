@@ -199,8 +199,9 @@ specific parameters — vague requests will produce empty panels.
 - Log volume → area on `logs.otel.{ns}`, x=`@timestamp` (30s), y=count, filter by `severity_text`
 - CPU utilization → metric tile on `metrics.otel.{ns}`, average of
   `metrics.k8s.node.cpu.utilization`
-- Service health → metric tile on `traces.otel.{ns}`, count with
-  `status.code: Error AND resource.attributes.service.name: "<name>"`
+- Service health → metric tile on `traces.otel.{ns}`, error-rate formula
+  `count(kql='status.code: Error') / count()` filtered by
+  `resource.attributes.service.name: "<name>"`
 
 When asked to create a dashboard, always specify: data view ID, chart type, x-axis field with
 interval, y-axis metric, split field (if any), and any KQL filter. Ask for clarification only if

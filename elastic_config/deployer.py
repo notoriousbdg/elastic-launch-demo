@@ -129,8 +129,12 @@ class ScenarioDeployer(
                 self._check_connectivity(client, _notify)
                 self._report_elastic_url_step(_notify)
                 self._derive_otlp_step(client, _notify)
-                # Fire the early-start hook as soon as the OTLP endpoint is
-                # known — before the slow tail (ML, alerts, SLOs, integrations).
+                self._cleanup_all_scenarios_step(client, _notify)
+                self._configure_platform_settings(client, _notify)
+                # Fire the early-start hook after platform settings so _enable
+                # runs before log generators write to logs.ecs — otherwise the
+                # plain logs.ecs index blocks wired-stream creation and the
+                # per-scenario logs.otel.<ns> fork never succeeds.
                 # A hook failure must never abort the rest of the deploy.
                 if on_otlp_ready is not None and self.progress.otlp_endpoint:
                     try:
@@ -140,8 +144,6 @@ class ScenarioDeployer(
                             "on_otlp_ready hook raised an exception; ignoring",
                             exc_info=True,
                         )
-                self._cleanup_all_scenarios_step(client, _notify)
-                self._configure_platform_settings(client, _notify)
                 self._deploy_apm_rollup(client, _notify)
                 # Start the APM ML job early so ES processes the 12h backfill
                 # server-side during the intervening steps; the catch-up poll

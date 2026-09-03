@@ -36,6 +36,7 @@ node -e "
     model: 'claude-sonnet',
     theme: 'dark',
     permissions: {
+      defaultMode: 'auto',
       allow: [
         'Bash(*)',
         'mcp__elastic-agent-builder__*',

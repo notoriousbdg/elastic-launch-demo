@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Generate Kibana dashboard NDJSON (compatible with Kibana 9.4+).
+Generate Kibana dashboard NDJSON (compatible with Kibana 9.4+/9.5).
 
 Can be used as:
   - Importable function: generate_dashboard_ndjson(scenario) -> str
@@ -14,7 +14,7 @@ when the scenario defines `executive_kpi_emitter_service_name`. Synthetic `busin
 are emitted once per cycle from that service via the telemetry DSL executor.
 
 Produces by-value Lens panels using the formBased datasource format that matches
-the built-in [OTel] dashboards shipped with Kibana 9.4, including all required
+the built-in [OTel] dashboards shipped with Kibana 9.4+/9.5, including all required
 fields: ignoreGlobalFilters, incompleteColumns, sampling, adHocDataViews,
 internalReferences, legend, valueLabels.
 
@@ -103,7 +103,7 @@ def _tag_ref(namespace: str) -> dict:
 # ── Layer / state / panel builders ─────────────────────────────────────────
 
 def make_layer(layer_id, column_order, columns, index_pattern_id=None):
-    """Build a formBased layer with all Kibana 9.4 required fields."""
+    """Build a formBased layer with all Kibana 9.4+/9.5 required fields."""
     layer = {
         "columnOrder": column_order,
         "columns": columns,
@@ -336,13 +336,10 @@ def make_metric_palette(thresholds):
 
 
 # ── Threshold palettes for metric tiles ───────────────────────────────────────
-# Green → Yellow → Red as values climb
-PALETTE_ERRORS = make_metric_palette([
-    ("#54B399", 2),     # green: 0-2 errors
-    ("#D6BF57", 5),     # yellow: 2-5 errors
-    ("#E7664C", 9999),  # red: 5+ errors
-])
-
+# Green → Yellow → Red as values climb.
+# Service health tiles use error *rate* (not absolute count) so the ~3%
+# baseline stays green while chaos-affected services (~70%) go yellow/red,
+# independent of time-window volume.
 PALETTE_ERROR_RATE = make_metric_palette([
     ("#54B399", 0.12),  # green: 0-12%
     ("#D6BF57", 0.20),  # yellow: 12-20%
@@ -522,7 +519,7 @@ def _build_dashboard_ndjson(
             "gridData": {"h": 14, "i": pid, "w": 1, "x": sep_x, "y": 0},
         })
 
-    # Row 1 (y=2, h=6): 9 Service Health Tiles
+    # Row 1 (y=2, h=6): 9 Service Health Tiles (error rate per service)
     tile_idx = 0
     for group in cloud_groups:
         for svc_offset, svc_name in enumerate(group["services"]):
@@ -530,16 +527,16 @@ def _build_dashboard_ndjson(
             pid = f"p_svc_{tile_idx}"
             lid = uid()
             cid = uid()
-            kql = f'resource.attributes.service.name: "{svc_name}" AND status.code: Error'
-            columns = {cid: col_count(label="Errors", kql_filter=kql)}
+            svc_query = f'resource.attributes.service.name: "{svc_name}"'
+            columns = {cid: col_formula("count(kql='status.code: Error') / count()", "Error Rate")}
             layer = make_layer(lid, [cid], columns, DATA_VIEW_ID_TRACES)
             state = make_state(layer, {
                 "layerId": lid,
                 "layerType": "data",
                 "metricAccessor": cid,
-                "palette": PALETTE_ERRORS,
+                "palette": PALETTE_ERROR_RATE,
                 "subtitle": svc_name,
-            })
+            }, query=svc_query)
             x = group["x_start"] + svc_offset * TILE_WIDTH
             w = TILE_WIDTH if svc_offset < 2 else (group["col_width"] - 2 * TILE_WIDTH)
             panels.append(make_panel(

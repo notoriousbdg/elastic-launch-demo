@@ -235,7 +235,7 @@ ECS_WIRED_STREAM = "logs.ecs"
 def data_stream_for(namespace: str | None = None) -> str:
     """All scenarios POST to the `logs.ecs` wired-stream ingest endpoint.
 
-    In Elastic 9.4+ wired streams replace classic data streams for the
+    In Elastic 9.4+/9.5 wired streams replace classic data streams for the
     `logs.otel` / `logs.ecs` namespaces. The deployer forks `logs.ecs` into
     per-scenario partitions `logs.ecs.{ns}` filtered by service.namespace,
     mirroring how `logs.otel` and `logs.otel.{ns}` are handled.

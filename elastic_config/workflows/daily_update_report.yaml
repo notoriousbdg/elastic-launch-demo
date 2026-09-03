@@ -7,14 +7,14 @@ description: >
 tags:
   - "__NS__"
 
+# Kibana 9.5+: inputs under manual trigger (elastic/kibana#269992).
 triggers:
   - type: manual
-
-inputs:
-  - name: email
-    type: string
-    required: true
-    description: "Recipient email address for the health report"
+    inputs:
+      - name: email
+        type: string
+        required: true
+        description: "Recipient email address for the health report"
 
 steps:
   - name: count_errors

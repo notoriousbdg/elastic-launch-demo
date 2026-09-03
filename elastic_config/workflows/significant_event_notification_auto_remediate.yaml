@@ -5,9 +5,19 @@ description: >
   auto-remediation channel (16-20). Triggered by alert rules — uses
   event.rule.tags[1] for the error_type search, extracts user_email from
   event_name, runs AI root cause analysis, creates a case, attaches the alert
-  to the case, then sends an email notification confirming that automated
-  remediation has been applied. Remediation is queued automatically without
-  requiring human approval, and the case is closed automatically.
+  to the case, then asks the agent to invoke the remediation_action workflow
+  tool with approval_mode: skip (same tool as HITL, which uses required).
+  Sends an email confirming automated remediation; the case closes once the
+  alert recovers.
+
+  Kibana does NOT scope .workflows system-connector actions to a specific
+  action group (a "group" key on the action is accepted by the create API
+  but silently dropped), so this workflow fires on every action-group
+  transition the rule goes through — including when the alert recovers, not
+  just when it becomes active. It self-gates on
+  event.alerts[0].kibana.alert.action_group so a recovery transition doesn't
+  spuriously create a duplicate case; see significant_event_case_close.yaml
+  for the mirrored guard on the close side.
 
 tags:
   - "__NS__"
@@ -23,136 +33,153 @@ triggers:
 #   tags[3] = channel number (as string)
 
 steps:
-  - name: enrich_context
-    type: elasticsearch.esql.query
-    with:
-      query: >
-        FROM logs.otel.__NS__,logs.otel.__NS__.* | WHERE event_name IS NOT NULL | SORT @timestamp DESC | KEEP event_name | LIMIT 1
-      format: json
+  - name: on_alert_active
+    type: if
+    condition: 'NOT event.alerts[0].kibana.alert.action_group : recovered'
+    steps:
+      - name: enrich_context
+        type: elasticsearch.esql.query
+        with:
+          query: >
+            FROM logs.otel.__NS__,logs.otel.__NS__.* | WHERE event_name IS NOT NULL | SORT @timestamp DESC | KEEP event_name | LIMIT 1
+          format: json
 
-  - name: count_errors
-    type: elasticsearch.esql.query
-    with:
-      query: >
-        FROM logs.otel.__NS__,logs.otel.__NS__.*
-        | WHERE @timestamp > NOW() - 15 MINUTES AND severity_text == "ERROR"
-        | STATS total_errors = COUNT(*)
-      format: json
+      - name: count_errors
+        type: elasticsearch.esql.query
+        with:
+          query: >
+            FROM logs.otel.__NS__,logs.otel.__NS__.*
+            | WHERE @timestamp > NOW() - 15 MINUTES AND severity_text == "ERROR"
+            | STATS total_errors = COUNT(*)
+          format: json
 
-  - name: parse_event_meta
-    type: data.set
-    with:
-      var:
-        - event_meta: "${{ steps.enrich_context.output.values[0][0] | json_parse }}"
+      - name: parse_event_meta
+        type: data.set
+        with:
+          var:
+            - event_meta: "${{ steps.enrich_context.output.values[0][0] | json_parse }}"
 
-  - name: run_rca
-    type: ai.agent
-    agent-id: __AGENT_ID__
-    create-conversation: true
-    timeout: 10m
-    with:
-      message: >
-        Significant event detected: {{ event.rule.name }}.
-        Error type: {{ event.rule.tags[1] }}.
-        Total errors in last 15 minutes: {{ steps.count_errors.output.values[0][0] }}.
-        Perform a root cause analysis only. Search logs for this error type,
-        identify affected services, trace the fault propagation, and provide
-        your structured RCA report. Do NOT execute any remediation actions.
+      - name: run_rca
+        type: ai.agent
+        agent-id: __AGENT_ID__
+        create-conversation: true
+        timeout: 10m
+        with:
+          message: >
+            Significant event detected: {{ event.rule.name }}.
+            Error type: {{ event.rule.tags[1] }}.
+            Total errors in last 15 minutes: {{ steps.count_errors.output.values[0][0] }}.
+            Perform a root cause analysis only. Search logs for this error type,
+            identify affected services, trace the fault propagation, and provide
+            your structured RCA report. Do NOT execute any remediation actions.
 
-  - name: create_case
-    type: cases.createCase
-    with:
-      title: "{{ event.rule.name }}"
-      description: |
-       [View Full Conversation](/app/agent_builder/conversations/{{ steps.run_rca.output.conversation_id }})
+      - name: create_case
+        type: cases.createCase
+        with:
+          title: "{{ event.rule.name }}"
+          description: |
+           [View Full Conversation](/app/agent_builder/conversations/{{ steps.run_rca.output.conversation_id }})
 
-       {{ steps.run_rca.output.message }}
-      tags:
-        - "__NS__"
-        - "{{ event.rule.tags[1] }}"
-      severity: "high"
-      owner: "observability"
-      settings:
-        syncAlerts: false
+           {{ steps.run_rca.output.message }}
+          tags:
+            - "__NS__"
+            - "{{ event.rule.tags[1] }}"
+          severity: "high"
+          owner: "observability"
+          settings:
+            syncAlerts: false
 
-  - name: attach_alert_to_case
-    type: kibana.request
-    with:
-      method: POST
-      path: "/api/cases/{{ steps.create_case.output.case.id }}/comments"
-      headers:
-        kbn-xsrf: "true"
-      body:
-        type: "alert"
-        alertId: "{{ event.alerts[0]._id }}"
-        index: "{{ event.alerts[0]._index }}"
-        rule:
-          id: "{{ event.rule.id }}"
-          name: "{{ event.rule.name }}"
-        owner: "observability"
+      - name: attach_alert_to_case
+        type: kibana.request
+        with:
+          method: POST
+          path: "/api/cases/{{ steps.create_case.output.case.id }}/comments"
+          headers:
+            kbn-xsrf: "true"
+          body:
+            type: "alert"
+            alertId: "{{ event.alerts[0]._id }}"
+            index: "{{ event.alerts[0]._index }}"
+            rule:
+              id: "{{ event.rule.id }}"
+              name: "{{ event.rule.name }}"
+            owner: "observability"
 
-  - name: send_notification
-    type: email
-    connector-id: elastic-cloud-email
-    if: "${{ steps.parse_event_meta.output.var[0].event_meta.user_email != '' and steps.parse_event_meta.output.var[0].event_meta.user_email != null }}"
-    with:
-      to:
-        - "{{ steps.parse_event_meta.output.var[0].event_meta.user_email }}"
-      subject: "__SCENARIO_NAME__ — Auto-remediated: {{ event.rule.name }}"
-      message: |
-        ## Auto-Remediated — __SCENARIO_NAME__
+      - name: send_notification
+        type: email
+        connector-id: elastic-cloud-email
+        if: "${{ steps.parse_event_meta.output.var[0].event_meta.user_email != '' and steps.parse_event_meta.output.var[0].event_meta.user_email != null }}"
+        with:
+          to:
+            - "{{ steps.parse_event_meta.output.var[0].event_meta.user_email }}"
+          subject: "__SCENARIO_NAME__ — Auto-remediated: {{ event.rule.name }}"
+          message: |
+            ## Auto-Remediated — __SCENARIO_NAME__
 
-        **Rule:** {{ event.rule.name }}
-        **Error Type:** {{ event.rule.tags[1] }}
-        **Total errors (15m):** {{ steps.count_errors.output.values[0][0] }}
+            **Rule:** {{ event.rule.name }}
+            **Error Type:** {{ event.rule.tags[1] }}
+            **Total errors (15m):** {{ steps.count_errors.output.values[0][0] }}
 
-        ---
+            ---
 
-        A significant event was identified and an AI root cause analysis has completed. Automated remediation has been applied. **No action is required** — the case will close automatically.
+            A significant event was identified and an AI root cause analysis has completed. Automated remediation has been applied. **No action is required** — the case will close automatically.
 
-        **Conversation:**
-        __KIBANA_URL__/app/agent_builder/conversations/{{ steps.run_rca.output.conversation_id }}
+            **Conversation:**
+            __KIBANA_URL__/app/agent_builder/conversations/{{ steps.run_rca.output.conversation_id }}
 
-        **Case (RCA + linked alert):**
-        __KIBANA_URL__/app/observability/cases/{{ steps.create_case.output.case.id }}
+            **Case (RCA + linked alert):**
+            __KIBANA_URL__/app/observability/cases/{{ steps.create_case.output.case.id }}
 
-        **Operations dashboard:**
-        __KIBANA_URL__/app/dashboards#/view/__NS__-exec-dashboard
+            **Operations dashboard:**
+            __KIBANA_URL__/app/dashboards#/view/__NS__-exec-dashboard
 
-        **Executive dashboard:**
-        __KIBANA_URL__/app/dashboards#/view/__NS__-business-exec-dashboard
+            **Executive dashboard:**
+            __KIBANA_URL__/app/dashboards#/view/__NS__-business-exec-dashboard
 
-  - name: request_remediation
-    type: kibana.request
-    with:
-      method: POST
-      path: "/api/agent_builder/converse"
-      headers:
-        kbn-xsrf: "true"
-      body:
-        agent_id: __AGENT_ID__
-        conversation_id: "{{ steps.run_rca.output.conversation_id }}"
-        input: >
-          Invoke the remediation_action workflow tool now. You MUST pass
-          approval_mode: skip (string) so remediation queues without waitForInput:
-          - action_type: {{ event.rule.tags[2] }}
-          - channel: {{ event.rule.tags[3] }}
-          - error_type: {{ event.rule.tags[1] }}
-          - case_id: {{ steps.create_case.output.case.id }}
-          - dry_run: false
-          - approval_mode: skip
-          - justification: Automated remediation triggered by alert rule
-    timeout: 10m
+      # Call the same remediation_action workflow the HITL path uses, via the
+      # agent tool — with approval_mode: skip so waitForInput is bypassed.
+      # Workflow inputs live under the manual trigger (9.5+) so the tool schema
+      # is non-empty and these params actually reach the workflow.
+      - name: request_remediation
+        type: kibana.request
+        with:
+          method: POST
+          path: "/api/agent_builder/converse"
+          headers:
+            kbn-xsrf: "true"
+          body:
+            agent_id: __AGENT_ID__
+            conversation_id: "{{ steps.run_rca.output.conversation_id }}"
+            input: >
+              Invoke the remediation_action workflow tool now (do not queue
+              remediation yourself). You MUST pass approval_mode: skip (string)
+              so remediation runs without waitForInput:
+              - action_type: {{ event.rule.tags[2] }}
+              - channel: {{ event.rule.tags[3] }}
+              - error_type: {{ event.rule.tags[1] }}
+              - case_id: {{ steps.create_case.output.case.id }}
+              - dry_run: false
+              - approval_mode: skip
+              - justification: Automated remediation triggered by alert rule
+        timeout: 10m
 
-  - name: audit_log
-    type: elasticsearch.index
-    with:
-      index: "__NS__-significant-events-audit"
-      document:
-        rule_name: "{{ event.rule.name }}"
-        error_type: "{{ event.rule.tags[1] }}"
-        total_errors: "{{ steps.count_errors.output.values[0][0] }}"
-        rca_case_created: true
-        auto_remediated: true
-        mission_id: "__SCENARIO_NAME__"
-      refresh: wait_for
+      - name: audit_log
+        type: elasticsearch.index
+        with:
+          index: "__NS__-significant-events-audit"
+          document:
+            rule_name: "{{ event.rule.name }}"
+            error_type: "{{ event.rule.tags[1] }}"
+            total_errors: "{{ steps.count_errors.output.values[0][0] }}"
+            rca_case_created: true
+            auto_remediated: true
+            mission_id: "__SCENARIO_NAME__"
+          refresh: wait_for
+
+    # This firing is for the alert's recovery transition — the Case
+    # Auto-Close workflow handles closing the case; nothing to do here.
+    else:
+      - name: log_skipped_recovery
+        type: console
+        with:
+          message: "Skipping notification — {{ event.rule.name }} recovered (handled by Case Auto-Close workflow)."
