@@ -1,0 +1,2020 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Global Relief Network Donation Platform — Chaos Channel Guide</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:       #0d1117;
+    --bg2:      #161b22;
+    --border:   #30363d;
+    --text:     #c9d1d9;
+    --muted:    #8b949e;
+    --white:    #ffffff;
+    --yellow:   #FEC514;
+    --blue:     #58a6ff;
+    --blue2:    #1f6feb;
+    --critical: #f85149;
+    --warning:  #d29922;
+    --nominal:  #3fb950;
+    --aws:      #FF9900;
+    --gcp:      #4285F4;
+    --azure:    #0078D4;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  /* ── TOPBAR ── */
+  .topbar {
+    background: var(--bg2);
+    border-bottom: 1px solid var(--border);
+    padding: 0 28px;
+    height: 52px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-shrink: 0;
+    position: relative;
+  }
+  .topbar-brand { font-size: 13px; font-weight: 700; color: var(--blue); letter-spacing: 1px; }
+  .topbar-brand span { color: var(--yellow); }
+  .topbar-title { font-size: 14px; font-weight: 600; color: var(--white); }
+  .topbar-counter { font-size: 13px; color: var(--muted); }
+  .progress-bar {
+    position: absolute; bottom: 0; left: 0;
+    height: 3px; background: var(--blue2); transition: width 0.2s ease;
+  }
+
+  /* ── STAGE ── */
+  .stage {
+    flex: 1; overflow-y: auto; padding: 28px 52px;
+    display: flex; flex-direction: column; justify-content: flex-start;
+  }
+  .stage.fade { opacity: 0; transition: opacity 0.18s; }
+
+  /* ── BOTTOMBAR ── */
+  .bottombar {
+    background: var(--bg2); border-top: 1px solid var(--border);
+    display: flex; flex-direction: column; gap: 6px;
+    padding: 8px 28px 10px; flex-shrink: 0;
+  }
+  .dots-nav-row { display: flex; align-items: center; justify-content: center; }
+  .dots-row { display: flex; justify-content: center; gap: 4px; flex-wrap: wrap; }
+  .dot-btn {
+    width: 12px; height: 12px; border-radius: 50%;
+    border: 2px solid var(--border); background: transparent;
+    cursor: pointer; padding: 0; transition: border-color .15s, background .15s;
+  }
+  .dot-btn:hover { border-color: var(--blue); }
+  .dot-btn.active { background: var(--blue2); border-color: var(--blue2); }
+  .dot-btn[data-kind="section"]   { border-color: var(--yellow); }
+  .dot-btn[data-kind="title"],
+  .dot-btn[data-kind="toc"],
+  .dot-btn[data-kind="platform"]  { border-color: var(--yellow); }
+  .dot-btn[data-kind="fault"]     { border-color: var(--critical); }
+  .dot-btn[data-kind="benign"]    { border-color: var(--nominal); }
+  .dot-btn[data-kind="cheatsheet"]{ border-color: var(--blue); }
+  .toc-jump-btn {
+    margin-left: 40px; background: transparent; color: var(--blue);
+    border: 1px solid var(--border); border-radius: 6px;
+    padding: 4px 14px; font-size: 12px; font-weight: 600;
+    cursor: pointer; letter-spacing: .5px; white-space: nowrap;
+    transition: background .15s, border-color .15s;
+  }
+  .toc-jump-btn:hover { background: rgba(31,111,235,.15); border-color: var(--blue2); }
+  .toc-jump-btn.hidden { visibility: hidden; pointer-events: none; }
+  .nav-row { display: flex; align-items: center; justify-content: space-between; }
+  .nav-btn {
+    background: #21262d; color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 6px 20px; font-size: 13px; font-weight: 600;
+    cursor: pointer; transition: background .15s, border-color .15s, color .15s;
+  }
+  .nav-btn:hover { background: var(--blue2); border-color: var(--blue2); color: var(--white); }
+  .nav-btn:disabled { opacity: .3; cursor: default; }
+  .nav-btn:disabled:hover { background: #21262d; border-color: var(--border); color: var(--text); }
+  .key-hint { font-size: 12px; color: var(--muted); }
+
+  /* ── TITLE SLIDE ── */
+  .title-slide { text-align: center; max-width: 800px; margin: 32px auto 0; }
+  .title-icon { font-size: 60px; margin-bottom: 14px; }
+  .title-eyebrow {
+    display: inline-block; background: var(--yellow); color: var(--bg);
+    font-size: 11px; font-weight: 700; letter-spacing: 2px; text-transform: uppercase;
+    padding: 4px 14px; border-radius: 3px; margin-bottom: 20px;
+  }
+  .title-main { font-size: 38px; font-weight: 700; color: var(--white); line-height: 1.2; margin-bottom: 10px; }
+  .title-sub  { font-size: 18px; color: var(--muted); margin-bottom: 32px; }
+  .title-meta { display: flex; gap: 16px; justify-content: center; flex-wrap: wrap; }
+  .meta-card {
+    background: var(--bg2); border: 1px solid var(--border); border-radius: 8px;
+    padding: 14px 20px; min-width: 140px;
+  }
+  .meta-label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 6px; }
+  .meta-value { font-size: 15px; font-weight: 700; color: var(--blue); }
+
+  /* ── TOC SLIDE ── */
+  .toc-slide { max-width: 1000px; margin: 0 auto; width: 100%; }
+  .slide-eyebrow { font-size: 11px; font-weight: 700; letter-spacing: 2px; text-transform: uppercase; color: var(--yellow); margin-bottom: 14px; }
+  .toc-filter {
+    width: 100%; background: var(--bg2); border: 1px solid var(--border);
+    border-radius: 6px; padding: 8px 14px; color: var(--text); font-size: 13px;
+    margin-bottom: 14px; outline: none;
+  }
+  .toc-filter:focus { border-color: var(--blue2); }
+  .toc-grid {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(195px, 1fr));
+    gap: 8px; overflow-y: auto; max-height: calc(100vh - 240px); padding-right: 4px;
+  }
+  .toc-tile {
+    background: var(--bg2); border: 1px solid var(--border);
+    border-radius: 6px; padding: 10px 14px; cursor: pointer;
+    transition: border-color .15s, background .15s;
+  }
+  .toc-tile:hover { border-color: var(--blue); background: #1c2128; }
+  .toc-tile[data-fault="1"] { border-left: 3px solid var(--critical); }
+  .toc-tile[data-fault="0"] { border-left: 3px solid var(--nominal); }
+  .toc-num  { font-size: 10px; color: var(--muted); margin-bottom: 3px; }
+  .toc-err  { font-size: 10px; font-weight: 700; color: var(--yellow); letter-spacing: .8px; margin-bottom: 3px; }
+  .toc-name { font-size: 12px; color: var(--text); line-height: 1.4; }
+  .toc-sub  { font-size: 10px; color: var(--muted); margin-top: 4px; text-transform: uppercase; letter-spacing: .5px; }
+  .toc-hidden { display: none !important; }
+
+  /* ── PLATFORM SLIDE ── */
+  .platform-slide { max-width: 1000px; margin: 0 auto; width: 100%; }
+  .cloud-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+  .cloud-col {
+    background: var(--bg2); border: 1px solid var(--border);
+    border-radius: 8px; padding: 16px;
+  }
+  .cloud-header {
+    display: flex; align-items: center; gap: 10px;
+    margin-bottom: 14px; padding-bottom: 10px; border-bottom: 1px solid var(--border);
+  }
+  .cloud-badge {
+    font-size: 11px; font-weight: 700; color: var(--bg);
+    padding: 2px 8px; border-radius: 3px; text-transform: uppercase;
+  }
+  .cloud-region { font-size: 11px; color: var(--muted); }
+  .svc-card {
+    background: var(--bg); border: 1px solid var(--border);
+    border-radius: 6px; padding: 10px 12px; margin-bottom: 8px;
+  }
+  .svc-card:last-child { margin-bottom: 0; }
+  .svc-name { font-size: 13px; font-weight: 600; color: var(--white); margin-bottom: 5px; }
+  .badges { display: flex; gap: 5px; flex-wrap: wrap; }
+  .badge {
+    font-size: 10px; font-weight: 600; padding: 2px 6px; border-radius: 3px;
+    text-transform: uppercase; letter-spacing: .4px;
+  }
+  .badge-sub  { background: rgba(88,166,255,.14); color: var(--blue); }
+  .badge-lang { background: rgba(254,197,20,.12);  color: var(--yellow); }
+
+  /* ── SECTION BREAK ── */
+  .section-break { text-align: center; max-width: 700px; margin: 56px auto 0; }
+  .section-part  { font-size: 80px; font-weight: 700; color: var(--blue2); opacity: .2; line-height: 1; margin-bottom: 10px; }
+  .section-title { font-size: 34px; font-weight: 700; color: var(--white); margin-bottom: 12px; }
+  .section-desc  { font-size: 17px; color: var(--muted); }
+
+  /* ── CHANNEL SLIDE ── */
+  .channel-slide { max-width: 1060px; margin: 0 auto; width: 100%; }
+  .ch-header { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; flex-wrap: wrap; }
+  .ch-num {
+    background: var(--blue2); color: var(--white);
+    font-size: 11px; font-weight: 700; padding: 3px 9px; border-radius: 4px; letter-spacing: 1px;
+  }
+  .ch-sub { font-size: 11px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: 2px; }
+  .ch-err {
+    font-size: 11px; font-weight: 700; color: var(--yellow);
+    font-family: monospace; background: rgba(254,197,20,.1); padding: 2px 7px; border-radius: 4px;
+  }
+  .ch-pill {
+    font-size: 10px; font-weight: 700; padding: 3px 10px; border-radius: 10px;
+    text-transform: uppercase; letter-spacing: .8px; margin-left: auto;
+  }
+  .ch-pill.fault  { background: rgba(248,81,73,.18);  color: var(--critical); border: 1px solid rgba(248,81,73,.35); }
+  .ch-pill.benign { background: rgba(63,185,80,.14);  color: var(--nominal);  border: 1px solid rgba(63,185,80,.35); }
+  .ch-name { font-size: 20px; font-weight: 700; color: var(--white); margin-bottom: 18px; }
+
+  /* ── FLOW DIAGRAM ── */
+  .flow-wrap {
+    display: flex; align-items: flex-start; gap: 0;
+    margin-bottom: 18px; overflow-x: auto; padding-bottom: 6px;
+  }
+  .flow-stage { display: flex; flex-direction: column; align-items: center; min-width: 108px; flex-shrink: 0; }
+  .flow-label { font-size: 9px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; color: var(--muted); margin-bottom: 6px; white-space: nowrap; }
+  .flow-cards { display: flex; flex-direction: column; gap: 4px; }
+  .flow-card {
+    background: var(--bg2); border: 1px solid var(--border);
+    border-radius: 6px; padding: 8px 10px; min-width: 100px;
+    text-align: center;
+    opacity: 0; transform: translateY(10px);
+    transition: opacity .35s ease, transform .35s ease;
+  }
+  .flow-card.visible { opacity: 1; transform: translateY(0); }
+  .fc-name { font-size: 11px; font-weight: 600; color: var(--white); line-height: 1.3; }
+  .fc-sub  { font-size: 9px;  color: var(--muted); margin-top: 3px; line-height: 1.3; }
+  .flow-card.c-trigger  { border-color: var(--muted); }
+  .flow-card.c-critical { border-color: var(--critical); background: rgba(248,81,73,.07); }
+  .flow-card.c-warning  { border-color: var(--warning);  background: rgba(210,153,34,.07); }
+  .flow-card.c-detect   { border-color: var(--blue2);    background: rgba(31,111,235,.08); }
+  .flow-card.c-agent    { border-color: var(--yellow);   background: rgba(254,197,20,.06); }
+  .flow-card.c-remediate{ border-color: var(--nominal);  background: rgba(63,185,80,.07); }
+  .flow-card.c-nominal  { border-color: var(--nominal);  background: rgba(63,185,80,.12); }
+  .flow-card.c-isolated { border-color: var(--border);   color: var(--muted); font-style: italic; background: var(--bg); }
+  .flow-arrow {
+    font-size: 18px; color: var(--muted); display: flex; align-items: center;
+    padding: 22px 2px 0; flex-shrink: 0;
+  }
+  .cloud-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; margin-right: 4px; vertical-align: middle; }
+
+  /* ── DETAIL PANELS ── */
+  .detail-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 10px; }
+  .detail-block { background: var(--bg2); border: 1px solid var(--border); border-radius: 6px; padding: 12px 14px; }
+  .detail-label { font-size: 10px; font-weight: 700; letter-spacing: 1.5px; text-transform: uppercase; color: var(--muted); margin-bottom: 7px; }
+  .detail-text  { font-size: 12px; color: var(--text); line-height: 1.65; }
+  .mono-block {
+    background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+    padding: 10px 14px; font-family: 'SF Mono','Fira Code',monospace;
+    font-size: 11px; color: var(--text); white-space: pre-wrap; overflow-x: auto;
+    line-height: 1.55; margin-bottom: 10px;
+  }
+  .mono-block .mono-label { font-size: 10px; color: var(--muted); display: block; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 1px; }
+  .ph  { color: var(--yellow); }
+  .val { color: var(--nominal); }
+  .notes-list { list-style: none; }
+  .notes-list li {
+    display: flex; gap: 8px; padding: 5px 0;
+    border-bottom: 1px solid #21262d; font-size: 11px; color: var(--text); line-height: 1.55;
+  }
+  .notes-list li:last-child { border-bottom: none; }
+  .notes-list li::before { content: '▸'; color: var(--blue); flex-shrink: 0; margin-top: 1px; }
+
+  /* ── CHEATSHEET ── */
+  .cheatsheet-slide { max-width: 1060px; margin: 0 auto; width: 100%; }
+  .cs-table { width: 100%; border-collapse: collapse; font-size: 12px; margin-bottom: 18px; }
+  .cs-table th {
+    background: var(--bg2); color: var(--muted); font-size: 10px; font-weight: 700;
+    letter-spacing: 1px; text-transform: uppercase; padding: 8px 10px; text-align: left;
+    border-bottom: 1px solid var(--border); white-space: nowrap;
+  }
+  .cs-table td { padding: 6px 10px; border-bottom: 1px solid #21262d; color: var(--text); vertical-align: top; }
+  .cs-table tr:hover td { background: var(--bg2); }
+  .cs-num  { font-weight: 700; color: var(--blue); white-space: nowrap; }
+  .cs-err  { font-family: monospace; font-size: 10px; color: var(--yellow); }
+  .cs-aff  { color: var(--critical); }
+  .cs-cas  { color: var(--warning); }
+  .cs-none { color: var(--muted); font-style: italic; }
+  .pill-f { font-size: 9px; font-weight: 700; color: var(--critical); border: 1px solid rgba(248,81,73,.4); padding: 1px 5px; border-radius: 8px; white-space: nowrap; }
+  .pill-b { font-size: 9px; font-weight: 700; color: var(--nominal);  border: 1px solid rgba(63,185,80,.4);  padding: 1px 5px; border-radius: 8px; white-space: nowrap; }
+  .curl-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .curl-block { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 12px 16px; }
+  .curl-label { font-size: 10px; font-weight: 700; letter-spacing: 1px; color: var(--muted); margin-bottom: 6px; text-transform: uppercase; }
+  .curl-cmd { font-family: monospace; font-size: 11px; color: var(--blue); white-space: pre; }
+
+  /* ── BACK BUTTON ── */
+  .back-btn {
+    display: inline-block; margin-top: 18px; background: transparent; color: var(--yellow);
+    border: 1px solid var(--yellow); border-radius: 6px; padding: 8px 20px;
+    font-size: 13px; font-weight: 700; cursor: pointer; transition: background .15s;
+  }
+  .back-btn:hover { background: rgba(254,197,20,.1); }
+
+  /* scrollbar */
+  ::-webkit-scrollbar { width: 5px; height: 5px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-brand"><span>🆘</span> ELASTIC OBSERVABILITY</div>
+  <div class="topbar-title">Global Relief Network Donation Platform — Chaos Channels</div>
+  <div class="topbar-counter" id="counter">1 / 26</div>
+  <div class="progress-bar" id="progressBar" style="width:3.85%"></div>
+</div>
+
+<div class="stage" id="stage"></div>
+
+<div class="bottombar">
+  <div class="dots-nav-row">
+    <div class="dots-row" id="dotsRow"></div>
+    <button class="toc-jump-btn hidden" id="tocJumpBtn" onclick="goTo(1)">☰ TOC</button>
+  </div>
+  <div class="nav-row">
+    <button class="nav-btn" id="prevBtn" onclick="navigate(-1)">← Prev</button>
+    <div class="key-hint">← → arrow keys &nbsp;|&nbsp; T = TOC &nbsp;|&nbsp; F = filter in TOC</div>
+    <button class="nav-btn" id="nextBtn" onclick="navigate(1)">Next →</button>
+  </div>
+</div>
+
+<script>
+/* ── data ── */
+const slides = [
+  {
+    "type": "title",
+    "icon": "🆘",
+    "name": "Global Relief Network Donation Platform",
+    "subtitle": "20 Chaos Channels — Demo Guide",
+    "description": "Donation and disaster-response coordination platform for a humanitarian relief nonprofit, serving global donors through a third-party content delivery platform and coordinating field aid disbursement across active disaster zones. Multi-cloud deployment spanning AWS, GCP, and Azure with AI-driven surge-capacity forecasting.",
+    "meta": {
+      "Channels": "20 Fault Channels",
+      "Services": "9 Microservices",
+      "Clouds": "AWS · GCP · Azure"
+    }
+  },
+  {
+    "type": "toc",
+    "summary": [
+      {
+        "num": 1,
+        "name": "Content Platform Feed Sync Failure",
+        "subsystem": "platform",
+        "error_type": "CONTENT-FEED-SYNC-FAIL",
+        "is_fault": true
+      },
+      {
+        "num": 2,
+        "name": "Personalization Tag Injection Timeout",
+        "subsystem": "platform",
+        "error_type": "CONTENT-TAG-INJECT-TIMEOUT",
+        "is_fault": true
+      },
+      {
+        "num": 3,
+        "name": "Donation Payment Gateway Timeout",
+        "subsystem": "payments",
+        "error_type": "PAY-GATEWAY-TIMEOUT",
+        "is_fault": true
+      },
+      {
+        "num": 4,
+        "name": "Duplicate Donation Charge Detected",
+        "subsystem": "platform",
+        "error_type": "PAY-DUPLICATE-CHARGE",
+        "is_fault": true
+      },
+      {
+        "num": 5,
+        "name": "Campaign Catalog Cache Staleness",
+        "subsystem": "caching",
+        "error_type": "CAMPAIGN-CACHE-STALE",
+        "is_fault": true
+      },
+      {
+        "num": 6,
+        "name": "Disaster Surge Capacity Undershoot",
+        "subsystem": "platform",
+        "error_type": "FORECAST-CAPACITY-UNDERSHOOT",
+        "is_fault": true
+      },
+      {
+        "num": 7,
+        "name": "Forecast Model Drift Surge Prediction",
+        "subsystem": "ml_inference",
+        "error_type": "FORECAST-MODEL-DRIFT",
+        "is_fault": true
+      },
+      {
+        "num": 8,
+        "name": "Donor Database Connection Pool Exhaustion",
+        "subsystem": "database",
+        "error_type": "DB-CONNPOOL-EXHAUST",
+        "is_fault": true
+      },
+      {
+        "num": 9,
+        "name": "Donor Database Replication Lag",
+        "subsystem": "database",
+        "error_type": "DB-REPLICATION-LAG",
+        "is_fault": true
+      },
+      {
+        "num": 10,
+        "name": "Volunteer Auth Federation Timeout",
+        "subsystem": "authentication",
+        "error_type": "AUTH-FEDERATION-TIMEOUT",
+        "is_fault": true
+      },
+      {
+        "num": 11,
+        "name": "Tax Receipt Notification Delivery Failure",
+        "subsystem": "platform",
+        "error_type": "NOTIF-RECEIPT-DELIVERY-FAIL",
+        "is_fault": true
+      },
+      {
+        "num": 12,
+        "name": "Aid Disbursement Ledger Mismatch",
+        "subsystem": "platform",
+        "error_type": "DISBURSE-LEDGER-MISMATCH",
+        "is_fault": true
+      },
+      {
+        "num": 13,
+        "name": "Field Ops Webhook Delivery Backlog",
+        "subsystem": "platform",
+        "error_type": "DISBURSE-WEBHOOK-BACKLOG",
+        "is_fault": true
+      },
+      {
+        "num": 14,
+        "name": "Content Platform Webhook Auth Rejection",
+        "subsystem": "authentication",
+        "error_type": "CONTENT-WEBHOOK-AUTH-REJECT",
+        "is_fault": true
+      },
+      {
+        "num": 15,
+        "name": "Donation Rate Limit Cascade",
+        "subsystem": "platform",
+        "error_type": "EDGE-RATE-LIMIT-CASCADE",
+        "is_fault": true
+      },
+      {
+        "num": 16,
+        "name": "Donor Portal Pod Oom Restart",
+        "subsystem": "deployment",
+        "error_type": "EDGE-POD-OOM-RESTART",
+        "is_fault": false
+      },
+      {
+        "num": 17,
+        "name": "Autoscaler Replica Bump Surge Cpu",
+        "subsystem": "platform",
+        "error_type": "PAY-AUTOSCALE-REPLICA-BUMP",
+        "is_fault": false
+      },
+      {
+        "num": 18,
+        "name": "Campaign Cache Flush Ttl Staleness",
+        "subsystem": "caching",
+        "error_type": "CAMPAIGN-CACHE-AUTO-FLUSH",
+        "is_fault": false
+      },
+      {
+        "num": 19,
+        "name": "Volunteer Auth Tls Cert Auto Renewal",
+        "subsystem": "authentication",
+        "error_type": "AUTH-TLS-CERT-RENEW",
+        "is_fault": false
+      },
+      {
+        "num": 20,
+        "name": "Notification Queue Pool Restart",
+        "subsystem": "messaging",
+        "error_type": "NOTIF-QUEUE-POOL-RESTART",
+        "is_fault": false
+      }
+    ]
+  },
+  {
+    "type": "platform",
+    "icon": "🆘",
+    "name": "Global Relief Network Donation Platform",
+    "clouds": [
+      {
+        "provider": "aws",
+        "region": "us-east-1",
+        "services": [
+          {
+            "service": "donor-portal-gateway",
+            "provider": "aws",
+            "region": "us-east-1",
+            "zone": "us-east-1a",
+            "subsystem": "edge",
+            "language": "go",
+            "sort_order": 1
+          },
+          {
+            "service": "donation-processing",
+            "provider": "aws",
+            "region": "us-east-1",
+            "zone": "us-east-1a",
+            "subsystem": "payments",
+            "language": "java",
+            "sort_order": 2
+          },
+          {
+            "service": "content-sync-service",
+            "provider": "aws",
+            "region": "us-east-1",
+            "zone": "us-east-1a",
+            "subsystem": "content_sync",
+            "language": "python",
+            "sort_order": 3
+          }
+        ]
+      },
+      {
+        "provider": "gcp",
+        "region": "us-central1",
+        "services": [
+          {
+            "service": "campaign-catalog",
+            "provider": "gcp",
+            "region": "us-central1",
+            "zone": "us-central1-a",
+            "subsystem": "campaigns",
+            "language": "go",
+            "sort_order": 4
+          },
+          {
+            "service": "capacity-forecast-service",
+            "provider": "gcp",
+            "region": "us-central1",
+            "zone": "us-central1-a",
+            "subsystem": "forecasting",
+            "language": "python",
+            "sort_order": 5
+          },
+          {
+            "service": "notification-service",
+            "provider": "gcp",
+            "region": "us-central1",
+            "zone": "us-central1-a",
+            "subsystem": "notifications",
+            "language": "dotnet",
+            "sort_order": 6
+          }
+        ]
+      },
+      {
+        "provider": "azure",
+        "region": "eastus",
+        "services": [
+          {
+            "service": "volunteer-auth",
+            "provider": "azure",
+            "region": "eastus",
+            "zone": "eastus-1",
+            "subsystem": "identity",
+            "language": "java",
+            "sort_order": 7
+          },
+          {
+            "service": "aid-disbursement",
+            "provider": "azure",
+            "region": "eastus",
+            "zone": "eastus-1",
+            "subsystem": "disbursement",
+            "language": "rust",
+            "sort_order": 8
+          },
+          {
+            "service": "donor-database",
+            "provider": "azure",
+            "region": "eastus",
+            "zone": "eastus-1",
+            "subsystem": "data",
+            "language": "cpp",
+            "sort_order": 9
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "type": "section",
+    "part": "Part 1",
+    "title": "Fault Channels (1–15)",
+    "desc": "True faults — AI agent investigation & approval required",
+    "color": "#f85149"
+  },
+  {
+    "type": "channel",
+    "num": 1,
+    "name": "Content Platform Feed Sync Failure",
+    "subsystem": "platform",
+    "error_type": "CONTENT-FEED-SYNC-FAIL",
+    "sensor_type": "error_rate",
+    "affected_services": [
+      "content-sync-service"
+    ],
+    "cascade_services": [
+      "donor-portal-gateway"
+    ],
+    "description": "The content-sync-service is repeatedly failing to sync campaign assets from the cdn_partner feed. Sync latency spikes and syncs time out before completing, leaving campaign imagery and copy stale on the donor portal.",
+    "investigation_notes": "1. Search body.text LIKE *CONTENT-FEED-SYNC-FAIL* to confirm the failing feed_source.\n2. Check content.sync_status on content-sync-service for feed_timeout occurrences.\n3. Compare content.cache_status on donor-portal-gateway for a rise in stale/miss.\n4. Check content_sync_service.syncs_total for a drop in successful sync throughput.\n5. Confirm whether the outage is isolated to feed_source={feed_source} or affects all feeds.\n6. Escalate to the content platform team if cdn_partner reachability is degraded upstream.",
+    "remediation_action": "restart_service",
+    "error_message": "CONTENT-FEED-SYNC-FAIL: feed_source={feed_source} sync_type={sync_type} timeout_ms={timeout_ms}",
+    "correlation_attr": {
+      "key": "content.feed_source",
+      "value": "cdn_partner"
+    },
+    "rca_clues": [
+      "content-sync-service",
+      "donor-portal-gateway"
+    ],
+    "example_values": {
+      "feed_source": "media_library",
+      "sync_type": "full",
+      "timeout_ms": 5819
+    },
+    "svc_cloud": {
+      "donor-portal-gateway": {
+        "provider": "aws",
+        "region": "us-east-1"
+      },
+      "content-sync-service": {
+        "provider": "aws",
+        "region": "us-east-1"
+      }
+    },
+    "is_fault": true,
+    "nominal_label": "ONLINE"
+  },
+  {
+    "type": "channel",
+    "num": 2,
+    "name": "Personalization Tag Injection Timeout",
+    "subsystem": "platform",
+    "error_type": "CONTENT-TAG-INJECT-TIMEOUT",
+    "sensor_type": "response_latency",
+    "affected_services": [
+      "content-sync-service"
+    ],
+    "cascade_services": [
+      "donor-portal-gateway"
+    ],
+    "description": "Personalization tag injection is timing out during content sync for banner and campaign_copy assets. Sync latency climbs well past baseline and the donor portal begins rendering unpersonalized fallback content.",
+    "investigation_notes": "1. Search body.text LIKE *CONTENT-TAG-INJECT-TIMEOUT* to confirm affected asset_type.\n2. Check content.latency_ms on content-sync-service for the sync_type in the alert.\n3. Look for a correlated deploy on content.sync_type=full syncs versus incremental.\n4. Check gateway.client_type on donor-portal-gateway to see which surfaces show fallback content.\n5. Check gateway.api_version for a recent rollout that changed personalization payload size.\n6. If isolated to one asset_type, scope remediation to that content pipeline only.",
+    "remediation_action": "restart_service",
+    "error_message": "CONTENT-TAG-INJECT-TIMEOUT: asset_type={asset_type} sync_type={sync_type} latency_ms={latency_ms}",
+    "correlation_attr": {
+      "key": "content.sync_type",
+      "value": "full"
+    },
+    "rca_clues": [
+      "content-sync-service",
+      "donor-portal-gateway"
+    ],
+    "example_values": {
+      "asset_type": "image",
+      "sync_type": "full",
+      "latency_ms": 2409
+    },
+    "svc_cloud": {
+      "donor-portal-gateway": {
+        "provider": "aws",
+        "region": "us-east-1"
+      },
+      "content-sync-service": {
+        "provider": "aws",
+        "region": "us-east-1"
+      }
+    },
+    "is_fault": true,
+    "nominal_label": "ONLINE"
+  },
+  {
+    "type": "channel",
+    "num": 3,
+    "name": "Donation Payment Gateway Timeout",
+    "subsystem": "payments",
+    "error_type": "PAY-GATEWAY-TIMEOUT",
+    "sensor_type": "response_latency",
+    "affected_services": [
+      "donation-processing"
+    ],
+    "cascade_services": [
+      "donor-portal-gateway"
+    ],
+    "description": "The donation-processing service is timing out while charging donations through the payment provider. Charge latency spikes past several seconds and an increasing share of transactions come back declined or timed out instead of settling.",
+    "investigation_notes": "1. Search body.text LIKE *PAY-GATEWAY-TIMEOUT* to confirm the affected payment_provider.\n2. Check payment.status on donation-processing for a rise in timeout/declined outcomes.\n3. Check donation_processing.latency_ms for sustained elevation above baseline.\n4. Compare payment.method distribution — confirm whether one method is disproportionately affected.\n5. Check gateway.client_type on donor-portal-gateway to see which checkout surfaces are impacted.\n6. If provider-side, coordinate with the payment_provider's status page before restarting locally.",
+    "remediation_action": "restart_service",
+    "error_message": "PAY-GATEWAY-TIMEOUT: provider={payment_provider} method={payment_method} timeout_ms={timeout_ms}",
+    "correlation_attr": {
+      "key": "deployment.payment_sdk_version",
+      "value": "stripe-sdk-v14.2.0-beta3"
+    },
+    "rca_clues": [
+      "donation-processing",
+      "donor-portal-gateway"
+    ],
+    "example_values": {
+      "payment_provider": "adyen",
+      "payment_method": "credit_card",
+      "timeout_ms": 3819
+    },
+    "svc_cloud": {
+      "donor-portal-gateway": {
+        "provider": "aws",
+        "region": "us-east-1"
+      },
+      "donation-processing": {
+        "provider": "aws",
+        "region": "us-east-1"
+      }
+    },
+    "is_fault": true,
+    "nominal_label": "ONLINE"
+  },
+  {
+    "type": "channel",
+    "num": 4,
+    "name": "Duplicate Donation Charge Detected",
+    "subsystem": "platform",
+    "error_type": "PAY-DUPLICATE-CHARGE",
+    "sensor_type": "health_check",
+    "affected_services": [
+      "donation-processing"
+    ],
+    "cascade_services": [
+      "donor-database"
+    ],
+    "description": "Idempotency key collisions in donation-processing are causing the same donation to be charged and inserted into the donations table more than once. Donors are seeing duplicate charges on their statements and the donations table is accumulating duplicate transaction rows for the same tx_id.",
+    "investigation_notes": "1. Search body.text LIKE *PAY-DUPLICATE-CHARGE* to identify the affected tx_id and provider.\n2. Check payment.tx_id on donation-processing for repeated writes within a short window.\n3. Check payment.total_tx growth rate against expected donor traffic for anomalies.\n4. Query donor-database db.table=donations for duplicate tx_id rows via db.query_type=SELECT.\n5. Confirm whether the idempotency cache/key store was recently deployed or flushed.\n6. Do not refund automatically — flag duplicates for manual donor-services reconciliation.",
+    "remediation_action": "restart_service",
+    "error_message": "PAY-DUPLICATE-CHARGE: provider={payment_provider} tx_id={tx_id} duplicate_count={duplicate_count}",
+    "correlation_attr": {
+      "key": "payment.method",
+      "value": "credit_card"
+    },
+    "rca_clues": [
+      "donation-processing",
+      "donor-database"
+    ],
+    "example_values": {
+      "payment_provider": "adyen",
+      "tx_id": "DON-{n}",
+      "duplicate_count": 2
+    },
+    "svc_cloud": {
+      "donation-processing": {
+        "provider": "aws",
+        "region": "us-east-1"
+      },
+      "donor-database": {
+        "provider": "azure",
+        "region": "eastus"
+      }
+    },
+    "is_fault": true,
+    "nominal_label": "ONLINE"
+  },
+  {
+    "type": "channel",
+    "num": 5,
+    "name": "Campaign Catalog Cache Staleness",
+    "subsystem": "caching",
+    "error_type": "CAMPAIGN-CACHE-STALE",
+    "sensor_type": "health_check",
+    "affected_services": [
+      "campaign-catalog"
+    ],
+    "cascade_services": [
+      "donor-portal-gateway"
+    ],
+    "description": "Campaign catalog cache entries are exceeding their TTL without refresh. The donor portal is serving stale campaign records — urgent or closing_soon campaigns still render as active, and closed campaigns keep accepting donations.",
+    "investigation_notes": "1. Search body.text LIKE *CAMPAIGN-CACHE-STALE* to identify the affected category.\n2. Check campaign.cache_status on campaign-catalog for a rise in stale entries.\n3. Compare campaign.cache_ttl_s against the expected refresh interval for drift.\n4. Check campaign.status distribution for urgent/closing_soon campaigns not refreshing.\n5. Check gateway.cdn_pop on donor-portal-gateway for edge-level cache propagation delay.\n6. Trigger a manual cache invalidation for the affected category if refresh is stuck.",
+    "remediation_action": "restart_service",
+    "error_message": "CAMPAIGN-CACHE-STALE: category={category} cache_ttl_s={cache_ttl_s} stale_age_s={stale_age_s}",
+    "correlation_attr": {
+      "key": "campaign.region_focus",
+      "value": "east_africa"
+    },
+    "rca_clues": [
+      "campaign-catalog",
+      "donor-portal-gateway"
+    ],
+    "example_values": {
+      "category": "disaster_relief",
+      "cache_ttl_s": 702,
+      "stale_age_s": 6974
+    },
+    "svc_cloud": {
+      "donor-portal-gateway": {
+        "provider": "aws",
+        "region": "us-east-1"
+      },
+      "campaign-catalog": {
+        "provider": "gcp",
+        "region": "us-central1"
+      }
+    },
+    "is_fault": true,
+    "nominal_label": "ONLINE"
+  },
+  {
+    "type": "channel",
+    "num": 6,
+    "name": "Disaster Surge Capacity Undershoot",
+    "subsystem": "platform",
+    "error_type": "FORECAST-CAPACITY-UNDERSHOOT",
+    "sensor_type": "health_check",
+    "affected_services": [
+      "capacity-forecast-service"
+    ],
+    "cascade_services": [
+      "donor-portal-gateway",
+      "donation-processing"
+    ],
+    "description": "The capacity-forecast-service is underestimating incoming donation volume during a disaster surge. Predicted load falls well short of actual traffic, and downstream donation-processing and donor-portal-gateway capacity was not scaled ahead of the spike, leading to saturation.",
+    "investigation_notes": "1. Search body.text LIKE *FORECAST-CAPACITY-UNDERSHOOT* to confirm the disaster_class.\n2. Check forecast.confidence_band on capacity-forecast-service for a widening band.\n3. Compare forecast.horizon_hours against how far out the undershoot was detected.\n4. Check platform.traffic_tier for surge to confirm actual traffic exceeded forecast.\n5. Check payment.latency_ms and donation_processing throughput for saturation symptoms.\n6. Escalate to the ops team for a manual capacity bump while the model is corrected.",
+    "remediation_action": "restart_service",
+    "error_message": "FORECAST-CAPACITY-UNDERSHOOT: disaster_class={disaster_class} horizon_hours={horizon_hours} undershoot_pct={undershoot_pct}",
+    "correlation_attr": {
+      "key": "forecast.model_version",
+      "value": "v2.3-rc1"
+    },
+    "rca_clues": [
+      "capacity-forecast-service",
+      "donor-portal-gateway",
+      "donation-processing"
+    ],
+    "example_values": {
+      "disaster_class": "tier_3",
+      "horizon_hours": 6,
+      "undershoot_pct": 21
+    },
+    "svc_cloud": {
+      "donor-portal-gateway": {
+        "provider": "aws",
+        "region": "us-east-1"
+      },
+      "capacity-forecast-service": {
+        "provider": "gcp",
+        "region": "us-central1"
+      },
+      "donation-processing": {
+        "provider": "aws",
+        "region": "us-east-1"
+      }
+    },
+    "is_fault": true,
+    "nominal_label": "ONLINE"
+  },
+  {
+    "type": "channel",
+    "num": 7,
+    "name": "Forecast Model Drift Surge Prediction",
+    "subsystem": "ml_inference",
+    "error_type": "FORECAST-MODEL-DRIFT",
+    "sensor_type": "health_check",
+    "affected_services": [
+      "capacity-forecast-service"
+    ],
+    "cascade_services": [
+      "campaign-catalog"
+    ],
+    "description": "The capacity-forecast-service's model version is drifting from its validated baseline. Confidence bands are widening and surge predictions are diverging from actual campaign donation patterns tracked by campaign-catalog.",
+    "investigation_notes": "1. Search body.text LIKE *FORECAST-MODEL-DRIFT* to confirm the affected model_version.\n2. Check forecast.confidence_band on capacity-forecast-service for sustained widening.\n3. Compare forecast predictions against campaign.status transitions on campaign-catalog.\n4. Check whether model_version=v2.3-rc1 is a canary rollout still under evaluation.\n5. Review capacity_forecast_service.latency_ms for inference-time regressions.\n6. Roll back to the last validated model_version if drift_score stays elevated.",
+    "remediation_action": "restart_service",
+    "error_message": "FORECAST-MODEL-DRIFT: model_version={model_version} confidence_band={confidence_band} drift_score={drift_score}",
+    "correlation_attr": {
+      "key": "forecast.model_version",
+      "value": "v2.3-rc1"
+    },
+    "rca_clues": [
+      "capacity-forecast-service",
+      "campaign-catalog"
+    ],
+    "example_values": {
+      "model_version": "v2.2",
+      "confidence_band": "wide",
+      "drift_score": 0.74
+    },
+    "svc_cloud": {
+      "capacity-forecast-service": {
+        "provider": "gcp",
+        "region": "us-central1"
+      },
+      "campaign-catalog": {
+        "provider": "gcp",
+        "region": "us-central1"
+      }
+    },
+    "is_fault": true,
+    "nominal_label": "ONLINE"
+  },
+  {
+    "type": "channel",
+    "num": 8,
+    "name": "Donor Database Connection Pool Exhaustion",
+    "subsystem": "database",
+    "error_type": "DB-CONNPOOL-EXHAUST",
+    "sensor_type": "connection_pool",
+    "affected_services": [
+      "donor-database"
+    ],
+    "cascade_services": [
+      "donation-processing"
+    ],
+    "description": "The donor-database primary connection pool is saturating near capacity. New query connections are queueing or being refused, and donation writes are slowing down at the source before they ever reach donation-processing's own latency budget.",
+    "investigation_notes": "1. Search body.text LIKE *DB-CONNPOOL-EXHAUST* to confirm the affected table.\n2. Check db.pool_utilization_pct on donor-database for sustained values above 90%.\n3. Check donor_database.pool_active_connections versus pool_idle_connections for headroom.\n4. Correlate with payment.latency_ms on donation-processing for downstream write delays.\n5. Check db.replication_role to confirm the exhaustion is on the primary, not a replica.\n6. Raise the pool max-connections limit or kill long-running queries if one table dominates.",
+    "remediation_action": "restart_service",
+    "error_message": "DB-CONNPOOL-EXHAUST: table={table} pool_utilization_pct={pool_utilization_pct}% pool_active={pool_active}",
+    "correlation_attr": {
+      "key": "db.replication_role",
+      "value": "primary"
+    },
+    "rca_clues": [
+      "donor-database",
+      "donation-processing"
+    ],
+    "example_values": {
+      "table": "donors",
+      "pool_utilization_pct": 90,
+      "pool_active": 100
+    },
+    "svc_cloud": {
+      "donation-processing": {
+        "provider": "aws",
+        "region": "us-east-1"
+      },
+      "donor-database": {
+        "provider": "azure",
+        "region": "eastus"
+      }
+    },
+    "is_fault": true,
+    "nominal_label": "ONLINE"
+  },
+  {
+    "type": "channel",
+    "num": 9,
+    "name": "Donor Database Replication Lag",
+    "subsystem": "database",
+    "error_type": "DB-REPLICATION-LAG",
+    "sensor_type": "health_check",
+    "affected_services": [
+      "donor-database"
+    ],
+    "cascade_services": [
+      "campaign-catalog"
+    ],
+    "description": "Replication lag between the donor-database primary and its replica is climbing well past normal bounds. Reads served from the replica — including campaign-catalog's campaign lookups — are returning outdated records.",
+    "investigation_notes": "1. Search body.text LIKE *DB-REPLICATION-LAG* to confirm the affected table.\n2. Check db.replication_lag_ms on donor-database for sustained multi-second lag.\n3. Confirm db.replication_role=replica is the source of the stale reads, not primary.\n4. Check campaign.cache_status on campaign-catalog for a rise in stale entries.\n5. Check donor_database.replication_lag_ms trend to see if lag is growing or plateaued.\n6. Consider routing campaign-catalog reads to primary until lag recovers below 1s.",
+    "remediation_action": "restart_service",
+    "error_message": "DB-REPLICATION-LAG: table={table} replication_role={replication_role} replication_lag_ms={replication_lag_ms}",
+    "correlation_attr": {
+      "key": "db.table",
+      "value": "campaigns"
+    },
+    "rca_clues": [
+      "donor-database",
+      "campaign-catalog"
+    ],
+    "example_values": {
+      "table": "campaigns",
+      "replication_role": "replica",
+      "replication_lag_ms": 27299
+    },
+    "svc_cloud": {
+      "campaign-catalog": {
+        "provider": "gcp",
+        "region": "us-central1"
+      },
+      "donor-database": {
+        "provider": "azure",
+        "region": "eastus"
+      }
+    },
+    "is_fault": true,
+    "nominal_label": "ONLINE"
+  },
+  {
+    "type": "channel",
+    "num": 10,
+    "name": "Volunteer Auth Federation Timeout",
+    "subsystem": "authentication",
+    "error_type": "AUTH-FEDERATION-TIMEOUT",
+    "sensor_type": "response_latency",
+    "affected_services": [
+      "volunteer-auth"
+    ],
+    "cascade_services": [
+      "aid-disbursement"
+    ],
+    "description": "The volunteer-auth identity federation provider is timing out during token issuance. Field coordinators are unable to authenticate, which blocks approval-tier actions in aid-disbursement that require an authenticated coordinator session.",
+    "investigation_notes": "1. Search body.text LIKE *AUTH-FEDERATION-TIMEOUT* to confirm the affected provider.\n2. Check auth.status on volunteer-auth for a rise in federation_timeout outcomes.\n3. Check auth.latency_ms for sustained elevation above the normal federation round-trip.\n4. Check disbursement.approval_tier on aid-disbursement for a drop in field_coordinator approvals.\n5. Check disbursement.webhook_backlog for a buildup caused by stalled approvals.\n6. Escalate to the federation provider if the timeout is external (partner_federation).",
+    "remediation_action": "restart_service",
+    "error_message": "AUTH-FEDERATION-TIMEOUT: provider={provider} method={method} timeout_ms={timeout_ms}",
+    "correlation_attr": {
+      "key": "auth.provider",
+      "value": "partner_federation"
+    },
+    "rca_clues": [
+      "volunteer-auth",
+      "aid-disbursement"
+    ],
+    "example_values": {
+      "provider": "google_workspace",
+      "method": "oauth2",
+      "timeout_ms": 12012
+    },
+    "svc_cloud": {
+      "aid-disbursement": {
+        "provider": "azure",
+        "region": "eastus"
+      },
+      "volunteer-auth": {
+        "provider": "azure",
+        "region": "eastus"
+      }
+    },
+    "is_fault": true,
+    "nominal_label": "ONLINE"
+  },
+  {
+    "type": "channel",
+    "num": 11,
+    "name": "Tax Receipt Notification Delivery Failure",
+    "subsystem": "platform",
+    "error_type": "NOTIF-RECEIPT-DELIVERY-FAIL",
+    "sensor_type": "error_rate",
+    "affected_services": [
+      "notification-service"
+    ],
+    "cascade_services": [
+      "donation-processing"
+    ],
+    "description": "Tax-receipt email notifications are failing delivery through the sendgrid provider. Donors who completed a successful charge in donation-processing are not receiving their confirmation receipts, and the notification queue is backing up behind provider-rejected sends.",
+    "investigation_notes": "1. Search body.text LIKE *NOTIF-RECEIPT-DELIVERY-FAIL* to confirm the affected provider.\n2. Check notification.delivery_status on notification-service for provider_rejected/timeout.\n3. Check notification.queue_depth for a buildup of unsent tax_receipt notifications.\n4. Correlate against payment.total_tx on donation-processing to size the affected donor cohort.\n5. Check notification_service.sent_total trend for a drop matching the failure window.\n6. If provider-side, fail over to an alternate provider before retrying the backlog.",
+    "remediation_action": "restart_service",
+    "error_message": "NOTIF-RECEIPT-DELIVERY-FAIL: template={template} provider={provider} status={delivery_status}",
+    "correlation_attr": {
+      "key": "notification.provider",
+      "value": "sendgrid"
+    },
+    "rca_clues": [
+      "notification-service",
+      "donation-processing"
+    ],
+    "example_values": {
+      "template": "tax_receipt",
+      "provider": "sendgrid",
+      "delivery_status": "timeout"
+    },
+    "svc_cloud": {
+      "notification-service": {
+        "provider": "gcp",
+        "region": "us-central1"
+      },
+      "donation-processing": {
+        "provider": "aws",
+        "region": "us-east-1"
+      }
+    },
+    "is_fault": true,
+    "nominal_label": "ONLINE"
+  },
+  {
+    "type": "channel",
+    "num": 12,
+    "name": "Aid Disbursement Ledger Mismatch",
+    "subsystem": "platform",
+    "error_type": "DISBURSE-LEDGER-MISMATCH",
+    "sensor_type": "health_check",
+    "affected_services": [
+      "aid-disbursement"
+    ],
+    "cascade_services": [
+      "donor-database"
+    ],
+    "description": "Aid-disbursement ledger entries are diverging from the disbursements table in donor-database after webhook confirmation drift. Reconciliation reports are showing mismatched totals between what was disbursed and what was recorded.",
+    "investigation_notes": "1. Search body.text LIKE *DISBURSE-LEDGER-MISMATCH* to confirm the affected region.\n2. Check disbursement.ledger_status on aid-disbursement for mismatch occurrences.\n3. Query donor-database db.table=disbursements via db.query_type=SELECT to compare totals.\n4. Check disbursement.approval_tier — auto_approved disbursements skip a human check.\n5. Check disbursement.method to see if one payout rail is more prone to the mismatch.\n6. Freeze further disbursements for the affected region until the ledger is reconciled.",
+    "remediation_action": "restart_service",
+    "error_message": "DISBURSE-LEDGER-MISMATCH: region={region} ledger_status={ledger_status} mismatch_amount={mismatch_amount}",
+    "correlation_attr": {
+      "key": "disbursement.approval_tier",
+      "value": "auto_approved"
+    },
+    "rca_clues": [
+      "aid-disbursement",
+      "donor-database"
+    ],
+    "example_values": {
+      "region": "east_africa",
+      "ledger_status": "mismatch",
+      "mismatch_amount": 3720.67
+    },
+    "svc_cloud": {
+      "aid-disbursement": {
+        "provider": "azure",
+        "region": "eastus"
+      },
+      "donor-database": {
+        "provider": "azure",
+        "region": "eastus"
+      }
+    },
+    "is_fault": true,
+    "nominal_label": "ONLINE"
+  },
+  {
+    "type": "channel",
+    "num": 13,
+    "name": "Field Ops Webhook Delivery Backlog",
+    "subsystem": "platform",
+    "error_type": "DISBURSE-WEBHOOK-BACKLOG",
+    "sensor_type": "queue_depth",
+    "affected_services": [
+      "aid-disbursement"
+    ],
+    "cascade_services": [
+      "notification-service"
+    ],
+    "description": "The field-ops webhook queue behind aid-disbursement's dispatch calls is backing up. Payout confirmation webhooks are piling up faster than they can be delivered, which delays the downstream notification-service dispatch that alerts field teams.",
+    "investigation_notes": "1. Search body.text LIKE *DISBURSE-WEBHOOK-BACKLOG* to confirm the affected region/method.\n2. Check disbursement.webhook_backlog on aid-disbursement for sustained growth.\n3. Check aid_disbursement.webhook_backlog metric trend to see whether it is still climbing.\n4. Check notification.queue_depth on notification-service for the downstream knock-on effect.\n5. Check disbursement.method to see if one payout rail's webhook endpoint is slow.\n6. Consider pausing new disbursements for the affected region until backlog drains.",
+    "remediation_action": "restart_service",
+    "error_message": "DISBURSE-WEBHOOK-BACKLOG: method={method} region={region} webhook_backlog={webhook_backlog}",
+    "correlation_attr": {
+      "key": "disbursement.method",
+      "value": "mobile_money"
+    },
+    "rca_clues": [
+      "aid-disbursement",
+      "notification-service"
+    ],
+    "example_values": {
+      "method": "mobile_money",
+      "webhook_backlog": 602,
+      "region": "caribbean"
+    },
+    "svc_cloud": {
+      "notification-service": {
+        "provider": "gcp",
+        "region": "us-central1"
+      },
+      "aid-disbursement": {
+        "provider": "azure",
+        "region": "eastus"
+      }
+    },
+    "is_fault": true,
+    "nominal_label": "ONLINE"
+  },
+  {
+    "type": "channel",
+    "num": 14,
+    "name": "Content Platform Webhook Auth Rejection",
+    "subsystem": "authentication",
+    "error_type": "CONTENT-WEBHOOK-AUTH-REJECT",
+    "sensor_type": "health_check",
+    "affected_services": [
+      "content-sync-service"
+    ],
+    "cascade_services": [
+      "volunteer-auth"
+    ],
+    "description": "Content platform webhook calls from content-sync-service are being rejected by the identity provider due to expired or invalid federation tokens. Feed syncs are failing authentication before they ever reach the upstream content source.",
+    "investigation_notes": "1. Search body.text LIKE *CONTENT-WEBHOOK-AUTH-REJECT* to confirm the affected feed_source.\n2. Check content.sync_status on content-sync-service for auth_rejected occurrences.\n3. Check auth.status on volunteer-auth for correlated federation failures at the same time.\n4. Check auth.provider to confirm whether partner_federation tokens are the ones failing.\n5. Verify the webhook's stored credential/token hasn't expired or been rotated.\n6. Refresh the federation token and re-run the sync for the affected feed_source.",
+    "remediation_action": "restart_service",
+    "error_message": "CONTENT-WEBHOOK-AUTH-REJECT: feed_source={feed_source} provider={provider} status={sync_status}",
+    "correlation_attr": {
+      "key": "auth.method",
+      "value": "oauth2"
+    },
+    "rca_clues": [
+      "content-sync-service",
+      "volunteer-auth"
+    ],
+    "example_values": {
+      "feed_source": "cdn_partner",
+      "provider": "partner_federation",
+      "sync_status": "auth_rejected"
+    },
+    "svc_cloud": {
+      "content-sync-service": {
+        "provider": "aws",
+        "region": "us-east-1"
+      },
+      "volunteer-auth": {
+        "provider": "azure",
+        "region": "eastus"
+      }
+    },
+    "is_fault": true,
+    "nominal_label": "ONLINE"
+  },
+  {
+    "type": "channel",
+    "num": 15,
+    "name": "Donation Rate Limit Cascade",
+    "subsystem": "platform",
+    "error_type": "EDGE-RATE-LIMIT-CASCADE",
+    "sensor_type": "health_check",
+    "affected_services": [
+      "donor-portal-gateway"
+    ],
+    "cascade_services": [
+      "donation-processing",
+      "campaign-catalog"
+    ],
+    "description": "Edge rate limiting on donor-portal-gateway is throttling a large share of incoming traffic during a surge. The throttled requests are cascading into elevated retry load on both donation-processing and campaign-catalog as clients back off and retry.",
+    "investigation_notes": "1. Search body.text LIKE *EDGE-RATE-LIMIT-CASCADE* to confirm the affected cdn_pop.\n2. Check platform.traffic_tier for surge to confirm the rate limiter was triggered by real load.\n3. Check gateway.client_type distribution to see which client population is most throttled.\n4. Check payment.latency_ms on donation-processing for retry-driven latency growth.\n5. Check campaign.latency_ms on campaign-catalog for the same retry-driven pattern.\n6. Raise the rate-limit ceiling temporarily for the affected cdn_pop if capacity allows.",
+    "remediation_action": "restart_service",
+    "error_message": "EDGE-RATE-LIMIT-CASCADE: client_type={client_type} cdn_pop={cdn_pop} throttled_pct={throttled_pct}",
+    "correlation_attr": {
+      "key": "platform.traffic_tier",
+      "value": "surge"
+    },
+    "rca_clues": [
+      "donor-portal-gateway",
+      "donation-processing",
+      "campaign-catalog"
+    ],
+    "example_values": {
+      "client_type": "partner_widget",
+      "cdn_pop": "iad89",
+      "throttled_pct": 21
+    },
+    "svc_cloud": {
+      "donor-portal-gateway": {
+        "provider": "aws",
+        "region": "us-east-1"
+      },
+      "campaign-catalog": {
+        "provider": "gcp",
+        "region": "us-central1"
+      },
+      "donation-processing": {
+        "provider": "aws",
+        "region": "us-east-1"
+      }
+    },
+    "is_fault": true,
+    "nominal_label": "ONLINE"
+  },
+  {
+    "type": "section",
+    "part": "Part 2",
+    "title": "Benign & Self-Healing (16–20)",
+    "desc": "System events that fire but self-resolve — signal vs. noise",
+    "color": "#3fb950"
+  },
+  {
+    "type": "channel",
+    "num": 16,
+    "name": "Donor Portal Pod Oom Restart",
+    "subsystem": "deployment",
+    "error_type": "EDGE-POD-OOM-RESTART",
+    "sensor_type": "health_check",
+    "affected_services": [
+      "donor-portal-gateway"
+    ],
+    "cascade_services": [],
+    "description": "A donor-portal-gateway pod is exceeding its memory limit under sustained elevated traffic, triggering an OOMKill and container restart. This is a self-healing condition: the platform auto-restarts the pod without requiring operator approval.",
+    "investigation_notes": "1. Search body.text LIKE *EDGE-POD-OOM-RESTART* to confirm the affected client_type.\n2. Check platform.traffic_tier for elevated/surge conditions preceding the OOMKill.\n3. Check memory_pct trend leading up to the restart to confirm the saturation pattern.\n4. Confirm the auto-remediation restart completed and the pod returned to Ready.\n5. Check restart_count for repeat OOMKills — a repeating pattern suggests a memory leak.\n6. If restart_count keeps climbing, escalate for a memory-limit increase or profiling.",
+    "remediation_action": "restart_service",
+    "error_message": "EDGE-POD-OOM-RESTART: client_type={client_type} memory_pct={memory_pct}% restart_count={restart_count}",
+    "correlation_attr": {
+      "key": "platform.traffic_tier",
+      "value": "elevated"
+    },
+    "rca_clues": [
+      "donor-portal-gateway"
+    ],
+    "example_values": {
+      "client_type": "partner_widget",
+      "memory_pct": 93,
+      "restart_count": 1
+    },
+    "svc_cloud": {
+      "donor-portal-gateway": {
+        "provider": "aws",
+        "region": "us-east-1"
+      }
+    },
+    "is_fault": false,
+    "nominal_label": "ONLINE"
+  },
+  {
+    "type": "channel",
+    "num": 17,
+    "name": "Autoscaler Replica Bump Surge Cpu",
+    "subsystem": "platform",
+    "error_type": "PAY-AUTOSCALE-REPLICA-BUMP",
+    "sensor_type": "cpu_usage",
+    "affected_services": [
+      "donation-processing"
+    ],
+    "cascade_services": [],
+    "description": "Sustained CPU utilization on donation-processing has crossed the autoscaling threshold during a donation surge. The horizontal pod autoscaler is bumping replica count automatically to absorb the load — no operator action is required.",
+    "investigation_notes": "1. Search body.text LIKE *PAY-AUTOSCALE-REPLICA-BUMP* to confirm the affected provider.\n2. Check cpu_pct trend on donation-processing for sustained values above the scale-out threshold.\n3. Confirm platform.traffic_tier is surge, consistent with a legitimate load-driven scale-out.\n4. Watch replica_target versus actual running replica count to confirm the autoscaler caught up.\n5. Check payment.latency_ms to confirm latency recovers once new replicas come online.\n6. If replica_target keeps climbing without latency recovery, escalate for capacity review.",
+    "remediation_action": "restart_service",
+    "error_message": "PAY-AUTOSCALE-REPLICA-BUMP: provider={provider} cpu_pct={cpu_pct}% replica_target={replica_target}",
+    "correlation_attr": {
+      "key": "platform.traffic_tier",
+      "value": "surge"
+    },
+    "rca_clues": [
+      "donation-processing"
+    ],
+    "example_values": {
+      "provider": "adyen",
+      "cpu_pct": 88,
+      "replica_target": 6
+    },
+    "svc_cloud": {
+      "donation-processing": {
+        "provider": "aws",
+        "region": "us-east-1"
+      }
+    },
+    "is_fault": false,
+    "nominal_label": "ONLINE"
+  },
+  {
+    "type": "channel",
+    "num": 18,
+    "name": "Campaign Cache Flush Ttl Staleness",
+    "subsystem": "caching",
+    "error_type": "CAMPAIGN-CACHE-AUTO-FLUSH",
+    "sensor_type": "health_check",
+    "affected_services": [
+      "campaign-catalog"
+    ],
+    "cascade_services": [],
+    "description": "A high proportion of urgent and closing_soon campaign entries in campaign-catalog's cache are hitting their short TTL at the same time. The platform's scheduled auto-flush is clearing the stale entries ahead of the next read — a routine, self-healing cache maintenance event.",
+    "investigation_notes": "1. Search body.text LIKE *CAMPAIGN-CACHE-AUTO-FLUSH* to confirm the affected status.\n2. Check campaign.cache_ttl_s to confirm entries expired within the expected short window.\n3. Check flushed_keys count against the expected campaign catalog size for scale sanity.\n4. Confirm campaign.cache_status returns to hit shortly after the flush completes.\n5. If flushes are recurring rapidly, check whether TTL is set too aggressively for urgent campaigns.\n6. No operator action needed unless cache misses persist after the auto-flush.",
+    "remediation_action": "restart_service",
+    "error_message": "CAMPAIGN-CACHE-AUTO-FLUSH: status={status} cache_ttl_s={cache_ttl_s} flushed_keys={flushed_keys}",
+    "correlation_attr": {
+      "key": "campaign.cache_status",
+      "value": "stale"
+    },
+    "rca_clues": [
+      "campaign-catalog"
+    ],
+    "example_values": {
+      "status": "urgent",
+      "cache_ttl_s": 33,
+      "flushed_keys": 1618
+    },
+    "svc_cloud": {
+      "campaign-catalog": {
+        "provider": "gcp",
+        "region": "us-central1"
+      }
+    },
+    "is_fault": false,
+    "nominal_label": "ONLINE"
+  },
+  {
+    "type": "channel",
+    "num": 19,
+    "name": "Volunteer Auth Tls Cert Auto Renewal",
+    "subsystem": "authentication",
+    "error_type": "AUTH-TLS-CERT-RENEW",
+    "sensor_type": "certificate_expiry",
+    "affected_services": [
+      "volunteer-auth"
+    ],
+    "cascade_services": [],
+    "description": "A volunteer-auth TLS certificate used for identity federation is approaching expiry. The platform's scheduled auto-renewal is rotating the certificate ahead of the deadline — a routine, self-healing maintenance event that requires no operator action.",
+    "investigation_notes": "1. Search body.text LIKE *AUTH-TLS-CERT-RENEW* to confirm the affected provider.\n2. Check cert_expiry_days on volunteer-auth to confirm the certificate was nearing expiry.\n3. Check auth.method to confirm which federation flow depends on the rotating certificate.\n4. Confirm the auto-renewal completed and cert_expiry_days returned to its normal range.\n5. Check auth.latency_ms briefly after rotation for any transient handshake slowdown.\n6. No operator action needed unless cert_expiry_days keeps dropping after the renewal.",
+    "remediation_action": "restart_service",
+    "error_message": "AUTH-TLS-CERT-RENEW: provider={provider} method={method} cert_expiry_days={cert_expiry_days}",
+    "correlation_attr": {
+      "key": "auth.provider",
+      "value": "internal"
+    },
+    "rca_clues": [
+      "volunteer-auth"
+    ],
+    "example_values": {
+      "provider": "internal",
+      "method": "oauth2",
+      "cert_expiry_days": 5
+    },
+    "svc_cloud": {
+      "volunteer-auth": {
+        "provider": "azure",
+        "region": "eastus"
+      }
+    },
+    "is_fault": false,
+    "nominal_label": "ONLINE"
+  },
+  {
+    "type": "channel",
+    "num": 20,
+    "name": "Notification Queue Pool Restart",
+    "subsystem": "messaging",
+    "error_type": "NOTIF-QUEUE-POOL-RESTART",
+    "sensor_type": "queue_depth",
+    "affected_services": [
+      "notification-service"
+    ],
+    "cascade_services": [],
+    "description": "The notification-service delivery worker pool queue depth has crossed its restart threshold. The platform is automatically recycling the worker pool to clear the backlog — a routine, self-healing event that requires no operator action.",
+    "investigation_notes": "1. Search body.text LIKE *NOTIF-QUEUE-POOL-RESTART* to confirm the affected channel.\n2. Check notification.queue_depth on notification-service for the spike that triggered the restart.\n3. Check notification.delivery_status to confirm whether the backlog was provider-side.\n4. Confirm the worker pool restart completed and queue_depth is draining back to baseline.\n5. Check notification.provider to see if one delivery provider disproportionately backed up the queue.\n6. No operator action needed unless queue_depth climbs again shortly after the restart.",
+    "remediation_action": "restart_service",
+    "error_message": "NOTIF-QUEUE-POOL-RESTART: channel={channel} provider={provider} queue_depth={queue_depth}",
+    "correlation_attr": {
+      "key": "notification.channel",
+      "value": "push"
+    },
+    "rca_clues": [
+      "notification-service"
+    ],
+    "example_values": {
+      "channel": "push",
+      "provider": "sendgrid",
+      "queue_depth": 1102
+    },
+    "svc_cloud": {
+      "notification-service": {
+        "provider": "gcp",
+        "region": "us-central1"
+      }
+    },
+    "is_fault": false,
+    "nominal_label": "ONLINE"
+  },
+  {
+    "type": "cheatsheet",
+    "channels": [
+      {
+        "num": 1,
+        "name": "Content Platform Feed Sync Failure",
+        "subsystem": "platform",
+        "error_type": "CONTENT-FEED-SYNC-FAIL",
+        "affected": [
+          "content-sync-service"
+        ],
+        "cascade": [
+          "donor-portal-gateway"
+        ],
+        "is_fault": true
+      },
+      {
+        "num": 2,
+        "name": "Personalization Tag Injection Timeout",
+        "subsystem": "platform",
+        "error_type": "CONTENT-TAG-INJECT-TIMEOUT",
+        "affected": [
+          "content-sync-service"
+        ],
+        "cascade": [
+          "donor-portal-gateway"
+        ],
+        "is_fault": true
+      },
+      {
+        "num": 3,
+        "name": "Donation Payment Gateway Timeout",
+        "subsystem": "payments",
+        "error_type": "PAY-GATEWAY-TIMEOUT",
+        "affected": [
+          "donation-processing"
+        ],
+        "cascade": [
+          "donor-portal-gateway"
+        ],
+        "is_fault": true
+      },
+      {
+        "num": 4,
+        "name": "Duplicate Donation Charge Detected",
+        "subsystem": "platform",
+        "error_type": "PAY-DUPLICATE-CHARGE",
+        "affected": [
+          "donation-processing"
+        ],
+        "cascade": [
+          "donor-database"
+        ],
+        "is_fault": true
+      },
+      {
+        "num": 5,
+        "name": "Campaign Catalog Cache Staleness",
+        "subsystem": "caching",
+        "error_type": "CAMPAIGN-CACHE-STALE",
+        "affected": [
+          "campaign-catalog"
+        ],
+        "cascade": [
+          "donor-portal-gateway"
+        ],
+        "is_fault": true
+      },
+      {
+        "num": 6,
+        "name": "Disaster Surge Capacity Undershoot",
+        "subsystem": "platform",
+        "error_type": "FORECAST-CAPACITY-UNDERSHOOT",
+        "affected": [
+          "capacity-forecast-service"
+        ],
+        "cascade": [
+          "donor-portal-gateway",
+          "donation-processing"
+        ],
+        "is_fault": true
+      },
+      {
+        "num": 7,
+        "name": "Forecast Model Drift Surge Prediction",
+        "subsystem": "ml_inference",
+        "error_type": "FORECAST-MODEL-DRIFT",
+        "affected": [
+          "capacity-forecast-service"
+        ],
+        "cascade": [
+          "campaign-catalog"
+        ],
+        "is_fault": true
+      },
+      {
+        "num": 8,
+        "name": "Donor Database Connection Pool Exhaustion",
+        "subsystem": "database",
+        "error_type": "DB-CONNPOOL-EXHAUST",
+        "affected": [
+          "donor-database"
+        ],
+        "cascade": [
+          "donation-processing"
+        ],
+        "is_fault": true
+      },
+      {
+        "num": 9,
+        "name": "Donor Database Replication Lag",
+        "subsystem": "database",
+        "error_type": "DB-REPLICATION-LAG",
+        "affected": [
+          "donor-database"
+        ],
+        "cascade": [
+          "campaign-catalog"
+        ],
+        "is_fault": true
+      },
+      {
+        "num": 10,
+        "name": "Volunteer Auth Federation Timeout",
+        "subsystem": "authentication",
+        "error_type": "AUTH-FEDERATION-TIMEOUT",
+        "affected": [
+          "volunteer-auth"
+        ],
+        "cascade": [
+          "aid-disbursement"
+        ],
+        "is_fault": true
+      },
+      {
+        "num": 11,
+        "name": "Tax Receipt Notification Delivery Failure",
+        "subsystem": "platform",
+        "error_type": "NOTIF-RECEIPT-DELIVERY-FAIL",
+        "affected": [
+          "notification-service"
+        ],
+        "cascade": [
+          "donation-processing"
+        ],
+        "is_fault": true
+      },
+      {
+        "num": 12,
+        "name": "Aid Disbursement Ledger Mismatch",
+        "subsystem": "platform",
+        "error_type": "DISBURSE-LEDGER-MISMATCH",
+        "affected": [
+          "aid-disbursement"
+        ],
+        "cascade": [
+          "donor-database"
+        ],
+        "is_fault": true
+      },
+      {
+        "num": 13,
+        "name": "Field Ops Webhook Delivery Backlog",
+        "subsystem": "platform",
+        "error_type": "DISBURSE-WEBHOOK-BACKLOG",
+        "affected": [
+          "aid-disbursement"
+        ],
+        "cascade": [
+          "notification-service"
+        ],
+        "is_fault": true
+      },
+      {
+        "num": 14,
+        "name": "Content Platform Webhook Auth Rejection",
+        "subsystem": "authentication",
+        "error_type": "CONTENT-WEBHOOK-AUTH-REJECT",
+        "affected": [
+          "content-sync-service"
+        ],
+        "cascade": [
+          "volunteer-auth"
+        ],
+        "is_fault": true
+      },
+      {
+        "num": 15,
+        "name": "Donation Rate Limit Cascade",
+        "subsystem": "platform",
+        "error_type": "EDGE-RATE-LIMIT-CASCADE",
+        "affected": [
+          "donor-portal-gateway"
+        ],
+        "cascade": [
+          "donation-processing",
+          "campaign-catalog"
+        ],
+        "is_fault": true
+      },
+      {
+        "num": 16,
+        "name": "Donor Portal Pod Oom Restart",
+        "subsystem": "deployment",
+        "error_type": "EDGE-POD-OOM-RESTART",
+        "affected": [
+          "donor-portal-gateway"
+        ],
+        "cascade": [],
+        "is_fault": false
+      },
+      {
+        "num": 17,
+        "name": "Autoscaler Replica Bump Surge Cpu",
+        "subsystem": "platform",
+        "error_type": "PAY-AUTOSCALE-REPLICA-BUMP",
+        "affected": [
+          "donation-processing"
+        ],
+        "cascade": [],
+        "is_fault": false
+      },
+      {
+        "num": 18,
+        "name": "Campaign Cache Flush Ttl Staleness",
+        "subsystem": "caching",
+        "error_type": "CAMPAIGN-CACHE-AUTO-FLUSH",
+        "affected": [
+          "campaign-catalog"
+        ],
+        "cascade": [],
+        "is_fault": false
+      },
+      {
+        "num": 19,
+        "name": "Volunteer Auth Tls Cert Auto Renewal",
+        "subsystem": "authentication",
+        "error_type": "AUTH-TLS-CERT-RENEW",
+        "affected": [
+          "volunteer-auth"
+        ],
+        "cascade": [],
+        "is_fault": false
+      },
+      {
+        "num": 20,
+        "name": "Notification Queue Pool Restart",
+        "subsystem": "messaging",
+        "error_type": "NOTIF-QUEUE-POOL-RESTART",
+        "affected": [
+          "notification-service"
+        ],
+        "cascade": [],
+        "is_fault": false
+      }
+    ]
+  }
+];
+
+const CLOUD_COLORS = {aws:"#FF9900", gcp:"#4285F4", azure:"#0078D4"};
+const CLOUD_LABELS = {aws:"AWS",     gcp:"GCP",     azure:"Azure"};
+
+let current = 0;
+let animTimer = null;
+
+/* ── utils ── */
+function esc(s) {
+  return String(s)
+    .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")
+    .replace(/"/g,"&quot;");
+}
+function cloudDot(prov) {
+  const c = CLOUD_COLORS[prov] || "#888";
+  return `<span class="cloud-dot" style="background:${c}"></span>`;
+}
+function slideIndex(type, num) {
+  return slides.findIndex(s => s.type === type && (num === undefined || s.num === num));
+}
+
+/* ── renderers ── */
+function renderTitle(s) {
+  const metaCards = Object.entries(s.meta).map(([l,v]) =>
+    `<div class="meta-card"><div class="meta-label">${esc(l)}</div><div class="meta-value">${esc(v)}</div></div>`
+  ).join("");
+  return `<div class="title-slide">
+    <div class="title-icon">${esc(s.icon)}</div>
+    <div class="title-eyebrow">⚡ Elastic · Chaos Channel Demo Guide</div>
+    <div class="title-main">${esc(s.name)}</div>
+    <div class="title-sub">${esc(s.subtitle)}</div>
+    <div class="title-meta">${metaCards}</div>
+  </div>`;
+}
+
+function renderToc(s) {
+  const tiles = s.summary.map(ch => {
+    const idx = slideIndex("channel", ch.num);
+    return `<div class="toc-tile" data-fault="${ch.is_fault?1:0}"
+        data-search="${esc(ch.name+' '+ch.subsystem+' '+ch.error_type).toLowerCase()}"
+        onclick="goTo(${idx})">
+      <div class="toc-num">Channel ${String(ch.num).padStart(2,"0")}</div>
+      <div class="toc-err">${esc(ch.error_type)}</div>
+      <div class="toc-name">${esc(ch.name)}</div>
+      <div class="toc-sub">${esc(ch.subsystem)}</div>
+    </div>`;
+  }).join("");
+  return `<div class="toc-slide">
+    <div class="slide-eyebrow">TABLE OF CONTENTS — Click any channel to jump · Type to filter</div>
+    <input class="toc-filter" id="tocFilter" placeholder="Filter by name, subsystem, or error type…" oninput="filterToc(this.value)">
+    <div class="toc-grid" id="tocGrid">${tiles}</div>
+  </div>`;
+}
+
+function filterToc(val) {
+  const v = val.toLowerCase();
+  document.querySelectorAll(".toc-tile").forEach(t => {
+    t.classList.toggle("toc-hidden", v && !(t.dataset.search||"").includes(v));
+  });
+}
+
+function renderPlatform(s) {
+  const cols = s.clouds.map(cl => {
+    const col = CLOUD_COLORS[cl.provider]||"#888";
+    const lbl = CLOUD_LABELS[cl.provider]||cl.provider;
+    const cards = cl.services.map(sv =>
+      `<div class="svc-card" style="border-left:3px solid ${col}">
+        <div class="svc-name">${esc(sv.service)}</div>
+        <div class="badges">
+          <span class="badge badge-sub">${esc(sv.subsystem)}</span>
+          ${sv.language ? `<span class="badge badge-lang">${esc(sv.language)}</span>` : ""}
+        </div>
+        <div style="font-size:10px;color:var(--muted);margin-top:4px">${esc(sv.region||"")}</div>
+      </div>`
+    ).join("");
+    return `<div class="cloud-col" style="border-top:3px solid ${col}">
+      <div class="cloud-header">
+        <span class="cloud-badge" style="background:${col}">${lbl}</span>
+        <span class="cloud-region">${esc(cl.region)}</span>
+      </div>
+      ${cards}
+    </div>`;
+  }).join("");
+  return `<div class="platform-slide">
+    <div class="slide-eyebrow">${esc(s.icon)} ${esc(s.name)} — Service Architecture</div>
+    <div class="cloud-grid">${cols}</div>
+  </div>`;
+}
+
+function renderSection(s) {
+  return `<div class="section-break">
+    <div class="section-part" style="color:${s.color||"var(--blue2)"}">${esc(s.part)}</div>
+    <div class="section-title">${esc(s.title)}</div>
+    <div class="section-desc">${esc(s.desc)}</div>
+  </div>`;
+}
+
+function renderChannel(s) {
+  const pillCls = s.is_fault ? "fault" : "benign";
+  const pillTxt = s.is_fault ? "⚠ Fault · Agent Required" : "✓ Benign · Self-Healing";
+
+  function svcCards(svcs, cls) {
+    if (!svcs || !svcs.length)
+      return `<div class="flow-card c-isolated visible"><div class="fc-name">None</div><div class="fc-sub">isolated fault</div></div>`;
+    return svcs.map((sv, i) => {
+      const sc = (s.svc_cloud||{})[sv]||{};
+      const prov = sc.provider||"aws";
+      const col  = CLOUD_COLORS[prov]||"#888";
+      const lbl  = CLOUD_LABELS[prov]||prov;
+      return `<div class="flow-card ${cls}" style="transition-delay:${(i+1)*80}ms">
+        <div class="fc-name">${cloudDot(prov)}${esc(sv)}</div>
+        <div class="fc-sub">${lbl} · ${esc(sc.region||"")}</div>
+      </div>`;
+    }).join("");
+  }
+
+  const ca  = s.correlation_attr||{};
+  const rca = s.rca_clues||[];
+  const ex  = s.example_values||{};
+
+  // error_message with placeholders highlighted + example values
+  const msgHtml = (s.error_message||"").replace(/\{(\w+)\}/g, (m, k) => {
+    const ev = ex[k] !== undefined ? `<span class="val"> (${esc(String(ex[k]))})</span>` : "";
+    return `<span class="ph">${esc(m)}</span>${ev}`;
+  });
+
+  // investigation notes
+  const noteLines = (s.investigation_notes||"").split("\n").filter(l=>l.trim());
+  const notesHtml = noteLines.map(l=>`<li>${esc(l.replace(/^\d+\.\s*/,""))}</li>`).join("");
+
+  const descHtml = s.description
+    ? `<div class="detail-block"><div class="detail-label">📋 Description</div><div class="detail-text">${esc(s.description)}</div></div>` : "";
+  const notesBlock = notesHtml
+    ? `<div class="detail-block"><div class="detail-label">▸ Stage Notes</div><ul class="notes-list">${notesHtml}</ul></div>` : "";
+
+  return `<div class="channel-slide">
+    <div class="ch-header">
+      <span class="ch-num">CH ${String(s.num).padStart(2,"0")}</span>
+      <span class="ch-sub">${esc(s.subsystem)}</span>
+      <span class="ch-err">${esc(s.error_type)}</span>
+      <span class="ch-pill ${pillCls}">${pillTxt}</span>
+    </div>
+    <div class="ch-name">${esc(s.name)}</div>
+
+    <div class="flow-wrap">
+      <div class="flow-stage">
+        <div class="flow-label">⚡ Trigger</div>
+        <div class="flow-cards">
+          <div class="flow-card c-trigger" style="transition-delay:0ms">
+            <div class="fc-name">CH ${s.num}</div>
+            <div class="fc-sub">${esc(s.sensor_type)}</div>
+          </div>
+        </div>
+      </div>
+      <div class="flow-arrow">→</div>
+
+      <div class="flow-stage">
+        <div class="flow-label">💥 Affected</div>
+        <div class="flow-cards">${svcCards(s.affected_services,"c-critical")}</div>
+      </div>
+      <div class="flow-arrow">→</div>
+
+      <div class="flow-stage">
+        <div class="flow-label">⚠️ Cascade</div>
+        <div class="flow-cards">${svcCards(s.cascade_services,"c-warning")}</div>
+      </div>
+      <div class="flow-arrow">→</div>
+
+      <div class="flow-stage">
+        <div class="flow-label">🔍 ES|QL Detect</div>
+        <div class="flow-cards">
+          <div class="flow-card c-detect" style="transition-delay:200ms">
+            <div class="fc-name">${esc(s.error_type)}</div>
+            <div class="fc-sub">${ca.key ? esc(ca.key)+" = "+esc(ca.value) : "significant event"}</div>
+          </div>
+        </div>
+      </div>
+      <div class="flow-arrow">→</div>
+
+      <div class="flow-stage">
+        <div class="flow-label">🤖 AI Agent</div>
+        <div class="flow-cards">
+          <div class="flow-card c-agent" style="transition-delay:280ms">
+            <div class="fc-name">RCA Investigation</div>
+            <div class="fc-sub">${rca.length
+              ? esc(rca.slice(0,2).join(", "))+(rca.length>2?` +${rca.length-2} more`:"")
+              : "pattern analysis"}</div>
+          </div>
+        </div>
+      </div>
+      <div class="flow-arrow">→</div>
+
+      <div class="flow-stage">
+        <div class="flow-label">🔧 Remediate</div>
+        <div class="flow-cards">
+          <div class="flow-card c-remediate" style="transition-delay:360ms">
+            <div class="fc-name">${esc(s.remediation_action)}</div>
+            <div class="fc-sub">POST /api/remediate/${s.num}</div>
+          </div>
+        </div>
+      </div>
+      <div class="flow-arrow">→</div>
+
+      <div class="flow-stage">
+        <div class="flow-label">✅ ${esc(s.nominal_label)}</div>
+        <div class="flow-cards">
+          <div class="flow-card c-nominal" style="transition-delay:440ms">
+            <div class="fc-name">${esc(s.nominal_label)}</div>
+            <div class="fc-sub">all services green</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="detail-row">${descHtml}${notesBlock}</div>
+
+    ${msgHtml ? `<div class="mono-block"><span class="mono-label">Error Signature</span>${msgHtml}</div>` : ""}
+  </div>`;
+}
+
+function renderCheatsheet(s) {
+  const rows = s.channels.map(ch => {
+    const pill = ch.is_fault
+      ? `<span class="pill-f">FAULT</span>`
+      : `<span class="pill-b">BENIGN</span>`;
+    const aff = ch.affected.length ? `<span class="cs-aff">${esc(ch.affected.join(", "))}</span>` : `<span class="cs-none">—</span>`;
+    const cas = ch.cascade.length  ? `<span class="cs-cas">${esc(ch.cascade.join(", "))}</span>`  : `<span class="cs-none">isolated</span>`;
+    return `<tr>
+      <td class="cs-num">${pill} ${String(ch.num).padStart(2,"0")}</td>
+      <td>${esc(ch.name)}</td>
+      <td>${esc(ch.subsystem)}</td>
+      <td class="cs-err">${esc(ch.error_type)}</td>
+      <td>${aff}</td>
+      <td>${cas}</td>
+    </tr>`;
+  }).join("");
+  return `<div class="cheatsheet-slide">
+    <div class="slide-eyebrow">⚡ All 20 Channels — Quick Reference</div>
+    <table class="cs-table">
+      <thead><tr><th>#</th><th>Name</th><th>Subsystem</th><th>Error Type</th><th>Affected</th><th>Cascade</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    <div class="curl-row">
+      <div class="curl-block">
+        <div class="curl-label">Trigger fault</div>
+        <div class="curl-cmd">curl -X POST http://&lt;host&gt;/api/chaos/trigger \
+  -H 'Content-Type: application/json' \
+  -d '{"channel": N}'</div>
+      </div>
+      <div class="curl-block">
+        <div class="curl-label">Resolve fault</div>
+        <div class="curl-cmd">curl -X POST http://&lt;host&gt;/api/remediate/N</div>
+      </div>
+    </div>
+    <button class="back-btn" onclick="goTo(1)">↑ Back to Contents</button>
+  </div>`;
+}
+
+/* ── main render ── */
+function renderSlide(idx) {
+  const s = slides[idx];
+  const stage = document.getElementById("stage");
+  if      (s.type==="title")       stage.innerHTML = renderTitle(s);
+  else if (s.type==="toc")         stage.innerHTML = renderToc(s);
+  else if (s.type==="platform")    stage.innerHTML = renderPlatform(s);
+  else if (s.type==="section")     stage.innerHTML = renderSection(s);
+  else if (s.type==="channel")     stage.innerHTML = renderChannel(s);
+  else if (s.type==="cheatsheet")  stage.innerHTML = renderCheatsheet(s);
+  // Stagger-animate flow cards after render
+  if (s.type==="channel") {
+    if (animTimer) clearTimeout(animTimer);
+    animTimer = setTimeout(()=>{
+      document.querySelectorAll(".flow-card").forEach(c=>c.classList.add("visible"));
+    }, 40);
+  }
+}
+
+function dotKind(s) {
+  if (s.type==="channel") return s.is_fault ? "fault" : "benign";
+  return s.type;
+}
+
+function buildDots() {
+  const row = document.getElementById("dotsRow");
+  row.innerHTML = slides.map((s,i) =>
+    `<button class="dot-btn${i===current?" active":""}" data-kind="${dotKind(s)}"
+      onclick="goTo(${i})" title="${s.type==="channel"?`Ch ${s.num}: ${esc(s.name)}`:s.type}"></button>`
+  ).join("");
+}
+
+function updateUI() {
+  renderSlide(current);
+  buildDots();
+  const hide = current<=1;
+  document.getElementById("tocJumpBtn").classList.toggle("hidden", hide);
+  document.getElementById("counter").textContent = `${current+1} / ${slides.length}`;
+  document.getElementById("progressBar").style.width = `${((current+1)/slides.length*100).toFixed(2)}%`;
+  document.getElementById("prevBtn").disabled = current===0;
+  document.getElementById("nextBtn").disabled = current===slides.length-1;
+}
+
+function goTo(idx) {
+  if (idx<0||idx>=slides.length||idx===current) return;
+  const stage = document.getElementById("stage");
+  stage.classList.add("fade");
+  setTimeout(()=>{ current=idx; updateUI(); stage.classList.remove("fade"); }, 180);
+}
+
+function navigate(dir) { goTo(current+dir); }
+
+document.addEventListener("keydown", e=>{
+  if (e.key==="ArrowRight"||e.key==="ArrowDown") navigate(1);
+  if (e.key==="ArrowLeft" ||e.key==="ArrowUp")   navigate(-1);
+  if ((e.key==="t"||e.key==="T") && current!==1) goTo(1);
+  if (e.key==="f" && current===1) {
+    const f=document.getElementById("tocFilter");
+    if (f){f.focus();e.preventDefault();}
+  }
+});
+
+updateUI();
+</script>
+</body>
+</html>
