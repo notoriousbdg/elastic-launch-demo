@@ -177,6 +177,11 @@ class AgentMixin:
 - Use **{p_channel_runbook}** to look up fault channel procedures or identify the remediation action_type
 - Use **{p_remediation_guide}** before executing any remediation or escalation action
 
+## ES|QL Field Name Rules — CRITICAL
+When querying logs with ES|QL, ALWAYS use `body.text` for log message content.
+NEVER use `body` alone — it is a nested object and will cause an "Unknown column [body]" error.
+Example: `WHERE body.text LIKE "%error%"` ✓   `WHERE body LIKE "%error%"` ✗
+
 ## Creating Visualizations
 Use the **visualization-creation** tool to create Lens charts and dashboards. Always provide complete,
 specific parameters — vague requests will produce empty panels.

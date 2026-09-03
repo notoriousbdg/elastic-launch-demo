@@ -93,7 +93,7 @@ steps:
 
   - name: send_notification
     type: email
-    connector-id: elastic-cloud-email
+    connector-id: Elastic-Cloud-SMTP
     if: "${{ steps.parse_event_meta.output.var[0].event_meta.user_email != '' and steps.parse_event_meta.output.var[0].event_meta.user_email != null }}"
     with:
       to:
