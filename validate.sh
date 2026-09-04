@@ -18,35 +18,92 @@ if [[ -f "$SCRIPT_DIR/.env" ]]; then
     set +a
 fi
 
+# ── Parse CLI args ────────────────────────────────────────────────────────────
+_CLI_SCENARIO=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --scenario|-s)
+            _CLI_SCENARIO="${2:-}"
+            if [[ -z "$_CLI_SCENARIO" ]]; then
+                echo "Usage: $0 [--scenario|-s <scenario_id>]" >&2
+                exit 1
+            fi
+            shift 2
+            ;;
+        --scenario=*)
+            _CLI_SCENARIO="${1#*=}"
+            shift
+            ;;
+        -h|--help)
+            echo "Usage: $0 [--scenario|-s <scenario_id>]"
+            exit 0
+            ;;
+        *)
+            echo "Unknown argument: $1" >&2
+            echo "Usage: $0 [--scenario|-s <scenario_id>]" >&2
+            exit 1
+            ;;
+    esac
+done
+
 # ── Load connectivity vars + scenario info from the deployment DB ─────────────
-_db_out=$(python3 -c "
+_py_script=$(mktemp /tmp/validate_XXXXXX.py)
+cat > "$_py_script" << PYEOF
 import sqlite3, os, sys
-db = os.path.join('$SCRIPT_DIR', 'data', 'deployments.db')
-if not os.path.exists(db):
-    exit(0)
-r = sqlite3.connect(db).execute(
-    \"SELECT scenario_id, elastic_url, elastic_api_key, kibana_url, otlp_endpoint, otlp_api_key \"
-    \"FROM deployments WHERE status='active' LIMIT 1\"
-).fetchone()
-if not r:
-    exit(0)
-sid, eu, ak, ku, oe, ok_ = r
-if eu:  print(f'_DB_EU={eu}')
-if ak:  print(f'_DB_AK={ak}')
-if ku:  print(f'_DB_KU={ku}')
-if oe:  print(f'_DB_OE={oe}')
-if ok_: print(f'_DB_OK={ok_}')
-sys.path.insert(0, '$SCRIPT_DIR')
+
+SCRIPT_DIR = "$SCRIPT_DIR"
+cli_scenario = "$_CLI_SCENARIO"
+
+db = os.path.join(SCRIPT_DIR, "data", "deployments.db")
+sid = eu = ak = ku = oe = ok_ = None
+if os.path.exists(db):
+    con = sqlite3.connect(db)
+    if cli_scenario:
+        r = con.execute(
+            "SELECT scenario_id, elastic_url, elastic_api_key, kibana_url, otlp_endpoint, otlp_api_key "
+            "FROM deployments WHERE scenario_id=? AND status='active' LIMIT 1",
+            (cli_scenario,),
+        ).fetchone()
+        if not r:
+            r = con.execute(
+                "SELECT scenario_id, elastic_url, elastic_api_key, kibana_url, otlp_endpoint, otlp_api_key "
+                "FROM deployments WHERE scenario_id=? LIMIT 1",
+                (cli_scenario,),
+            ).fetchone()
+    else:
+        r = con.execute(
+            "SELECT scenario_id, elastic_url, elastic_api_key, kibana_url, otlp_endpoint, otlp_api_key "
+            "FROM deployments WHERE status='active' LIMIT 1"
+        ).fetchone()
+    if r:
+        sid, eu, ak, ku, oe, ok_ = r
+        if eu:  print(f"_DB_EU={eu}")
+        if ak:  print(f"_DB_AK={ak}")
+        if ku:  print(f"_DB_KU={ku}")
+        if oe:  print(f"_DB_OE={oe}")
+        if ok_: print(f"_DB_OK={ok_}")
+
+resolve_sid = cli_scenario or sid
+if not resolve_sid:
+    sys.exit(0)
+
+sys.path.insert(0, SCRIPT_DIR)
 try:
-    from scenarios import get_scenario
-    s = get_scenario(sid)
-    print(f'SCENARIO_NS={s.namespace}')
-    print(f'SCENARIO_NAME={s.scenario_name}')
-    agent_id = s.agent_config.get('id', s.namespace + '-analyst')
-    print(f'AGENT_ID={agent_id}')
+    from scenario_engine import get_scenario
+    s = get_scenario(resolve_sid)
+    ns = s.namespace
+    name = s.scenario_name
+    aid = s.agent_config.get("id", ns + "-analyst")
 except Exception:
-    pass
-" 2>/dev/null || true)
+    ns = resolve_sid
+    name = resolve_sid
+    aid = resolve_sid + "-analyst"
+print(f"SCENARIO_NS={ns}")
+print(f"SCENARIO_NAME={name}")
+print(f"AGENT_ID={aid}")
+PYEOF
+_db_out=$(python3 "$_py_script" 2>/dev/null || true)
+rm -f "$_py_script"
 eval "$_db_out"
 
 ELASTIC_URL="${ELASTIC_URL:-${_DB_EU:-}}"
@@ -171,13 +228,17 @@ echo ""
 
 # ── 3. OTel Log Data ─────────────────────────────────────────────────────────
 echo "--- OTel Log Data ---"
-otel_count=$(get_count "logs")
+# Scenario-namespaced stream first, then generic fallback
+otel_count=$(get_count "logs.otel.${SCENARIO_NS}")
+if [[ "$otel_count" -le 0 ]]; then
+    otel_count=$(get_count "logs.otel")
+fi
 if [[ "$otel_count" -gt 0 ]]; then
-    pass "logs has data ($otel_count docs)"
+    pass "OTel log data found ($otel_count docs in logs.otel.${SCENARIO_NS} / logs.otel)"
 elif [[ "$otel_count" -eq 0 ]]; then
-    warn "logs exists but is empty (start the demo app generators)"
+    warn "logs.otel.${SCENARIO_NS} exists but is empty (start the demo app generators)"
 else
-    warn "logs index not found (start the demo app generators)"
+    warn "logs.otel.${SCENARIO_NS} not found (start the demo app generators)"
 fi
 echo ""
 
@@ -543,16 +604,25 @@ for w in items:
 
     # --- Test Escalation Workflow ---
     if [[ -n "$escalation_wf_id" ]]; then
-        esc_run_response=$(kb_post "/api/workflows/${escalation_wf_id}/run" \
+        esc_run_response=$(kb_post "/api/workflows/workflow/${escalation_wf_id}/run" \
             '{"inputs":{"action":"escalate","channel":1,"severity":"ADVISORY","justification":"Validation test — automated escalation check","hold_id":"","investigation_summary":""}}')
         esc_run_code=$(echo "$esc_run_response" | tail -1)
+        if [[ "$esc_run_code" -eq 404 || "$esc_run_code" -eq 405 ]]; then
+            esc_run_response=$(kb_post "/api/workflows/${escalation_wf_id}/run" \
+                '{"inputs":{"action":"escalate","channel":1,"severity":"ADVISORY","justification":"Validation test — automated escalation check","hold_id":"","investigation_summary":""}}')
+            esc_run_code=$(echo "$esc_run_response" | tail -1)
+        fi
         esc_run_body=$(echo "$esc_run_response" | sed '$d')
 
         if [[ "$esc_run_code" -ge 200 && "$esc_run_code" -lt 300 ]]; then
             esc_exec_id=$(echo "$esc_run_body" | python3 -c "import sys,json; print(json.load(sys.stdin).get('workflowExecutionId',''))" 2>/dev/null || echo "")
             if [[ -n "$esc_exec_id" ]]; then
                 sleep 12
-                esc_status_response=$(kb_get "/api/workflowExecutions/${esc_exec_id}")
+                esc_status_response=$(kb_get "/api/workflows/executions/${esc_exec_id}")
+                esc_status_code=$(echo "$esc_status_response" | tail -1)
+                if [[ "$esc_status_code" -eq 404 || "$esc_status_code" -eq 405 ]]; then
+                    esc_status_response=$(kb_get "/api/workflowExecutions/${esc_exec_id}")
+                fi
                 esc_status=$(echo "$esc_status_response" | sed '$d' | python3 -c "import sys,json; print(json.load(sys.stdin).get('status','unknown'))" 2>/dev/null || echo "unknown")
 
                 if [[ "$esc_status" == "completed" ]]; then
@@ -580,20 +650,31 @@ print(e.get('message','') if isinstance(e,dict) else str(e))
 
     # --- Test Remediation Workflow (dry_run=true) ---
     if [[ -n "$remediation_wf_id" ]]; then
-        rem_run_response=$(kb_post "/api/workflows/${remediation_wf_id}/run" \
+        rem_run_response=$(kb_post "/api/workflows/workflow/${remediation_wf_id}/run" \
             '{"inputs":{"error_type":"validation_test","channel":1,"action_type":"validation_check","target_service":"","justification":"Validation test — automated dry-run check","dry_run":true,"case_id":""}}')
         rem_run_code=$(echo "$rem_run_response" | tail -1)
+        if [[ "$rem_run_code" -eq 404 || "$rem_run_code" -eq 405 ]]; then
+            rem_run_response=$(kb_post "/api/workflows/${remediation_wf_id}/run" \
+                '{"inputs":{"error_type":"validation_test","channel":1,"action_type":"validation_check","target_service":"","justification":"Validation test — automated dry-run check","dry_run":true,"case_id":""}}')
+            rem_run_code=$(echo "$rem_run_response" | tail -1)
+        fi
         rem_run_body=$(echo "$rem_run_response" | sed '$d')
 
         if [[ "$rem_run_code" -ge 200 && "$rem_run_code" -lt 300 ]]; then
             rem_exec_id=$(echo "$rem_run_body" | python3 -c "import sys,json; print(json.load(sys.stdin).get('workflowExecutionId',''))" 2>/dev/null || echo "")
             if [[ -n "$rem_exec_id" ]]; then
                 sleep 8
-                rem_status_response=$(kb_get "/api/workflowExecutions/${rem_exec_id}")
+                rem_status_response=$(kb_get "/api/workflows/executions/${rem_exec_id}")
+                rem_status_code=$(echo "$rem_status_response" | tail -1)
+                if [[ "$rem_status_code" -eq 404 || "$rem_status_code" -eq 405 ]]; then
+                    rem_status_response=$(kb_get "/api/workflowExecutions/${rem_exec_id}")
+                fi
                 rem_status=$(echo "$rem_status_response" | sed '$d' | python3 -c "import sys,json; print(json.load(sys.stdin).get('status','unknown'))" 2>/dev/null || echo "unknown")
 
                 if [[ "$rem_status" == "completed" ]]; then
                     pass "E2E: Remediation workflow dry-run executed successfully (completed)"
+                elif [[ "$rem_status" == "waiting_for_input" ]]; then
+                    pass "E2E: Remediation workflow reached approval gate (waiting_for_input — human-in-the-loop working correctly)"
                 elif [[ "$rem_status" == "running" ]]; then
                     warn "E2E: Remediation workflow still running after 8s"
                 else
