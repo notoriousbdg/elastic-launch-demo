@@ -59,7 +59,7 @@ steps:
 
   - name: send_email
     type: email
-    connector-id: elastic-cloud-email
+    connector-id: __EMAIL_CONNECTOR_ID__
     with:
       to:
         - "{{ inputs.email }}"

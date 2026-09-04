@@ -27,7 +27,14 @@ class ServiceManager:
         self.chaos_controller = chaos_controller
         self._ctx = ctx  # ScenarioContext or None
         self.otlp = otlp_client or OTLPClient()
-        self.es_bulk = ESBulkClient()
+        self.es_bulk = (
+            ESBulkClient(
+                elastic_url=ctx.elastic_url,
+                api_key=ctx.elastic_api_key,
+            )
+            if ctx and ctx.elastic_url and ctx.elastic_api_key
+            else ESBulkClient()
+        )
         self.services: dict[str, Any] = {}
         self._stop_event = threading.Event()
 

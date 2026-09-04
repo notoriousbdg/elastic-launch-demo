@@ -292,7 +292,7 @@ FROM logs,logs.*
 **Symptoms:** Workflow completes but no email arrives.
 
 **Check:**
-- Email step uses `elastic-cloud-email` connector — this is a preconfigured system connector
+- Email step uses the deploy-time `__EMAIL_CONNECTOR_ID__` pin (`elastic-cloud-email` on ECH, `Elastic-Cloud-SMTP` or similar on serverless)
 - Verify the `user_email` is being extracted correctly from the event
 - Check workflow execution details for the email step output
 
