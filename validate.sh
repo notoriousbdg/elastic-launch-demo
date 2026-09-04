@@ -402,7 +402,8 @@ for item in items:
         fail "Notification workflow MISSING 'alert' trigger — alert rules won't fire it"
     fi
 
-    # Check Notification workflow has email step with elastic-cloud-email
+    # Check Notification workflow has email step with a resolved connector
+    # (ECH: elastic-cloud-email; serverless: Elastic-Cloud-SMTP or similar)
     notif_email=$(echo "$wf_search_body" | python3 -c "
 import sys, json
 data = json.load(sys.stdin)
@@ -411,15 +412,15 @@ for item in items:
     if 'Significant Event Notification' in item.get('name', '') and '${SCENARIO_NAME}' in item.get('name', ''):
         yaml_text = item.get('yaml', '')
         has_email_step = 'type: email' in yaml_text
-        has_smtp = 'elastic-cloud-email' in yaml_text
-        print('yes' if (has_email_step and has_smtp) else 'no')
+        unresolved = '__EMAIL_CONNECTOR_ID__' in yaml_text
+        print('yes' if (has_email_step and not unresolved) else 'no')
         break
 " 2>/dev/null || echo "unknown")
 
     if [[ "$notif_email" == "yes" ]]; then
-        pass "Notification workflow has email step with elastic-cloud-email connector"
+        pass "Notification workflow has email step with resolved connector"
     else
-        fail "Notification workflow MISSING email step with elastic-cloud-email"
+        fail "Notification workflow MISSING email step or unresolved __EMAIL_CONNECTOR_ID__"
     fi
 
     # Check Notification workflow uses var[0].event_meta pattern (json_parse for email extraction)

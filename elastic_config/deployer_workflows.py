@@ -21,6 +21,7 @@ logger = logging.getLogger("deployer")
 
 _DEFAULT_SONNET_CONNECTOR_ID = ".anthropic-claude-5-sonnet-chat_completion"
 _DEFAULT_HAIKU_CONNECTOR_ID = "Anthropic-Claude-Haiku-4-5"
+_DEFAULT_EMAIL_CONNECTOR_ID = "elastic-cloud-email"
 
 
 class WorkflowsMixin:
@@ -38,9 +39,11 @@ class WorkflowsMixin:
             logger.info("Created %s workflow indices for %s", created, self.ns)
 
         sonnet_id, haiku_id = self._resolve_llm_connector_ids(client)
+        email_id = self._resolve_email_connector_id(client)
         workflow_yamls = self._generate_workflow_yamls(
             sonnet_connector_id=sonnet_id,
             haiku_connector_id=haiku_id,
+            email_connector_id=email_id,
         )
         step.items_total = len(workflow_yamls)
 
@@ -121,10 +124,59 @@ class WorkflowsMixin:
         logger.info("RCA connectors: sonnet=%s haiku=%s", sonnet, haiku)
         return sonnet, haiku
 
+    def _resolve_email_connector_id(self, client: httpx.Client) -> str:
+        """Return the email connector id for workflow email steps.
+
+        ECH exposes a preconfigured connector with id ``elastic-cloud-email``.
+        Serverless exposes a similar preconfigured connector but with a
+        different id (e.g. ``Elastic-Cloud-SMTP``).  This method tries the
+        ECH default first, then falls back to the first connector whose id or
+        name contains 'smtp' or 'email', then returns the ECH default as a
+        last resort (so ECH keeps working even if the connector list call fails).
+        """
+        try:
+            resp = client.get(
+                f"{self.kibana_url}/api/actions/connectors",
+                headers=_kibana_headers(self.api_key),
+            )
+            if resp.status_code >= 300:
+                logger.warning(
+                    "Could not list connectors for email pin (HTTP %s); using default",
+                    resp.status_code,
+                )
+                return _DEFAULT_EMAIL_CONNECTOR_ID
+            body = resp.json()
+            connectors = (
+                body
+                if isinstance(body, list)
+                else body.get("data") or body.get("results") or body.get("connectors") or []
+            )
+        except Exception as exc:
+            logger.warning("Email connector lookup failed (%s); using default", exc)
+            return _DEFAULT_EMAIL_CONNECTOR_ID
+
+        ids = {str(c.get("id", "")) for c in connectors}
+
+        # Prefer the well-known ECH preconfigured connector when it exists.
+        if _DEFAULT_EMAIL_CONNECTOR_ID in ids:
+            return _DEFAULT_EMAIL_CONNECTOR_ID
+
+        # Serverless / custom: match by id or name containing 'smtp' or 'email'.
+        for c in connectors:
+            cid = str(c.get("id", ""))
+            blob = f"{cid} {c.get('name', '')}".lower()
+            if "smtp" in blob or "email" in blob:
+                logger.info("Email connector resolved to: %s", cid)
+                return cid
+
+        logger.info("No email connector found; falling back to %s", _DEFAULT_EMAIL_CONNECTOR_ID)
+        return _DEFAULT_EMAIL_CONNECTOR_ID
+
     def _generate_workflow_yamls(
         self,
         sonnet_connector_id: str = _DEFAULT_SONNET_CONNECTOR_ID,
         haiku_connector_id: str = _DEFAULT_HAIKU_CONNECTOR_ID,
+        email_connector_id: str = _DEFAULT_EMAIL_CONNECTOR_ID,
     ) -> dict[str, str]:
         """Generate workflow YAMLs templated for this scenario."""
         ns = self.ns
@@ -151,6 +203,9 @@ class WorkflowsMixin:
             )
             yaml_content = yaml_content.replace(
                 "__HAIKU_CONNECTOR_ID__", haiku_connector_id
+            )
+            yaml_content = yaml_content.replace(
+                "__EMAIL_CONNECTOR_ID__", email_connector_id
             )
             key = fname.replace(".yaml", "")
             workflows[key] = yaml_content

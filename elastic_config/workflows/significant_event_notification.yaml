@@ -294,7 +294,7 @@ steps:
 
   - name: send_notification
     type: email
-    connector-id: elastic-cloud-email
+    connector-id: __EMAIL_CONNECTOR_ID__
     if: "${{ event.alerts[0].kibana.alert.action_group != 'recovered' and steps.enrich_context.output.values[0][0] != '' and steps.enrich_context.output.values[0][0] != null }}"
     with:
       to:
