@@ -79,7 +79,7 @@ class YamlScenario(BaseScenario):
                     "sensor_type", "affected_services", "cascade_services",
                     "description", "investigation_notes", "remediation_action",
                     "error_message", "stack_trace", "infrastructure_events",
-                    "business_impact",
+                    "business_impact", "fault_kind", "infra_impact",
                 )
                 if k in ch
             }
@@ -248,6 +248,17 @@ class YamlScenario(BaseScenario):
             }
         raw = self._data.get("db_operations", {})
         return {svc: [tuple(op) for op in ops] for svc, ops in raw.items()}
+
+    @property
+    def llm_operations(self) -> dict[str, dict[str, Any]]:
+        if self._service_specs:
+            return {
+                svc: dict(spec["llm_operations"])
+                for svc, spec in self._service_specs.items()
+                if spec.get("llm_operations")
+            }
+        raw = self._data.get("llm_operations", {})
+        return {svc: dict(cfg) for svc, cfg in raw.items()}
 
     # ── Infrastructure ───────────────────────────────────────────────────
 

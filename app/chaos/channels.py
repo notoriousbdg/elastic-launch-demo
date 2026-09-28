@@ -8,6 +8,9 @@ from __future__ import annotations
 
 from app.config import CHANNEL_REGISTRY
 
+# Channel.fault_kind — generators use this instead of hardcoded channel IDs.
+FAULT_KIND_TABLE_FULL_VS_DISK = "table_full_vs_disk"
+
 
 def get_affected_services(channel: int, registry: dict | None = None) -> list[str]:
     """Return the list of directly affected services for a channel."""
@@ -60,6 +63,24 @@ def get_channel_summary(channel: int, registry: dict | None = None) -> dict | No
 
 
 def get_all_channel_summaries(registry: dict | None = None) -> list[dict]:
-    """Get summaries for all 20 channels."""
+    """Get summaries for all channels."""
     reg = registry or CHANNEL_REGISTRY
     return [s for ch_id in sorted(reg.keys()) if (s := get_channel_summary(ch_id, registry=reg)) is not None]
+
+
+def services_for_fault_kind(
+    registry: dict | None,
+    active_channels: list[int] | None,
+    kind: str,
+) -> set[str]:
+    svcs: set[str] = set()
+    if not active_channels:
+        return svcs
+    reg = registry or CHANNEL_REGISTRY
+    for ch_id in active_channels:
+        ch = reg.get(ch_id, {})
+        if ch.get("fault_kind") != kind:
+            continue
+        svcs.update(ch.get("affected_services", []))
+        svcs.update(ch.get("cascade_services", []))
+    return svcs

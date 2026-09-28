@@ -145,7 +145,7 @@ agent_config:
     search for these vendor-specific identifiers in logs: Cisco syslog mnemonics (SW_MATM-4-MACFLAP_NOTIF, SPANTREE-2-TOPO_CHANGE,
     BGP-3-NOTIFICATION), PAN-OS system events (SYSTEM-session-threshold, SYSTEM-cpu-critical, SYSTEM-cert-expire), Juniper
     Mist events (AP_DISCONNECTED, INTERFERENCE_DETECTED, AUTH_FAILURE_STORM), DNS/DHCP faults (NAMED-SERVFAIL-FORWARDER, DHCPD-LEASE-EXHAUSTION),
-    commerce errors (BID_LATENCY_SLA_BREACH, PAYMENT_GATEWAY_TIMEOUT, CATALOG_SYNC_FAILURE), manufacturing faults (MES-QUEUE-OVERFLOW,
+    commerce errors (BID_LATENCY_SLA_BREACH, PAYMENT_GATEWAY_TIMEOUT, CATALOG_SYNC_FAILURE, TABLE_IS_FULL), manufacturing faults (MES-QUEUE-OVERFLOW,
     MES-QC-REJECT-THRESHOLD), warehouse faults (WMS-LABEL-PRINTER-FAULT, WMS-SCANNER-DESYNC), and cloud ops events (CLOUD-ORPHANED-RESOURCE,
     VPN-TUNNEL-FLAP). Log messages are in body.text — NEVER search the body field alone.'
 assessment_tool_config:

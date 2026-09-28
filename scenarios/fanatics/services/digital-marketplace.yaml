@@ -29,6 +29,8 @@ entry_endpoints:
   - POST
 - - /api/v1/marketplace/search
   - GET
+- - /api/v1/marketplace/recommend
+  - POST
 db_operations:
 - - SELECT
   - products
@@ -36,9 +38,17 @@ db_operations:
 - - INSERT
   - orders
   - INSERT INTO orders (user_id, product_id, quantity, total, status, created_at) VALUES (?, ?, ?, ?, 'pending', NOW())
+- - INSERT
+  - listings
+  - INSERT INTO listings (sku, seller_id, title, price, status, created_at) VALUES (?, ?, ?, ?, 'active', NOW())
 - - UPDATE
   - inventory
   - UPDATE inventory SET quantity = quantity - ? WHERE sku = ? AND quantity >= ?
+llm_operations:
+  provider: aws.bedrock
+  system: aws.bedrock
+  model: anthropic.claude-3-5-sonnet-20241022-v2:0
+  operation: chat
 emit_fault_logs: true
 kpi_emitter: true
 steps:
@@ -62,6 +72,19 @@ steps:
       - 35.0
       - 120.0
       round: 1
+    bedrock_latency_ms:
+      uniform:
+      - 90.0
+      - 420.0
+      round: 1
+    input_tokens:
+      randint:
+      - 180
+      - 1400
+    output_tokens:
+      randint:
+      - 40
+      - 650
 - metric:
     name: marketplace.active_users
     value:
@@ -82,10 +105,26 @@ steps:
     value:
       var: avg_response_ms
     unit: ms
+- metric:
+    name: gen_ai.client.operation.duration
+    value:
+      var: bedrock_latency_ms
+    unit: ms
+- metric:
+    name: gen_ai.client.token.usage.input
+    value:
+      var: input_tokens
+    unit: '{token}'
+- metric:
+    name: gen_ai.client.token.usage.output
+    value:
+      var: output_tokens
+    unit: '{token}'
 - log:
     level: INFO
     message: marketplace.health active_users={active_users} tps={transactions_per_sec} cart_conversion={cart_conversion}%
-      response_ms={avg_response_ms}
+      response_ms={avg_response_ms} bedrock_model=anthropic.claude-3-5-sonnet-20241022-v2:0
+      bedrock_latency_ms={bedrock_latency_ms} bedrock_tokens_in={input_tokens} bedrock_tokens_out={output_tokens}
     attrs:
       operation: marketplace_health
       marketplace.active_users:
@@ -96,6 +135,10 @@ steps:
         var: cart_conversion
       marketplace.response_ms:
         var: avg_response_ms
+      gen_ai.provider.name: aws.bedrock
+      gen_ai.request.model: anthropic.claude-3-5-sonnet-20241022-v2:0
+      gen_ai.client.operation.duration:
+        var: bedrock_latency_ms
 - sample:
     catalog_items:
       randint:

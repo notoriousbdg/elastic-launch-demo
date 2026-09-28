@@ -401,11 +401,12 @@ def _generate_host_metrics(
     rng: random.Random,
     cpu_spike_pct: float = 0,
     memory_spike_pct: float = 0,
+    disk_spike_pct: float = 0,
 ) -> dict[str, list]:
     """Generate all host metrics grouped by scraper scope name.
 
     Returns dict mapping scope_name -> list of metric dicts.
-    cpu_spike_pct/memory_spike_pct: 0-100 target utilization when spiked.
+    cpu_spike_pct/memory_spike_pct/disk_spike_pct: 0-100 target utilization when spiked.
     """
     state.tick()
     metrics_by_scope: dict[str, list] = {}
@@ -576,7 +577,10 @@ def _generate_host_metrics(
     # ── Filesystem metrics ──
     fs_metrics = []
     disk_total = state.disk_total
-    disk_used_pct = rng.uniform(0.20, 0.75)
+    if disk_spike_pct > 0:
+        disk_used_pct = rng.uniform(max(0.90, disk_spike_pct / 100.0), 0.995)
+    else:
+        disk_used_pct = rng.uniform(0.20, 0.75)
     reserved_pct = 0.05  # 5% reserved for root, matching real Linux ext4/xfs behavior
     for device, mountpoint, fs_type in [
         ("/dev/sda1", "/", "ext4"),
@@ -1050,17 +1054,18 @@ def run(
         spikes = chaos_controller.get_infra_spikes() if chaos_controller else {}
         cpu_pct = spikes.get("cpu_pct", 0)
         mem_pct = spikes.get("memory_pct", 0)
+        disk_pct = spikes.get("disk_pct", 0)
 
         # Build set of cloud providers with active faults (for targeting)
         spiked_clouds: set[str] = set()
         has_active_faults = False
-        if chaos_controller and (cpu_pct > 0 or mem_pct > 0):
+        if chaos_controller and (cpu_pct > 0 or mem_pct > 0 or disk_pct > 0):
             active_channels = chaos_controller.get_active_channels()
             if active_channels:
                 has_active_faults = True
                 for ch_id in active_channels:
                     ch = _channel_registry.get(ch_id, {})
-                    for svc in ch.get("affected_services", []):
+                    for svc in ch.get("affected_services", []) + ch.get("cascade_services", []):
                         cloud = _service_cloud.get(svc)
                         if cloud:
                             spiked_clouds.add(cloud)
@@ -1075,17 +1080,20 @@ def run(
             host_name = host_cfg["host.name"]
             host_cloud = _host_cloud_map.get(host_name, "")
             # Spike this host if: sliders active AND (no faults → spike all, or this host's cloud is affected)
-            if (cpu_pct > 0 or mem_pct > 0) and (
+            if (cpu_pct > 0 or mem_pct > 0 or disk_pct > 0) and (
                 not has_active_faults or host_cloud in spiked_clouds
             ):
                 host_cpu = cpu_pct
                 host_mem = mem_pct
+                host_disk = disk_pct
             else:
                 host_cpu = 0
                 host_mem = 0
+                host_disk = 0
 
             metrics_by_scope = _generate_host_metrics(
-                state, rng, cpu_spike_pct=host_cpu, memory_spike_pct=host_mem
+                state, rng, cpu_spike_pct=host_cpu, memory_spike_pct=host_mem,
+                disk_spike_pct=host_disk,
             )
             sent = _send_metrics_with_scopes(client, resource, metrics_by_scope)
             batch_metrics += sent

@@ -140,16 +140,14 @@ def check_scenario(scenario_id: str) -> tuple[list[str], list[str]]:
     reg = s.channel_registry           # filtered view (display fields only)
     raw_channels = s._channels         # full channel data (includes fault_params, etc.)
 
-    if len(reg) != 20:
-        errors.append(f"channel_registry has {len(reg)} entries (expected 20)")
+    if len(reg) < 20:
+        errors.append(f"channel_registry has {len(reg)} entries (expected at least 20)")
 
     expected_nums = set(range(1, 21))
     missing_nums = expected_nums - set(reg.keys())
-    extra_nums = set(reg.keys()) - expected_nums
     if missing_nums:
         errors.append(f"missing channel numbers: {sorted(missing_nums)}")
-    if extra_nums:
-        errors.append(f"unexpected channel numbers: {sorted(extra_nums)}")
+    # Extra channels beyond 1-20 (e.g. Channel 21 LLM/disk RCA demos) are allowed.
 
     # Check required fields — registry fields against channel_registry,
     # fault_params against the raw _channels dict (not filtered by channel_registry).
@@ -377,7 +375,7 @@ def check_scenario(scenario_id: str) -> tuple[list[str], list[str]]:
     # ── Check 17: get_rca_clues returns dict ──────────────────────────────────
     import random
     rng = random.Random(42)
-    for ch_num in range(1, 21):
+    for ch_num in sorted(reg.keys()):
         for svc in list(svc_keys)[:2]:  # spot-check 2 services per channel
             try:
                 result = s.get_rca_clues(ch_num, svc, rng)

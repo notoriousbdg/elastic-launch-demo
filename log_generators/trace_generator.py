@@ -232,6 +232,99 @@ def _get_db_chaos_info(
     return None
 
 
+def _get_table_full_chaos(
+    service_name: str,
+    channel_registry: dict | None,
+    active_channels: list[int] | None,
+) -> dict | None:
+    """Return the table-full-vs-disk channel if this service is in it."""
+    if not active_channels or not channel_registry:
+        return None
+    for ch_id in active_channels:
+        ch = channel_registry.get(ch_id, {})
+        if ch.get("fault_kind") != "table_full_vs_disk":
+            continue
+        if service_name in ch.get("affected_services", []) + ch.get("cascade_services", []):
+            return ch
+    return None
+
+
+def _table_full_exception(client: OTLPClient, table: str) -> dict:
+    return client.build_exception_event(
+        "pymysql.err.OperationalError",
+        f"TABLE_IS_FULL: The table '{table}' is full (errno 1114)",
+        (
+            f'pymysql.err.OperationalError: (1114, "The table \'{table}\' is full")\n'
+            f"OSError: [Errno 28] No space left on device: '/var/lib/mysql/{table}.ibd'\n"
+            "  at marketplace.db.pool.PooledCursor.execute\n"
+            "  at marketplace.handlers.checkout.create_listing"
+        ),
+    )
+
+
+def _pick_db_op(db_ops: list, rng: random.Random, prefer_insert: bool):
+    if prefer_insert:
+        inserts = [op for op in db_ops if str(op[0]).upper() == "INSERT"]
+        if inserts:
+            return rng.choice(inserts)
+    return rng.choice(db_ops)
+
+
+def _build_gen_ai_span(
+    client: OTLPClient,
+    rng: random.Random,
+    *,
+    trace_id: str,
+    parent_span_id: str,
+    llm_cfg: dict,
+    duration_ms: int,
+    is_error: bool,
+):
+    model = llm_cfg.get("model", "anthropic.claude-3-5-sonnet-20241022-v2:0")
+    provider = llm_cfg.get("provider", "aws.bedrock")
+    system = llm_cfg.get("system", provider)
+    operation = llm_cfg.get("operation", "chat")
+    input_tokens = rng.randint(180, 1400)
+    output_tokens = rng.randint(40, 650) if not is_error else rng.randint(0, 20)
+    attrs = {
+        "gen_ai.provider.name": provider,
+        "gen_ai.system": system,
+        "gen_ai.operation.name": operation,
+        "gen_ai.request.model": model,
+        "gen_ai.response.model": model,
+        "gen_ai.usage.input_tokens": input_tokens,
+        "gen_ai.usage.output_tokens": output_tokens,
+        "rpc.system": "aws-api",
+        "rpc.service": "Bedrock Runtime",
+        "rpc.method": "InvokeModel",
+        "server.address": "bedrock-runtime.us-east-1.amazonaws.com",
+        "server.port": 443,
+        "aws.bedrock.model_id": model,
+    }
+    events = None
+    status = STATUS_ERROR if is_error else STATUS_OK
+    if is_error:
+        events = [client.build_exception_event(
+            "OSError",
+            "No space left on device writing Bedrock response cache",
+            "OSError: [Errno 28] No space left on device: '/tmp/bedrock-cache/response.json'\n"
+            "  at marketplace.llm.bedrock_client.invoke_model\n"
+            "  at marketplace.recommend.generate_copy",
+        )]
+        attrs["error.type"] = "ENOSPC"
+    return client.build_span(
+        name=f"{operation} {model}",
+        trace_id=trace_id,
+        span_id=_gen_span_id(),
+        parent_span_id=parent_span_id,
+        kind=SPAN_KIND_CLIENT,
+        duration_ms=max(1, duration_ms),
+        status_code=status,
+        attributes=attrs,
+        events=events,
+    )
+
+
 def _get_cascade_http_status(
     service_name: str,
     channel_registry: dict | None,
@@ -317,6 +410,7 @@ def _generate_trace(client: OTLPClient, resources: dict, rng: random.Random,
                     service_topology: dict | None = None,
                     entry_endpoints: dict | None = None,
                     db_operations: dict | None = None,
+                    llm_operations: dict | None = None,
                     latency_multiplier: float = 1.0,
                     scenario=None,
                     active_channels: list[int] | None = None,
@@ -339,6 +433,7 @@ def _generate_trace(client: OTLPClient, resources: dict, rng: random.Random,
     _endpoints = entry_endpoints or ENTRY_ENDPOINTS
     _db_ops = db_operations or DB_OPERATIONS
     _db_conn = db_connection_map or {}
+    _llm_ops = llm_operations or {}
 
     trace_id = _gen_trace_id()
     spans_by_service: dict[str, list] = {}
@@ -376,7 +471,10 @@ def _generate_trace(client: OTLPClient, resources: dict, rng: random.Random,
                 error_service = rng.choice(downstream)[0]
 
     # Latency: affected services get 200-2000ms, normal get 50-500ms
-    if chaos_affected and entry_service in chaos_affected:
+    _table_full = _get_table_full_chaos(entry_service, channel_registry, active_channels)
+    if _table_full:
+        total_duration = rng.randint(2500, 9000)
+    elif chaos_affected and entry_service in chaos_affected:
         total_duration = rng.randint(200, 2000)
     else:
         total_duration = rng.randint(50, 500)
@@ -459,14 +557,23 @@ def _generate_trace(client: OTLPClient, resources: dict, rng: random.Random,
         _record_error_span(entry_service, root_span_id)
 
     # Add DB span if this service does DB operations
-    if entry_service in _db_ops and rng.random() < 0.6:
-        op, table, statement = rng.choice(_db_ops[entry_service])
+    db_emit_chance = 0.95 if _table_full else 0.6
+    if entry_service in _db_ops and rng.random() < db_emit_chance:
+        op, table, statement = _pick_db_op(_db_ops[entry_service], rng, prefer_insert=bool(_table_full))
         db_info = _db_conn.get(entry_service, {}).get(table)
         db_span_id = _gen_span_id()
 
         # Chaos-aware: DB spans dominate trace when DB subsystem is under fault
         _db_chaos = _get_db_chaos_info(entry_service, channel_registry, active_channels)
-        if _db_chaos:
+        if _table_full:
+            db_duration = rng.randint(int(total_duration * 0.7), max(int(total_duration * 0.7) + 1, int(total_duration * 0.92)))
+            db_status = STATUS_ERROR
+            db_events = [_table_full_exception(client, table)]
+            db_system = "mysql"
+            db_port = 3306
+            db_host = db_info["host"] if db_info else f"{_namespace}-mysql-host"
+            db_name = db_info["db_name"] if db_info else f"{_namespace}_marketplace"
+        elif _db_chaos:
             db_duration = rng.randint(int(total_duration * 0.6), max(int(total_duration * 0.6) + 1, int(total_duration * 0.9)))
             db_status = STATUS_ERROR
             _pool_active = rng.randint(95, 100)
@@ -480,19 +587,27 @@ def _generate_trace(client: OTLPClient, resources: dict, rng: random.Random,
                 "  at com.zaxxer.hikari.pool.HikariPool.getConnection(HikariPool.java:197)\n"
                 "  at com.zaxxer.hikari.HikariDataSource.getConnection(HikariDataSource.java:100)",
             )]
+            db_system = db_info["db_system"] if db_info else "postgresql"
+            db_port = db_info["port"] if db_info else 5432
+            db_host = db_info["host"] if db_info else f"{_namespace}-db-host"
+            db_name = db_info["db_name"] if db_info else f"{_namespace}_telemetry"
         else:
             db_duration = rng.randint(2, min(30, total_duration // 3))
             db_status = STATUS_OK
             db_events = None
+            db_system = db_info["db_system"] if db_info else "postgresql"
+            db_port = db_info["port"] if db_info else 5432
+            db_host = db_info["host"] if db_info else f"{_namespace}-db-host"
+            db_name = db_info["db_name"] if db_info else f"{_namespace}_telemetry"
 
         _db_attrs = {
-            "db.system": db_info["db_system"] if db_info else "postgresql",
-            "db.name": db_info["db_name"] if db_info else f"{_namespace}_telemetry",
+            "db.system": db_system,
+            "db.name": db_name,
             "db.statement": statement,
             "db.operation": op,
             "db.sql.table": table,
-            "server.address": db_info["host"] if db_info else f"{_namespace}-db-host",
-            "server.port": db_info["port"] if db_info else 5432,
+            "server.address": db_host,
+            "server.port": db_port,
         }
         _db_attrs.update(_extra_attrs(entry_service, db_status == STATUS_ERROR))
         db_span = client.build_span(
@@ -509,6 +624,21 @@ def _generate_trace(client: OTLPClient, resources: dict, rng: random.Random,
         spans_by_service.setdefault(entry_service, []).append(db_span)
         if db_status == STATUS_ERROR:
             _record_error_span(entry_service, db_span_id)
+
+    # Optional Amazon Bedrock / GenAI child span (LLM observability)
+    llm_cfg = _llm_ops.get(entry_service)
+    if llm_cfg and rng.random() < (0.85 if _table_full else 0.45):
+        llm_duration = rng.randint(int(total_duration * 0.4), int(total_duration * 0.7)) if _table_full else rng.randint(80, 450)
+        spans_by_service.setdefault(entry_service, []).append(
+            _build_gen_ai_span(
+                client, rng,
+                trace_id=trace_id,
+                parent_span_id=root_span_id,
+                llm_cfg=llm_cfg,
+                duration_ms=llm_duration,
+                is_error=bool(_table_full and rng.random() < 0.35),
+            )
+        )
 
     # Generate downstream CLIENT+SERVER spans based on topology
     downstream_calls = _topology.get(entry_service, [])
@@ -721,7 +851,10 @@ def run(client: OTLPClient, stop_event: threading.Event, chaos_controller=None,
     _all_topology = scenario_data["service_topology"] if scenario_data else SERVICE_TOPOLOGY
     _all_endpoints = scenario_data["entry_endpoints"] if scenario_data else ENTRY_ENDPOINTS
     _db_ops = scenario_data["db_operations"] if scenario_data else DB_OPERATIONS
+    _llm_ops = scenario_data.get("llm_operations", {}) if scenario_data else {}
     _scenario = scenario_data.get("scenario") if scenario_data else None
+    if not _llm_ops and _scenario is not None:
+        _llm_ops = getattr(_scenario, "llm_operations", {}) or {}
 
     # Filter out services that don't generate traces (infra devices, databases)
     excluded = {
@@ -780,6 +913,7 @@ def run(client: OTLPClient, stop_event: threading.Event, chaos_controller=None,
                 services=_services, namespace=_namespace,
                 service_topology=_topology, entry_endpoints=_endpoints,
                 db_operations=_db_ops,
+                llm_operations=_llm_ops or None,
                 latency_multiplier=_latency_mult,
                 scenario=_scenario,
                 active_channels=_active_channels or None,

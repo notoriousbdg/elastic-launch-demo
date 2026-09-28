@@ -1,0 +1,81 @@
+name: Slow Marketplace — Table Full vs Container Disk
+subsystem: commerce
+vehicle_section: listing_store
+error_type: TABLE_IS_FULL
+sensor_type: mysql_tablespace
+fault_kind: table_full_vs_disk
+affected_services:
+- digital-marketplace
+- auction-engine
+cascade_services:
+- packaging-fulfillment
+description: |-
+  Checkout and listing APIs are slow. APM traces drill into a MySQL INSERT that looks like
+  the listings table is full. The real cause is marketplace pod ephemeral storage exhaustion —
+  InnoDB cannot extend the tablespace, and the Bedrock recommendation cache cannot write either.
+investigation_notes: |-
+  1. Open the slow checkout/recommend trace. The waterfall will show INSERT INTO listings
+  dominating duration with MySQL error 1114 TABLE_IS_FULL — that is the *symptom*, not the cause.
+  2. Do not stop at the database. Correlate the same time window with
+  `k8s.pod.filesystem.utilization` on digital-marketplace and
+  `system.filesystem.utilization` on fanatics-aws-host-01.
+  3. Container ephemeral storage is ~99% full (app logs, Bedrock response cache under /tmp/bedrock-cache,
+  and InnoDB ibtmp). MySQL reports 'table is full' because the container disk cannot grow the tablespace.
+  4. Confirm Bedrock LLM spans (`gen_ai.provider.name = aws.bedrock`) are also slow —
+  InvokeModel succeeds, then the local cache write blocks on ENOSPC.
+  5. Immediate remediation: recycle the digital-marketplace pod to free ephemeral storage
+  (`free_ephemeral_storage`). Then enable log rotation and raise the pod ephemeral-storage limit.
+  6. Do not ALTER TABLE, drop rows, or scale MySQL — the listings table is not actually at max rows.
+remediation_action: free_ephemeral_storage
+error_message: |-
+  pymysql.err.OperationalError: (1114, "TABLE_IS_FULL: The table 'listings' is full")
+  sku={listing_sku} order={order_id} latency_ms={app_latency_ms}
+  pod_fs_util_pct={pod_fs_util_pct} mysql_errno=1114
+  cache_path=/tmp/bedrock-cache write=ENOSPC
+stack_trace: |-
+  Traceback (most recent call last):
+    File "/app/marketplace/handlers/checkout.py", line 214, in create_listing
+      cursor.execute(INSERT_LISTING, (sku, seller_id, price))
+    File "/app/marketplace/db/pool.py", line 88, in execute
+      return self._conn.cursor().execute(sql, params)
+  pymysql.err.OperationalError: (1114, "TABLE_IS_FULL: The table 'listings' is full")
+  OSError: [Errno 28] No space left on device: '/tmp/bedrock-cache/{listing_sku}.json'
+  Hint: check pod ephemeral storage before resizing MySQL
+correlation_attr:
+  key: k8s.pod.ephemeral_storage_class
+  value: gp3-unbounded-emptyDir
+infra_impact:
+  disk_pct: 98
+  latency_multiplier: 4.0
+fault_params:
+  listing_sku:
+    format: "SKU-{n}"
+    n: {randint: [100000, 999999]}
+  order_id:
+    format: "ORD-{n}"
+    n: {randint: [100000, 999999]}
+  app_latency_ms: {randint: [2500, 12000]}
+  pod_fs_util_pct: {uniform: [96.5, 99.9], round: 1}
+rca_clues:
+  digital-marketplace:
+    db.error_code: 1114
+    db.table_full: true
+    db.table: listings
+    k8s.pod.ephemeral_storage_util_pct: {uniform: [96.5, 99.8], round: 1}
+    k8s.pod.disk_pressure: true
+    gen_ai.cache_write_enospc: true
+    gen_ai.provider: aws.bedrock
+  auction-engine:
+    auction.listing_insert_timeout: true
+    auction.stale_catalog_count: {randint: [20, 200]}
+    db.error_code: 1114
+  packaging-fulfillment:
+    warehouse.order_create_backlog: {randint: [40, 400]}
+    warehouse.downstream_db_timeout: true
+business_impact:
+  - kpi: business.merch_gmv_usd_per_min
+    factor: {uniform: [0.15, 0.40]}
+  - kpi: business.churn_risk_index_0_100
+    factor: {uniform: [1.5, 3.5]}
+  - kpi: business.net_satisfaction_proxy_nps
+    factor: {uniform: [0.20, 0.50]}
