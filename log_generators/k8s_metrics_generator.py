@@ -289,7 +289,10 @@ def _generate_pod_metrics(svc: str, state: K8sState, rng: random.Random) -> list
     metrics.append(_cumulative_sum("k8s.pod.network.tx", "By", state.net_tx[svc], ts=ts))
 
     # Pod Filesystem
+    fs_capacity = 10_000_000_000
     metrics.append(_gauge("k8s.pod.filesystem.usage", "By", rng.randint(100_000_000, 500_000_000), is_int=True, ts=ts))
+    metrics.append(_gauge("k8s.pod.filesystem.capacity", "By", fs_capacity, is_int=True, ts=ts))
+    metrics.append(_gauge("k8s.pod.filesystem.utilization", "1", rng.uniform(0.12, 0.48), ts=ts))
 
     # Container metrics owned by kubeletstatsreceiver
     container_attrs = {"container.name": f"{svc}-container"}
@@ -837,20 +840,25 @@ def run(client: OTLPClient, stop_event: threading.Event, scenario_data: dict | N
         state.tick()
         resource_metrics = []
 
-        # Determine OOM spike targets from chaos_controller
+        # Determine OOM / disk spike targets from chaos_controller
         spikes = chaos_controller.get_infra_spikes() if chaos_controller else {}
         oom_intensity = spikes.get("k8s_oom_intensity", 0)
+        disk_pct = spikes.get("disk_pct", 0)
 
         # Build set of spiked services (affected by active faults)
         spiked_services: set[str] = set()
+        disk_spiked_services: set[str] = set()
         has_active_faults = False
-        if chaos_controller and oom_intensity > 0:
+        if chaos_controller and (oom_intensity > 0 or disk_pct > 0):
             active_channels = chaos_controller.get_active_channels()
             if active_channels:
                 has_active_faults = True
                 for ch_id in active_channels:
                     ch = _channel_registry.get(ch_id, {})
                     spiked_services.update(ch.get("affected_services", []))
+                    if ch.get("fault_kind") == "table_full_vs_disk" or disk_pct > 0:
+                        disk_spiked_services.update(ch.get("affected_services", []))
+                        disk_spiked_services.update(ch.get("cascade_services", []))
 
         for cluster, pod_data in cluster_data:
             svcs = cluster["services"]
@@ -874,6 +882,18 @@ def run(client: OTLPClient, stop_event: threading.Event, scenario_data: dict | N
                                 rng.uniform(0.92, 1.0) * intensity_ratio
                                 + (1 - intensity_ratio) * rng.uniform(0.25, 0.85)
                             )
+
+                if disk_pct > 0 and svc in disk_spiked_services:
+                    fs_util = rng.uniform(max(0.90, disk_pct / 100.0), 0.995)
+                    fs_capacity = 10_000_000_000
+                    fs_used = int(fs_capacity * fs_util)
+                    for m in pod_metrics:
+                        if m["name"] == "k8s.pod.filesystem.utilization":
+                            m["gauge"]["dataPoints"][0]["asDouble"] = fs_util
+                        elif m["name"] == "k8s.pod.filesystem.usage":
+                            m["gauge"]["dataPoints"][0]["asInt"] = str(fs_used)
+                        elif m["name"] == "k8s.pod.filesystem.capacity":
+                            m["gauge"]["dataPoints"][0]["asInt"] = str(fs_capacity)
 
                 resource_metrics.append({
                     "resource": pod_res,
@@ -915,12 +935,17 @@ def run(client: OTLPClient, stop_event: threading.Event, scenario_data: dict | N
 
             # Determine if any node in this cluster has spiked services
             cluster_has_spike = oom_intensity > 0 and (not has_active_faults or any(s in spiked_services for s in svcs))
+            cluster_has_disk = disk_pct > 0 and any(s in disk_spiked_services for s in svcs)
 
             # ── Node-level metrics — split across two receivers ───────────────
             for node_name in pod_data["node_names"]:
                 # kubeletstatsreceiver: cpu.usage, memory.*, filesystem.*, network.*
                 kubelet_node_res = _build_node_resource_kubelet(node_name, pod_data, cluster)
                 kubelet_node_metrics = _generate_node_metrics_kubelet(rng)
+                if cluster_has_disk:
+                    for m in kubelet_node_metrics:
+                        if m["name"] == "k8s.node.filesystem.utilization":
+                            m["gauge"]["dataPoints"][0]["asDouble"] = rng.uniform(0.94, 0.99)
                 resource_metrics.append({
                     "resource": kubelet_node_res,
                     "scopeMetrics": [{"scope": {"name": KUBELET_SCOPE, "version": SCOPE_VERSION}, "metrics": kubelet_node_metrics}],
@@ -934,6 +959,10 @@ def run(client: OTLPClient, stop_event: threading.Event, scenario_data: dict | N
                     # Set memory_pressure condition on affected nodes
                     for m in cluster_node_metrics:
                         if m["name"] == "k8s.node.condition_memory_pressure":
+                            m["gauge"]["dataPoints"][0]["asInt"] = str(1)
+                if cluster_has_disk:
+                    for m in cluster_node_metrics:
+                        if m["name"] == "k8s.node.condition_disk_pressure":
                             m["gauge"]["dataPoints"][0]["asInt"] = str(1)
 
                 resource_metrics.append({

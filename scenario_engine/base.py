@@ -141,6 +141,15 @@ class BaseScenario(ABC):
         """DB operations: service -> [(op, table, statement)]."""
         ...
 
+    @property
+    def llm_operations(self) -> dict[str, dict[str, Any]]:
+        """Optional GenAI child spans: service -> {provider, system, model, operation}.
+
+        Empty by default. Scenarios that call an LLM (e.g. Amazon Bedrock) override this
+        so the trace generator emits OpenTelemetry GenAI spans for LLM observability.
+        """
+        return {}
+
     # ── Infrastructure ───────────────────────────────────────────────
 
     @property

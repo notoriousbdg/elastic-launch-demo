@@ -110,6 +110,7 @@ class ServiceManager:
                 "service_topology": scenario.service_topology,
                 "entry_endpoints": scenario.entry_endpoints,
                 "db_operations": scenario.db_operations,
+                "llm_operations": getattr(scenario, "llm_operations", {}),
                 "scenario": scenario,
             }
 

@@ -58,6 +58,7 @@ class ChaosController:
         self._infra_spikes: dict[str, float] = {
             "cpu_pct": 0,
             "memory_pct": 0,
+            "disk_pct": 0,
             "k8s_oom_intensity": 0,
             "latency_multiplier": 1.0,
         }
