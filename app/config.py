@@ -1,10 +1,13 @@
-"""Configuration — loads active scenario and exposes settings for backward compatibility."""
+"""Configuration — environment settings only.
+
+Nothing here loads a scenario: scenario data reaches the rest of the app
+through ScenarioContext (app/context.py).
+"""
 
 from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any
 
 from dotenv import load_dotenv
 
@@ -54,22 +57,6 @@ if _kibana_proxy_raw and not _kibana_proxy_raw.startswith(("http://", "https://"
 KIBANA_PROXY = _kibana_proxy_raw
 ELASTIC_API_KEY = os.getenv("ELASTIC_API_KEY", "")
 ELASTIC_URL = os.getenv("ELASTIC_URL", "")
-
-from scenario_engine import get_scenario  # noqa: E402
-
-_scenario = get_scenario(ACTIVE_SCENARIO)
-
-# ── Scenario-derived Configuration ────────────────────────────────────────
-# These module-level variables ensure all existing imports continue working:
-#   from app.config import SERVICES, CHANNEL_REGISTRY, MISSION_ID, etc.
-
-NAMESPACE = _scenario.namespace
-SERVICES: dict[str, dict[str, Any]] = _scenario.services
-CHANNEL_REGISTRY: dict[int, dict[str, Any]] = _scenario.channel_registry
-
-# Mission/scenario identity
-MISSION_ID = _scenario.namespace.upper()  # "NOVA7", "FANATICS", etc.
-MISSION_NAME = _scenario.scenario_name
 
 # Severity Number Mapping (shared across all scenarios)
 SEVERITY_MAP = {

@@ -17,9 +17,8 @@ def build_topology(scenario_data: dict) -> dict[str, dict]:
 
     Seed is f"{namespace}:{idx}" — namespace-scoped so identifiers (node names,
     pod/node UIDs, container IDs) are unique per scenario even when scenarios share
-    the same cluster region layout. Mirrors the RNG call sequence of
-    k8s_metrics_generator._init_pod_data exactly so pod/container IDs are identical
-    whether read here or from the k8s metrics generator.
+    the same cluster region layout. The k8s metrics generator reads its pod data
+    from here (via to_pod_data), so every signal shares the same pod/container IDs.
     """
     hosts: list[dict] = scenario_data.get("hosts", [])
     k8s_clusters: list[dict] = scenario_data.get("k8s_clusters", [])
@@ -33,14 +32,13 @@ def build_topology(scenario_data: dict) -> dict[str, dict]:
         # Namespace-scoped seed: random.Random(str) uses sha512, stable across processes.
         # This ensures identifiers (node names, pod/node UIDs, container IDs) are unique
         # per scenario even when scenarios share the same cluster-index / region layout.
-        # Must mirror _init_pod_data in k8s_metrics_generator exactly.
         stable = random.Random(f"{namespace}:{idx}")
         region = cluster["region"]
         # Per-namespace subnet octet derived from namespace name — structurally ensures
         # no two scenarios produce the same node-name string (they land in different /16s).
         ns_octet = zlib.crc32(namespace.encode()) % 256
 
-        # Mirror _init_pod_data: generate 3 node names with same 2-randint-per-node sequence
+        # 3 node names, 2 randints each. Changing the RNG call order changes every ID.
         node_names = [
             f"ip-10-{ns_octet}-{stable.randint(10, 200)}-{stable.randint(10, 200)}.{region}.compute.internal"
             for _ in range(3)
@@ -50,7 +48,6 @@ def build_topology(scenario_data: dict) -> dict[str, dict]:
         zones = cluster.get("zones", [region + "-a"])
 
         for svc in cluster.get("services", []):
-            # Mirror _init_pod_data RNG sequence per service exactly
             node_name = stable.choice(node_names)
             pod_hex1 = f"{stable.getrandbits(32):08x}"
             pod_hex2 = f"{stable.getrandbits(24):06x}"

@@ -33,7 +33,7 @@ import threading
 import time
 
 from app.telemetry import OTLPClient, _format_attributes, SCHEMA_URL, _now_ns
-from app.config import ACTIVE_SCENARIO, SERVICES, NAMESPACE
+from app.context import standalone_generator_data
 
 logger = logging.getLogger("jvm-metrics-generator")
 
@@ -79,17 +79,6 @@ GC_HISTOGRAM_BOUNDS = [
     5.0,
     10.0,
 ]
-
-
-def _load_java_services():
-    """Return list of (service_name, service_cfg) for Java services."""
-    from scenario_engine import get_scenario
-
-    scenario = get_scenario(ACTIVE_SCENARIO)
-    services = scenario.services
-    return [
-        (name, cfg) for name, cfg in services.items() if cfg.get("language") == "java"
-    ]
 
 
 def _build_resource(service_name: str, cfg: dict, namespace: str, topology: dict | None = None) -> dict:
@@ -334,23 +323,18 @@ def _generate_metrics(state: JvmState, rng: random.Random, active_chaos: dict | 
 
 
 def run(
-    client: OTLPClient, stop_event: threading.Event, scenario_data: dict | None = None,
+    client: OTLPClient, stop_event: threading.Event, *, scenario_data: dict,
     chaos_controller=None,
 ) -> None:
     """Run JVM metrics generator loop until stop_event is set."""
     rng = random.Random()
 
-    if scenario_data:
-        ns = scenario_data["namespace"]
-        services = scenario_data["services"]
-        java_services = [
-            (name, cfg)
-            for name, cfg in services.items()
-            if cfg.get("language") == "java"
-        ]
-    else:
-        ns = NAMESPACE
-        java_services = _load_java_services()
+    ns = scenario_data["namespace"]
+    java_services = [
+        (name, cfg)
+        for name, cfg in scenario_data["services"].items()
+        if cfg.get("language") == "java"
+    ]
 
     if not java_services:
         logger.info(
@@ -358,12 +342,10 @@ def run(
         )
         return
 
-    _channel_registry: dict = scenario_data.get("channel_registry", {}) if scenario_data else {}
+    _channel_registry: dict = scenario_data.get("channel_registry", {})
 
-    _topology_data = None
-    if scenario_data:
-        from log_generators.infra_topology import build_topology as _build_infra_topology
-        _topology_data = _build_infra_topology(scenario_data)
+    from log_generators.infra_topology import build_topology as _build_infra_topology
+    _topology_data = _build_infra_topology(scenario_data)
 
     resources = {name: _build_resource(name, cfg, ns, topology=_topology_data) for name, cfg in java_services}
     states = {name: JvmState(rng) for name, _ in java_services}
@@ -438,7 +420,7 @@ def main() -> None:
     timer.daemon = True
     timer.start()
     logger.info("Running for %ds (standalone)", duration)
-    run(client, stop_event)
+    run(client, stop_event, scenario_data=standalone_generator_data())
     timer.cancel()
     client.close()
 

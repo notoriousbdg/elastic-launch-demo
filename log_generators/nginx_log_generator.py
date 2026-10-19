@@ -25,7 +25,8 @@ from app.telemetry import (
     SCOPE_NAME,
     _now_ns,
 )
-from app.config import SEVERITY_MAP, NAMESPACE
+from app.config import SEVERITY_MAP
+from app.context import standalone_generator_data
 from app.trace_context import _trace_context_store
 
 # Nginx is the front door for the demo: any active fault on any service is
@@ -162,7 +163,7 @@ def _generate_access_log(
     rng: random.Random,
     endpoints: list | None = None,
     server_names: list | None = None,
-    namespace: str | None = None,
+    namespace: str = "",
     active_chaos: dict | None = None,
 ) -> tuple[dict, dict | None]:
     """Generate an access log record and optionally an HTTP trace span.
@@ -174,7 +175,7 @@ def _generate_access_log(
     """
     _endpoints = endpoints
     _server_names = server_names
-    _ns = namespace or NAMESPACE
+    _ns = namespace
 
     method = rng.choice(METHODS)
     path = rng.choice(_endpoints)
@@ -349,19 +350,14 @@ def _generate_error_log(
 
 # ── Run loop (used by ServiceManager and standalone) ──────────────────────────
 def run(
-    client: OTLPClient, stop_event: threading.Event, scenario_data: dict | None = None,
+    client: OTLPClient, stop_event: threading.Event, *, scenario_data: dict,
     chaos_controller=None,
 ) -> None:
     """Run nginx log generator loop until stop_event is set."""
     rng = random.Random()
 
-    # Rebuild namespace-dependent data from scenario_data to avoid import-time freezing
-    if scenario_data:
-        ns = scenario_data["namespace"]
-    else:
-        ns = NAMESPACE
-
-    _channel_registry: dict = scenario_data.get("channel_registry", {}) if scenario_data else {}
+    ns = scenario_data["namespace"]
+    _channel_registry: dict = scenario_data.get("channel_registry", {})
 
     server_names = [f"{ns}-nginx-01", f"{ns}-nginx-02"]
     endpoints = [
@@ -428,15 +424,7 @@ def run(
 
     # Only emit traces if nginx-proxy is in the scenario's services (avoids
     # disconnected Service Map nodes when the scenario doesn't include it).
-    _emit_traces = True
-    if scenario_data and "services" in scenario_data:
-        _emit_traces = "nginx-proxy" in scenario_data["services"]
-
-    # Only emit traces if nginx-proxy is in the scenario's services (avoids
-    # disconnected Service Map nodes when the scenario doesn't include it).
-    _emit_traces = True
-    if scenario_data and "services" in scenario_data:
-        _emit_traces = "nginx-proxy" in scenario_data["services"]
+    _emit_traces = "nginx-proxy" in scenario_data["services"]
 
     total_sent = 0
     total_spans = 0
@@ -554,7 +542,7 @@ def main() -> None:
     timer.start()
     logger.info("Running for %ds (standalone mode)", duration)
 
-    run(client, stop_event)
+    run(client, stop_event, scenario_data=standalone_generator_data())
     timer.cancel()
     client.close()
 

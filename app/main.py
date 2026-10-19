@@ -20,17 +20,12 @@ from app.config import (
     ACTIVE_SCENARIO_SET,
     APP_HOST,
     APP_PORT,
-    CHANNEL_REGISTRY,
     CHANNEL_TIMEOUT,
     ELASTIC_API_KEY,
     ELASTIC_URL,
     KIBANA_PROXY,
     KIBANA_URL,
-    MISSION_ID,
-    MISSION_NAME,
-    NAMESPACE,
     OTLP_ENDPOINT,
-    SERVICES,
 )
 
 logging.basicConfig(
@@ -228,7 +223,7 @@ def _inject_theme(html: str, deployment_id: Optional[str] = None) -> str:
         from scenario_engine import get_scenario
 
         scenario = get_scenario(ACTIVE_SCENARIO)
-        mission_id = MISSION_ID
+        mission_id = scenario.namespace.upper()
         kibana = _get_default_creds()[1]
 
     kibana_display = KIBANA_PROXY or kibana

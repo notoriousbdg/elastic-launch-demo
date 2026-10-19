@@ -27,7 +27,7 @@ import threading
 import time
 
 from app.telemetry import OTLPClient, _format_attributes, SCHEMA_URL, _now_ns
-from app.config import NAMESPACE
+from app.context import standalone_generator_data
 
 logger = logging.getLogger("vpc-flow-generator")
 
@@ -35,7 +35,6 @@ FLOW_INTERVAL = int(os.getenv("VPC_FLOW_INTERVAL", "5"))
 BATCH_SIZE_MIN = 10
 BATCH_SIZE_MAX = 20
 
-SCOPE_NAME = f"{NAMESPACE}-vpc-flow-generator"
 SCOPE_VERSION = "1.0.0"
 
 # ── Realistic IP pools ──────────────────────────────────────────────────────
@@ -84,11 +83,6 @@ GCP_EXTERNAL_IPS = [
     "142.250.80.25",
 ]
 
-GCP_VPC_NAMES = [
-    f"{NAMESPACE}-vpc-prod",
-    f"{NAMESPACE}-vpc-staging",
-    f"{NAMESPACE}-vpc-data",
-]
 COUNTRY_CODES = ["USA", "DEU", "GBR", "JPN", "AUS", "CAN", "FRA", "BRA", "IND", "SGP"]
 TRANSPORTS = ["tcp", "udp", "icmp"]
 COMMON_PORTS = [22, 53, 80, 443, 3306, 5432, 6379, 8080, 8443, 9200, 9300]
@@ -185,12 +179,12 @@ def _generate_aws_flow_record(rng: random.Random) -> dict:
 # ── GCP VPC flow log generation ─────────────────────────────────────────────
 
 
-def _build_gcp_resource() -> dict:
+def _build_gcp_resource(namespace: str) -> dict:
     attrs = {
         "cloud.provider": "gcp",
         "cloud.platform": "gcp_compute_engine",
         "cloud.region": "us-central1",
-        "cloud.account.id": f"{NAMESPACE}-project-prod",
+        "cloud.account.id": f"{namespace}-project-prod",
         "data_stream.type": "logs",
         "data_stream.dataset": "gcp.vpcflow",
         "data_stream.namespace": "default",
@@ -202,10 +196,10 @@ def _build_gcp_resource() -> dict:
 
 
 def _generate_gcp_flow_record(
-    rng: random.Random, gcp_vpc_names: list | None = None
+    rng: random.Random, gcp_vpc_names: list
 ) -> dict:
     """Generate a single GCP VPC flow log record."""
-    _vpc_names = gcp_vpc_names or GCP_VPC_NAMES
+    _vpc_names = gcp_vpc_names
 
     now_ns = _now_ns()
     src_ip = rng.choice(GCP_INTERNAL_IPS + GCP_EXTERNAL_IPS)
@@ -258,37 +252,15 @@ def _generate_gcp_flow_record(
 
 
 def run(
-    client: OTLPClient, stop_event: threading.Event, scenario_data: dict | None = None
+    client: OTLPClient, stop_event: threading.Event, *, scenario_data: dict
 ) -> None:
     """Run VPC flow log generator loop until stop_event is set."""
     rng = random.Random()
 
-    # Rebuild namespace-dependent data from scenario_data to avoid import-time freezing
-    if scenario_data:
-        ns = scenario_data["namespace"]
-        scope_name = f"{ns}-vpc-flow-generator"
-        gcp_vpc_names = [f"{ns}-vpc-prod", f"{ns}-vpc-staging", f"{ns}-vpc-data"]
-        # Rebuild GCP resource with dynamic namespace
-        gcp_attrs = {
-            "cloud.provider": "gcp",
-            "cloud.platform": "gcp_compute_engine",
-            "cloud.region": "us-central1",
-            "cloud.account.id": f"{ns}-project-prod",
-            "data_stream.type": "logs",
-            "data_stream.dataset": "gcp.vpcflow",
-            "data_stream.namespace": "default",
-            "service.name": "gcp-vpc-flow",
-            "telemetry.sdk.name": "opentelemetry",
-            "telemetry.sdk.version": "1.24.0",
-        }
-        gcp_resource = {
-            "attributes": _format_attributes(gcp_attrs),
-            "schemaUrl": SCHEMA_URL,
-        }
-    else:
-        scope_name = SCOPE_NAME
-        gcp_vpc_names = GCP_VPC_NAMES
-        gcp_resource = _build_gcp_resource()
+    ns = scenario_data["namespace"]
+    scope_name = f"{ns}-vpc-flow-generator"
+    gcp_vpc_names = [f"{ns}-vpc-prod", f"{ns}-vpc-staging", f"{ns}-vpc-data"]
+    gcp_resource = _build_gcp_resource(ns)
 
     aws_resource = _build_aws_resource()
 
@@ -368,7 +340,7 @@ def main() -> None:
     timer.daemon = True
     timer.start()
     logger.info("Running for %ds (standalone)", duration)
-    run(client, stop_event)
+    run(client, stop_event, scenario_data=standalone_generator_data())
     timer.cancel()
     client.close()
 

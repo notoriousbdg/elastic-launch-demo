@@ -20,7 +20,7 @@ import time
 
 from app.services.expr import safe_format
 from app.telemetry import OTLPClient, _format_attributes, SCHEMA_URL
-from app.config import SERVICES, CHANNEL_REGISTRY, ACTIVE_SCENARIO, NAMESPACE
+from app.context import standalone_generator_data
 from app.trace_context import _trace_context_store
 
 # Generic exceptions by language for baseline error spans (no active chaos channel)
@@ -75,17 +75,6 @@ STATUS_OK = 1
 STATUS_ERROR = 2
 
 
-def _load_topology():
-    """Load topology data from the active scenario."""
-    from scenario_engine import get_scenario
-    scenario = get_scenario(ACTIVE_SCENARIO)
-    return scenario.service_topology, scenario.entry_endpoints, scenario.db_operations
-
-
-# ── Module-level topology (loaded once) ──────────────────────────────────────
-SERVICE_TOPOLOGY, ENTRY_ENDPOINTS, DB_OPERATIONS = _load_topology()
-
-
 # ── Helpers ───────────────────────────────────────────────────────────────────
 def _gen_trace_id() -> str:
     return secrets.token_hex(16)
@@ -97,12 +86,12 @@ def _gen_span_id() -> str:
 
 def _build_resource(
     service_name: str,
-    services: dict | None = None,
-    namespace: str | None = None,
+    services: dict,
+    namespace: str,
     topology: dict | None = None,
 ) -> dict:
-    _services = services or SERVICES
-    _namespace = namespace or NAMESPACE
+    _services = services
+    _namespace = namespace
     cfg = _services[service_name]
     language = cfg.get("language", "python")
     attrs = {
@@ -309,10 +298,10 @@ def _build_db_connection_map(
 
 def _generate_trace(client: OTLPClient, resources: dict, rng: random.Random,
                     chaos_affected: set[str] | None = None,
-                    *, services: dict | None = None, namespace: str | None = None,
-                    service_topology: dict | None = None,
-                    entry_endpoints: dict | None = None,
-                    db_operations: dict | None = None,
+                    *, services: dict, namespace: str,
+                    service_topology: dict,
+                    entry_endpoints: dict,
+                    db_operations: dict,
                     latency_multiplier: float = 1.0,
                     scenario=None,
                     active_channels: list[int] | None = None,
@@ -329,11 +318,11 @@ def _generate_trace(client: OTLPClient, resources: dict, rng: random.Random,
     When chaos_affected is provided, those services get high error rates (70%)
     and elevated latency; all others use a healthy 3% baseline.
     """
-    _services = services or SERVICES
-    _namespace = namespace or NAMESPACE
-    _topology = service_topology or SERVICE_TOPOLOGY
-    _endpoints = entry_endpoints or ENTRY_ENDPOINTS
-    _db_ops = db_operations or DB_OPERATIONS
+    _services = services
+    _namespace = namespace
+    _topology = service_topology
+    _endpoints = entry_endpoints
+    _db_ops = db_operations
     _db_conn = db_connection_map or {}
 
     trace_id = _gen_trace_id()
@@ -706,18 +695,17 @@ def _generate_trace(client: OTLPClient, resources: dict, rng: random.Random,
 
 # ── Run loop (used by ServiceManager and standalone) ──────────────────────────
 def run(client: OTLPClient, stop_event: threading.Event, chaos_controller=None,
-        scenario_data: dict | None = None) -> None:
+        *, scenario_data: dict) -> None:
     """Run trace generator loop until stop_event is set."""
     rng = random.Random()
 
-    # Use scenario_data overrides or fall back to module-level globals
-    _all_services = scenario_data["services"] if scenario_data else SERVICES
-    _namespace = scenario_data["namespace"] if scenario_data else NAMESPACE
-    _channel_registry = scenario_data["channel_registry"] if scenario_data else CHANNEL_REGISTRY
-    _all_topology = scenario_data["service_topology"] if scenario_data else SERVICE_TOPOLOGY
-    _all_endpoints = scenario_data["entry_endpoints"] if scenario_data else ENTRY_ENDPOINTS
-    _db_ops = scenario_data["db_operations"] if scenario_data else DB_OPERATIONS
-    _scenario = scenario_data.get("scenario") if scenario_data else None
+    _all_services = scenario_data["services"]
+    _namespace = scenario_data["namespace"]
+    _channel_registry = scenario_data["channel_registry"]
+    _all_topology = scenario_data["service_topology"]
+    _all_endpoints = scenario_data["entry_endpoints"]
+    _db_ops = scenario_data["db_operations"]
+    _scenario = scenario_data.get("scenario")
 
     # Filter out services that don't generate traces (infra devices, databases)
     excluded = {
@@ -827,7 +815,7 @@ def main() -> None:
     timer.start()
     logger.info("Running for %ds (standalone mode)", duration)
 
-    run(client, stop_event)
+    run(client, stop_event, scenario_data=standalone_generator_data())
     timer.cancel()
     client.close()
 

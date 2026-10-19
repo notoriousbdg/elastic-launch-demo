@@ -6,10 +6,6 @@ import logging
 import threading
 from typing import Any
 
-from app.config import (
-    SERVICES,
-    ACTIVE_SCENARIO,
-)
 from app.telemetry import ESBulkClient, OTLPClient
 
 logger = logging.getLogger("nova7.manager")
@@ -21,18 +17,18 @@ class ServiceManager:
     def __init__(
         self,
         chaos_controller,
-        ctx=None,
+        ctx,
         otlp_client: OTLPClient | None = None,
     ):
         self.chaos_controller = chaos_controller
-        self._ctx = ctx  # ScenarioContext or None
+        self._ctx = ctx  # ScenarioContext
         self.otlp = otlp_client or OTLPClient()
         self.es_bulk = (
             ESBulkClient(
                 elastic_url=ctx.elastic_url,
                 api_key=ctx.elastic_api_key,
             )
-            if ctx and ctx.elastic_url and ctx.elastic_api_key
+            if ctx.elastic_url and ctx.elastic_api_key
             else ESBulkClient()
         )
         self.services: dict[str, Any] = {}
@@ -44,28 +40,10 @@ class ServiceManager:
         self._init_services()
 
     def _init_services(self) -> None:
-        """Dynamically load and instantiate services from the active scenario."""
-        from app.services.base_service import BaseService
-
-        if self._ctx:
-            scenario = self._ctx.scenario
-        else:
-            import os
-            from scenario_engine import get_scenario
-
-            active = os.environ.get("ACTIVE_SCENARIO", ACTIVE_SCENARIO)
-            scenario = get_scenario(active)
-
-        service_classes = scenario.get_service_classes()
-
-        with BaseService._context_lock:
-            BaseService.set_context(self._ctx)
-            try:
-                for cls in service_classes:
-                    svc = cls(self.chaos_controller, self.otlp)
-                    self.services[svc.SERVICE_NAME] = svc
-            finally:
-                BaseService.clear_context()
+        """Instantiate one service per entry in the scenario's services/ directory."""
+        for cls in self._ctx.scenario.get_service_classes():
+            svc = cls(self.chaos_controller, self.otlp, self._ctx)
+            self.services[svc.SERVICE_NAME] = svc
 
     def start_all(self) -> None:
         # stop_all() sets the event and closes the clients; start from a clean
@@ -103,58 +81,22 @@ class ServiceManager:
         from log_generators.jvm_metrics_generator import run as run_jvm
         from log_generators.raw_access_log_generator import run as run_raw_access
 
-        # Build scenario_data dict from context for scenario-dependent generators
-        scenario_data = None
-        if self._ctx:
-            scenario = self._ctx.scenario
-            scenario_data = {
-                "services": self._ctx.services,
-                "channel_registry": self._ctx.channel_registry,
-                "namespace": self._ctx.namespace,
-                "hosts": scenario.hosts,
-                "k8s_clusters": scenario.k8s_clusters,
-                "service_topology": scenario.service_topology,
-                "entry_endpoints": scenario.entry_endpoints,
-                "db_operations": scenario.db_operations,
-                "scenario": scenario,
-            }
-
-        # Trace generator needs chaos_controller and scenario_data
-        trace_args = (self.otlp, self._stop_event, self.chaos_controller)
-        trace_kwargs = {"scenario_data": scenario_data} if scenario_data else {}
-
-        # Host metrics generator needs chaos_controller and scenario_data
-        host_args = (self.otlp, self._stop_event)
-        host_kwargs = {"scenario_data": scenario_data} if scenario_data else {}
-        host_kwargs["chaos_controller"] = self.chaos_controller
-
-        # K8s metrics generator needs chaos_controller and scenario_data
-        k8s_args = (self.otlp, self._stop_event)
-        k8s_kwargs = {"scenario_data": scenario_data} if scenario_data else {}
-        k8s_kwargs["chaos_controller"] = self.chaos_controller
-
-        # Common args/kwargs for generators that accept scenario_data
-        common_args = (self.otlp, self._stop_event)
-        common_kwargs = {"scenario_data": scenario_data} if scenario_data else {}
-
-        # Chaos-aware kwargs for infra log generators (nginx, mysql, jvm)
-        chaos_kwargs = dict(common_kwargs)
-        chaos_kwargs["chaos_controller"] = self.chaos_controller
-
-        # Raw access-log generator uses ESBulkClient instead of OTLPClient
-        raw_access_args = (self.es_bulk, self._stop_event)
-        raw_access_kwargs = {"scenario_data": scenario_data} if scenario_data else {}
+        scenario_data = self._ctx.generator_data()
+        otlp_args = (self.otlp, self._stop_event)
+        data_kwargs = {"scenario_data": scenario_data}
+        chaos_kwargs = {**data_kwargs, "chaos_controller": self.chaos_controller}
 
         generators = [
-            ("gen-traces", run_traces, trace_args, trace_kwargs),
-            ("gen-host-metrics", run_metrics, host_args, host_kwargs),
-            ("gen-k8s-metrics", run_k8s, k8s_args, k8s_kwargs),
-            ("gen-jvm-metrics", run_jvm, common_args, chaos_kwargs),
-            ("gen-vpc-flow", run_vpc, common_args, common_kwargs),
-            ("gen-raw-access", run_raw_access, raw_access_args, raw_access_kwargs),
-            ("gen-nginx", run_nginx, common_args, chaos_kwargs),
-            ("gen-nginx-metrics", run_nginx_metrics, common_args, common_kwargs),
-            ("gen-mysql", run_mysql, common_args, chaos_kwargs),
+            ("gen-traces", run_traces, otlp_args, chaos_kwargs),
+            ("gen-host-metrics", run_metrics, otlp_args, chaos_kwargs),
+            ("gen-k8s-metrics", run_k8s, otlp_args, chaos_kwargs),
+            ("gen-jvm-metrics", run_jvm, otlp_args, chaos_kwargs),
+            ("gen-vpc-flow", run_vpc, otlp_args, data_kwargs),
+            # The raw access-log generator writes via ES _bulk, not OTLP.
+            ("gen-raw-access", run_raw_access, (self.es_bulk, self._stop_event), data_kwargs),
+            ("gen-nginx", run_nginx, otlp_args, chaos_kwargs),
+            ("gen-nginx-metrics", run_nginx_metrics, otlp_args, data_kwargs),
+            ("gen-mysql", run_mysql, otlp_args, chaos_kwargs),
         ]
         for name, fn, args, kwargs in generators:
             t = threading.Thread(

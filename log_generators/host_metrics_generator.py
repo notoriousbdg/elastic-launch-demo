@@ -21,7 +21,7 @@ import threading
 import time
 
 from app.telemetry import OTLPClient, _format_attributes, SCHEMA_URL, _now_ns
-from app.config import ACTIVE_SCENARIO
+from app.context import standalone_generator_data
 
 logger = logging.getLogger("host-metrics-generator")
 
@@ -178,23 +178,10 @@ PROCESS_TEMPLATES = [
 ]
 
 
-# ── Host definitions from active scenario ─────────────────────────────────────
-def _load_hosts_and_clusters():
-    from scenario_engine import get_scenario
-
-    scn = get_scenario(ACTIVE_SCENARIO)
-    cluster_by_provider = {c["provider"]: c["name"] for c in scn.k8s_clusters}
-    return scn.hosts, cluster_by_provider
-
-
-HOSTS, CLUSTER_BY_PROVIDER = _load_hosts_and_clusters()
-
-
-def _build_host_resource(host_cfg: dict, cluster_by_provider: dict = CLUSTER_BY_PROVIDER) -> dict:
+def _build_host_resource(host_cfg: dict, cluster_by_provider: dict) -> dict:
     """Build OTLP resource for a host with all required Infrastructure UI attributes.
 
-    cluster_by_provider: provider → cluster-name map for the active scenario.
-    Defaults to the module-level CLUSTER_BY_PROVIDER (standalone/legacy path).
+    cluster_by_provider: provider → cluster-name map for the scenario.
     """
     attrs = {}
     for key in [
@@ -992,29 +979,25 @@ def _send_process_metrics(
 def run(
     client: OTLPClient,
     stop_event: threading.Event,
-    scenario_data: dict | None = None,
+    *,
+    scenario_data: dict,
     chaos_controller=None,
 ) -> None:
     """Run host metrics generator loop until stop_event is set."""
     rng = random.Random()
 
-    hosts = scenario_data["hosts"] if scenario_data else HOSTS
-    # Per-deployment provider → cluster-name map; fall back to module global for standalone mode.
-    _cluster_by_provider = (
-        {c["provider"]: c["name"] for c in scenario_data.get("k8s_clusters", [])}
-        if scenario_data else CLUSTER_BY_PROVIDER
-    )
+    hosts = scenario_data["hosts"]
+    _cluster_by_provider = {c["provider"]: c["name"] for c in scenario_data.get("k8s_clusters", [])}
     # Build cloud_provider -> host_name mapping for targeted spikes
     _host_cloud_map: dict[str, str] = {}
     for h in hosts:
         _host_cloud_map[h["host.name"]] = h.get("cloud.provider", "")
     # Build service -> cloud_provider mapping from scenario_data
-    _service_cloud: dict[str, str] = {}
-    _channel_registry = {}
-    if scenario_data:
-        for svc_name, svc_cfg in scenario_data.get("services", {}).items():
-            _service_cloud[svc_name] = svc_cfg.get("cloud_provider", "")
-        _channel_registry = scenario_data.get("channel_registry", {})
+    _service_cloud: dict[str, str] = {
+        svc_name: svc_cfg.get("cloud_provider", "")
+        for svc_name, svc_cfg in scenario_data.get("services", {}).items()
+    }
+    _channel_registry = scenario_data.get("channel_registry", {})
 
     # Build resources and metric state for each host
     host_resources = []
@@ -1130,7 +1113,7 @@ def main() -> None:
     timer.start()
     logger.info("Running for %ds (standalone mode)", duration)
 
-    run(client, stop_event)
+    run(client, stop_event, scenario_data=standalone_generator_data())
     timer.cancel()
     client.close()
 

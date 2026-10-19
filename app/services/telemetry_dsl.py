@@ -88,8 +88,8 @@ class YamlService(BaseService):
     SERVICE_NAME: str = ""
     _telemetry_spec: dict = {}
 
-    def __init__(self, chaos_controller, otlp_client) -> None:
-        super().__init__(chaos_controller, otlp_client)
+    def __init__(self, chaos_controller, otlp_client, ctx) -> None:
+        super().__init__(chaos_controller, otlp_client, ctx)
         self._rng = random.Random()
         self._safe_rand = make_safe_rand(self._rng)
         self._state: dict[str, Any] = {}
@@ -258,7 +258,7 @@ class YamlService(BaseService):
                 ev_name = json.dumps({
                     "callback_url": meta.get("callback_url", ""),
                     "user_email": meta.get("user_email", ""),
-                    "deployment_id": self._ctx.scenario_id if self._ctx else "",
+                    "deployment_id": self._ctx.scenario_id,
                 })
             self.emit_log(level, message, attrs or None, event_name=ev_name, channel=channel)
         else:

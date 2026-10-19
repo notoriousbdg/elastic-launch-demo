@@ -10,7 +10,6 @@ import time
 from abc import ABC, abstractmethod
 from typing import Any, Iterable, Optional
 
-from app.config import ACTIVE_SCENARIO, CHANNEL_REGISTRY, MISSION_ID, SERVICES
 from app.telemetry import OTLPClient
 from app.trace_context import _trace_context_store
 
@@ -40,69 +39,35 @@ def _scenario_topology(ctx) -> dict:
     return topo
 
 
-def _get_scenario():
-    from scenario_engine import get_scenario
-
-    return get_scenario(ACTIVE_SCENARIO)
-
-
 class BaseService(ABC):
     """Base class providing telemetry emission, threading, and fault injection hooks."""
 
     # Subclasses MUST set this
     SERVICE_NAME: str = ""
 
-    # Class-level context — set by ServiceManager before batch-creating services.
-    # Avoids changing 37 subclass constructors.
-    _context = None  # ScenarioContext | None
-    _context_lock = threading.Lock()
-
-    @classmethod
-    def set_context(cls, ctx):
-        """Set the scenario context for the next batch of service instantiations."""
-        cls._context = ctx
-
-    @classmethod
-    def clear_context(cls):
-        """Clear the class-level context after batch creation."""
-        cls._context = None
-
-    def __init__(self, chaos_controller, otlp_client: OTLPClient):
+    def __init__(self, chaos_controller, otlp_client: OTLPClient, ctx):
         self.chaos_controller = chaos_controller
         self.otlp = otlp_client
-
-        # Capture context at creation time
-        ctx = self.__class__._context
-        if ctx:
-            self._ctx = ctx
-            self.service_cfg = ctx.services[self.SERVICE_NAME]
-            self._channel_registry = ctx.channel_registry
-            self._mission_id = ctx.mission_id
-            self._namespace = ctx.namespace
-        else:
-            # Backward-compatible: module-level globals
-            self._ctx = None
-            self.service_cfg = SERVICES[self.SERVICE_NAME]
-            self._channel_registry = CHANNEL_REGISTRY
-            self._mission_id = MISSION_ID
-            self._namespace = "nova7"
+        self._ctx = ctx  # ScenarioContext
+        self.service_cfg = ctx.services[self.SERVICE_NAME]
+        self._channel_registry = ctx.channel_registry
+        self._mission_id = ctx.mission_id
+        self._namespace = ctx.namespace
 
         # Derive topology-based infra attributes so that logs, per-service metrics,
         # and single-span traces carry the same host.name / container.id / k8s.pod.*
         # join keys as the trace, JVM-metrics, and k8s-metrics generators.  This is
         # what makes APM failed-transaction correlation → Logs → Infrastructure
         # resolve end-to-end without leaving any signal on a synthetic "{svc}-host".
-        infra_attrs: dict | None = None
-        if self._ctx:
-            from log_generators.infra_topology import get_resource_attrs
+        from log_generators.infra_topology import get_resource_attrs
 
-            topo = _scenario_topology(self._ctx)
-            infra_attrs = dict(get_resource_attrs(topo, self.SERVICE_NAME))
-            # Mirror the trace path: for k8s services, set service.instance.id to
-            # the pod uid so APM instance grouping is consistent across all signals.
-            entry = topo.get(self.SERVICE_NAME) or {}
-            if entry.get("_service_instance_id"):
-                infra_attrs["service.instance.id"] = entry["_service_instance_id"]
+        topo = _scenario_topology(self._ctx)
+        infra_attrs = dict(get_resource_attrs(topo, self.SERVICE_NAME))
+        # Mirror the trace path: for k8s services, set service.instance.id to
+        # the pod uid so APM instance grouping is consistent across all signals.
+        entry = topo.get(self.SERVICE_NAME) or {}
+        if entry.get("_service_instance_id"):
+            infra_attrs["service.instance.id"] = entry["_service_instance_id"]
 
         self.resource = OTLPClient.build_resource(
             self.SERVICE_NAME,
@@ -112,10 +77,7 @@ class BaseService(ABC):
         )
 
         # Derive nominal label from scenario (space="NOMINAL", others="NORMAL")
-        if self._ctx:
-            self._nominal_label = self._ctx.scenario.nominal_label
-        else:
-            self._nominal_label = _get_scenario().nominal_label
+        self._nominal_label = self._ctx.scenario.nominal_label
 
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -335,7 +297,7 @@ class BaseService(ABC):
                     {
                         "callback_url": meta.get("callback_url", ""),
                         "user_email": meta.get("user_email", ""),
-                        "deployment_id": self._ctx.scenario_id if self._ctx else "",
+                        "deployment_id": self._ctx.scenario_id,
                     }
                 )
             self.emit_log("ERROR", msg, attrs, event_name=ev_name, channel=channel)
@@ -416,6 +378,4 @@ class BaseService(ABC):
 
     def _generate_fault_params(self, channel: int) -> dict[str, Any]:
         """Generate realistic random parameters for fault messages from scenario."""
-        if self._ctx:
-            return self._ctx.scenario.get_fault_params(channel)
-        return _get_scenario().get_fault_params(channel)
+        return self._ctx.scenario.get_fault_params(channel)

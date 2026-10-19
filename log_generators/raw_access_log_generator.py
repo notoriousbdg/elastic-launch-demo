@@ -250,20 +250,14 @@ def data_stream_for(namespace: str | None = None) -> str:
 def run(
     client: ESBulkClient,
     stop_event: threading.Event,
-    scenario_data: dict | None = None,
+    *,
+    scenario_data: dict,
 ) -> None:
     """Run the raw access-log generator loop until stop_event is set."""
     rng = random.Random()
 
-    if scenario_data and "scenario" in scenario_data:
-        scenario = scenario_data["scenario"]
-        namespace = scenario_data["namespace"]
-    else:
-        from app.config import ACTIVE_SCENARIO
-        from scenario_engine import get_scenario
-
-        scenario = get_scenario(ACTIVE_SCENARIO)
-        namespace = scenario.namespace
+    scenario = scenario_data["scenario"]
+    namespace = scenario_data["namespace"]
 
     profile = scenario.raw_log_profile
     data_stream = data_stream_for(namespace)
@@ -333,7 +327,9 @@ def main() -> None:
     timer.start()
     logger.info("Running for %ds (standalone mode)", duration)
 
-    run(client, stop_event)
+    from app.context import standalone_generator_data
+
+    run(client, stop_event, scenario_data=standalone_generator_data())
     timer.cancel()
     client.close()
 

@@ -15,7 +15,6 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from app.context import ScenarioContext  # noqa: E402
-from app.services.base_service import BaseService  # noqa: E402
 from app.telemetry import OTLPClient  # noqa: E402
 from app.trace_context import _trace_context_store  # noqa: E402
 from scenario_engine import get_scenario  # noqa: E402
@@ -66,11 +65,7 @@ def service():
     ctx = ScenarioContext.from_scenario(scenario)
     otlp, chaos = RecordingOTLP(), FakeChaos()
     cls = next(c for c in scenario.get_service_classes() if c.SERVICE_NAME == SERVICE)
-    BaseService.set_context(ctx)
-    try:
-        svc = cls(chaos, otlp)
-    finally:
-        BaseService.clear_context()
+    svc = cls(chaos, otlp, ctx)
     return svc, otlp, chaos
 
 
