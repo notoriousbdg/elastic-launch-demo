@@ -10,6 +10,7 @@ from contextlib import asynccontextmanager
 from typing import Optional
 
 from fastapi import FastAPI, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
@@ -482,7 +483,7 @@ async def health():
 
 
 @app.get("/chaos", response_class=HTMLResponse)
-async def chaos_page(deployment_id: Optional[str] = None):
+def chaos_page(deployment_id: Optional[str] = None):
     path = os.path.join(_base, "chaos_ui", "static", "index.html")
     with open(path) as f:
         html = f.read()
@@ -501,7 +502,7 @@ async def list_scenarios():
 
 
 @app.post("/api/scenarios/reload")
-async def reload_scenarios():
+def reload_scenarios():
     """Re-scan scenarios/*/scenario.yaml and reload all scenarios from disk."""
     from scenario_engine import reload_registry
 
@@ -509,7 +510,7 @@ async def reload_scenarios():
 
 
 @app.get("/api/scenarios/{scenario_id}/download")
-async def download_scenario(scenario_id: str):
+def download_scenario(scenario_id: str):
     """Download a scenario folder as a zip archive named <scenario_id>.zip."""
     from scenario_engine import export_scenario_zip
 
@@ -531,7 +532,7 @@ async def upload_scenario(request: Request):
 
     body = await request.body()
     try:
-        result = import_scenario_zip(body)
+        result = await run_in_threadpool(import_scenario_zip, body)
     except (ValueError, zipfile.BadZipFile) as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     return result
@@ -560,15 +561,15 @@ async def fetch_github_scenarios(request: Request):
         return JSONResponse({"error": "repo_url is required"}, status_code=400)
 
     try:
-        data = fetch_github_zipball(repo_url, token)
-        result = import_scenarios_from_archive(data)
+        data = await run_in_threadpool(fetch_github_zipball, repo_url, token)
+        result = await run_in_threadpool(import_scenarios_from_archive, data)
     except (ValueError, zipfile.BadZipFile) as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     return result
 
 
 @app.get("/api/scenario")
-async def current_scenario(deployment_id: Optional[str] = None):
+def current_scenario(deployment_id: Optional[str] = None):
     """Return active scenario metadata."""
     scenario = _get_scenario_for_deployment(deployment_id)
     return {
@@ -615,7 +616,7 @@ async def list_deployments():
 
 
 @app.post("/api/deployments/{deployment_id}/stop")
-async def stop_deployment(deployment_id: str):
+def stop_deployment(deployment_id: str):
     """Stop a specific deployment's generators."""
     inst = registry.get(deployment_id)
     if not inst:
@@ -628,7 +629,7 @@ async def stop_deployment(deployment_id: str):
 
 
 @app.delete("/api/deployments/{deployment_id}")
-async def remove_deployment(deployment_id: str):
+def remove_deployment(deployment_id: str):
     """Remove a deployment from registry and store."""
     inst = registry.remove(deployment_id)
     if inst:
@@ -886,7 +887,7 @@ async def env_creds_status():
 
 
 @app.post("/api/setup/test-connection")
-async def test_connection(body: dict):
+def test_connection(body: dict):
     """Test connectivity to each component independently."""
     from scenario_engine import get_scenario as _get_scenario_by_id
     from elastic_config.deployer import ScenarioDeployer
@@ -948,7 +949,7 @@ async def test_connection(body: dict):
 
 
 @app.post("/api/setup/launch")
-async def launch_setup(body: dict):
+def launch_setup(body: dict):
     """Launch deployment of a scenario to Elastic.
 
     Accepts scenario_id + kibana_url + api_key.  Derives ES and OTLP URLs.
@@ -1206,7 +1207,7 @@ async def auto_deploy_status():
 
 
 @app.get("/api/setup/detect")
-async def detect_existing(deployment_id: Optional[str] = None):
+def detect_existing(deployment_id: Optional[str] = None):
     """Check if the active scenario is already deployed to Elastic."""
     from elastic_config.deployer import ScenarioDeployer
 
@@ -1229,7 +1230,7 @@ async def detect_existing(deployment_id: Optional[str] = None):
 
 
 @app.post("/api/setup/teardown")
-async def teardown_setup(body: dict = {}):
+def teardown_setup(body: dict = {}):
     """Remove a scenario's Elastic config (KB, workflows, alerts, etc)."""
     from elastic_config.deployer import ScenarioDeployer
 
@@ -1256,7 +1257,7 @@ async def teardown_setup(body: dict = {}):
 
 
 @app.post("/api/setup/stop-and-teardown")
-async def stop_and_teardown(body: dict = {}):
+def stop_and_teardown(body: dict = {}):
     """Stop generators and remove scenario artifacts from Elastic (async with progress)."""
     from elastic_config.deployer import ScenarioDeployer
 
