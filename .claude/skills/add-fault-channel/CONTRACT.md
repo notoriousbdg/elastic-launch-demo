@@ -26,6 +26,7 @@ Reference source: [`scenarios/ecommerce/channels/01-payment-gateway-timeout.yaml
 | `fault_params` | ✅ | `dict` | YAML DSL expressions for every `{placeholder}` in `error_message` + `stack_trace`. |
 | `rca_clues` | ✅ | `dict` | Per-service partial clues. Keys = service names from `affected_services` + `cascade_services`. |
 | `infrastructure_events` | optional | `list` | Extra infrastructure log events during the fault window. |
+| `infra_impact` | optional | `dict` | Infrastructure spikes applied while the channel is active: `cpu_pct`, `memory_pct`, `k8s_oom_intensity` (0–100) and `latency_multiplier` (1.0–10.0). E.g. `{cpu_pct: 85, latency_multiplier: 3.0}`. Values combine with other active channels and the chaos-UI sliders by taking the max; all spikes reset when the last channel resolves. |
 | `business_impact` | optional | `list[str]` | 2–4 KPI names from `scenario.yaml`'s `executive_kpi_emissions:` list. Used by the ML/anomaly layer to link fault windows to business metrics. All existing scenarios carry this field (schema 1.2). When replacing a channel, **copy `business_impact` from the old channel if present** rather than dropping it. |
 
 ### `investigation_notes` shape
