@@ -410,9 +410,37 @@ class OTLPClient:
         """ES native OTLP metrics path, or None if Elasticsearch is not configured."""
         return f"{self.elastic_url}/_otlp/v1/metrics" if self.elastic_url else None
 
+    @staticmethod
+    def prepare_payload(payload: dict) -> dict:
+        """Return *payload* in OTLP shape, without mutating it.
+
+        Resources are built as ``{"attributes": [...], "schemaUrl": ...}``, but
+        OTLP puts ``schema_url`` on ResourceLogs/ResourceMetrics/ResourceSpans,
+        not on Resource; receivers drop it as an unknown field. Hoist it to the
+        envelope. Copies are made because callers reuse resource dicts.
+        """
+        out = dict(payload)
+        for key in ("resourceLogs", "resourceMetrics", "resourceSpans"):
+            entries = payload.get(key)
+            if not entries:
+                continue
+            fixed = []
+            for entry in entries:
+                resource = entry.get("resource") or {}
+                if "schemaUrl" in resource:
+                    entry = {
+                        **entry,
+                        "resource": {k: v for k, v in resource.items() if k != "schemaUrl"},
+                    }
+                    entry.setdefault("schemaUrl", resource["schemaUrl"])
+                fixed.append(entry)
+            out[key] = fixed
+        return out
+
     def _send(self, url: str, payload: dict, signal_name: str) -> None:
         if not self.endpoint:
             return  # No endpoint configured yet; silently drop until reconfigure() is called
+        payload = self.prepare_payload(payload)
         if self.consecutive_failures >= self.max_failures_before_backoff:
             # Exponential backoff — skip sending
             backoff = min(

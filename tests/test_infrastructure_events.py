@@ -15,7 +15,6 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from app.context import ScenarioContext  # noqa: E402
-from app.telemetry import OTLPClient  # noqa: E402
 from app.trace_context import _trace_context_store  # noqa: E402
 from scenario_engine import get_scenario  # noqa: E402
 
@@ -25,52 +24,21 @@ SERVICE = "network-core"
 EVENT_NAME = "gcp.monitoring.GTPTunnelSetupFailure"
 
 
-class RecordingOTLP:
-    """Stands in for OTLPClient; keeps every sent log record."""
-
-    def __init__(self) -> None:
-        self._real = OTLPClient.__new__(OTLPClient)
-        self.logs: list[dict] = []
-
-    def send_logs(self, resource, records):
-        self.logs.extend(records)
-
-    def send_metrics(self, resource, metrics):
-        pass
-
-    def send_traces(self, resource, spans):
-        pass
-
-    def __getattr__(self, name):
-        return getattr(self._real, name)
-
-
-class FakeChaos:
-    def __init__(self) -> None:
-        self.active: set[int] = set()
-
-    def is_active(self, ch: int) -> bool:
-        return ch in self.active
-
-    def get_channel_metadata(self, ch: int) -> dict:
-        return {}
-
-
 @pytest.fixture()
-def service():
+def service(recording_otlp, fake_chaos):
     scenario = get_scenario(SCENARIO)
     ch = scenario.channel_registry[CHANNEL]
     assert any(e.get("event_name") == EVENT_NAME for e in ch["infrastructure_events"])
 
     ctx = ScenarioContext.from_scenario(scenario)
-    otlp, chaos = RecordingOTLP(), FakeChaos()
+    otlp, chaos = recording_otlp(), fake_chaos()
     cls = next(c for c in scenario.get_service_classes() if c.SERVICE_NAME == SERVICE)
     svc = cls(chaos, otlp, ctx)
     return svc, otlp, chaos
 
 
-def _infra_events(otlp: RecordingOTLP) -> list[dict]:
-    return [r for r in otlp.logs if r.get("eventName") == EVENT_NAME]
+def _infra_events(otlp) -> list[dict]:
+    return [r for r in otlp.log_records() if r.get("eventName") == EVENT_NAME]
 
 
 def test_infra_event_uses_channel_error_trace(service):

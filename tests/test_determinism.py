@@ -17,52 +17,16 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from app.context import ScenarioContext  # noqa: E402
-from app.telemetry import OTLPClient  # noqa: E402
+from conftest import FakeChaos, RecordingOTLP  # noqa: E402
 from scenario_engine import get_scenario  # noqa: E402
 
 FROZEN_NOW = 1_800_000_000.0
-VOLATILE = {"timeUnixNano", "observedTimeUnixNano", "startTimeUnixNano", "traceId", "spanId"}
-
-
-def _normalize(obj):
-    """Drop timestamps and trace/span ids, which come from the wall clock / secrets."""
-    if isinstance(obj, dict):
-        return {k: _normalize(v) for k, v in obj.items() if k not in VOLATILE}
-    if isinstance(obj, list):
-        return [_normalize(v) for v in obj]
-    return obj
-
-
-class RecordingOTLP(OTLPClient):
-    def __init__(self) -> None:
-        super().__init__(endpoint="http://otlp.invalid", api_key="k", elastic_url="http://es.invalid")
-        self.payloads: list = []
-
-    def _send(self, url, payload, signal_name):
-        self.payloads.append(_normalize(payload))
-
-
-class FakeChaos:
-    def __init__(self, active=()):
-        self.active = set(active)
-
-    def is_active(self, ch):
-        return ch in self.active
-
-    def get_active_channels(self):
-        return sorted(self.active)
-
-    def get_channel_metadata(self, ch):
-        return {}
-
-    def get_infra_spikes(self):
-        return {"cpu_pct": 0, "memory_pct": 0, "k8s_oom_intensity": 0, "latency_multiplier": 1.0}
 
 
 def _run_services(scenario_id: str, seed: int, active=(), ticks: int = 3) -> list:
     scenario = get_scenario(scenario_id)
     ctx = ScenarioContext.from_scenario(scenario)
-    otlp, chaos = RecordingOTLP(), FakeChaos(active)
+    otlp, chaos = RecordingOTLP(normalize=True), FakeChaos(active)
     clock = lambda: FROZEN_NOW  # noqa: E731
     services = [
         cls(chaos, otlp, ctx, rng=random.Random(f"{seed}:{cls.SERVICE_NAME}"), clock=clock)
@@ -71,7 +35,6 @@ def _run_services(scenario_id: str, seed: int, active=(), ticks: int = 3) -> lis
     for _ in range(ticks):
         for svc in services:
             svc.generate_telemetry()
-    otlp.client.close()
     return otlp.payloads
 
 
@@ -108,7 +71,7 @@ def test_generators_are_reproducible_with_seeded_rng(module):
 
     def one_cycle(seed: int) -> list:
         stop = threading.Event()
-        client = RecordingOTLP()
+        client = RecordingOTLP(normalize=True)
         original = client._send
 
         def _send(url, payload, signal_name):
@@ -120,7 +83,6 @@ def test_generators_are_reproducible_with_seeded_rng(module):
         if "chaos_controller" in run.__code__.co_varnames:
             kwargs["chaos_controller"] = FakeChaos()
         run(client, stop, **kwargs)
-        client.client.close()
         return client.payloads
 
     first, second = one_cycle(7), one_cycle(7)

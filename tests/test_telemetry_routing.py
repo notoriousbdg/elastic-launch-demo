@@ -102,3 +102,32 @@ def test_scenario_instance_passes_context_es_url():
         assert inst.otlp._metrics_otlp_url() == "https://tenant-es.example/_otlp/v1/metrics"
     finally:
         inst.otlp.client.close()
+
+
+def test_prepare_payload_hoists_schema_url_without_mutating():
+    resource = {"attributes": [{"key": "service.name", "value": {"stringValue": "s"}}],
+                "schemaUrl": "https://opentelemetry.io/schemas/1.35.0"}
+    payload = {"resourceLogs": [{"resource": resource, "scopeLogs": []}]}
+
+    out = OTLPClient.prepare_payload(payload)
+
+    entry = out["resourceLogs"][0]
+    assert entry["schemaUrl"] == "https://opentelemetry.io/schemas/1.35.0"
+    assert "schemaUrl" not in entry["resource"]
+    # The caller's (reused) resource dict is untouched.
+    assert resource["schemaUrl"] == "https://opentelemetry.io/schemas/1.35.0"
+    assert payload["resourceLogs"][0]["resource"] is resource
+
+
+def test_sent_logs_carry_schema_url_on_the_envelope():
+    import json
+
+    otlp = OTLPClient(endpoint="https://ingest.example", api_key="k", elastic_url="https://es.example")
+    bodies: list[bytes] = []
+    otlp.client = httpx.Client(transport=httpx.MockTransport(
+        lambda req: (bodies.append(req.content), httpx.Response(200))[1]
+    ))
+    _send_one_of_each(otlp)
+    sent = json.loads(bodies[1])  # [0] is protobuf metrics, [1] JSON logs
+    assert "schemaUrl" in sent["resourceLogs"][0]
+    assert "schemaUrl" not in sent["resourceLogs"][0]["resource"]
