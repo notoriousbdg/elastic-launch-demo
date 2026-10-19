@@ -176,8 +176,10 @@ def scenarios_tmpdir(tmp_path, monkeypatch):
 
     monkeypatch.setattr(scenario_engine, "_SCENARIOS_DIR", tmp_path)
     scenario_engine._registry.clear()
-    monkeypatch.setattr(scenario_engine, "_loaded", False)
+    scenario_engine._loaded = False
     yield tmp_path
+    # Not monkeypatched: restoring _loaded=True over an emptied registry would
+    # leave later tests with no scenarios. Force rediscovery from the real dir.
     scenario_engine._registry.clear()
     scenario_engine._loaded = False
 
