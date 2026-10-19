@@ -18,6 +18,7 @@ import signal
 import threading
 import time
 
+from app.services.expr import safe_format
 from app.telemetry import OTLPClient, _format_attributes, SCHEMA_URL
 from app.config import SERVICES, CHANNEL_REGISTRY, ACTIVE_SCENARIO, NAMESPACE
 from app.trace_context import _trace_context_store
@@ -195,13 +196,8 @@ def _build_exception_event(
                 fault_params = scenario.get_fault_params(ch_id)
                 error_type = ch.get("error_type", "Error")
                 # Format error message and stack trace with fault params
-                import string
-                class SafeDict(dict):
-                    def __missing__(self, key):
-                        return f"{{{key}}}"
-                fmt = string.Formatter()
-                message = fmt.vformat(ch.get("error_message", "error"), (), SafeDict(fault_params))
-                stacktrace = fmt.vformat(ch.get("stack_trace", ""), (), SafeDict(fault_params))
+                message = safe_format(ch.get("error_message", "error"), fault_params, keep_missing=True)
+                stacktrace = safe_format(ch.get("stack_trace", ""), fault_params, keep_missing=True)
                 return [client.build_exception_event(error_type, message, stacktrace)]
 
     # Generic exception for baseline errors

@@ -67,7 +67,7 @@ import time
 from typing import Any
 
 from app.services.base_service import BaseService
-from app.services.expr import _SAFE_TIME, make_safe_rand, safe_eval
+from app.services.expr import _SAFE_TIME, make_safe_rand, safe_eval, safe_format
 from scenario_engine.fault_spec import resolve
 
 
@@ -421,7 +421,7 @@ class YamlService(BaseService):
         if "format" in spec:
             template = str(spec["format"])
             kwargs = {k: self._resolve(v, env) for k, v in spec.items() if k != "format"}
-            return template.format(**kwargs)
+            return safe_format(template, kwargs)
 
         # Plain dict with no recognised DSL key — return verbatim (literal dict)
         return spec
