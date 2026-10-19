@@ -159,14 +159,29 @@ class ScenarioDeployer(
         ])
         _notify = callback or (lambda p: None)
         _notify(self.progress)
+        failed: list[str] = []
 
         try:
             with httpx.Client(timeout=60.0, verify=True) as client:
+
+                def run(idx: StepIdx, fn) -> None:
+                    """Run one step; an exception fails that step, not the deploy."""
+                    try:
+                        fn(client, _notify)
+                    except Exception as exc:
+                        step = self._step(idx)
+                        step.status = "failed"
+                        step.detail = f"{type(exc).__name__}: {exc}"[:500]
+                        failed.append(step.name)
+                        logger.exception("Deploy step %r failed; continuing", step.name)
+                        _notify(self.progress)
+
+                # Connectivity is the only fatal step: nothing else can work without it.
                 self._check_connectivity(client, _notify)
-                self._report_elastic_url_step(_notify)
-                self._derive_otlp_step(client, _notify)
-                self._cleanup_all_scenarios_step(client, _notify)
-                self._configure_platform_settings(client, _notify)
+                run(StepIdx.ES_URL, lambda _c, n: self._report_elastic_url_step(n))
+                run(StepIdx.OTLP_ENDPOINT, self._derive_otlp_step)
+                run(StepIdx.CLEANUP, self._cleanup_all_scenarios_step)
+                run(StepIdx.PLATFORM_SETTINGS, self._configure_platform_settings)
                 # Fire the early-start hook after platform settings so _enable
                 # runs before log generators write to logs.ecs — otherwise the
                 # plain logs.ecs index blocks wired-stream creation and the
@@ -180,28 +195,31 @@ class ScenarioDeployer(
                             "on_otlp_ready hook raised an exception; ignoring",
                             exc_info=True,
                         )
-                self._deploy_apm_rollup(client, _notify)
+                run(StepIdx.APM_ROLLUP, self._deploy_apm_rollup)
                 # Start the APM ML job early so ES processes the 12h backfill
                 # server-side during the intervening steps; the catch-up poll
                 # runs at the very end via _finalize_apm_anomaly_detection.
-                self._setup_apm_anomaly_detection(client, _notify)
-                self._deploy_workflows(client, _notify)
-                self._deploy_knowledge_base(client, _notify)
-                self._deploy_tools(client, _notify)
-                self._deploy_agent(client, _notify)
-                self._deploy_scenario_stream(client, _notify)
-                self._deploy_knowledge_indicators(client, _notify)
-                self._deploy_significant_events(client, _notify)
-                self._deploy_data_views(client, _notify)
-                self._deploy_dashboard(client, _notify)
-                self._deploy_alerting(client, _notify)
-                self._deploy_ecs_log_backfill(client, _notify)
-                self._deploy_logs_ml_jobs(client, _notify)
-                self._deploy_slos(client, _notify)
-                self._install_integrations(client, _notify)
+                run(StepIdx.APM_ANOMALY, self._setup_apm_anomaly_detection)
+                # Later steps tolerate missing outputs of failed earlier ones:
+                # tools/alerts work without workflow ids, the agent only
+                # references tools that were created.
+                run(StepIdx.WORKFLOWS, self._deploy_workflows)
+                run(StepIdx.KNOWLEDGE_BASE, self._deploy_knowledge_base)
+                run(StepIdx.AI_TOOLS, self._deploy_tools)
+                run(StepIdx.AI_AGENT, self._deploy_agent)
+                run(StepIdx.STREAM_CREATE, self._deploy_scenario_stream)
+                run(StepIdx.KNOWLEDGE_INDICATORS, self._deploy_knowledge_indicators)
+                run(StepIdx.SIGNIFICANT_EVENTS, self._deploy_significant_events)
+                run(StepIdx.DATA_VIEWS, self._deploy_data_views)
+                run(StepIdx.DASHBOARDS, self._deploy_dashboard)
+                run(StepIdx.ALERT_RULES, self._deploy_alerting)
+                run(StepIdx.ECS_LOG_BACKFILL, self._deploy_ecs_log_backfill)
+                run(StepIdx.LOGS_ML_JOBS, self._deploy_logs_ml_jobs)
+                run(StepIdx.SLOS, self._deploy_slos)
+                run(StepIdx.INTEGRATIONS, self._install_integrations)
                 # Block on APM datafeed catch-up now; should be near-instant
                 # since ES has been training throughout the steps above.
-                self._finalize_apm_anomaly_detection(client, _notify)
+                run(StepIdx.APM_ANOMALY, self._finalize_apm_anomaly_detection)
                 # Spawn a background thread that waits for all services to appear
                 # in traces, then re-runs the SLO workflow to capture the full set.
                 # Returns immediately; never blocks or raises.
@@ -210,6 +228,8 @@ class ScenarioDeployer(
             self.progress.error = str(exc)
             logger.exception("Deployment failed")
 
+        if failed and not self.progress.error:
+            self.progress.error = f"{len(failed)} step(s) failed: {', '.join(failed)}"
         self.progress.finished = True
         _notify(self.progress)
         return self.progress
