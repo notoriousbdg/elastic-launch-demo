@@ -31,6 +31,7 @@ from typing import Any
 
 import yaml
 
+from app.services.expr import find_exprs, validate_expr
 from scenario_engine.base import BaseScenario
 from scenario_engine.fault_spec import resolve, resolve_dict
 
@@ -365,7 +366,14 @@ def load_yaml_scenario(scenario_dir: Path) -> YamlScenario:
             ch_num = _channel_num_from_path(ch_path)
             channels[ch_num] = _load_yaml(ch_path)
 
-    return YamlScenario(data, channels, scenario_dir=scenario_dir)
+    scenario = YamlScenario(data, channels, scenario_dir=scenario_dir)
+
+    # Reject unsafe expressions up front so they never reach eval().
+    for doc in (data, *channels.values(), *scenario._service_specs.values()):
+        for expr in find_exprs(doc):
+            validate_expr(expr)
+
+    return scenario
 
 
 # ---------------------------------------------------------------------------

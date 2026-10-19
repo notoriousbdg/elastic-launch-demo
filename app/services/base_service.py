@@ -286,13 +286,9 @@ class BaseService(ABC):
     @staticmethod
     def _safe_format(template: str, params: dict) -> str:
         """Format a template string, ignoring missing keys."""
-        import string
+        from app.services.expr import safe_format
 
-        class SafeDict(dict):
-            def __missing__(self, key):
-                return f"{{{key}}}"
-
-        return string.Formatter().vformat(template, (), SafeDict(params))
+        return safe_format(template, params, keep_missing=True)
 
     def emit_fault_logs(self, channel: int) -> None:
         """Emit error logs matching the channel's exact error signature."""

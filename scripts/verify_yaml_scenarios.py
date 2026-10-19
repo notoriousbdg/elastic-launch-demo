@@ -2,7 +2,8 @@
 """Verify that YAML scenarios pass all integrity checks.
 
 Checks performed for each scenario:
-  1.  scenario.yaml loads without errors
+  1.  scenario.yaml loads without errors (loading also rejects any ``expr:``
+      outside the allowlist in app/services/expr.py)
   1b. schema_version: if present, must parse as MAJOR.MINOR; malformed → error.
       Missing → warning only (treated as '1.0', compatible with current engine).
       If older MAJOR than engine → error (upgrade_required).
