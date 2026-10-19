@@ -134,6 +134,7 @@ class YamlService(BaseService):
 
         active_channels = self.get_active_channels_for_service()
         cascade_channels = self.get_cascade_channels_for_service()
+        self.reset_infrastructure_events(keep_channels=active_channels)
 
         # Standard fault logs (all affected-service channels)
         if spec.get("emit_fault_logs", True):
