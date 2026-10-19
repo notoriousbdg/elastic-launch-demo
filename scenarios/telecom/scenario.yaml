@@ -371,21 +371,3 @@ trace_attributes:
       db.query_type: {choice: [SELECT, INSERT]}
       db.table: {choice: [identities, sessions, tokens]}
       db.replication_role: {choice: [primary, replica]}
-theme:
-  bg_primary: '#0a0e1a'
-  bg_secondary: '#111827'
-  bg_tertiary: '#1e293b'
-  accent_primary: '#0066FF'
-  accent_secondary: '#00C7B1'
-  text_primary: '#e2e8f0'
-  text_secondary: '#94a3b8'
-  text_accent: '#0066FF'
-  status_nominal: '#22c55e'
-  status_warning: '#eab308'
-  status_critical: '#ef4444'
-  status_info: '#3b82f6'
-  font_family: '''Inter'', ''Segoe UI'', system-ui, sans-serif'
-  font_mono: '''JetBrains Mono'', ''Fira Code'', monospace'
-  chaos_title: Incident Simulator
-  service_label: Service
-  channel_label: Incident

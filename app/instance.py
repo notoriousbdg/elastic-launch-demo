@@ -35,6 +35,7 @@ class ScenarioInstance:
         self.otlp = OTLPClient(
             endpoint=ctx.otlp_endpoint or None,
             api_key=ctx.otlp_api_key or None,
+            elastic_url=ctx.elastic_url or None,
         )
 
         # Per-instance chaos controller with this scenario's channel registry.
@@ -69,7 +70,6 @@ class ScenarioInstance:
                 elastic_api_key=ctx.elastic_api_key,
                 namespace=ctx.namespace,
                 chaos_controller=self.chaos_controller,
-                stop_event=self.service_manager._stop_event,
             )
 
         self._running = False
@@ -97,6 +97,8 @@ class ScenarioInstance:
         """Stop all services and generators."""
         if not self._running:
             return
+        if self.remediation_poller:
+            self.remediation_poller.stop()
         self.service_manager.stop_all()
         self._running = False
         logger.info("Instance %s stopped", self.scenario_id)

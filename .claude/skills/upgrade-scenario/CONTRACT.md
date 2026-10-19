@@ -4,6 +4,8 @@ This document is the canonical reference for schema versioning in
 elastic-launch-demo. It defines version semantics, status values, the
 `schema.yaml` data model, and the rules for writing migration guidance.
 
+> **Shape vs version:** the JSON Schemas in `scenario_engine/schemas/` describe the shape the current engine accepts. A migration that adds, renames or removes a YAML key must update the matching schema file in the same change, or `verify_yaml_scenarios.py` (check 0) and scenario imports will reject migrated scenarios.
+
 ---
 
 ## Version format

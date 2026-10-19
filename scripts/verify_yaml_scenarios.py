@@ -2,7 +2,9 @@
 """Verify that YAML scenarios pass all integrity checks.
 
 Checks performed for each scenario:
-  1.  scenario.yaml loads without errors
+  0.  every file matches the JSON Schemas in scenario_engine/schemas/
+  1.  scenario.yaml loads without errors (loading also rejects any ``expr:``
+      outside the allowlist in app/services/expr.py)
   1b. schema_version: if present, must parse as MAJOR.MINOR; malformed → error.
       Missing → warning only (treated as '1.0', compatible with current engine).
       If older MAJOR than engine → error (upgrade_required).
@@ -20,6 +22,8 @@ Checks performed for each scenario:
       get_fault_params(ch) — and every fault_params key is referenced
       by at least one placeholder (orphan check)
   10. every affected_services / cascade_services value is a key in services
+  10b. infra_impact (optional) only sets cpu_pct / memory_pct /
+      k8s_oom_intensity (0–100) and latency_multiplier (1.0–10.0)
   11. every k8s_clusters[].services value is a key in services
   12. agent_config.system_prompt references all 20 channel error_types, and
       every error_type in the prompt is present in a channel (bidirectional)
@@ -84,9 +88,32 @@ _CHANNEL_REQUIRED_FIELDS = (
 )
 
 
+# Spike keys a channel's infra_impact may set, with the same ranges as the
+# chaos UI sliders (app/chaos_ui/static/index.html).
+_INFRA_IMPACT_RANGES = {
+    "cpu_pct": (0, 100),
+    "memory_pct": (0, 100),
+    "k8s_oom_intensity": (0, 100),
+    "latency_multiplier": (1.0, 10.0),
+}
+
+
 def _placeholders(text: str) -> set[str]:
-    # Match {word} but not {{word}} (double-brace escapes are literal in log lines).
-    return set(re.findall(r"(?<!\{)\{(\w+)\}(?!\})", text))
+    """Top-level field names of every replacement field in a str.format template.
+
+    Covers {name}, {name:spec}, {name!r} and {name[key]}; {{escaped}} braces are
+    literal. Falls back to plain {name} matching if the text is not a valid template.
+    """
+    import string
+
+    try:
+        names = set()
+        for _, field, _, _ in string.Formatter().parse(text):
+            if field:
+                names.add(re.split(r"[.\[]", field, maxsplit=1)[0])
+        return names
+    except ValueError:
+        return set(re.findall(r"(?<!\{)\{(\w+)\}(?!\})", text))
 
 
 def check_scenario(scenario_id: str) -> tuple[list[str], list[str]]:
@@ -99,6 +126,10 @@ def check_scenario(scenario_id: str) -> tuple[list[str], list[str]]:
 
     if not yaml_path.exists():
         return [f"scenario.yaml not found under scenarios/{scenario_id}/"], []
+
+    # ── Check 0: JSON Schema ─────────────────────────────────────────────────
+    from scenario_engine.schema_validation import validate_scenario_dir
+    errors.extend(f"schema: {e}" for e in validate_scenario_dir(scenario_dir))
 
     # Load via YamlScenario
     try:
@@ -234,6 +265,27 @@ def check_scenario(scenario_id: str) -> tuple[list[str], list[str]]:
             for svc in ch.get(field, []):
                 if svc not in svc_keys:
                     errors.append(f"ch {ch_num}: {field} '{svc}' not in services")
+
+    # ── Check 10b: infra_impact keys and ranges ──────────────────────────────
+    for ch_num, ch in sorted(reg.items()):
+        impact = ch.get("infra_impact")
+        if impact is None:
+            continue
+        if not isinstance(impact, dict):
+            errors.append(f"ch {ch_num}: infra_impact must be a mapping")
+            continue
+        for key, val in impact.items():
+            if key not in _INFRA_IMPACT_RANGES:
+                errors.append(
+                    f"ch {ch_num}: infra_impact key '{key}' is not one of "
+                    f"{sorted(_INFRA_IMPACT_RANGES)}"
+                )
+                continue
+            lo, hi = _INFRA_IMPACT_RANGES[key]
+            if isinstance(val, bool) or not isinstance(val, (int, float)) or not lo <= val <= hi:
+                errors.append(
+                    f"ch {ch_num}: infra_impact.{key}={val!r} must be a number in [{lo}, {hi}]"
+                )
 
     # ── Check 11: k8s_clusters services membership ────────────────────────────
     for cluster in s.k8s_clusters:

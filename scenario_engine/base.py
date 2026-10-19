@@ -203,12 +203,6 @@ class BaseScenario(ABC):
         """
         return self._default_tool_definitions()
 
-    @property
-    @abstractmethod
-    def knowledge_base_docs(self) -> list[dict[str, Any]]:
-        """20 KB documents for agent knowledge base."""
-        ...
-
     # ── Service Classes ──────────────────────────────────────────────
 
     @abstractmethod
@@ -233,8 +227,11 @@ class BaseScenario(ABC):
         return {}
 
     @abstractmethod
-    def get_fault_params(self, channel: int) -> dict[str, Any]:
-        """Generate realistic random fault parameters for a channel."""
+    def get_fault_params(self, channel: int, rng: Any = None) -> dict[str, Any]:
+        """Generate realistic random fault parameters for a channel.
+
+        *rng* is a ``random.Random``; None uses a fresh unseeded one.
+        """
         ...
 
     # ── Convenience ──────────────────────────────────────────────────
@@ -324,24 +321,6 @@ class BaseScenario(ABC):
             "methods": ["GET", "POST", "PUT", "DELETE"],
             "paths": ["/api/v1/health"],
             "change_point_path": "/api/v1/health",
-        }
-
-    @property
-    def infra_names(self) -> dict[str, Any]:
-        """Standard infrastructure names derived from namespace."""
-        ns = self.namespace
-        return {
-            "nginx_hosts": [f"{ns}-nginx-01", f"{ns}-nginx-02"],
-            "nginx_servers": [f"{ns}-proxy-01", f"{ns}-proxy-02"],
-            "proxy_host": f"{ns}-proxy-host",
-            "mysql_host": f"{ns}-mysql-host",
-            "vpc_scope": f"{ns}-vpc-flow-generator",
-            "vpc_names": [f"{ns}-vpc-prod", f"{ns}-vpc-staging", f"{ns}-vpc-data"],
-            "gcp_account": f"{ns}-project-prod",
-            "daemonsets": [f"{ns}-log-collector", f"{ns}-node-exporter"],
-            "statefulsets": [f"{ns}-redis", f"{ns}-postgres"],
-            "url_domain": f"{ns}.internal",
-            "db_prefix": ns.replace("-", "_"),
         }
 
     # ── Default Tool Generation ──────────────────────────────────────

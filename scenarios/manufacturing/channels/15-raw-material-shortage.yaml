@@ -37,7 +37,7 @@ fault_params:
     n: {randint: [100000, 999999]}
   po_quantity: {randint: [2000, 12000]}
   supplier_id: {randint: [1000, 9999]}
-  po_eta: 2026-05-12T08:00:00Z
+  po_eta: "2026-05-12T08:00:00Z"
   forward_consumption: {randint: [1500, 4500]}
   affected_wo_count: {randint: [3, 18]}
   hours_to_starve: {randint: [2, 14]}

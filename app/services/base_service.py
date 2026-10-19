@@ -8,9 +8,8 @@ import secrets
 import threading
 import time
 from abc import ABC, abstractmethod
-from typing import Any, Optional
+from typing import Any, Callable, Iterable, Optional
 
-from app.config import ACTIVE_SCENARIO, CHANNEL_REGISTRY, MISSION_ID, SERVICES
 from app.telemetry import OTLPClient
 from app.trace_context import _trace_context_store
 
@@ -40,69 +39,47 @@ def _scenario_topology(ctx) -> dict:
     return topo
 
 
-def _get_scenario():
-    from scenario_engine import get_scenario
-
-    return get_scenario(ACTIVE_SCENARIO)
-
-
 class BaseService(ABC):
     """Base class providing telemetry emission, threading, and fault injection hooks."""
 
     # Subclasses MUST set this
     SERVICE_NAME: str = ""
 
-    # Class-level context — set by ServiceManager before batch-creating services.
-    # Avoids changing 37 subclass constructors.
-    _context = None  # ScenarioContext | None
-    _context_lock = threading.Lock()
-
-    @classmethod
-    def set_context(cls, ctx):
-        """Set the scenario context for the next batch of service instantiations."""
-        cls._context = ctx
-
-    @classmethod
-    def clear_context(cls):
-        """Clear the class-level context after batch creation."""
-        cls._context = None
-
-    def __init__(self, chaos_controller, otlp_client: OTLPClient):
+    def __init__(
+        self,
+        chaos_controller,
+        otlp_client: OTLPClient,
+        ctx,
+        *,
+        rng: random.Random | None = None,
+        clock: Callable[[], float] | None = None,
+    ):
+        """*rng* and *clock* default to a fresh ``random.Random()`` and
+        ``time.time``; tests pass seeded / frozen ones for reproducible output."""
+        self._rng = rng if rng is not None else random.Random()
+        self._clock = clock or time.time
         self.chaos_controller = chaos_controller
         self.otlp = otlp_client
-
-        # Capture context at creation time
-        ctx = self.__class__._context
-        if ctx:
-            self._ctx = ctx
-            self.service_cfg = ctx.services[self.SERVICE_NAME]
-            self._channel_registry = ctx.channel_registry
-            self._mission_id = ctx.mission_id
-            self._namespace = ctx.namespace
-        else:
-            # Backward-compatible: module-level globals
-            self._ctx = None
-            self.service_cfg = SERVICES[self.SERVICE_NAME]
-            self._channel_registry = CHANNEL_REGISTRY
-            self._mission_id = MISSION_ID
-            self._namespace = "nova7"
+        self._ctx = ctx  # ScenarioContext
+        self.service_cfg = ctx.services[self.SERVICE_NAME]
+        self._channel_registry = ctx.channel_registry
+        self._mission_id = ctx.mission_id
+        self._namespace = ctx.namespace
 
         # Derive topology-based infra attributes so that logs, per-service metrics,
         # and single-span traces carry the same host.name / container.id / k8s.pod.*
         # join keys as the trace, JVM-metrics, and k8s-metrics generators.  This is
         # what makes APM failed-transaction correlation → Logs → Infrastructure
         # resolve end-to-end without leaving any signal on a synthetic "{svc}-host".
-        infra_attrs: dict | None = None
-        if self._ctx:
-            from log_generators.infra_topology import get_resource_attrs
+        from log_generators.infra_topology import get_resource_attrs
 
-            topo = _scenario_topology(self._ctx)
-            infra_attrs = dict(get_resource_attrs(topo, self.SERVICE_NAME))
-            # Mirror the trace path: for k8s services, set service.instance.id to
-            # the pod uid so APM instance grouping is consistent across all signals.
-            entry = topo.get(self.SERVICE_NAME) or {}
-            if entry.get("_service_instance_id"):
-                infra_attrs["service.instance.id"] = entry["_service_instance_id"]
+        topo = _scenario_topology(self._ctx)
+        infra_attrs = dict(get_resource_attrs(topo, self.SERVICE_NAME))
+        # Mirror the trace path: for k8s services, set service.instance.id to
+        # the pod uid so APM instance grouping is consistent across all signals.
+        entry = topo.get(self.SERVICE_NAME) or {}
+        if entry.get("_service_instance_id"):
+            infra_attrs["service.instance.id"] = entry["_service_instance_id"]
 
         self.resource = OTLPClient.build_resource(
             self.SERVICE_NAME,
@@ -112,16 +89,13 @@ class BaseService(ABC):
         )
 
         # Derive nominal label from scenario (space="NOMINAL", others="NORMAL")
-        if self._ctx:
-            self._nominal_label = self._ctx.scenario.nominal_label
-        else:
-            self._nominal_label = _get_scenario().nominal_label
+        self._nominal_label = self._ctx.scenario.nominal_label
 
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._phase = "ACTIVE"
         self._status = self._nominal_label
-        self._last_status_change = time.time()
+        self._last_status_change = self._clock()
 
     # ── Lifecycle ──────────────────────────────────────────────────────
 
@@ -148,7 +122,7 @@ class BaseService(ABC):
                 self.generate_telemetry()
             except Exception:
                 logger.exception("Error in %s telemetry loop", self.SERVICE_NAME)
-            interval = random.uniform(1.5, 3.0)
+            interval = self._rng.uniform(1.5, 3.0)
             self._stop_event.wait(interval)
 
     # ── Abstract ───────────────────────────────────────────────────────
@@ -286,13 +260,9 @@ class BaseService(ABC):
     @staticmethod
     def _safe_format(template: str, params: dict) -> str:
         """Format a template string, ignoring missing keys."""
-        import string
+        from app.services.expr import safe_format
 
-        class SafeDict(dict):
-            def __missing__(self, key):
-                return f"{{{key}}}"
-
-        return string.Formatter().vformat(template, (), SafeDict(params))
+        return safe_format(template, params, keep_missing=True)
 
     def emit_fault_logs(self, channel: int) -> None:
         """Emit error logs matching the channel's exact error signature."""
@@ -304,7 +274,7 @@ class BaseService(ABC):
         self.emit_infrastructure_events(channel)
 
         # Generate 2-4 error logs per cycle when channel is active
-        for _ in range(random.randint(2, 4)):
+        for _ in range(self._rng.randint(2, 4)):
             fault_params = self._generate_fault_params(channel)
             msg = self._safe_format(ch["error_message"], fault_params)
             stack = self._safe_format(ch["stack_trace"], fault_params)
@@ -339,7 +309,7 @@ class BaseService(ABC):
                     {
                         "callback_url": meta.get("callback_url", ""),
                         "user_email": meta.get("user_email", ""),
-                        "deployment_id": self._ctx.scenario_id if self._ctx else "",
+                        "deployment_id": self._ctx.scenario_id,
                     }
                 )
             self.emit_log("ERROR", msg, attrs, event_name=ev_name, channel=channel)
@@ -363,7 +333,7 @@ class BaseService(ABC):
                 "system.status": "WARNING",
             }
         )
-        self.emit_log("WARN", random.choice(messages), attrs, channel=channel)
+        self.emit_log("WARN", self._rng.choice(messages), attrs, channel=channel)
 
     def emit_infrastructure_events(self, channel: int) -> None:
         """Emit one-shot infrastructure/audit events when a channel fires.
@@ -407,59 +377,17 @@ class BaseService(ABC):
                 channel=channel,
             )
 
-    def reset_infrastructure_events(self) -> None:
-        """Clear tracked infrastructure events (call on channel resolve)."""
-        if hasattr(self, "_infra_events_emitted"):
-            self._infra_events_emitted.clear()
+    def reset_infrastructure_events(self, keep_channels: Iterable[int] = ()) -> None:
+        """Forget emitted infrastructure events, except for *keep_channels*.
 
-    def emit_infrastructure_events(self, channel: int) -> None:
-        """Emit one-shot infrastructure/audit events when a channel fires.
-
-        Reads optional 'infrastructure_events' list from channel_registry entry.
-        Each event: {body, severity, event_name, attributes, service (optional)}.
-        Events are only emitted once per channel activation.
+        Called every tick with the currently active channels, so a channel's
+        events fire again the next time it is triggered after resolving.
         """
         if not hasattr(self, "_infra_events_emitted"):
-            self._infra_events_emitted: set[tuple[int, int]] = set()
-
-        ch = self._channel_registry.get(channel)
-        if not ch:
             return
-        infra_events = ch.get("infrastructure_events", [])
-        if not infra_events:
-            return
-
-        for idx, evt in enumerate(infra_events):
-            # Only emit for this service (or if no service filter specified)
-            evt_service = evt.get("service")
-            if evt_service and evt_service != self.SERVICE_NAME:
-                continue
-
-            key = (channel, idx)
-            if key in self._infra_events_emitted:
-                continue
-            self._infra_events_emitted.add(key)
-
-            attrs = self._base_log_attrs()
-            if evt.get("attributes"):
-                attrs.update(evt["attributes"])
-            attrs["chaos.channel"] = channel
-            attrs["infrastructure.event"] = True
-
-            self.emit_log(
-                evt.get("severity", "WARN"),
-                evt["body"],
-                attrs,
-                event_name=evt.get("event_name"),
-            )
-
-    def reset_infrastructure_events(self) -> None:
-        """Clear tracked infrastructure events (call on channel resolve)."""
-        if hasattr(self, "_infra_events_emitted"):
-            self._infra_events_emitted.clear()
+        keep = set(keep_channels)
+        self._infra_events_emitted = {k for k in self._infra_events_emitted if k[0] in keep}
 
     def _generate_fault_params(self, channel: int) -> dict[str, Any]:
         """Generate realistic random parameters for fault messages from scenario."""
-        if self._ctx:
-            return self._ctx.scenario.get_fault_params(channel)
-        return _get_scenario().get_fault_params(channel)
+        return self._ctx.scenario.get_fault_params(channel, self._rng)

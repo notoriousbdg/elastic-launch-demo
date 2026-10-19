@@ -35,13 +35,12 @@ class RemediationPoller:
         elastic_api_key: str,
         namespace: str,
         chaos_controller: ChaosController,
-        stop_event: threading.Event,
     ):
         self._elastic_url = elastic_url.rstrip("/")
         self._api_key = elastic_api_key
         self._namespace = namespace
         self._chaos = chaos_controller
-        self._stop = stop_event
+        self._stop = threading.Event()
         self._index = f"{namespace}-remediation-queue"
         self._thread: threading.Thread | None = None
 
@@ -55,11 +54,19 @@ class RemediationPoller:
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
             return
+        self._stop = threading.Event()
         self._thread = threading.Thread(
             target=self._run, name="remediation-poller", daemon=True
         )
         self._thread.start()
         logger.info("Remediation poller started (index=%s)", self._index)
+
+    def stop(self, timeout: float = 5.0) -> None:
+        """Signal the poll loop to exit and wait for it."""
+        self._stop.set()
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=timeout)
+        self._thread = None
 
     def _run(self) -> None:
         """Main poll loop."""

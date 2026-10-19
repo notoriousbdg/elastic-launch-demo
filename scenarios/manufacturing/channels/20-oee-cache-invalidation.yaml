@@ -31,7 +31,7 @@ correlation_attr:
 fault_params:
   line_id: {choice: [LINE-01, LINE-02, LINE-03, LINE-04, LINE-05]}
   stale_entries: {randint: [8, 80]}
-  correction_time: 2026-05-06T13:42:18Z
+  correction_time: "2026-05-06T13:42:18Z"
   affected_window: "13:00–16:00"
 rca_clues:
   oee-analytics:

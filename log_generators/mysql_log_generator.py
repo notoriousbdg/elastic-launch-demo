@@ -26,7 +26,7 @@ import threading
 import time
 
 from app.telemetry import OTLPClient, _format_attributes, SCHEMA_URL, _now_ns
-from app.config import NAMESPACE
+from app.context import standalone_generator_data
 from app.trace_context import _trace_context_store
 
 # MySQL is the backend data tier for the demo: any active fault is observable
@@ -346,7 +346,7 @@ def _generate_top_query_event(
     operation, template = rng.choice(QUERY_TEMPLATES)
     db = rng.choice(databases)
     query = _render_query(template, rng, db_prefix)
-    digest = secrets.token_hex(16)
+    digest = f"{rng.getrandbits(128):032x}"
 
     attrs = {
         "db.query.text": query,
@@ -494,7 +494,7 @@ def _generate_mysql_metrics(
     # ── events_statements_summary_by_digest ──────────────────────────
     # sum_timer_wait emitted as double so ESQL CASE(..., 0.0) type-checks correctly
     for _ in range(rng.randint(3, 8)):
-        digest = secrets.token_hex(16)
+        digest = f"{rng.getrandbits(128):032x}"
         count_star = rng.randint(100, 50_000)
         sum_wait = float(rng.randint(1_000_000_000, 200_000_000_000))
         attrs = {"digest": digest}
@@ -541,20 +541,17 @@ def _generate_mysql_metrics(
 def run(
     client: OTLPClient,
     stop_event: threading.Event,
-    scenario_data: dict | None = None,
+    *,
+    scenario_data: dict,
+    rng: random.Random | None = None,
     chaos_controller=None,
 ) -> None:
     """Run MySQL generator loop until stop_event is set."""
-    rng = random.Random()
+    rng = rng if rng is not None else random.Random()
 
-    if scenario_data:
-        ns = scenario_data["namespace"]
-        db_prefix = ns.replace("-", "_")
-    else:
-        ns = NAMESPACE
-        db_prefix = NAMESPACE.replace("-", "_")
-
-    _channel_registry: dict = scenario_data.get("channel_registry", {}) if scenario_data else {}
+    ns = scenario_data["namespace"]
+    db_prefix = ns.replace("-", "_")
+    _channel_registry: dict = scenario_data.get("channel_registry", {})
 
     databases = [
         f"{db_prefix}_telemetry",
@@ -573,9 +570,7 @@ def run(
     metrics_resource = _build_metrics_resource(ns)
     trace_resource = _build_trace_resource(ns)
 
-    _emit_traces = True
-    if scenario_data and "services" in scenario_data:
-        _emit_traces = "mysql-primary" in scenario_data["services"]
+    _emit_traces = "mysql-primary" in scenario_data["services"]
 
     metric_state = MySQLMetricState(rng)
 
@@ -693,7 +688,7 @@ def main() -> None:
     timer.start()
     logger.info("Running for %ds (standalone mode)", duration)
 
-    run(client, stop_event)
+    run(client, stop_event, scenario_data=standalone_generator_data())
     timer.cancel()
     client.close()
 

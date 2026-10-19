@@ -21,7 +21,7 @@ import threading
 import time
 
 from app.telemetry import OTLPClient, _format_attributes, SCHEMA_URL, _now_ns
-from app.config import NAMESPACE
+from app.context import standalone_generator_data
 
 logger = logging.getLogger("nginx-metrics-generator")
 
@@ -32,25 +32,26 @@ SCOPE_NAME = (
 )
 SCOPE_VERSION = "0.115.0"
 
-# Two nginx instances across different hosts (derived from active scenario)
-NGINX_HOSTS = [
-    {
-        "host.name": f"{NAMESPACE}-nginx-01",
-        "service.name": "nginx-proxy",
-        "service.instance.id": "nginx-proxy-001",
-        "cloud.provider": "aws",
-        "cloud.platform": "aws_ec2",
-        "cloud.region": "us-east-1",
-    },
-    {
-        "host.name": f"{NAMESPACE}-nginx-02",
-        "service.name": "nginx-proxy",
-        "service.instance.id": "nginx-proxy-002",
-        "cloud.provider": "gcp",
-        "cloud.platform": "gcp_compute_engine",
-        "cloud.region": "us-central1",
-    },
-]
+def _nginx_hosts(namespace: str) -> list[dict]:
+    """Two nginx instances across different hosts, named after the scenario namespace."""
+    return [
+        {
+            "host.name": f"{namespace}-nginx-01",
+            "service.name": "nginx-proxy",
+            "service.instance.id": "nginx-proxy-001",
+            "cloud.provider": "aws",
+            "cloud.platform": "aws_ec2",
+            "cloud.region": "us-east-1",
+        },
+        {
+            "host.name": f"{namespace}-nginx-02",
+            "service.name": "nginx-proxy",
+            "service.instance.id": "nginx-proxy-002",
+            "cloud.provider": "gcp",
+            "cloud.platform": "gcp_compute_engine",
+            "cloud.region": "us-central1",
+        },
+    ]
 
 
 def _build_resource(host_cfg: dict) -> dict:
@@ -155,34 +156,13 @@ def _generate_metrics(state: NginxState, rng: random.Random) -> list:
 
 
 def run(
-    client: OTLPClient, stop_event: threading.Event, scenario_data: dict | None = None
+    client: OTLPClient, stop_event: threading.Event, *, scenario_data: dict,
+    rng: random.Random | None = None,
 ) -> None:
     """Run nginx metrics generator loop until stop_event is set."""
-    rng = random.Random()
+    rng = rng if rng is not None else random.Random()
 
-    # Rebuild host list dynamically from scenario_data to avoid import-time freezing
-    if scenario_data:
-        ns = scenario_data["namespace"]
-        nginx_hosts = [
-            {
-                "host.name": f"{ns}-nginx-01",
-                "service.name": "nginx-proxy",
-                "service.instance.id": "nginx-proxy-001",
-                "cloud.provider": "aws",
-                "cloud.platform": "aws_ec2",
-                "cloud.region": "us-east-1",
-            },
-            {
-                "host.name": f"{ns}-nginx-02",
-                "service.name": "nginx-proxy",
-                "service.instance.id": "nginx-proxy-002",
-                "cloud.provider": "gcp",
-                "cloud.platform": "gcp_compute_engine",
-                "cloud.region": "us-central1",
-            },
-        ]
-    else:
-        nginx_hosts = NGINX_HOSTS
+    nginx_hosts = _nginx_hosts(scenario_data["namespace"])
 
     resources = [_build_resource(h) for h in nginx_hosts]
     states = [NginxState(rng) for _ in nginx_hosts]
@@ -236,7 +216,7 @@ def main() -> None:
     timer.daemon = True
     timer.start()
     logger.info("Running for %ds (standalone)", duration)
-    run(client, stop_event)
+    run(client, stop_event, scenario_data=standalone_generator_data())
     timer.cancel()
     client.close()
 

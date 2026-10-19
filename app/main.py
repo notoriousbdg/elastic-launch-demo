@@ -10,6 +10,7 @@ from contextlib import asynccontextmanager
 from typing import Optional
 
 from fastapi import FastAPI, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
@@ -19,17 +20,12 @@ from app.config import (
     ACTIVE_SCENARIO_SET,
     APP_HOST,
     APP_PORT,
-    CHANNEL_REGISTRY,
     CHANNEL_TIMEOUT,
     ELASTIC_API_KEY,
     ELASTIC_URL,
     KIBANA_PROXY,
     KIBANA_URL,
-    MISSION_ID,
-    MISSION_NAME,
-    NAMESPACE,
     OTLP_ENDPOINT,
-    SERVICES,
 )
 
 logging.basicConfig(
@@ -43,6 +39,8 @@ logger = logging.getLogger("nova7")
 
 # ── Multi-tenancy singletons ──────────────────────────────────────────────────
 from app.op_queue import OperationQueue
+from app.progress import IDLE as PROGRESS_IDLE, ProgressStore
+from app.launch import Credentials, Launcher
 from app.registry import InstanceRegistry
 from app.store import ChaosStore, DeploymentStore
 
@@ -50,17 +48,7 @@ registry = InstanceRegistry()
 store = DeploymentStore()
 chaos_store = ChaosStore()
 op_queue = OperationQueue()
-
-
-def _queued_step(position: int, total: int) -> dict:
-    """Synthetic 'Queued' progress step that mirrors DeployStep.to_dict() shape."""
-    return {
-        "name": "Queued",
-        "status": "running",
-        "detail": f"Position {position} of {total} in queue",
-        "items_total": 0,
-        "items_done": 0,
-    }
+launcher = Launcher(registry, store, chaos_store)
 
 
 def _purge_deployment_records(deployment_id: str) -> None:
@@ -71,8 +59,8 @@ def _purge_deployment_records(deployment_id: str) -> None:
 
 
 # In-memory progress trackers keyed by deployment_id
-_deploy_progress: dict[str, dict] = {}
-_teardown_progress: dict[str, dict] = {}
+_deploy_progress = ProgressStore()
+_teardown_progress = ProgressStore()
 
 
 def _get_instance(deployment_id: Optional[str] = None):
@@ -133,14 +121,16 @@ async def lifespan(app: FastAPI):
             if not _pre_derived_otlp.endswith(":443"):
                 _pre_derived_otlp += ":443"
 
-        def _make_auto_deploy(dep_id, s_id, _scenario, _deployer):
+        creds = Credentials(kibana_url=kibana_url, elastic_url=elastic_url, api_key=api_key)
+
+        def _make_auto_deploy(dep_id, _scenario, _deployer):
             """Factory that binds per-scenario variables for each deploy thread."""
             _scenario_name = _scenario.scenario_name
 
             def _progress_cb(progress):
                 d = progress.to_dict()
                 d["scenario_name"] = _scenario_name
-                _deploy_progress[dep_id] = d
+                _deploy_progress.set(dep_id, d)
                 steps = d.get("steps") or []
                 if steps:
                     last = steps[-1]
@@ -153,123 +143,19 @@ async def lifespan(app: FastAPI):
                     )
 
             def _auto_deploy():
-                # Shared state between the early-start hook and the post-deploy
-                # fallback path.  Using a dict avoids nonlocal rebinding issues.
-                _state: dict = {"started": False, "instance": None, "endpoint": None}
-
-                def _on_otlp_ready(early_endpoint: str) -> None:
-                    """Start telemetry emission as soon as OTLP endpoint is known.
-
-                    Fires from within deploy_all() right after step 3
-                    (OTLP derivation), before the slow tail (ML, alerts, SLOs,
-                    integrations).  This means KPI gauges reach Elasticsearch
-                    minutes earlier and the executive dashboard tiles populate
-                    immediately when the operator opens it.
-                    """
-                    ep = OTLP_ENDPOINT or early_endpoint
-                    try:
-                        ctx = ScenarioContext.from_scenario(
-                            _scenario,
-                            otlp_endpoint=ep,
-                            otlp_api_key=api_key,
-                            elastic_url=elastic_url,
-                            elastic_api_key=api_key,
-                            kibana_url=kibana_url,
-                        )
-                        instance = ScenarioInstance(ctx, chaos_store=chaos_store)
-                        if ep:
-                            instance.otlp.reconfigure(ep, api_key)
-                        instance.start()
-                        registry.register(dep_id, instance)
-                        store.upsert(
-                            deployment_id=dep_id,
-                            scenario_id=s_id,
-                            otlp_endpoint=ep,
-                            otlp_api_key=api_key,
-                            elastic_url=elastic_url,
-                            elastic_api_key=api_key,
-                            kibana_url=kibana_url,
-                        )
-                        _state["started"] = True
-                        _state["instance"] = instance
-                        _state["endpoint"] = ep
-                        logger.info(
-                            "Auto-deploy: instance started early after OTLP derive (%s)",
-                            dep_id,
-                        )
-                    except Exception:
-                        logger.exception(
-                            "Auto-deploy: early start failed for %s; will retry after deploy_all",
-                            s_id,
-                        )
-
-                result = _deployer.deploy_all(
-                    callback=_progress_cb, on_otlp_ready=_on_otlp_ready
-                )
-
-                if _state["started"]:
-                    # Hook fired — instance is already running.
-                    # Reconfigure only if the final verified endpoint differs from
-                    # the early one (e.g. if OTLP_ENDPOINT env var wasn't set and
-                    # the deployer returned a different verified URL).
-                    final_endpoint = (
-                        OTLP_ENDPOINT or result.otlp_endpoint or _pre_derived_otlp
-                    )
-                    if final_endpoint and final_endpoint != _state["endpoint"]:
-                        inst = _state["instance"]
-                        if inst is not None:
-                            inst.otlp.reconfigure(final_endpoint, api_key)
-                            logger.info(
-                                "Auto-deploy: OTLP endpoint updated post-deploy for %s → %s",
-                                dep_id,
-                                final_endpoint,
-                            )
-                    logger.info("Auto-deploy complete: %s (%s)", dep_id, s_id)
-                    return
-
-                # Hook never fired (OTLP derivation failed or raised) — fall back
-                # to the original post-deploy start behavior.
                 # Priority: explicit env var → deployer-verified → pre-derived fallback
-                otlp_endpoint = OTLP_ENDPOINT or result.otlp_endpoint or _pre_derived_otlp
-                try:
-                    ctx = ScenarioContext.from_scenario(
-                        _scenario,
-                        otlp_endpoint=otlp_endpoint,
-                        otlp_api_key=api_key,
-                        elastic_url=elastic_url,
-                        elastic_api_key=api_key,
-                        kibana_url=kibana_url,
-                    )
-                    instance = ScenarioInstance(ctx, chaos_store=chaos_store)
-                    if otlp_endpoint:
-                        instance.otlp.reconfigure(otlp_endpoint, api_key)
-                    instance.start()
-                    registry.register(dep_id, instance)
-                    store.upsert(
-                        deployment_id=dep_id,
-                        scenario_id=s_id,
-                        otlp_endpoint=otlp_endpoint,
-                        otlp_api_key=api_key,
-                        elastic_url=elastic_url,
-                        elastic_api_key=api_key,
-                        kibana_url=kibana_url,
-                    )
-                    logger.info("Auto-deploy complete: %s (%s)", dep_id, s_id)
-                except Exception:
-                    logger.exception("Auto-deploy failed for %s", s_id)
+                launcher.deploy_and_start(
+                    _deployer, _scenario, dep_id, creds,
+                    otlp_override=OTLP_ENDPOINT,
+                    otlp_fallback=_pre_derived_otlp,
+                    progress_cb=_progress_cb,
+                )
 
             return _auto_deploy
 
         def _make_on_position(s_id: str):
             def _on_position(position: int, total: int) -> None:
-                entry = _deploy_progress.get(s_id)
-                if not entry or entry.get("finished"):
-                    return
-                steps = entry.get("steps") or []
-                if steps and steps[0].get("name") == "Queued":
-                    steps[0] = _queued_step(position, total)
-                else:
-                    entry["steps"] = [_queued_step(position, total)]
+                _deploy_progress.set_queue_position(s_id, position, total)
             return _on_position
 
         for scenario_id in ACTIVE_SCENARIO_LIST:
@@ -281,15 +167,10 @@ async def lifespan(app: FastAPI):
                 "Auto-deploy triggered from environment variables (scenario=%s)",
                 scenario_id,
             )
-            _deploy_progress[scenario_id] = {
-                "finished": False, "error": "",
-                "scenario_id": scenario_id,
-                "scenario_name": scenario.scenario_name,
-                "steps": [_queued_step(1, 1)],
-            }
+            _deploy_progress.start_queued(scenario_id, scenario_id, scenario.scenario_name)
             op_queue.submit_deploy(
                 scenario_id,
-                _make_auto_deploy(scenario_id, scenario_id, scenario, deployer),
+                _make_auto_deploy(scenario_id, scenario, deployer),
                 _make_on_position(scenario_id),
             )
 
@@ -342,7 +223,7 @@ def _inject_theme(html: str, deployment_id: Optional[str] = None) -> str:
         from scenario_engine import get_scenario
 
         scenario = get_scenario(ACTIVE_SCENARIO)
-        mission_id = MISSION_ID
+        mission_id = scenario.namespace.upper()
         kibana = _get_default_creds()[1]
 
     kibana_display = KIBANA_PROXY or kibana
@@ -504,7 +385,7 @@ async def health():
 
 
 @app.get("/chaos", response_class=HTMLResponse)
-async def chaos_page(deployment_id: Optional[str] = None):
+def chaos_page(deployment_id: Optional[str] = None):
     path = os.path.join(_base, "chaos_ui", "static", "index.html")
     with open(path) as f:
         html = f.read()
@@ -523,7 +404,7 @@ async def list_scenarios():
 
 
 @app.post("/api/scenarios/reload")
-async def reload_scenarios():
+def reload_scenarios():
     """Re-scan scenarios/*/scenario.yaml and reload all scenarios from disk."""
     from scenario_engine import reload_registry
 
@@ -531,7 +412,7 @@ async def reload_scenarios():
 
 
 @app.get("/api/scenarios/{scenario_id}/download")
-async def download_scenario(scenario_id: str):
+def download_scenario(scenario_id: str):
     """Download a scenario folder as a zip archive named <scenario_id>.zip."""
     from scenario_engine import export_scenario_zip
 
@@ -553,7 +434,7 @@ async def upload_scenario(request: Request):
 
     body = await request.body()
     try:
-        result = import_scenario_zip(body)
+        result = await run_in_threadpool(import_scenario_zip, body)
     except (ValueError, zipfile.BadZipFile) as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     return result
@@ -582,15 +463,15 @@ async def fetch_github_scenarios(request: Request):
         return JSONResponse({"error": "repo_url is required"}, status_code=400)
 
     try:
-        data = fetch_github_zipball(repo_url, token)
-        result = import_scenarios_from_archive(data)
+        data = await run_in_threadpool(fetch_github_zipball, repo_url, token)
+        result = await run_in_threadpool(import_scenarios_from_archive, data)
     except (ValueError, zipfile.BadZipFile) as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     return result
 
 
 @app.get("/api/scenario")
-async def current_scenario(deployment_id: Optional[str] = None):
+def current_scenario(deployment_id: Optional[str] = None):
     """Return active scenario metadata."""
     scenario = _get_scenario_for_deployment(deployment_id)
     return {
@@ -637,7 +518,7 @@ async def list_deployments():
 
 
 @app.post("/api/deployments/{deployment_id}/stop")
-async def stop_deployment(deployment_id: str):
+def stop_deployment(deployment_id: str):
     """Stop a specific deployment's generators."""
     inst = registry.get(deployment_id)
     if not inst:
@@ -650,7 +531,7 @@ async def stop_deployment(deployment_id: str):
 
 
 @app.delete("/api/deployments/{deployment_id}")
-async def remove_deployment(deployment_id: str):
+def remove_deployment(deployment_id: str):
     """Remove a deployment from registry and store."""
     inst = registry.remove(deployment_id)
     if inst:
@@ -908,7 +789,7 @@ async def env_creds_status():
 
 
 @app.post("/api/setup/test-connection")
-async def test_connection(body: dict):
+def test_connection(body: dict):
     """Test connectivity to each component independently."""
     from scenario_engine import get_scenario as _get_scenario_by_id
     from elastic_config.deployer import ScenarioDeployer
@@ -955,13 +836,8 @@ async def test_connection(body: dict):
             scenario_id = body.get("scenario_id", ACTIVE_SCENARIO)
             scenario = _get_scenario_by_id(scenario_id)
             deployer = ScenarioDeployer(scenario, elastic_url, kibana_url, api_key)
-            explicit_otlp = body.get("otlp_url") or ""
-            if explicit_otlp:
-                otlp_ok = deployer._verify_otlp_candidate(client, explicit_otlp)
-                otlp_url = explicit_otlp if otlp_ok else ""
-            else:
-                otlp_url = deployer._derive_otlp_endpoint(client) or ""
-                otlp_ok = bool(otlp_url)
+            otlp_url = deployer.probe_otlp(client, explicit=body.get("otlp_url") or "")
+            otlp_ok = bool(otlp_url)
             result["otlp_ok"] = otlp_ok
             result["otlp_error"] = None if otlp_ok else "Endpoint unreachable"
             result["otlp_endpoint"] = otlp_url or None
@@ -970,7 +846,7 @@ async def test_connection(body: dict):
 
 
 @app.post("/api/setup/launch")
-async def launch_setup(body: dict):
+def launch_setup(body: dict):
     """Launch deployment of a scenario to Elastic.
 
     Accepts scenario_id + kibana_url + api_key.  Derives ES and OTLP URLs.
@@ -979,8 +855,6 @@ async def launch_setup(body: dict):
     """
     from scenario_engine import get_scenario as _get_scenario_by_id
     from elastic_config.deployer import ScenarioDeployer
-    from app.context import ScenarioContext
-    from app.instance import ScenarioInstance
 
     scenario_id = body.get("scenario_id", ACTIVE_SCENARIO)
     _def_elastic, _def_kibana, _def_key = _get_default_creds()
@@ -1024,6 +898,10 @@ async def launch_setup(body: dict):
         )
 
     cloud_api_key = (body.get("cloud_api_key") or "").strip()
+    creds = Credentials(
+        kibana_url=kibana_url, elastic_url=elastic_url, api_key=api_key,
+        cloud_api_key=cloud_api_key,
+    )
     deployer = ScenarioDeployer(
         scenario, elastic_url, kibana_url, api_key,
         kibana_proxy=KIBANA_PROXY,
@@ -1039,7 +917,7 @@ async def launch_setup(body: dict):
         d = progress.to_dict()
         d["scenario_id"] = scenario_id
         d["scenario_name"] = scenario_name
-        _deploy_progress[deployment_id] = d
+        _deploy_progress.set(deployment_id, d)
 
     def _run():
         # Stop existing instance for this scenario if running
@@ -1053,132 +931,16 @@ async def launch_setup(body: dict):
             except Exception as exc:
                 logger.warning("Error stopping old instance: %s", exc)
 
-        # Shared state between the early-start hook and the post-deploy fallback.
-        _state: dict = {"started": False, "instance": None, "endpoint": None}
-
-        def _on_otlp_ready(early_endpoint: str) -> None:
-            """Start telemetry as soon as the OTLP endpoint is confirmed (step 3),
-            before the slow tail of deploy_all() runs.
-            """
-            ep = explicit_otlp or early_endpoint
-            try:
-                ctx = ScenarioContext.from_scenario(
-                    scenario,
-                    otlp_endpoint=ep,
-                    otlp_api_key=api_key,
-                    elastic_url=elastic_url,
-                    elastic_api_key=api_key,
-                    kibana_url=kibana_url,
-                )
-                instance = ScenarioInstance(ctx, chaos_store=chaos_store)
-                if ep:
-                    instance.otlp.reconfigure(ep, api_key)
-                    logger.info(
-                        "OTLPClient for %s reconfigured early to %s", scenario_id, ep
-                    )
-                instance.start()
-                registry.register(deployment_id, instance)
-                store.upsert(
-                    deployment_id=deployment_id,
-                    scenario_id=scenario_id,
-                    otlp_endpoint=ep,
-                    otlp_api_key=api_key,
-                    elastic_url=elastic_url,
-                    elastic_api_key=api_key,
-                    kibana_url=kibana_url,
-                    cloud_api_key=cloud_api_key,
-                )
-                _state["started"] = True
-                _state["instance"] = instance
-                _state["endpoint"] = ep
-                logger.info(
-                    "Launch: instance started early after OTLP derive (%s)", deployment_id
-                )
-            except Exception as exc:
-                logger.exception(
-                    "Launch: early start failed for %s; will retry after deploy_all",
-                    scenario_id,
-                )
-
-        result = deployer.deploy_all(
-            callback=_progress_cb, on_otlp_ready=_on_otlp_ready
+        launcher.deploy_and_start(
+            deployer, scenario, deployment_id, creds,
+            otlp_override=explicit_otlp,
+            progress_cb=_progress_cb,
         )
 
-        if _state["started"]:
-            # Hook fired — instance is already running.
-            # Reconfigure only if the final endpoint differs from the early one.
-            final_endpoint = explicit_otlp or result.otlp_endpoint
-            if final_endpoint and final_endpoint != _state["endpoint"]:
-                inst = _state["instance"]
-                if inst is not None:
-                    inst.otlp.reconfigure(final_endpoint, api_key)
-                    logger.info(
-                        "OTLPClient for %s updated post-deploy to %s",
-                        scenario_id,
-                        final_endpoint,
-                    )
-            logger.info("Deployment %s (%s) live", deployment_id, scenario_id)
-            return
-
-        # Hook never fired — fall back to original post-deploy start behavior.
-        # Use explicit OTLP override if provided, otherwise use derived
-        otlp_endpoint = explicit_otlp or result.otlp_endpoint
-
-        # Create ScenarioContext + ScenarioInstance
-        try:
-            ctx = ScenarioContext.from_scenario(
-                scenario,
-                otlp_endpoint=otlp_endpoint or "",
-                otlp_api_key=api_key,
-                elastic_url=elastic_url,
-                elastic_api_key=api_key,
-                kibana_url=kibana_url,
-            )
-            instance = ScenarioInstance(ctx, chaos_store=chaos_store)
-
-            # Reconfigure OTLP if we have an endpoint
-            if otlp_endpoint:
-                instance.otlp.reconfigure(otlp_endpoint, api_key)
-                logger.info(
-                    "OTLPClient for %s reconfigured to %s", scenario_id, otlp_endpoint
-                )
-
-            instance.start()
-            registry.register(deployment_id, instance)
-
-            # Persist to SQLite
-            store.upsert(
-                deployment_id=deployment_id,
-                scenario_id=scenario_id,
-                otlp_endpoint=otlp_endpoint or "",
-                otlp_api_key=api_key,
-                elastic_url=elastic_url,
-                elastic_api_key=api_key,
-                kibana_url=kibana_url,
-                cloud_api_key=cloud_api_key,
-            )
-
-            logger.info("Deployment %s (%s) live", deployment_id, scenario_id)
-        except Exception as exc:
-            logger.exception("Failed to start instance for %s: %s", scenario_id, exc)
-
     def _on_position(position: int, total: int) -> None:
-        entry = _deploy_progress.get(deployment_id)
-        if not entry or entry.get("finished"):
-            return
-        steps = entry.get("steps") or []
-        if steps and steps[0].get("name") == "Queued":
-            steps[0] = _queued_step(position, total)
-        else:
-            entry["steps"] = [_queued_step(position, total)]
+        _deploy_progress.set_queue_position(deployment_id, position, total)
 
-    existing = _deploy_progress.get(deployment_id)
-    if not existing or existing.get("finished"):
-        _deploy_progress[deployment_id] = {
-            "finished": False, "error": "",
-            "scenario_id": scenario_id, "scenario_name": scenario_name,
-            "steps": [_queued_step(1, 1)],
-        }
+    _deploy_progress.start_queued(deployment_id, scenario_id, scenario_name, only_if_idle=True)
     accepted = op_queue.submit_deploy(deployment_id, _run, _on_position)
     if not accepted:
         logger.info("Launch for %s ignored (already active or queued)", deployment_id)
@@ -1193,12 +955,9 @@ async def launch_setup(body: dict):
 @app.get("/api/setup/progress")
 async def setup_progress(deployment_id: Optional[str] = None):
     """Return current deployment progress."""
-    if deployment_id and deployment_id in _deploy_progress:
-        return _deploy_progress[deployment_id]
+    entry = _deploy_progress.get(deployment_id) if deployment_id else None
     # Fall back to most recent progress entry
-    if _deploy_progress:
-        return list(_deploy_progress.values())[-1]
-    return {"finished": True, "error": "", "steps": []}
+    return entry or _deploy_progress.latest() or dict(PROGRESS_IDLE)
 
 
 @app.get("/api/setup/active-deploys")
@@ -1213,17 +972,17 @@ async def active_deploys():
     seen = set(ordered)
     # Anything in the progress map that isn't tracked by the queue (e.g., legacy
     # in-flight ops) gets appended at the end so we don't drop it.
-    extras = [d for d, p in _deploy_progress.items()
-              if not p.get("finished", True) and d not in seen]
+    active = _deploy_progress.in_progress()
+    extras = [d for d in active if d not in seen]
     return {
         "deployments": [
             {
                 "deployment_id": dep_id,
-                "scenario_id": _deploy_progress.get(dep_id, {}).get("scenario_id", dep_id),
-                "scenario_name": _deploy_progress.get(dep_id, {}).get("scenario_name", dep_id),
+                "scenario_id": active[dep_id].get("scenario_id", dep_id),
+                "scenario_name": active[dep_id].get("scenario_name", dep_id),
             }
             for dep_id in ordered + extras
-            if dep_id in _deploy_progress and not _deploy_progress[dep_id].get("finished", True)
+            if dep_id in active
         ]
     }
 
@@ -1234,16 +993,17 @@ async def auto_deploy_status():
 
     Kept for backward compatibility; the selector UI uses /api/setup/active-deploys.
     """
+    active = _deploy_progress.in_progress()
     deployments = [
         {"deployment_id": s_id}
         for s_id in ACTIVE_SCENARIO_LIST
-        if s_id in _deploy_progress and not _deploy_progress[s_id].get("finished", True)
+        if s_id in active
     ]
     return {"deployments": deployments}
 
 
 @app.get("/api/setup/detect")
-async def detect_existing(deployment_id: Optional[str] = None):
+def detect_existing(deployment_id: Optional[str] = None):
     """Check if the active scenario is already deployed to Elastic."""
     from elastic_config.deployer import ScenarioDeployer
 
@@ -1266,7 +1026,7 @@ async def detect_existing(deployment_id: Optional[str] = None):
 
 
 @app.post("/api/setup/teardown")
-async def teardown_setup(body: dict = {}):
+def teardown_setup(body: dict = {}):
     """Remove a scenario's Elastic config (KB, workflows, alerts, etc)."""
     from elastic_config.deployer import ScenarioDeployer
 
@@ -1293,7 +1053,7 @@ async def teardown_setup(body: dict = {}):
 
 
 @app.post("/api/setup/stop-and-teardown")
-async def stop_and_teardown(body: dict = {}):
+def stop_and_teardown(body: dict = {}):
     """Stop generators and remove scenario artifacts from Elastic (async with progress)."""
     from elastic_config.deployer import ScenarioDeployer
 
@@ -1308,12 +1068,9 @@ async def stop_and_teardown(body: dict = {}):
     # entry so the UI stops polling.
     if op_queue.cancel_deploy(deployment_id):
         logger.info("Cancelled queued deploy %s on teardown request", deployment_id)
-        dep = _deploy_progress.get(deployment_id)
-        if dep:
-            dep["finished"] = True
-            dep["error"] = "Cancelled before deployment started"
+        _deploy_progress.mark_finished(deployment_id, "Cancelled before deployment started")
         _purge_deployment_records(deployment_id)
-        _teardown_progress[deployment_id] = {"finished": True, "error": "", "steps": []}
+        _teardown_progress.set(deployment_id, PROGRESS_IDLE)
         return {"status": "cancelled", "deployment_id": deployment_id}
 
     inst = registry.remove(deployment_id)
@@ -1335,7 +1092,7 @@ async def stop_and_teardown(body: dict = {}):
             d = progress.to_dict()
             d["scenario_id"] = scenario_id
             d["scenario_name"] = scenario_name
-            _teardown_progress[deployment_id] = d
+            _teardown_progress.set(deployment_id, d)
 
         def _run_teardown():
             try:
@@ -1347,20 +1104,9 @@ async def stop_and_teardown(body: dict = {}):
             _purge_deployment_records(deployment_id)
 
         def _on_position(position: int, total: int) -> None:
-            entry = _teardown_progress.get(deployment_id)
-            if not entry or entry.get("finished"):
-                return
-            steps = entry.get("steps") or []
-            if steps and steps[0].get("name") == "Queued":
-                steps[0] = _queued_step(position, total)
-            else:
-                entry["steps"] = [_queued_step(position, total)]
+            _teardown_progress.set_queue_position(deployment_id, position, total)
 
-        _teardown_progress[deployment_id] = {
-            "finished": False, "error": "",
-            "scenario_id": scenario_id, "scenario_name": scenario_name,
-            "steps": [_queued_step(1, 1)],
-        }
+        _teardown_progress.start_queued(deployment_id, scenario_id, scenario_name)
         op_queue.submit_teardown(deployment_id, _run_teardown, _on_position)
         return {"status": "stopping", "deployment_id": deployment_id}
 
@@ -1371,18 +1117,15 @@ async def stop_and_teardown(body: dict = {}):
         except Exception as exc:
             logger.warning("Error stopping deployment %s: %s", deployment_id, exc)
     _purge_deployment_records(deployment_id)
-    _teardown_progress[deployment_id] = {"finished": True, "error": "", "steps": []}
+    _teardown_progress.set(deployment_id, PROGRESS_IDLE)
     return {"status": "stopping", "deployment_id": deployment_id}
 
 
 @app.get("/api/setup/teardown-progress")
 async def teardown_progress(deployment_id: Optional[str] = None):
     """Return current teardown progress."""
-    if deployment_id and deployment_id in _teardown_progress:
-        return _teardown_progress[deployment_id]
-    if _teardown_progress:
-        return list(_teardown_progress.values())[-1]
-    return {"finished": True, "error": "", "steps": []}
+    entry = _teardown_progress.get(deployment_id) if deployment_id else None
+    return entry or _teardown_progress.latest() or dict(PROGRESS_IDLE)
 
 
 @app.get("/api/setup/active-teardowns")
@@ -1395,17 +1138,17 @@ async def active_teardowns():
     """
     ordered = op_queue.list_ordered("teardown")
     seen = set(ordered)
-    extras = [d for d, p in _teardown_progress.items()
-              if not p.get("finished", True) and d not in seen]
+    active = _teardown_progress.in_progress()
+    extras = [d for d in active if d not in seen]
     return {
         "teardowns": [
             {
                 "deployment_id": dep_id,
-                "scenario_id": _teardown_progress.get(dep_id, {}).get("scenario_id", dep_id),
-                "scenario_name": _teardown_progress.get(dep_id, {}).get("scenario_name", dep_id),
+                "scenario_id": active[dep_id].get("scenario_id", dep_id),
+                "scenario_name": active[dep_id].get("scenario_name", dep_id),
             }
             for dep_id in ordered + extras
-            if dep_id in _teardown_progress and not _teardown_progress[dep_id].get("finished", True)
+            if dep_id in active
         ]
     }
 

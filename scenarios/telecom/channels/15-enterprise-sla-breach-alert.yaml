@@ -53,7 +53,7 @@ fault_params:
   sla_breach_min: {randint: [5, 60]}
   sla_credit_tier: {choice: [WARNING, 5_PCT_CREDIT, 10_PCT_CREDIT, 20_PCT_CREDIT]}
   sla_activation_time_s: {randint: [35, 120]}
-  breach_start_time: 2026-03-08T07:12:00Z
+  breach_start_time: "2026-03-08T07:12:00Z"
   sla_credit_amount: {uniform: [5000.0, 50000.0], round: 0}
   enterprise_affected: {randint: [5, 50]}
   mvno_affected: {randint: [1, 5]}

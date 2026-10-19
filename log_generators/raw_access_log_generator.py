@@ -24,7 +24,7 @@ import signal
 import threading
 import time
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 
 from app.telemetry import ESBulkClient
 
@@ -250,20 +250,17 @@ def data_stream_for(namespace: str | None = None) -> str:
 def run(
     client: ESBulkClient,
     stop_event: threading.Event,
-    scenario_data: dict | None = None,
+    *,
+    scenario_data: dict,
+    rng: random.Random | None = None,
+    clock: Callable[[], float] | None = None,
 ) -> None:
     """Run the raw access-log generator loop until stop_event is set."""
-    rng = random.Random()
+    rng = rng if rng is not None else random.Random()
+    clock = clock or time.time
 
-    if scenario_data and "scenario" in scenario_data:
-        scenario = scenario_data["scenario"]
-        namespace = scenario_data["namespace"]
-    else:
-        from app.config import ACTIVE_SCENARIO
-        from scenario_engine import get_scenario
-
-        scenario = get_scenario(ACTIVE_SCENARIO)
-        namespace = scenario.namespace
+    scenario = scenario_data["scenario"]
+    namespace = scenario_data["namespace"]
 
     profile = scenario.raw_log_profile
     data_stream = data_stream_for(namespace)
@@ -289,7 +286,7 @@ def run(
     )
 
     while not stop_event.is_set():
-        now = time.time()
+        now = clock()
         spike_active = schedule.is_spike_active(now)
 
         base_batch = rng.randint(BATCH_SIZE_MIN, BATCH_SIZE_MAX)
@@ -333,7 +330,9 @@ def main() -> None:
     timer.start()
     logger.info("Running for %ds (standalone mode)", duration)
 
-    run(client, stop_event)
+    from app.context import standalone_generator_data
+
+    run(client, stop_event, scenario_data=standalone_generator_data())
     timer.cancel()
     client.close()
 

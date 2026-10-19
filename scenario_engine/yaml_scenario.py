@@ -31,6 +31,7 @@ from typing import Any
 
 import yaml
 
+from app.services.expr import find_exprs, validate_expr
 from scenario_engine.base import BaseScenario
 from scenario_engine.fault_spec import resolve, resolve_dict
 
@@ -79,7 +80,7 @@ class YamlScenario(BaseScenario):
                     "sensor_type", "affected_services", "cascade_services",
                     "description", "investigation_notes", "remediation_action",
                     "error_message", "stack_trace", "infrastructure_events",
-                    "business_impact",
+                    "business_impact", "infra_impact",
                 )
                 if k in ch
             }
@@ -197,20 +198,12 @@ class YamlScenario(BaseScenario):
     def services(self) -> dict[str, dict[str, Any]]:
         """Identity/resource metadata for each service (cloud, region, language, subsystem).
 
-        Derived from per-service YAML files in sort_order; falls back to the
-        legacy ``services:`` block in scenario.yaml when no services/ dir exists.
+        Derived from per-service YAML files in sort_order.
         """
-        if self._service_specs:
-            return {
-                svc: {k: spec[k] for k in self._IDENTITY_KEYS if k in spec}
-                for svc, spec in self._service_specs.items()
-            }
-        # Legacy / test fallback: services: block in scenario.yaml
-        result: dict[str, dict[str, Any]] = {}
-        for svc, cfg in self._data.get("services", {}).items():
-            result[svc] = {k: v for k, v in cfg.items()
-                           if k in self._IDENTITY_KEYS}
-        return result
+        return {
+            svc: {k: spec[k] for k in self._IDENTITY_KEYS if k in spec}
+            for svc, spec in self._service_specs.items()
+        }
 
     @property
     def channel_registry(self) -> dict[int, dict[str, Any]]:
@@ -218,36 +211,27 @@ class YamlScenario(BaseScenario):
 
     @property
     def service_topology(self) -> dict[str, list[tuple[str, str, str]]]:
-        if self._service_specs:
-            return {
-                svc: [tuple(e) for e in spec.get("topology", [])]
-                for svc, spec in self._service_specs.items()
-                if spec.get("topology")
-            }
-        raw = self._data.get("service_topology", {})
-        return {svc: [tuple(e) for e in edges] for svc, edges in raw.items()}
+        return {
+            svc: [tuple(e) for e in spec.get("topology", [])]
+            for svc, spec in self._service_specs.items()
+            if spec.get("topology")
+        }
 
     @property
     def entry_endpoints(self) -> dict[str, list[tuple[str, str]]]:
-        if self._service_specs:
-            return {
-                svc: [tuple(e) for e in spec.get("entry_endpoints", [])]
-                for svc, spec in self._service_specs.items()
-                if spec.get("entry_endpoints")
-            }
-        raw = self._data.get("entry_endpoints", {})
-        return {svc: [tuple(e) for e in eps] for svc, eps in raw.items()}
+        return {
+            svc: [tuple(e) for e in spec.get("entry_endpoints", [])]
+            for svc, spec in self._service_specs.items()
+            if spec.get("entry_endpoints")
+        }
 
     @property
     def db_operations(self) -> dict[str, list[tuple[str, str, str]]]:
-        if self._service_specs:
-            return {
-                svc: [tuple(op) for op in spec.get("db_operations", [])]
-                for svc, spec in self._service_specs.items()
-                if spec.get("db_operations")
-            }
-        raw = self._data.get("db_operations", {})
-        return {svc: [tuple(op) for op in ops] for svc, ops in raw.items()}
+        return {
+            svc: [tuple(op) for op in spec.get("db_operations", [])]
+            for svc, spec in self._service_specs.items()
+            if spec.get("db_operations")
+        }
 
     # ── Infrastructure ───────────────────────────────────────────────────
 
@@ -268,10 +252,6 @@ class YamlScenario(BaseScenario):
     @property
     def assessment_tool_config(self) -> dict[str, Any]:
         return self._data.get("assessment_tool_config", {})
-
-    @property
-    def knowledge_base_docs(self) -> list[dict[str, Any]]:
-        return []  # Populated at deploy time from channel_registry
 
     # ── Raw Log Profile ──────────────────────────────────────────────────
 
@@ -313,10 +293,10 @@ class YamlScenario(BaseScenario):
 
     # ── Fault Parameters ─────────────────────────────────────────────────
 
-    def get_fault_params(self, channel: int) -> dict[str, Any]:
+    def get_fault_params(self, channel: int, rng: random.Random | None = None) -> dict[str, Any]:
         ch = self._channels.get(channel, {})
         raw = ch.get("fault_params", {})
-        return resolve_dict(raw)  # unseeded rng for true randomness
+        return resolve_dict(raw, rng)  # rng=None → fresh unseeded rng
 
     # ── Trace Attributes & RCA ───────────────────────────────────────────
 
@@ -365,7 +345,14 @@ def load_yaml_scenario(scenario_dir: Path) -> YamlScenario:
             ch_num = _channel_num_from_path(ch_path)
             channels[ch_num] = _load_yaml(ch_path)
 
-    return YamlScenario(data, channels, scenario_dir=scenario_dir)
+    scenario = YamlScenario(data, channels, scenario_dir=scenario_dir)
+
+    # Reject unsafe expressions up front so they never reach eval().
+    for doc in (data, *channels.values(), *scenario._service_specs.values()):
+        for expr in find_exprs(doc):
+            validate_expr(expr)
+
+    return scenario
 
 
 # ---------------------------------------------------------------------------
@@ -412,7 +399,7 @@ def emit_executive_business_metrics_if_eligible(service: Any) -> None:
     if not want or want != service.SERVICE_NAME:
         return
 
-    rng = random.Random()
+    rng = getattr(service, "_rng", None) or random.Random()
 
     # Collect per-KPI impact candidates from every active fault channel.
     # Structure: { kpi_name -> [candidate_value, ...] }

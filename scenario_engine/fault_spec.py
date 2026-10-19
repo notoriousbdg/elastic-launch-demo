@@ -16,7 +16,8 @@ or None) is returned verbatim.
 
 The ``format`` primitive supports Python format-spec syntax inside the
 template (e.g. ``"{n:02x}"`` or ``"{v:X}"``), since we delegate to
-:meth:`str.format` after resolving argument values.
+:func:`app.services.expr.safe_format` (``str.format`` semantics, without
+attribute fields) after resolving argument values.
 
 Example channel-file usage::
 
@@ -38,6 +39,8 @@ from __future__ import annotations
 
 import random as _random
 from typing import Any
+
+from app.services.expr import safe_format
 
 # Keys that trigger DSL dispatch when found in a dict.
 _DSL_KEYS: frozenset[str] = frozenset({"choice", "randint", "uniform", "random", "format"})
@@ -94,7 +97,7 @@ def resolve(spec: Any, rng: _random.Random | None = None) -> Any:
         kwargs: dict[str, Any] = {
             k: resolve(v, rng) for k, v in spec.items() if k != "format"
         }
-        return template.format(**kwargs)
+        return safe_format(template, kwargs)
 
     # Plain dict — no recognised DSL key — return verbatim.
     return spec

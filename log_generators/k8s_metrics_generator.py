@@ -24,11 +24,10 @@ import signal
 import threading
 import time
 import uuid
-import zlib
 from datetime import datetime, timezone
 
 from app.telemetry import OTLPClient, _format_attributes, SCHEMA_URL, _now_ns
-from app.config import ACTIVE_SCENARIO, NAMESPACE
+from app.context import standalone_generator_data
 
 logger = logging.getLogger("k8s-metrics-generator")
 
@@ -40,70 +39,12 @@ CLUSTER_SCOPE = "github.com/open-telemetry/opentelemetry-collector-contrib/recei
 K8S_OBJECTS_SCOPE = "github.com/open-telemetry/opentelemetry-collector-contrib/receiver/k8sobjectsreceiver"
 SCOPE_VERSION = "0.115.0"
 
-# ── Load from active scenario ────────────────────────────────────────────────
-def _load_scenario_data():
-    from scenario_engine import get_scenario
-    scenario = get_scenario(ACTIVE_SCENARIO)
-    return list(scenario.services.keys()), scenario.k8s_clusters
-
-SERVICES, CLUSTERS = _load_scenario_data()
-
-# Legacy single-cluster config (used by warning event logs) — use first cluster
-CLOUD_CONFIG = {
-    "provider": CLUSTERS[0]["provider"] if CLUSTERS else "aws",
-    "platform": CLUSTERS[0]["platform"] if CLUSTERS else "aws_eks",
-    "region": CLUSTERS[0]["region"] if CLUSTERS else "us-east-1",
-    "zones": CLUSTERS[0]["zones"] if CLUSTERS else ["us-east-1a"],
-    "os_description": CLUSTERS[0].get("os_description", "Linux") if CLUSTERS else "Linux",
-}
-
-
-def _init_pod_data(cluster: dict, seed_offset: int = 0, namespace: str = NAMESPACE) -> dict:
-    """Initialize static K8s pod/node/deployment data for a cluster's services.
-
-    Uses a namespace-scoped seed so pod/node names are deterministic across restarts
-    and unique per scenario even when scenarios share the same cluster-index/region layout.
-    Seed expression mirrors infra_topology.build_topology exactly so IDs are identical
-    between the trace generator and the k8s metrics generator.
-    seed_offset differentiates clusters (0, 1, 2).
-    """
-    # Namespace-scoped seed: random.Random(str) uses sha512, stable across processes.
-    # Must mirror build_topology in infra_topology.py exactly.
-    stable = random.Random(f"{namespace}:{seed_offset}")
-
-    region = cluster["region"]
-    # Per-namespace subnet octet — ensures node names never collide across scenarios.
-    ns_octet = zlib.crc32(namespace.encode()) % 256
-    node_names = [
-        f"ip-10-{ns_octet}-{stable.randint(10, 200)}-{stable.randint(10, 200)}.{region}.compute.internal"
-        for _ in range(3)
-    ]
-
-    pods = {}
-    for svc in cluster["services"]:
-        node_name = stable.choice(node_names)
-        pod_hex1 = f"{stable.getrandbits(32):08x}"
-        pod_hex2 = f"{stable.getrandbits(24):06x}"
-        pods[svc] = {
-            "pod_name": f"{svc}-{pod_hex1}-{pod_hex2}",
-            "pod_uid": str(uuid.UUID(int=stable.getrandbits(128))),
-            "pod_ip": f"10.{stable.randint(100, 120)}.{stable.randint(1, 10)}.{stable.randint(2, 250)}",
-            "node_name": node_name,
-            "node_uid": str(uuid.UUID(int=stable.getrandbits(128))),
-            "deployment_name": f"{svc}-deployment",
-            "replicaset_name": f"{svc}-{stable.getrandbits(32):08x}",
-            "container_id": f"containerd://{stable.getrandbits(256):064x}",
-        }
-
-    return {"pods": pods, "node_names": list(set(node_names))}
-
-
 class K8sState:
     """Tracks cumulative counters per service."""
 
-    def __init__(self, rng: random.Random, services: list[str] | None = None):
+    def __init__(self, rng: random.Random, services: list[str]):
         self._rng = rng
-        self._services = services or list(SERVICES)
+        self._services = list(services)
         self.net_rx = {svc: rng.randint(50_000_000, 100_000_000) for svc in self._services}
         self.net_tx = {svc: rng.randint(70_000_000, 120_000_000) for svc in self._services}
         self.restarts = {svc: 0 for svc in self._services}
@@ -144,7 +85,7 @@ def _cumulative_sum(name: str, unit: str, value, is_int: bool = True, attributes
     }
 
 
-def _build_pod_resource(svc: str, pod_data: dict, cluster: dict, namespace: str = NAMESPACE) -> dict:
+def _build_pod_resource(svc: str, pod_data: dict, cluster: dict, namespace: str) -> dict:
     """Build OTLP resource for a pod (kubeletstatsreceiver).
 
     Carries kubelet-owned pod and container metrics.
@@ -243,7 +184,7 @@ def _build_node_resource_kubelet(node_name: str, pod_data: dict, cluster: dict) 
     return {"attributes": _format_attributes(attrs), "schemaUrl": SCHEMA_URL}
 
 
-def _build_deployment_resource(svc: str, pod_data: dict, cluster: dict, namespace: str = NAMESPACE) -> dict:
+def _build_deployment_resource(svc: str, pod_data: dict, cluster: dict, namespace: str) -> dict:
     """Build OTLP resource for a deployment (k8sclusterreceiver)."""
     p = pod_data["pods"][svc]
     attrs = {
@@ -359,14 +300,11 @@ def _generate_deployment_metrics(rng: random.Random) -> list:
 # ── Additional workload resources + metrics for donut charts ─────────────────
 
 # DaemonSets: 2 system-level daemonsets
-DAEMONSETS = [f"{NAMESPACE}-log-collector", f"{NAMESPACE}-node-exporter"]
 # StatefulSets: 2 stateful services
-STATEFULSETS = [f"{NAMESPACE}-redis", f"{NAMESPACE}-postgres"]
 # Jobs: 2 periodic batch jobs
-JOBS = [f"{NAMESPACE}-db-backup", f"{NAMESPACE}-report-gen"]
 
 
-def _build_daemonset_resource(ds_name: str, cluster: dict, namespace: str = NAMESPACE) -> dict:
+def _build_daemonset_resource(ds_name: str, cluster: dict, namespace: str) -> dict:
     attrs = {
         "k8s.daemonset.name": ds_name,
         "k8s.namespace.name": namespace,
@@ -392,7 +330,7 @@ def _generate_daemonset_metrics(rng: random.Random, num_nodes: int) -> list:
     ]
 
 
-def _build_statefulset_resource(ss_name: str, cluster: dict, namespace: str = NAMESPACE) -> dict:
+def _build_statefulset_resource(ss_name: str, cluster: dict, namespace: str) -> dict:
     attrs = {
         "k8s.statefulset.name": ss_name,
         "k8s.namespace.name": namespace,
@@ -418,7 +356,7 @@ def _generate_statefulset_metrics(rng: random.Random) -> list:
     ]
 
 
-def _build_replicaset_resource(svc: str, pod_data: dict, cluster: dict, namespace: str = NAMESPACE) -> dict:
+def _build_replicaset_resource(svc: str, pod_data: dict, cluster: dict, namespace: str) -> dict:
     p = pod_data["pods"][svc]
     attrs = {
         "k8s.replicaset.name": p["replicaset_name"],
@@ -443,7 +381,7 @@ def _generate_replicaset_metrics(rng: random.Random) -> list:
     ]
 
 
-def _build_pod_phase_resource(svc: str, pod_data: dict, cluster: dict, namespace: str = NAMESPACE) -> dict:
+def _build_pod_phase_resource(svc: str, pod_data: dict, cluster: dict, namespace: str) -> dict:
     """Resource for pod-phase metrics (k8sclusterreceiver scope)."""
     p = pod_data["pods"][svc]
     attrs = {
@@ -473,7 +411,7 @@ def _generate_pod_phase_metric(rng: random.Random) -> list:
 
 # ── Container resource (k8sclusterreceiver) ──────────────────────────────────
 
-def _build_container_resource(svc: str, pod_data: dict, cluster: dict, namespace: str = NAMESPACE) -> dict:
+def _build_container_resource(svc: str, pod_data: dict, cluster: dict, namespace: str) -> dict:
     """Build OTLP resource for a container (k8sclusterreceiver).
 
     k8sclusterreceiver owns: k8s.container.restarts, cpu/memory requests+limits.
@@ -517,7 +455,7 @@ def _generate_container_metrics(svc: str, state: K8sState, rng: random.Random) -
 
 # ── Volume resource (kubeletstatsreceiver) ────────────────────────────────────
 
-def _build_volume_resource(svc: str, vol_name: str, pod_data: dict, cluster: dict, namespace: str = NAMESPACE) -> dict:
+def _build_volume_resource(svc: str, vol_name: str, pod_data: dict, cluster: dict, namespace: str) -> dict:
     """Build OTLP resource for a pod volume (kubeletstatsreceiver).
 
     k8s.volume.name is a resource attribute — the real receiver creates one
@@ -584,7 +522,7 @@ def _generate_namespace_metrics(rng: random.Random) -> list:
 
 # ── Job resource (k8sclusterreceiver) ─────────────────────────────────────────
 
-def _build_job_resource(job_name: str, cluster: dict, namespace: str = NAMESPACE) -> dict:
+def _build_job_resource(job_name: str, cluster: dict, namespace: str) -> dict:
     """Build OTLP resource for a k8s Job (k8sclusterreceiver)."""
     attrs = {
         "k8s.job.name": job_name,
@@ -626,7 +564,7 @@ WARNING_EVENTS = [
 ]
 
 
-def _generate_k8s_warning_logs(client: OTLPClient, pod_data: dict, cluster: dict, rng: random.Random, namespace: str = NAMESPACE) -> None:
+def _generate_k8s_warning_logs(client: OTLPClient, pod_data: dict, cluster: dict, rng: random.Random, namespace: str) -> None:
     """Generate occasional K8s Warning event logs for the dashboard's Warning Events panel."""
     # Only emit ~20% of the time
     if rng.random() > 0.20:
@@ -707,7 +645,7 @@ def _generate_k8s_warning_logs(client: OTLPClient, pod_data: dict, cluster: dict
 
 # ── Run loop ─────────────────────────────────────────────────────────────────
 
-def _generate_oom_killed_log(client: OTLPClient, svc: str, pod_data: dict, cluster: dict, rng: random.Random, namespace: str = NAMESPACE) -> None:
+def _generate_oom_killed_log(client: OTLPClient, svc: str, pod_data: dict, cluster: dict, rng: random.Random, namespace: str) -> None:
     """Emit an OOMKilled event log for a targeted pod."""
     p = pod_data["pods"][svc]
     now_ns = _now_ns()
@@ -777,32 +715,31 @@ def _generate_oom_killed_log(client: OTLPClient, svc: str, pod_data: dict, clust
     client._send(f"{client.endpoint}/v1/logs", payload, "k8s-oomkill-events")
 
 
-def run(client: OTLPClient, stop_event: threading.Event, scenario_data: dict | None = None,
-        chaos_controller=None) -> None:
+def run(client: OTLPClient, stop_event: threading.Event, *, scenario_data: dict,
+        rng: random.Random | None = None, chaos_controller=None) -> None:
     """Run K8s metrics generator loop until stop_event is set."""
-    rng = random.Random()
-    clusters = scenario_data["k8s_clusters"] if scenario_data else CLUSTERS
-    # Prefer per-deployment namespace; fall back to module global for standalone mode.
-    _namespace = scenario_data["namespace"] if scenario_data else NAMESPACE
-    # Per-namespace workload names (avoid frozen module-global NAMESPACE).
+    rng = rng if rng is not None else random.Random()
+    _namespace = scenario_data["namespace"]
+    # Per-namespace workload names.
     _daemonsets = [f"{_namespace}-log-collector", f"{_namespace}-node-exporter"]
     _statefulsets = [f"{_namespace}-redis", f"{_namespace}-postgres"]
     _jobs = [f"{_namespace}-db-backup", f"{_namespace}-report-gen"]
 
     # Build service -> cloud_provider mapping for targeted spikes
-    _service_cloud: dict[str, str] = {}
-    _channel_registry = {}
-    if scenario_data:
-        for svc_name, svc_cfg in scenario_data.get("services", {}).items():
-            _service_cloud[svc_name] = svc_cfg.get("cloud_provider", "")
-        _channel_registry = scenario_data.get("channel_registry", {})
+    _service_cloud: dict[str, str] = {
+        svc_name: svc_cfg.get("cloud_provider", "")
+        for svc_name, svc_cfg in scenario_data.get("services", {}).items()
+    }
+    _channel_registry = scenario_data.get("channel_registry", {})
 
-    # Filter out database services — they're managed instances, not K8s deployments
-    if scenario_data:
-        db_services = {name for name, cfg in scenario_data.get("services", {}).items()
-                       if cfg.get("subsystem") == "database"}
-        for c in clusters:
-            c["services"] = [s for s in c["services"] if s not in db_services]
+    # Filter out database services — they're managed instances, not K8s deployments.
+    # Filter into copies: the cluster dicts belong to the shared scenario object.
+    db_services = {name for name, cfg in scenario_data.get("services", {}).items()
+                   if cfg.get("subsystem") == "database"}
+    clusters = [
+        {**c, "services": [s for s in c["services"] if s not in db_services]}
+        for c in scenario_data["k8s_clusters"]
+    ]
 
     # Collect all service names across clusters for state tracking
     all_services = []
@@ -810,21 +747,16 @@ def run(client: OTLPClient, stop_event: threading.Event, scenario_data: dict | N
         all_services.extend(c["services"])
     state = K8sState(rng, services=all_services)
 
-    # Initialize per-cluster pod data — use shared topology when scenario_data is available
-    # so pod/container IDs match the trace generator (enabling APM Service Map infra correlation)
-    _infra_topology = None
-    if scenario_data:
-        from log_generators.infra_topology import build_topology as _build_infra_topology, to_pod_data as _to_pod_data
-        _infra_topology = _build_infra_topology(scenario_data)
+    # Per-cluster pod data comes from the shared topology so pod/container IDs
+    # match the trace generator (enabling APM Service Map infra correlation).
+    from log_generators.infra_topology import build_topology as _build_infra_topology, to_pod_data as _to_pod_data
+    _infra_topology = _build_infra_topology(scenario_data)
 
     cluster_data = []
     total_services = 0
     total_nodes = 0
-    for idx, cluster in enumerate(clusters):
-        if _infra_topology is not None:
-            pod_data = _to_pod_data(_infra_topology, cluster)
-        else:
-            pod_data = _init_pod_data(cluster, seed_offset=idx, namespace=_namespace)
+    for cluster in clusters:
+        pod_data = _to_pod_data(_infra_topology, cluster)
         cluster_data.append((cluster, pod_data))
         total_services += len(cluster["services"])
         total_nodes += len(pod_data["node_names"])
@@ -1032,7 +964,7 @@ def main() -> None:
     timer.daemon = True
     timer.start()
     logger.info("Running for %ds (standalone)", duration)
-    run(client, stop_event)
+    run(client, stop_event, scenario_data=standalone_generator_data())
     timer.cancel()
     client.close()
 

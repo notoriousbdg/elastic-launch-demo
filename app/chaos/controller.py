@@ -7,7 +7,7 @@ import threading
 import time
 from typing import TYPE_CHECKING, Any, Callable
 
-from app.config import CHANNEL_REGISTRY, CHANNEL_TIMEOUT
+from app.config import CHANNEL_TIMEOUT
 
 if TYPE_CHECKING:
     from app.store import ChaosStore
@@ -28,13 +28,13 @@ class ChaosController:
 
     def __init__(
         self,
-        channel_registry: dict[int, dict[str, Any]] | None = None,
+        channel_registry: dict[int, dict[str, Any]],
         chaos_store: ChaosStore | None = None,
         deployment_id: str = "",
         on_resolve: "Callable[[], None] | None" = None,
     ):
         self._lock = threading.RLock()
-        self._channel_registry = channel_registry or CHANNEL_REGISTRY
+        self._channel_registry = channel_registry
         self._store = chaos_store
         self._deployment_id = deployment_id
         # Called best-effort in a background thread when the last active

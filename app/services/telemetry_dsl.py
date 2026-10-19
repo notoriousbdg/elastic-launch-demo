@@ -67,7 +67,7 @@ import time
 from typing import Any
 
 from app.services.base_service import BaseService
-from app.services.expr import _SAFE_TIME, make_safe_rand, safe_eval
+from app.services.expr import make_safe_rand, make_safe_time, safe_eval, safe_format
 from scenario_engine.fault_spec import resolve
 
 
@@ -88,10 +88,10 @@ class YamlService(BaseService):
     SERVICE_NAME: str = ""
     _telemetry_spec: dict = {}
 
-    def __init__(self, chaos_controller, otlp_client) -> None:
-        super().__init__(chaos_controller, otlp_client)
-        self._rng = random.Random()
+    def __init__(self, chaos_controller, otlp_client, ctx, *, rng=None, clock=None) -> None:
+        super().__init__(chaos_controller, otlp_client, ctx, rng=rng, clock=clock)
         self._safe_rand = make_safe_rand(self._rng)
+        self._safe_time = make_safe_time(self._clock)
         self._state: dict[str, Any] = {}
         self._init_state()
 
@@ -112,7 +112,7 @@ class YamlService(BaseService):
         if "init" in init_spec:
             v = init_spec["init"]
             if v == "now":
-                return time.time()
+                return self._clock()
             return v
 
         # Per-key counter dict: {init_per_key: {keys_from: CONST, spec: value_spec}}
@@ -134,6 +134,7 @@ class YamlService(BaseService):
 
         active_channels = self.get_active_channels_for_service()
         cascade_channels = self.get_cascade_channels_for_service()
+        self.reset_infrastructure_events(keep_channels=active_channels)
 
         # Standard fault logs (all affected-service channels)
         if spec.get("emit_fault_logs", True):
@@ -167,7 +168,7 @@ class YamlService(BaseService):
         env: dict[str, Any] = {
             # Random + time
             "rand": self._safe_rand,
-            "time": _SAFE_TIME,
+            "time": self._safe_time,
             # Fault state
             "active": bool(active_channels),
             "active_channels": active_channels,
@@ -257,7 +258,7 @@ class YamlService(BaseService):
                 ev_name = json.dumps({
                     "callback_url": meta.get("callback_url", ""),
                     "user_email": meta.get("user_email", ""),
-                    "deployment_id": self._ctx.scenario_id if self._ctx else "",
+                    "deployment_id": self._ctx.scenario_id,
                 })
             self.emit_log(level, message, attrs or None, event_name=ev_name, channel=channel)
         else:
@@ -298,11 +299,11 @@ class YamlService(BaseService):
         seconds = float(spec["seconds"])
         state_key = str(spec["state_key"])
         last_ts = self._state.get(state_key, 0.0)
-        if time.time() - last_ts > seconds:
+        if self._clock() - last_ts > seconds:
             # Refresh env from latest state before executing the throttled block
             env.update(self._state)
             self._exec_steps(spec.get("steps", []), env)
-            self._state[state_key] = time.time()
+            self._state[state_key] = self._clock()
             env[state_key] = self._state[state_key]
         elif "else" in spec:
             self._exec_steps(spec["else"], env)
@@ -421,7 +422,7 @@ class YamlService(BaseService):
         if "format" in spec:
             template = str(spec["format"])
             kwargs = {k: self._resolve(v, env) for k, v in spec.items() if k != "format"}
-            return template.format(**kwargs)
+            return safe_format(template, kwargs)
 
         # Plain dict with no recognised DSL key — return verbatim (literal dict)
         return spec

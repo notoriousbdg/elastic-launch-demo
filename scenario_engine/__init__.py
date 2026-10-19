@@ -7,6 +7,7 @@ import logging
 import os
 import re
 import shutil
+import tempfile
 import zipfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -19,6 +20,7 @@ from scenario_engine.schema_version import (
     effective_version,
     version_status,
 )
+from scenario_engine.schema_validation import validate_scenario_dir
 from scenario_engine.yaml_scenario import load_yaml_scenario
 
 if TYPE_CHECKING:
@@ -48,7 +50,11 @@ def _discover_impl() -> list[dict[str, str]]:
             scenario = load_yaml_scenario(scenario_file.parent)
             _registry[scenario.scenario_id] = scenario
             logger.debug("Registered scenario: %s", scenario.scenario_id)
-        except (OSError, KeyError, yaml.YAMLError) as e:
+            # Installed scenarios still load when they drift from the schema (so
+            # an upgrade never hides a custom scenario); imports are strict.
+            for err in validate_scenario_dir(scenario_file.parent):
+                logger.warning("Scenario %s schema: %s", pkg, err)
+        except (OSError, KeyError, ValueError, yaml.YAMLError) as e:
             msg = str(e)
             logger.warning("Scenario %s not available: %s", pkg, msg)
             errors.append({"package": pkg, "error": msg})
@@ -147,6 +153,34 @@ def export_scenario_zip(scenario_id: str) -> bytes:
     return buf.getvalue()
 
 
+def _validate_staged(staged: Path) -> None:
+    """Load a staged scenario folder, raising ValueError if it is unusable.
+
+    Every file must match the JSON Schemas in scenario_engine/schemas/, and
+    loading runs the expression allowlist (``validate_expr``), so a malformed
+    scenario or one with an unsafe ``expr:`` is rejected before it is installed.
+    """
+    schema_errors = validate_scenario_dir(staged)
+    if schema_errors:
+        shown = "; ".join(schema_errors[:5])
+        more = f" (+{len(schema_errors) - 5} more)" if len(schema_errors) > 5 else ""
+        raise ValueError(f"Scenario {staged.name!r} does not match the schema: {shown}{more}")
+    try:
+        load_yaml_scenario(staged)
+    except (OSError, KeyError, yaml.YAMLError) as exc:
+        raise ValueError(f"Scenario {staged.name!r} failed to load: {exc}") from exc
+
+
+def _install_validated(staged: Path, scenario_id: str, validate: bool = True) -> None:
+    """Validate *staged* (unless already done) and replace ``_SCENARIOS_DIR/<id>`` with it."""
+    if validate:
+        _validate_staged(staged)
+    dest = _SCENARIOS_DIR / scenario_id
+    if dest.exists():
+        shutil.rmtree(dest)
+    shutil.copytree(staged, dest)
+
+
 def import_scenario_zip(data: bytes) -> dict[str, Any]:
     """Unpack a scenario zip into the scenarios directory and reload.
 
@@ -193,12 +227,9 @@ def import_scenario_zip(data: bytes) -> dict[str, Any]:
             if not str(target).startswith(str(resolved_base) + "/"):
                 raise ValueError(f"Zip entry would escape scenarios directory: {entry!r}")
 
-        # Overwrite existing scenario folder if present.
-        dest = _SCENARIOS_DIR / scenario_id
-        if dest.exists():
-            shutil.rmtree(dest)
-
-        zf.extractall(_SCENARIOS_DIR)
+        with tempfile.TemporaryDirectory() as staging:
+            zf.extractall(staging)
+            _install_validated(Path(staging) / scenario_id, scenario_id)
 
     result = reload_registry()
     result["id"] = scenario_id
@@ -302,7 +333,7 @@ def import_scenarios_from_archive(data: bytes) -> dict[str, Any]:
     except zipfile.BadZipFile:
         raise ValueError("Downloaded archive is not a valid zip file")
 
-    with zf:
+    with zf, tempfile.TemporaryDirectory() as staging:
         names = zf.namelist()
         if not names:
             raise ValueError("Downloaded archive is empty")
@@ -338,6 +369,7 @@ def import_scenarios_from_archive(data: bytes) -> dict[str, Any]:
 
         resolved_base = _SCENARIOS_DIR.resolve()
         imported_ids: list[str] = []
+        staging_root = Path(staging)
 
         for scenario_id, entry_names in scenario_entries.items():
             if not _SAFE_ID.fullmatch(scenario_id):
@@ -363,31 +395,33 @@ def import_scenarios_from_archive(data: bytes) -> dict[str, Any]:
                         f"Zip entry would escape scenarios directory: {entry!r}"
                     )
 
-            # Overwrite existing scenario folder.
-            dest = _SCENARIOS_DIR / scenario_id
-            if dest.exists():
-                shutil.rmtree(dest)
-
-            # Extract files, rewriting arcname from
-            # <prefix>/scenarios/<id>/<rel>  →  <scenarios_dir>/<id>/<rel>
+            # Stage files, rewriting arcname from
+            # <prefix>/scenarios/<id>/<rel>  →  <staging>/<id>/<rel>
             for entry in entry_names:
                 if entry.endswith("/"):
                     continue  # skip directory entries
                 rel = entry[len(sc_prefix):]
                 if not rel:
                     continue
-                out_path = _SCENARIOS_DIR / scenario_id / rel
+                out_path = staging_root / scenario_id / rel
                 out_path.parent.mkdir(parents=True, exist_ok=True)
                 out_path.write_bytes(zf.read(entry))
 
             imported_ids.append(scenario_id)
-            logger.debug("Imported scenario %r from archive", scenario_id)
 
         if not imported_ids:
             raise ValueError(
                 "No valid scenarios found under scenarios/ "
                 "(each subfolder needs a scenario.yaml)"
             )
+
+        # Validate every staged scenario before installing any of them, so a
+        # bad scenario rejects the whole import instead of half-applying it.
+        for scenario_id in imported_ids:
+            _validate_staged(staging_root / scenario_id)
+        for scenario_id in imported_ids:
+            _install_validated(staging_root / scenario_id, scenario_id, validate=False)
+            logger.debug("Imported scenario %r from archive", scenario_id)
 
     result = reload_registry()
     result["imported_ids"] = imported_ids

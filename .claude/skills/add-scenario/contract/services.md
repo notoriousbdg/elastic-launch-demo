@@ -2,6 +2,8 @@
 
 Use this as a generation checklist when authoring `services/<svc>.yaml` files.
 
+> **Machine-checked schema:** `scenario_engine/schemas/service.schema.json` is the enforced shape of this file. Run `python3 scripts/verify_yaml_scenarios.py <id>` before finishing — it validates every file against the schemas (check 0) plus the cross-file rules below. Uploads and GitHub imports that fail the schema are rejected.
+
 ---
 
 ## Services
@@ -80,7 +82,7 @@ steps:                             # ordered list; executed once per generate_te
 | Value spec | Resolves to |
 |---|---|
 | `{var: name}` | Current value of sample var or state key `name` |
-| `{expr: "python_expr"}` | Sandboxed Python eval; env includes all vars, state, constants, `rand`, `active` |
+| `{expr: "python_expr"}` | Allowlisted Python expression; env includes all vars, state, constants, `rand`, `active`. Allowed: arithmetic (no `**`), comparisons, `and`/`or`/`not`, ternary, subscripts, f-strings, `round int float len min max sum abs str list tuple bool`, `rand.*`, `time.time()`, `.lower() .upper() .replace() .strip()`, `.get() .keys() .values() .items()`. Any other attribute, dunder names, lambdas and comprehensions are rejected when the scenario loads (see `app/services/expr.py`). Templates (`message`, `format`, `error_message`, `stack_trace`) may use `{name}`, `{name[key]}` and format specs, but not `{name.attr}`. |
 | `{if_active: spec, else: spec}` | First spec during a fault, second spec nominally |
 | `{choice: [a, b, c]}` | `random.choice` — list literal or name of a constant list |
 | `{randint: [lo, hi]}` | `random.randint(lo, hi)` |

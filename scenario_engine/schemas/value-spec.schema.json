@@ -1,0 +1,144 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://elastic-launch-demo.local/schemas/value-spec.schema.json",
+  "title": "Value spec",
+  "description": "A value resolved at runtime by app/services/telemetry_dsl.py (_resolve) or scenario_engine/fault_spec.py. A dict containing one of the DSL keywords is evaluated; any other dict, list or scalar is a literal.",
+  "$ref": "#/$defs/valueSpec",
+  "$defs": {
+    "number2": {
+      "type": "array",
+      "prefixItems": [{"type": "number"}, {"type": "number"}],
+      "minItems": 2,
+      "maxItems": 2
+    },
+    "round": {"type": "integer", "minimum": 0},
+    "valueSpec": {
+      "anyOf": [
+        {"type": ["string", "number", "boolean", "null"]},
+        {"type": "array"},
+        {"$ref": "#/$defs/var"},
+        {"$ref": "#/$defs/expr"},
+        {"$ref": "#/$defs/channelField"},
+        {"$ref": "#/$defs/ifActive"},
+        {"$ref": "#/$defs/gauss"},
+        {"$ref": "#/$defs/sample"},
+        {"$ref": "#/$defs/choice"},
+        {"$ref": "#/$defs/randint"},
+        {"$ref": "#/$defs/uniform"},
+        {"$ref": "#/$defs/random"},
+        {"$ref": "#/$defs/format"},
+        {"$ref": "#/$defs/literalObject"}
+      ]
+    },
+    "var": {
+      "description": "Current value of a sample variable, state key or constant.",
+      "type": "object",
+      "required": ["var"],
+      "properties": {"var": {"type": "string"}},
+      "additionalProperties": false
+    },
+    "expr": {
+      "description": "Allowlisted Python expression (see app/services/expr.py validate_expr).",
+      "type": "object",
+      "required": ["expr"],
+      "properties": {"expr": {"type": "string", "minLength": 1}},
+      "additionalProperties": false
+    },
+    "channelField": {
+      "description": "A field of the active channel (per_active_channel_steps only).",
+      "type": "object",
+      "required": ["channel_field"],
+      "properties": {"channel_field": {"type": "string"}},
+      "additionalProperties": false
+    },
+    "ifActive": {
+      "description": "First spec while any channel affecting this service is active, else the second.",
+      "type": "object",
+      "required": ["if_active"],
+      "properties": {
+        "if_active": {"$ref": "#/$defs/valueSpec"},
+        "else": {"$ref": "#/$defs/valueSpec"}
+      },
+      "additionalProperties": false
+    },
+    "gauss": {
+      "type": "object",
+      "required": ["gauss"],
+      "properties": {
+        "gauss": {"$ref": "#/$defs/number2"},
+        "clamp": {"$ref": "#/$defs/number2"},
+        "round": {"$ref": "#/$defs/round"}
+      },
+      "additionalProperties": false
+    },
+    "sample": {
+      "description": "random.sample of k items from a constant or sample variable.",
+      "type": "object",
+      "required": ["sample"],
+      "properties": {
+        "sample": {
+          "type": "object",
+          "required": ["from", "k"],
+          "properties": {"from": {"type": "string"}, "k": {"type": "integer", "minimum": 0}},
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "choice": {
+      "description": "random.choice over a list literal, or the name of a constant (a dict constant picks one of its keys).",
+      "type": "object",
+      "required": ["choice"],
+      "properties": {"choice": {"type": ["array", "string"]}},
+      "additionalProperties": false
+    },
+    "randint": {
+      "type": "object",
+      "required": ["randint"],
+      "properties": {
+        "randint": {
+          "type": "array",
+          "prefixItems": [{"type": "integer"}, {"type": "integer"}],
+          "minItems": 2,
+          "maxItems": 2
+        }
+      },
+      "additionalProperties": false
+    },
+    "uniform": {
+      "type": "object",
+      "required": ["uniform"],
+      "properties": {"uniform": {"$ref": "#/$defs/number2"}, "round": {"$ref": "#/$defs/round"}},
+      "additionalProperties": false
+    },
+    "random": {
+      "type": "object",
+      "required": ["random"],
+      "properties": {"random": {"const": true}, "round": {"$ref": "#/$defs/round"}},
+      "additionalProperties": false
+    },
+    "format": {
+      "description": "str.format template; every other key is a named sub-spec.",
+      "type": "object",
+      "required": ["format"],
+      "properties": {"format": {"type": "string"}},
+      "additionalProperties": {"$ref": "#/$defs/valueSpec"}
+    },
+    "literalObject": {
+      "description": "A dict with no DSL keyword is returned as-is.",
+      "type": "object",
+      "not": {
+        "anyOf": [
+          {"required": ["var"]}, {"required": ["expr"]}, {"required": ["channel_field"]},
+          {"required": ["if_active"]}, {"required": ["gauss"]}, {"required": ["sample"]},
+          {"required": ["choice"]}, {"required": ["randint"]}, {"required": ["uniform"]},
+          {"required": ["random"]}, {"required": ["format"]}
+        ]
+      }
+    },
+    "valueSpecMap": {
+      "type": "object",
+      "additionalProperties": {"$ref": "#/$defs/valueSpec"}
+    }
+  }
+}

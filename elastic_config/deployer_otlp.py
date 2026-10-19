@@ -118,18 +118,12 @@ class OtlpMixin:
         except Exception:
             return False
 
-    def verify_otlp(self, otlp_url: str) -> bool:
-        """Verify an OTLP endpoint is reachable with our API key."""
-        try:
-            with httpx.Client(timeout=5, verify=True) as client:
-                resp = client.post(
-                    f"{otlp_url.rstrip('/')}/v1/logs",
-                    headers={
-                        "Authorization": f"ApiKey {self.api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json={"resourceLogs": []},
-                )
-                return resp.status_code == 200
-        except Exception:
-            return False
+    def probe_otlp(self, client: httpx.Client, explicit: str = "") -> str:
+        """Return a reachable OTLP endpoint, or "" if none responds.
+
+        With *explicit*, only that endpoint is probed; otherwise the endpoint
+        is derived the same way the deploy pipeline does it.
+        """
+        if explicit:
+            return explicit if self._verify_otlp_candidate(client, explicit) else ""
+        return self._derive_otlp_endpoint(client) or ""
