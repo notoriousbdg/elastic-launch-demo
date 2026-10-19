@@ -8,7 +8,7 @@ import secrets
 import threading
 import time
 from abc import ABC, abstractmethod
-from typing import Any, Optional
+from typing import Any, Iterable, Optional
 
 from app.config import ACTIVE_SCENARIO, CHANNEL_REGISTRY, MISSION_ID, SERVICES
 from app.telemetry import OTLPClient
@@ -407,56 +407,16 @@ class BaseService(ABC):
                 channel=channel,
             )
 
-    def reset_infrastructure_events(self) -> None:
-        """Clear tracked infrastructure events (call on channel resolve)."""
-        if hasattr(self, "_infra_events_emitted"):
-            self._infra_events_emitted.clear()
+    def reset_infrastructure_events(self, keep_channels: Iterable[int] = ()) -> None:
+        """Forget emitted infrastructure events, except for *keep_channels*.
 
-    def emit_infrastructure_events(self, channel: int) -> None:
-        """Emit one-shot infrastructure/audit events when a channel fires.
-
-        Reads optional 'infrastructure_events' list from channel_registry entry.
-        Each event: {body, severity, event_name, attributes, service (optional)}.
-        Events are only emitted once per channel activation.
+        Called every tick with the currently active channels, so a channel's
+        events fire again the next time it is triggered after resolving.
         """
         if not hasattr(self, "_infra_events_emitted"):
-            self._infra_events_emitted: set[tuple[int, int]] = set()
-
-        ch = self._channel_registry.get(channel)
-        if not ch:
             return
-        infra_events = ch.get("infrastructure_events", [])
-        if not infra_events:
-            return
-
-        for idx, evt in enumerate(infra_events):
-            # Only emit for this service (or if no service filter specified)
-            evt_service = evt.get("service")
-            if evt_service and evt_service != self.SERVICE_NAME:
-                continue
-
-            key = (channel, idx)
-            if key in self._infra_events_emitted:
-                continue
-            self._infra_events_emitted.add(key)
-
-            attrs = self._base_log_attrs()
-            if evt.get("attributes"):
-                attrs.update(evt["attributes"])
-            attrs["chaos.channel"] = channel
-            attrs["infrastructure.event"] = True
-
-            self.emit_log(
-                evt.get("severity", "WARN"),
-                evt["body"],
-                attrs,
-                event_name=evt.get("event_name"),
-            )
-
-    def reset_infrastructure_events(self) -> None:
-        """Clear tracked infrastructure events (call on channel resolve)."""
-        if hasattr(self, "_infra_events_emitted"):
-            self._infra_events_emitted.clear()
+        keep = set(keep_channels)
+        self._infra_events_emitted = {k for k in self._infra_events_emitted if k[0] in keep}
 
     def _generate_fault_params(self, channel: int) -> dict[str, Any]:
         """Generate realistic random parameters for fault messages from scenario."""
