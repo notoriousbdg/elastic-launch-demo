@@ -68,6 +68,12 @@ class ServiceManager:
                 BaseService.clear_context()
 
     def start_all(self) -> None:
+        # stop_all() sets the event and closes the clients; start from a clean
+        # slate so a stopped manager can be started again.
+        self._stop_event = threading.Event()
+        self._generator_threads = []
+        self.otlp.ensure_open()
+        self.es_bulk.ensure_open()
         for svc in self.services.values():
             svc.start()
         self._start_generators()
