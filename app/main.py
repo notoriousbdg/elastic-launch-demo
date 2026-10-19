@@ -43,6 +43,7 @@ logger = logging.getLogger("nova7")
 
 # ── Multi-tenancy singletons ──────────────────────────────────────────────────
 from app.op_queue import OperationQueue
+from app.progress import IDLE as PROGRESS_IDLE, ProgressStore
 from app.registry import InstanceRegistry
 from app.store import ChaosStore, DeploymentStore
 
@@ -50,17 +51,6 @@ registry = InstanceRegistry()
 store = DeploymentStore()
 chaos_store = ChaosStore()
 op_queue = OperationQueue()
-
-
-def _queued_step(position: int, total: int) -> dict:
-    """Synthetic 'Queued' progress step that mirrors DeployStep.to_dict() shape."""
-    return {
-        "name": "Queued",
-        "status": "running",
-        "detail": f"Position {position} of {total} in queue",
-        "items_total": 0,
-        "items_done": 0,
-    }
 
 
 def _purge_deployment_records(deployment_id: str) -> None:
@@ -71,8 +61,8 @@ def _purge_deployment_records(deployment_id: str) -> None:
 
 
 # In-memory progress trackers keyed by deployment_id
-_deploy_progress: dict[str, dict] = {}
-_teardown_progress: dict[str, dict] = {}
+_deploy_progress = ProgressStore()
+_teardown_progress = ProgressStore()
 
 
 def _get_instance(deployment_id: Optional[str] = None):
@@ -140,7 +130,7 @@ async def lifespan(app: FastAPI):
             def _progress_cb(progress):
                 d = progress.to_dict()
                 d["scenario_name"] = _scenario_name
-                _deploy_progress[dep_id] = d
+                _deploy_progress.set(dep_id, d)
                 steps = d.get("steps") or []
                 if steps:
                     last = steps[-1]
@@ -262,14 +252,7 @@ async def lifespan(app: FastAPI):
 
         def _make_on_position(s_id: str):
             def _on_position(position: int, total: int) -> None:
-                entry = _deploy_progress.get(s_id)
-                if not entry or entry.get("finished"):
-                    return
-                steps = entry.get("steps") or []
-                if steps and steps[0].get("name") == "Queued":
-                    steps[0] = _queued_step(position, total)
-                else:
-                    entry["steps"] = [_queued_step(position, total)]
+                _deploy_progress.set_queue_position(s_id, position, total)
             return _on_position
 
         for scenario_id in ACTIVE_SCENARIO_LIST:
@@ -281,12 +264,7 @@ async def lifespan(app: FastAPI):
                 "Auto-deploy triggered from environment variables (scenario=%s)",
                 scenario_id,
             )
-            _deploy_progress[scenario_id] = {
-                "finished": False, "error": "",
-                "scenario_id": scenario_id,
-                "scenario_name": scenario.scenario_name,
-                "steps": [_queued_step(1, 1)],
-            }
+            _deploy_progress.start_queued(scenario_id, scenario_id, scenario.scenario_name)
             op_queue.submit_deploy(
                 scenario_id,
                 _make_auto_deploy(scenario_id, scenario_id, scenario, deployer),
@@ -1039,7 +1017,7 @@ async def launch_setup(body: dict):
         d = progress.to_dict()
         d["scenario_id"] = scenario_id
         d["scenario_name"] = scenario_name
-        _deploy_progress[deployment_id] = d
+        _deploy_progress.set(deployment_id, d)
 
     def _run():
         # Stop existing instance for this scenario if running
@@ -1163,22 +1141,9 @@ async def launch_setup(body: dict):
             logger.exception("Failed to start instance for %s: %s", scenario_id, exc)
 
     def _on_position(position: int, total: int) -> None:
-        entry = _deploy_progress.get(deployment_id)
-        if not entry or entry.get("finished"):
-            return
-        steps = entry.get("steps") or []
-        if steps and steps[0].get("name") == "Queued":
-            steps[0] = _queued_step(position, total)
-        else:
-            entry["steps"] = [_queued_step(position, total)]
+        _deploy_progress.set_queue_position(deployment_id, position, total)
 
-    existing = _deploy_progress.get(deployment_id)
-    if not existing or existing.get("finished"):
-        _deploy_progress[deployment_id] = {
-            "finished": False, "error": "",
-            "scenario_id": scenario_id, "scenario_name": scenario_name,
-            "steps": [_queued_step(1, 1)],
-        }
+    _deploy_progress.start_queued(deployment_id, scenario_id, scenario_name, only_if_idle=True)
     accepted = op_queue.submit_deploy(deployment_id, _run, _on_position)
     if not accepted:
         logger.info("Launch for %s ignored (already active or queued)", deployment_id)
@@ -1193,12 +1158,9 @@ async def launch_setup(body: dict):
 @app.get("/api/setup/progress")
 async def setup_progress(deployment_id: Optional[str] = None):
     """Return current deployment progress."""
-    if deployment_id and deployment_id in _deploy_progress:
-        return _deploy_progress[deployment_id]
+    entry = _deploy_progress.get(deployment_id) if deployment_id else None
     # Fall back to most recent progress entry
-    if _deploy_progress:
-        return list(_deploy_progress.values())[-1]
-    return {"finished": True, "error": "", "steps": []}
+    return entry or _deploy_progress.latest() or dict(PROGRESS_IDLE)
 
 
 @app.get("/api/setup/active-deploys")
@@ -1213,17 +1175,17 @@ async def active_deploys():
     seen = set(ordered)
     # Anything in the progress map that isn't tracked by the queue (e.g., legacy
     # in-flight ops) gets appended at the end so we don't drop it.
-    extras = [d for d, p in _deploy_progress.items()
-              if not p.get("finished", True) and d not in seen]
+    active = _deploy_progress.in_progress()
+    extras = [d for d in active if d not in seen]
     return {
         "deployments": [
             {
                 "deployment_id": dep_id,
-                "scenario_id": _deploy_progress.get(dep_id, {}).get("scenario_id", dep_id),
-                "scenario_name": _deploy_progress.get(dep_id, {}).get("scenario_name", dep_id),
+                "scenario_id": active[dep_id].get("scenario_id", dep_id),
+                "scenario_name": active[dep_id].get("scenario_name", dep_id),
             }
             for dep_id in ordered + extras
-            if dep_id in _deploy_progress and not _deploy_progress[dep_id].get("finished", True)
+            if dep_id in active
         ]
     }
 
@@ -1234,10 +1196,11 @@ async def auto_deploy_status():
 
     Kept for backward compatibility; the selector UI uses /api/setup/active-deploys.
     """
+    active = _deploy_progress.in_progress()
     deployments = [
         {"deployment_id": s_id}
         for s_id in ACTIVE_SCENARIO_LIST
-        if s_id in _deploy_progress and not _deploy_progress[s_id].get("finished", True)
+        if s_id in active
     ]
     return {"deployments": deployments}
 
@@ -1308,12 +1271,9 @@ async def stop_and_teardown(body: dict = {}):
     # entry so the UI stops polling.
     if op_queue.cancel_deploy(deployment_id):
         logger.info("Cancelled queued deploy %s on teardown request", deployment_id)
-        dep = _deploy_progress.get(deployment_id)
-        if dep:
-            dep["finished"] = True
-            dep["error"] = "Cancelled before deployment started"
+        _deploy_progress.mark_finished(deployment_id, "Cancelled before deployment started")
         _purge_deployment_records(deployment_id)
-        _teardown_progress[deployment_id] = {"finished": True, "error": "", "steps": []}
+        _teardown_progress.set(deployment_id, PROGRESS_IDLE)
         return {"status": "cancelled", "deployment_id": deployment_id}
 
     inst = registry.remove(deployment_id)
@@ -1335,7 +1295,7 @@ async def stop_and_teardown(body: dict = {}):
             d = progress.to_dict()
             d["scenario_id"] = scenario_id
             d["scenario_name"] = scenario_name
-            _teardown_progress[deployment_id] = d
+            _teardown_progress.set(deployment_id, d)
 
         def _run_teardown():
             try:
@@ -1347,20 +1307,9 @@ async def stop_and_teardown(body: dict = {}):
             _purge_deployment_records(deployment_id)
 
         def _on_position(position: int, total: int) -> None:
-            entry = _teardown_progress.get(deployment_id)
-            if not entry or entry.get("finished"):
-                return
-            steps = entry.get("steps") or []
-            if steps and steps[0].get("name") == "Queued":
-                steps[0] = _queued_step(position, total)
-            else:
-                entry["steps"] = [_queued_step(position, total)]
+            _teardown_progress.set_queue_position(deployment_id, position, total)
 
-        _teardown_progress[deployment_id] = {
-            "finished": False, "error": "",
-            "scenario_id": scenario_id, "scenario_name": scenario_name,
-            "steps": [_queued_step(1, 1)],
-        }
+        _teardown_progress.start_queued(deployment_id, scenario_id, scenario_name)
         op_queue.submit_teardown(deployment_id, _run_teardown, _on_position)
         return {"status": "stopping", "deployment_id": deployment_id}
 
@@ -1371,18 +1320,15 @@ async def stop_and_teardown(body: dict = {}):
         except Exception as exc:
             logger.warning("Error stopping deployment %s: %s", deployment_id, exc)
     _purge_deployment_records(deployment_id)
-    _teardown_progress[deployment_id] = {"finished": True, "error": "", "steps": []}
+    _teardown_progress.set(deployment_id, PROGRESS_IDLE)
     return {"status": "stopping", "deployment_id": deployment_id}
 
 
 @app.get("/api/setup/teardown-progress")
 async def teardown_progress(deployment_id: Optional[str] = None):
     """Return current teardown progress."""
-    if deployment_id and deployment_id in _teardown_progress:
-        return _teardown_progress[deployment_id]
-    if _teardown_progress:
-        return list(_teardown_progress.values())[-1]
-    return {"finished": True, "error": "", "steps": []}
+    entry = _teardown_progress.get(deployment_id) if deployment_id else None
+    return entry or _teardown_progress.latest() or dict(PROGRESS_IDLE)
 
 
 @app.get("/api/setup/active-teardowns")
@@ -1395,17 +1341,17 @@ async def active_teardowns():
     """
     ordered = op_queue.list_ordered("teardown")
     seen = set(ordered)
-    extras = [d for d, p in _teardown_progress.items()
-              if not p.get("finished", True) and d not in seen]
+    active = _teardown_progress.in_progress()
+    extras = [d for d in active if d not in seen]
     return {
         "teardowns": [
             {
                 "deployment_id": dep_id,
-                "scenario_id": _teardown_progress.get(dep_id, {}).get("scenario_id", dep_id),
-                "scenario_name": _teardown_progress.get(dep_id, {}).get("scenario_name", dep_id),
+                "scenario_id": active[dep_id].get("scenario_id", dep_id),
+                "scenario_name": active[dep_id].get("scenario_name", dep_id),
             }
             for dep_id in ordered + extras
-            if dep_id in _teardown_progress and not _teardown_progress[dep_id].get("finished", True)
+            if dep_id in active
         ]
     }
 
