@@ -72,10 +72,16 @@ class OTLPClient:
         endpoint: str | None = None,
         api_key: str | None = None,
         auth_type: str | None = None,
+        elastic_url: str | None = None,
     ):
         self.endpoint = (endpoint or OTLP_ENDPOINT).rstrip("/")
         self.api_key = api_key or OTLP_API_KEY
         self.auth_type = auth_type or OTLP_AUTH_TYPE
+        # Metrics go to this deployment's Elasticsearch, not a process-wide env var,
+        # so each tenant's metrics land in its own cluster.
+        self.elastic_url = (
+            elastic_url or ELASTIC_URL or os.getenv("ELASTICSEARCH_URL", "")
+        ).strip().rstrip("/")
 
         headers = {"Content-Type": "application/json"}
         if self.api_key:
@@ -86,9 +92,20 @@ class OTLPClient:
         self.consecutive_failures = 0
         self.max_failures_before_backoff = 5
 
-    def reconfigure(self, endpoint: str, api_key: str, auth_type: str = "ApiKey"):
-        """Update endpoint and auth for a running client."""
+    def reconfigure(
+        self,
+        endpoint: str,
+        api_key: str,
+        auth_type: str = "ApiKey",
+        elastic_url: str | None = None,
+    ):
+        """Update endpoint and auth for a running client.
+
+        ``elastic_url`` is kept unless a new one is given.
+        """
         self.endpoint = endpoint.rstrip("/")
+        if elastic_url:
+            self.elastic_url = elastic_url.strip().rstrip("/")
         self.api_key = api_key
         self.auth_type = auth_type
         self.consecutive_failures = 0
@@ -389,14 +406,9 @@ class OTLPClient:
             return msg.SerializeToString(), {"Content-Type": "application/x-protobuf"}
         return json.dumps(payload).encode(), {}
 
-    @staticmethod
-    def _metrics_otlp_url() -> str | None:
+    def _metrics_otlp_url(self) -> str | None:
         """ES native OTLP metrics path, or None if Elasticsearch is not configured."""
-        es = (
-            (ELASTIC_URL or "").strip()
-            or os.getenv("ELASTICSEARCH_URL", "").strip()
-        ).rstrip("/")
-        return f"{es}/_otlp/v1/metrics" if es else None
+        return f"{self.elastic_url}/_otlp/v1/metrics" if self.elastic_url else None
 
     def _send(self, url: str, payload: dict, signal_name: str) -> None:
         if not self.endpoint:
