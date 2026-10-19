@@ -324,10 +324,11 @@ def _generate_metrics(state: JvmState, rng: random.Random, active_chaos: dict | 
 
 def run(
     client: OTLPClient, stop_event: threading.Event, *, scenario_data: dict,
+    rng: random.Random | None = None,
     chaos_controller=None,
 ) -> None:
     """Run JVM metrics generator loop until stop_event is set."""
-    rng = random.Random()
+    rng = rng if rng is not None else random.Random()
 
     ns = scenario_data["namespace"]
     java_services = [

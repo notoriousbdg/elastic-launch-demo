@@ -346,7 +346,7 @@ def _generate_top_query_event(
     operation, template = rng.choice(QUERY_TEMPLATES)
     db = rng.choice(databases)
     query = _render_query(template, rng, db_prefix)
-    digest = secrets.token_hex(16)
+    digest = f"{rng.getrandbits(128):032x}"
 
     attrs = {
         "db.query.text": query,
@@ -494,7 +494,7 @@ def _generate_mysql_metrics(
     # ── events_statements_summary_by_digest ──────────────────────────
     # sum_timer_wait emitted as double so ESQL CASE(..., 0.0) type-checks correctly
     for _ in range(rng.randint(3, 8)):
-        digest = secrets.token_hex(16)
+        digest = f"{rng.getrandbits(128):032x}"
         count_star = rng.randint(100, 50_000)
         sum_wait = float(rng.randint(1_000_000_000, 200_000_000_000))
         attrs = {"digest": digest}
@@ -543,10 +543,11 @@ def run(
     stop_event: threading.Event,
     *,
     scenario_data: dict,
+    rng: random.Random | None = None,
     chaos_controller=None,
 ) -> None:
     """Run MySQL generator loop until stop_event is set."""
-    rng = random.Random()
+    rng = rng if rng is not None else random.Random()
 
     ns = scenario_data["namespace"]
     db_prefix = ns.replace("-", "_")

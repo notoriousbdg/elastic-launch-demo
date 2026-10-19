@@ -24,7 +24,7 @@ import signal
 import threading
 import time
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 
 from app.telemetry import ESBulkClient
 
@@ -252,9 +252,12 @@ def run(
     stop_event: threading.Event,
     *,
     scenario_data: dict,
+    rng: random.Random | None = None,
+    clock: Callable[[], float] | None = None,
 ) -> None:
     """Run the raw access-log generator loop until stop_event is set."""
-    rng = random.Random()
+    rng = rng if rng is not None else random.Random()
+    clock = clock or time.time
 
     scenario = scenario_data["scenario"]
     namespace = scenario_data["namespace"]
@@ -283,7 +286,7 @@ def run(
     )
 
     while not stop_event.is_set():
-        now = time.time()
+        now = clock()
         spike_active = schedule.is_spike_active(now)
 
         base_batch = rng.randint(BATCH_SIZE_MIN, BATCH_SIZE_MAX)

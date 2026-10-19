@@ -182,7 +182,7 @@ def _build_exception_event(
         for ch_id in active_channels:
             ch = channel_registry.get(ch_id, {})
             if service_name in ch.get("affected_services", []):
-                fault_params = scenario.get_fault_params(ch_id)
+                fault_params = scenario.get_fault_params(ch_id, rng)
                 error_type = ch.get("error_type", "Error")
                 # Format error message and stack trace with fault params
                 message = safe_format(ch.get("error_message", "error"), fault_params, keep_missing=True)
@@ -695,9 +695,9 @@ def _generate_trace(client: OTLPClient, resources: dict, rng: random.Random,
 
 # ── Run loop (used by ServiceManager and standalone) ──────────────────────────
 def run(client: OTLPClient, stop_event: threading.Event, chaos_controller=None,
-        *, scenario_data: dict) -> None:
+        *, scenario_data: dict, rng: random.Random | None = None) -> None:
     """Run trace generator loop until stop_event is set."""
-    rng = random.Random()
+    rng = rng if rng is not None else random.Random()
 
     _all_services = scenario_data["services"]
     _namespace = scenario_data["namespace"]

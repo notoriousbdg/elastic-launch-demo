@@ -716,9 +716,9 @@ def _generate_oom_killed_log(client: OTLPClient, svc: str, pod_data: dict, clust
 
 
 def run(client: OTLPClient, stop_event: threading.Event, *, scenario_data: dict,
-        chaos_controller=None) -> None:
+        rng: random.Random | None = None, chaos_controller=None) -> None:
     """Run K8s metrics generator loop until stop_event is set."""
-    rng = random.Random()
+    rng = rng if rng is not None else random.Random()
     _namespace = scenario_data["namespace"]
     # Per-namespace workload names.
     _daemonsets = [f"{_namespace}-log-collector", f"{_namespace}-node-exporter"]

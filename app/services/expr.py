@@ -37,7 +37,7 @@ import functools
 import random as _random
 import string
 import time as _time
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 
 class _SafeRand:
@@ -68,15 +68,23 @@ class _SafeRand:
 
 
 class _SafeTime:
-    """Thin wrapper exposing only time.time()."""
+    """Thin wrapper exposing only time.time() (or an injected clock)."""
 
-    __slots__ = ()
+    __slots__ = ("_clock",)
+
+    def __init__(self, clock: "Callable[[], float] | None" = None) -> None:
+        self._clock = clock or _time.time
 
     def time(self) -> float:
-        return _time.time()
+        return self._clock()
 
 
 _SAFE_TIME = _SafeTime()
+
+
+def make_safe_time(clock: "Callable[[], float] | None" = None) -> _SafeTime:
+    """A ``time`` object for expressions whose ``time()`` reads *clock*."""
+    return _SafeTime(clock)
 
 # Builtins available inside every expression.  ``__builtins__`` is empty so
 # dangerous callables (import, exec, open, __import__ …) are not reachable.

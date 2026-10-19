@@ -8,7 +8,7 @@ import secrets
 import threading
 import time
 from abc import ABC, abstractmethod
-from typing import Any, Iterable, Optional
+from typing import Any, Callable, Iterable, Optional
 
 from app.telemetry import OTLPClient
 from app.trace_context import _trace_context_store
@@ -45,7 +45,19 @@ class BaseService(ABC):
     # Subclasses MUST set this
     SERVICE_NAME: str = ""
 
-    def __init__(self, chaos_controller, otlp_client: OTLPClient, ctx):
+    def __init__(
+        self,
+        chaos_controller,
+        otlp_client: OTLPClient,
+        ctx,
+        *,
+        rng: random.Random | None = None,
+        clock: Callable[[], float] | None = None,
+    ):
+        """*rng* and *clock* default to a fresh ``random.Random()`` and
+        ``time.time``; tests pass seeded / frozen ones for reproducible output."""
+        self._rng = rng if rng is not None else random.Random()
+        self._clock = clock or time.time
         self.chaos_controller = chaos_controller
         self.otlp = otlp_client
         self._ctx = ctx  # ScenarioContext
@@ -83,7 +95,7 @@ class BaseService(ABC):
         self._thread: Optional[threading.Thread] = None
         self._phase = "ACTIVE"
         self._status = self._nominal_label
-        self._last_status_change = time.time()
+        self._last_status_change = self._clock()
 
     # ── Lifecycle ──────────────────────────────────────────────────────
 
@@ -110,7 +122,7 @@ class BaseService(ABC):
                 self.generate_telemetry()
             except Exception:
                 logger.exception("Error in %s telemetry loop", self.SERVICE_NAME)
-            interval = random.uniform(1.5, 3.0)
+            interval = self._rng.uniform(1.5, 3.0)
             self._stop_event.wait(interval)
 
     # ── Abstract ───────────────────────────────────────────────────────
@@ -262,7 +274,7 @@ class BaseService(ABC):
         self.emit_infrastructure_events(channel)
 
         # Generate 2-4 error logs per cycle when channel is active
-        for _ in range(random.randint(2, 4)):
+        for _ in range(self._rng.randint(2, 4)):
             fault_params = self._generate_fault_params(channel)
             msg = self._safe_format(ch["error_message"], fault_params)
             stack = self._safe_format(ch["stack_trace"], fault_params)
@@ -321,7 +333,7 @@ class BaseService(ABC):
                 "system.status": "WARNING",
             }
         )
-        self.emit_log("WARN", random.choice(messages), attrs, channel=channel)
+        self.emit_log("WARN", self._rng.choice(messages), attrs, channel=channel)
 
     def emit_infrastructure_events(self, channel: int) -> None:
         """Emit one-shot infrastructure/audit events when a channel fires.
@@ -378,4 +390,4 @@ class BaseService(ABC):
 
     def _generate_fault_params(self, channel: int) -> dict[str, Any]:
         """Generate realistic random parameters for fault messages from scenario."""
-        return self._ctx.scenario.get_fault_params(channel)
+        return self._ctx.scenario.get_fault_params(channel, self._rng)

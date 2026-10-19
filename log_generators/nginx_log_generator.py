@@ -351,10 +351,11 @@ def _generate_error_log(
 # ── Run loop (used by ServiceManager and standalone) ──────────────────────────
 def run(
     client: OTLPClient, stop_event: threading.Event, *, scenario_data: dict,
+    rng: random.Random | None = None,
     chaos_controller=None,
 ) -> None:
     """Run nginx log generator loop until stop_event is set."""
-    rng = random.Random()
+    rng = rng if rng is not None else random.Random()
 
     ns = scenario_data["namespace"]
     _channel_registry: dict = scenario_data.get("channel_registry", {})

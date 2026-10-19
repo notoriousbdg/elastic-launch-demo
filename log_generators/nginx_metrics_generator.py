@@ -156,10 +156,11 @@ def _generate_metrics(state: NginxState, rng: random.Random) -> list:
 
 
 def run(
-    client: OTLPClient, stop_event: threading.Event, *, scenario_data: dict
+    client: OTLPClient, stop_event: threading.Event, *, scenario_data: dict,
+    rng: random.Random | None = None,
 ) -> None:
     """Run nginx metrics generator loop until stop_event is set."""
-    rng = random.Random()
+    rng = rng if rng is not None else random.Random()
 
     nginx_hosts = _nginx_hosts(scenario_data["namespace"])
 

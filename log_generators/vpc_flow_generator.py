@@ -252,10 +252,11 @@ def _generate_gcp_flow_record(
 
 
 def run(
-    client: OTLPClient, stop_event: threading.Event, *, scenario_data: dict
+    client: OTLPClient, stop_event: threading.Event, *, scenario_data: dict,
+    rng: random.Random | None = None,
 ) -> None:
     """Run VPC flow log generator loop until stop_event is set."""
-    rng = random.Random()
+    rng = rng if rng is not None else random.Random()
 
     ns = scenario_data["namespace"]
     scope_name = f"{ns}-vpc-flow-generator"

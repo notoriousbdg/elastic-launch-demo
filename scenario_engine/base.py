@@ -227,8 +227,11 @@ class BaseScenario(ABC):
         return {}
 
     @abstractmethod
-    def get_fault_params(self, channel: int) -> dict[str, Any]:
-        """Generate realistic random fault parameters for a channel."""
+    def get_fault_params(self, channel: int, rng: Any = None) -> dict[str, Any]:
+        """Generate realistic random fault parameters for a channel.
+
+        *rng* is a ``random.Random``; None uses a fresh unseeded one.
+        """
         ...
 
     # ── Convenience ──────────────────────────────────────────────────

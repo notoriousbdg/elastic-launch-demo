@@ -981,10 +981,11 @@ def run(
     stop_event: threading.Event,
     *,
     scenario_data: dict,
+    rng: random.Random | None = None,
     chaos_controller=None,
 ) -> None:
     """Run host metrics generator loop until stop_event is set."""
-    rng = random.Random()
+    rng = rng if rng is not None else random.Random()
 
     hosts = scenario_data["hosts"]
     _cluster_by_provider = {c["provider"]: c["name"] for c in scenario_data.get("k8s_clusters", [])}

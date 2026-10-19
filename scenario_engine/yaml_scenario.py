@@ -293,10 +293,10 @@ class YamlScenario(BaseScenario):
 
     # ── Fault Parameters ─────────────────────────────────────────────────
 
-    def get_fault_params(self, channel: int) -> dict[str, Any]:
+    def get_fault_params(self, channel: int, rng: random.Random | None = None) -> dict[str, Any]:
         ch = self._channels.get(channel, {})
         raw = ch.get("fault_params", {})
-        return resolve_dict(raw)  # unseeded rng for true randomness
+        return resolve_dict(raw, rng)  # rng=None → fresh unseeded rng
 
     # ── Trace Attributes & RCA ───────────────────────────────────────────
 
@@ -399,7 +399,7 @@ def emit_executive_business_metrics_if_eligible(service: Any) -> None:
     if not want or want != service.SERVICE_NAME:
         return
 
-    rng = random.Random()
+    rng = getattr(service, "_rng", None) or random.Random()
 
     # Collect per-KPI impact candidates from every active fault channel.
     # Structure: { kpi_name -> [candidate_value, ...] }
