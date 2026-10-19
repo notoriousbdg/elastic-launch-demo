@@ -1,0 +1,193 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://elastic-launch-demo.local/schemas/service.schema.json",
+  "title": "Service file — scenarios/<id>/services/<svc>.yaml",
+  "description": "Identity, topology and telemetry DSL for one simulated service. Interpreted by app/services/telemetry_dsl.py; see .claude/skills/add-scenario/contract/services.md.",
+  "type": "object",
+  "required": [
+    "service", "sort_order", "cloud_provider", "cloud_region", "cloud_platform",
+    "cloud_availability_zone", "subsystem", "language"
+  ],
+  "properties": {
+    "service": {"type": "string", "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"},
+    "sort_order": {"type": "integer", "minimum": 1},
+    "cloud_provider": {"enum": ["aws", "gcp", "azure"]},
+    "cloud_region": {"type": "string"},
+    "cloud_platform": {"type": "string"},
+    "cloud_availability_zone": {"type": "string"},
+    "subsystem": {"type": "string"},
+    "language": {"enum": ["python", "java", "go", "dotnet", "rust", "cpp"]},
+    "generates_traces": {"type": "boolean"},
+    "topology": {
+      "description": "Outbound calls: [callee, path, method].",
+      "type": "array",
+      "items": {"$ref": "#/$defs/string3"}
+    },
+    "entry_endpoints": {
+      "description": "Inbound endpoints: [path, method].",
+      "type": "array",
+      "items": {"$ref": "#/$defs/string2"}
+    },
+    "db_operations": {
+      "description": "DB calls: [operation, table, sql].",
+      "type": "array",
+      "items": {"$ref": "#/$defs/string3"}
+    },
+    "emit_fault_logs": {"type": "boolean"},
+    "kpi_emitter": {"type": "boolean"},
+    "constants": {"type": "object"},
+    "state": {
+      "type": "object",
+      "additionalProperties": {"$ref": "#/$defs/stateInit"}
+    },
+    "steps": {"$ref": "#/$defs/steps"},
+    "per_active_channel_steps": {"$ref": "#/$defs/steps"}
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "string2": {
+      "type": "array",
+      "prefixItems": [{"type": "string"}, {"type": "string"}],
+      "minItems": 2,
+      "maxItems": 2
+    },
+    "string3": {
+      "type": "array",
+      "prefixItems": [{"type": "string"}, {"type": "string"}, {"type": "string"}],
+      "minItems": 3,
+      "maxItems": 3
+    },
+    "valueSpec": {"$ref": "value-spec.schema.json#/$defs/valueSpec"},
+    "attrs": {"$ref": "value-spec.schema.json#/$defs/valueSpecMap"},
+    "stateInit": {
+      "anyOf": [
+        {
+          "type": "object",
+          "required": ["init"],
+          "properties": {"init": {}},
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["init_per_key"],
+          "properties": {
+            "init_per_key": {
+              "type": "object",
+              "required": ["keys_from", "spec"],
+              "properties": {"keys_from": {"type": "string"}, "spec": {"$ref": "#/$defs/valueSpec"}},
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "steps": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/step"}
+    },
+    "step": {
+      "description": "Exactly one step keyword per list item.",
+      "oneOf": [
+        {
+          "type": "object", "required": ["sample"], "additionalProperties": false,
+          "properties": {"sample": {"$ref": "value-spec.schema.json#/$defs/valueSpecMap"}}
+        },
+        {
+          "type": "object", "required": ["metric"], "additionalProperties": false,
+          "properties": {
+            "metric": {
+              "type": "object",
+              "required": ["name", "value"],
+              "properties": {
+                "name": {"$ref": "#/$defs/valueSpec"},
+                "value": {"$ref": "#/$defs/valueSpec"},
+                "unit": {"$ref": "#/$defs/valueSpec"},
+                "attrs": {"$ref": "#/$defs/attrs"}
+              },
+              "additionalProperties": false
+            }
+          }
+        },
+        {
+          "type": "object", "required": ["log"], "additionalProperties": false,
+          "properties": {
+            "log": {
+              "type": "object",
+              "required": ["message"],
+              "properties": {
+                "level": {"$ref": "#/$defs/valueSpec"},
+                "message": {"$ref": "#/$defs/valueSpec"},
+                "attrs": {"$ref": "#/$defs/attrs"},
+                "with_remediation_meta": {"type": "boolean"}
+              },
+              "additionalProperties": false
+            }
+          }
+        },
+        {
+          "type": "object", "required": ["for_each"], "additionalProperties": false,
+          "properties": {
+            "for_each": {
+              "type": "object",
+              "required": ["in", "as", "steps"],
+              "properties": {
+                "in": {"$ref": "#/$defs/valueSpec"},
+                "as": {
+                  "anyOf": [
+                    {"type": "string"},
+                    {"type": "array", "items": {"type": "string"}, "minItems": 2, "maxItems": 2}
+                  ]
+                },
+                "steps": {"$ref": "#/$defs/steps"}
+              },
+              "additionalProperties": false
+            }
+          }
+        },
+        {
+          "type": "object", "required": ["every"], "additionalProperties": false,
+          "properties": {
+            "every": {
+              "type": "object",
+              "required": ["seconds", "state_key"],
+              "properties": {
+                "seconds": {"type": "number", "exclusiveMinimum": 0},
+                "state_key": {"type": "string"},
+                "steps": {"$ref": "#/$defs/steps"},
+                "else": {"$ref": "#/$defs/steps"}
+              },
+              "additionalProperties": false
+            }
+          }
+        },
+        {
+          "type": "object", "required": ["counter"], "additionalProperties": false,
+          "properties": {
+            "counter": {
+              "type": "object",
+              "required": ["state_key"],
+              "properties": {"state_key": {"type": "string"}, "by": {"$ref": "#/$defs/valueSpec"}},
+              "additionalProperties": false
+            }
+          }
+        },
+        {
+          "type": "object", "required": ["incr_key"], "additionalProperties": false,
+          "properties": {
+            "incr_key": {
+              "type": "object",
+              "required": ["state_key", "key"],
+              "properties": {
+                "state_key": {"type": "string"},
+                "key": {"$ref": "#/$defs/valueSpec"},
+                "by": {"$ref": "#/$defs/valueSpec"}
+              },
+              "additionalProperties": false
+            }
+          }
+        }
+      ]
+    }
+  }
+}

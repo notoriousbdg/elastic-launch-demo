@@ -78,7 +78,8 @@ def test_verify_script_checks_infra_impact(scenario_copy, monkeypatch, impact, e
     _set_infra_impact(scenario_copy, 2, impact)
 
     errors, _ = verify_yaml_scenarios.check_scenario("space")
-    impact_errors = [e for e in errors if "infra_impact" in e]
+    # Check 10b's own messages; type errors are also reported by the schema check.
+    impact_errors = [e for e in errors if "infra_impact" in e and not e.startswith("schema:")]
     if expected_error is None:
         assert impact_errors == []
     else:

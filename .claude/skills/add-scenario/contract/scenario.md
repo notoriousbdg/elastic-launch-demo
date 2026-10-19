@@ -2,6 +2,8 @@
 
 Use this as a generation checklist for `scenario.yaml`. Work top-to-bottom and verify every property is present and correctly shaped.
 
+> **Machine-checked schema:** `scenario_engine/schemas/scenario.schema.json` is the enforced shape of this file. Run `python3 scripts/verify_yaml_scenarios.py <id>` before finishing — it validates every file against the schemas (check 0) plus the cross-file rules below. Uploads and GitHub imports that fail the schema are rejected.
+
 The runtime reads scenario data from three sources:
 - `scenarios/<id>/scenario.yaml` — scenario-level properties (identity, infra, agent, KPIs, trace attrs)
 - `scenarios/<id>/channels/NN-<slug>.yaml` — one file per fault channel

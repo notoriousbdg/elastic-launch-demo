@@ -38,7 +38,7 @@ fault_params:
     format: "2026-Q{n}"
     n: {randint: [1, 4]}
   stage: {choice: [data_collection, validation, aggregation, formatting, submission]}
-  deadline_utc: 2026-02-16T23:59:00Z
+  deadline_utc: "2026-02-16T23:59:00Z"
 rca_clues:
   compliance-monitor:
     compliance.validation_error_count: {randint: [500, 5000]}

@@ -20,6 +20,7 @@ from scenario_engine.schema_version import (
     effective_version,
     version_status,
 )
+from scenario_engine.schema_validation import validate_scenario_dir
 from scenario_engine.yaml_scenario import load_yaml_scenario
 
 if TYPE_CHECKING:
@@ -49,6 +50,10 @@ def _discover_impl() -> list[dict[str, str]]:
             scenario = load_yaml_scenario(scenario_file.parent)
             _registry[scenario.scenario_id] = scenario
             logger.debug("Registered scenario: %s", scenario.scenario_id)
+            # Installed scenarios still load when they drift from the schema (so
+            # an upgrade never hides a custom scenario); imports are strict.
+            for err in validate_scenario_dir(scenario_file.parent):
+                logger.warning("Scenario %s schema: %s", pkg, err)
         except (OSError, KeyError, ValueError, yaml.YAMLError) as e:
             msg = str(e)
             logger.warning("Scenario %s not available: %s", pkg, msg)
@@ -151,9 +156,15 @@ def export_scenario_zip(scenario_id: str) -> bytes:
 def _validate_staged(staged: Path) -> None:
     """Load a staged scenario folder, raising ValueError if it is unusable.
 
-    Loading runs the expression allowlist (``validate_expr``), so a scenario
-    with an unsafe ``expr:`` is rejected before it is installed.
+    Every file must match the JSON Schemas in scenario_engine/schemas/, and
+    loading runs the expression allowlist (``validate_expr``), so a malformed
+    scenario or one with an unsafe ``expr:`` is rejected before it is installed.
     """
+    schema_errors = validate_scenario_dir(staged)
+    if schema_errors:
+        shown = "; ".join(schema_errors[:5])
+        more = f" (+{len(schema_errors) - 5} more)" if len(schema_errors) > 5 else ""
+        raise ValueError(f"Scenario {staged.name!r} does not match the schema: {shown}{more}")
     try:
         load_yaml_scenario(staged)
     except (OSError, KeyError, yaml.YAMLError) as exc:

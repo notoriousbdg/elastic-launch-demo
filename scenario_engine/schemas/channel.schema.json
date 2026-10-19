@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://elastic-launch-demo.local/schemas/channel.schema.json",
+  "title": "Fault channel — scenarios/<id>/channels/NN-<slug>.yaml",
+  "description": "One fault channel. The channel number comes from the filename prefix. See .claude/skills/add-fault-channel/CONTRACT.md.",
+  "type": "object",
+  "required": [
+    "name", "subsystem", "vehicle_section", "error_type", "sensor_type",
+    "affected_services", "cascade_services", "description", "investigation_notes",
+    "remediation_action", "error_message", "stack_trace", "fault_params", "rca_clues"
+  ],
+  "properties": {
+    "name": {"type": "string", "minLength": 1},
+    "subsystem": {"type": "string"},
+    "vehicle_section": {"type": "string"},
+    "error_type": {"type": "string", "minLength": 1},
+    "sensor_type": {"type": "string"},
+    "affected_services": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+    "cascade_services": {"type": "array", "items": {"type": "string"}},
+    "description": {"type": "string"},
+    "investigation_notes": {"type": "string"},
+    "remediation_action": {"type": "string"},
+    "error_message": {"type": "string"},
+    "stack_trace": {"type": "string"},
+    "fault_params": {"$ref": "value-spec.schema.json#/$defs/valueSpecMap"},
+    "rca_clues": {
+      "description": "Per-service span attributes: {service: {attr: value spec}}.",
+      "type": "object",
+      "additionalProperties": {"$ref": "value-spec.schema.json#/$defs/valueSpecMap"}
+    },
+    "correlation_attr": {
+      "description": "{key, value} injected on error spans; {} means no correlation attribute.",
+      "type": "object",
+      "properties": {"key": {"type": "string"}, "value": {"type": ["string", "number", "boolean"]}},
+      "dependentRequired": {"key": ["value"], "value": ["key"]},
+      "additionalProperties": false
+    },
+    "infrastructure_events": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["body"],
+        "properties": {
+          "body": {"type": "string"},
+          "severity": {"enum": ["TRACE", "DEBUG", "INFO", "WARN", "ERROR", "FATAL"]},
+          "event_name": {"type": "string"},
+          "service": {"type": "string"},
+          "attributes": {"type": "object"}
+        },
+        "additionalProperties": false
+      }
+    },
+    "business_impact": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["kpi"],
+        "properties": {
+          "kpi": {"type": "string"},
+          "factor": {"$ref": "value-spec.schema.json#/$defs/valueSpec"},
+          "value": {"$ref": "value-spec.schema.json#/$defs/valueSpec"}
+        },
+        "oneOf": [{"required": ["factor"]}, {"required": ["value"]}],
+        "additionalProperties": false
+      }
+    },
+    "infra_impact": {
+      "description": "Spikes applied while active; keys and ranges are checked by verify_yaml_scenarios.py (check 10b).",
+      "type": "object",
+      "additionalProperties": {"type": "number"}
+    }
+  },
+  "additionalProperties": false
+}

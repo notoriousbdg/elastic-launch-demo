@@ -1,0 +1,151 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://elastic-launch-demo.local/schemas/scenario.schema.json",
+  "title": "Scenario — scenarios/<id>/scenario.yaml",
+  "description": "Scenario-level identity, infrastructure, agent config, KPIs and trace attributes. See .claude/skills/add-scenario/contract/scenario.md.",
+  "type": "object",
+  "required": ["scenario_id", "scenario_name", "scenario_description", "namespace"],
+  "properties": {
+    "scenario_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]*$"},
+    "scenario_name": {"type": "string", "minLength": 1},
+    "scenario_description": {"type": "string"},
+    "namespace": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$"},
+    "schema_version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+$"},
+    "scenario_icon": {"type": "string"},
+    "sort_order": {"type": "integer"},
+    "nominal_label": {"type": "string"},
+    "apm_ml_bucket_span": {"type": "string", "pattern": "^[0-9]+[smhd]$"},
+    "hosts": {
+      "type": "array",
+      "items": {
+        "description": "OTel host resource attributes plus cpu_count / memory_total_bytes / disk_total_bytes.",
+        "type": "object",
+        "required": ["host.name", "cloud.provider"],
+        "properties": {
+          "host.name": {"type": "string"},
+          "cloud.provider": {"enum": ["aws", "gcp", "azure"]},
+          "cpu_count": {"type": "integer", "minimum": 1},
+          "memory_total_bytes": {"type": "integer", "minimum": 0},
+          "disk_total_bytes": {"type": "integer", "minimum": 0},
+          "host.ip": {"type": "array", "items": {"type": "string"}},
+          "host.mac": {"type": "array", "items": {"type": "string"}}
+        }
+      }
+    },
+    "k8s_clusters": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "provider", "platform", "region", "zones", "services"],
+        "properties": {
+          "name": {"type": "string"},
+          "provider": {"enum": ["aws", "gcp", "azure"]},
+          "platform": {"type": "string"},
+          "region": {"type": "string"},
+          "zones": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+          "os_description": {"type": "string"},
+          "services": {"type": "array", "items": {"type": "string"}}
+        },
+        "additionalProperties": false
+      }
+    },
+    "agent_config": {
+      "type": "object",
+      "required": ["id", "name", "system_prompt"],
+      "properties": {
+        "id": {"type": "string"},
+        "name": {"type": "string"},
+        "description": {"type": "string"},
+        "assessment_tool_name": {"type": "string"},
+        "system_prompt": {"type": "string"}
+      },
+      "additionalProperties": false
+    },
+    "assessment_tool_config": {
+      "type": "object",
+      "required": ["id", "description"],
+      "properties": {"id": {"type": "string"}, "description": {"type": "string"}},
+      "additionalProperties": false
+    },
+    "executive_kpi_emitter_service_name": {"type": "string"},
+    "executive_dashboard_intro": {"type": "string"},
+    "executive_kpi_sections": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["header", "specs"],
+        "properties": {
+          "header": {"type": "string"},
+          "specs": {
+            "description": "[title, field] pairs.",
+            "type": "array",
+            "items": {
+              "type": "array",
+              "prefixItems": [{"type": "string"}, {"type": "string"}],
+              "minItems": 2,
+              "maxItems": 2
+            }
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "executive_trend_charts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["title", "field"],
+        "properties": {"title": {"type": "string"}, "field": {"type": "string"}, "y_label": {"type": "string"}},
+        "additionalProperties": false
+      }
+    },
+    "executive_kpi_emissions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "value"],
+        "properties": {
+          "name": {"type": "string", "pattern": "^business\\."},
+          "value": {"$ref": "value-spec.schema.json#/$defs/valueSpec"},
+          "unit": {"type": "string"}
+        },
+        "additionalProperties": false
+      }
+    },
+    "raw_log_profile": {
+      "type": "object",
+      "properties": {
+        "service_name": {"type": "string"},
+        "user_id_prefix": {"type": "string"},
+        "tier_field": {"type": "string"},
+        "tier_values": {
+          "description": "[tier, weight] pairs.",
+          "type": "array",
+          "items": {
+            "type": "array",
+            "prefixItems": [{"type": "string"}, {"type": "number"}],
+            "minItems": 2,
+            "maxItems": 2
+          }
+        },
+        "country_weights": {"type": "object", "additionalProperties": {"type": "number"}},
+        "methods": {"type": "array", "items": {"type": "string"}},
+        "paths": {"type": "array", "items": {"type": "string"}},
+        "change_point_path": {"type": "string"}
+      },
+      "additionalProperties": false
+    },
+    "trace_attributes": {
+      "type": "object",
+      "properties": {
+        "base": {"$ref": "value-spec.schema.json#/$defs/valueSpecMap"},
+        "services": {
+          "type": "object",
+          "additionalProperties": {"$ref": "value-spec.schema.json#/$defs/valueSpecMap"}
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

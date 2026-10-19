@@ -2,6 +2,8 @@
 
 Use this as a generation checklist when authoring `services/<svc>.yaml` files.
 
+> **Machine-checked schema:** `scenario_engine/schemas/service.schema.json` is the enforced shape of this file. Run `python3 scripts/verify_yaml_scenarios.py <id>` before finishing — it validates every file against the schemas (check 0) plus the cross-file rules below. Uploads and GitHub imports that fail the schema are rejected.
+
 ---
 
 ## Services

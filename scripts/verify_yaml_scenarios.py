@@ -2,6 +2,7 @@
 """Verify that YAML scenarios pass all integrity checks.
 
 Checks performed for each scenario:
+  0.  every file matches the JSON Schemas in scenario_engine/schemas/
   1.  scenario.yaml loads without errors (loading also rejects any ``expr:``
       outside the allowlist in app/services/expr.py)
   1b. schema_version: if present, must parse as MAJOR.MINOR; malformed → error.
@@ -98,8 +99,21 @@ _INFRA_IMPACT_RANGES = {
 
 
 def _placeholders(text: str) -> set[str]:
-    # Match {word} but not {{word}} (double-brace escapes are literal in log lines).
-    return set(re.findall(r"(?<!\{)\{(\w+)\}(?!\})", text))
+    """Top-level field names of every replacement field in a str.format template.
+
+    Covers {name}, {name:spec}, {name!r} and {name[key]}; {{escaped}} braces are
+    literal. Falls back to plain {name} matching if the text is not a valid template.
+    """
+    import string
+
+    try:
+        names = set()
+        for _, field, _, _ in string.Formatter().parse(text):
+            if field:
+                names.add(re.split(r"[.\[]", field, maxsplit=1)[0])
+        return names
+    except ValueError:
+        return set(re.findall(r"(?<!\{)\{(\w+)\}(?!\})", text))
 
 
 def check_scenario(scenario_id: str) -> tuple[list[str], list[str]]:
@@ -112,6 +126,10 @@ def check_scenario(scenario_id: str) -> tuple[list[str], list[str]]:
 
     if not yaml_path.exists():
         return [f"scenario.yaml not found under scenarios/{scenario_id}/"], []
+
+    # ── Check 0: JSON Schema ─────────────────────────────────────────────────
+    from scenario_engine.schema_validation import validate_scenario_dir
+    errors.extend(f"schema: {e}" for e in validate_scenario_dir(scenario_dir))
 
     # Load via YamlScenario
     try:

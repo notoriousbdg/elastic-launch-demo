@@ -37,7 +37,7 @@ fault_params:
   idoc_backlog: {randint: [20, 250]}
   elapsed_min: {randint: [5, 45]}
   crash_count: {randint: [1, 5]}
-  failure_time: 2026-05-06T14:15:32Z
+  failure_time: "2026-05-06T14:15:32Z"
 rca_clues:
   erp-bridge:
     winlog.event_id: 7031

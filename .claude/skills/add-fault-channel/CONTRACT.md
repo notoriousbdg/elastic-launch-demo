@@ -2,6 +2,8 @@
 
 Use this as a generation checklist. Work top-to-bottom and verify every property is present and correctly shaped before writing the channel YAML file.
 
+> **Machine-checked schema:** `scenario_engine/schemas/channel.schema.json` is the enforced shape of this file. Run `python3 scripts/verify_yaml_scenarios.py <id>` before finishing — it validates every file against the schemas (check 0) plus the cross-file rules below. Uploads and GitHub imports that fail the schema are rejected.
+
 Reference source: [`scenarios/ecommerce/channels/01-payment-gateway-timeout.yaml`](scenarios/ecommerce/channels/01-payment-gateway-timeout.yaml)
 
 ---

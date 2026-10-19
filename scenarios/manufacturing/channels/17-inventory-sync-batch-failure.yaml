@@ -34,7 +34,7 @@ fault_params:
   record_count: {randint: [500, 4500]}
   failure_mode: {choice: [SOCKET_TIMEOUT, RFC_HANDLE_INVALID]}
   retry_count: {randint: [0, 2]}
-  failure_time: 2026-05-06T14:15:32Z
+  failure_time: "2026-05-06T14:15:32Z"
 rca_clues:
   inventory-sync:
     wms.batch_failure_mode: {choice: [SOCKET_TIMEOUT, RFC_HANDLE_INVALID]}

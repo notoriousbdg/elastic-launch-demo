@@ -54,7 +54,7 @@ fault_params:
   db_baseline_ms: {randint: [15, 25]}
   rds_event: ModifyDBInstance
   maintenance_duration_min: {randint: [5, 25]}
-  event_time: 2026-03-08T07:12:00Z
+  event_time: "2026-03-08T07:12:00Z"
   latency_multiplier: {randint: [100, 210]}
   failed_activations: {randint: [500, 5000]}
   affected_subscribers: {randint: [5000, 15000]}
