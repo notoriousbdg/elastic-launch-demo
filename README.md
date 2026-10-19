@@ -241,14 +241,11 @@ elastic-launch-demo/
 │   │   └── *.py                     # Individual service implementations
 │   ├── chaos/                       # Chaos injection system
 │   │   ├── controller.py            # Channel state management
-│   │   ├── channels.py              # Channel definitions helper
 │   │   └── remediation_poller.py    # Polls op_queue and calls controller.resolve()
 │   ├── selector/static/             # Scenario selector UI (front page)
 │   ├── chaos_ui/static/             # Chaos controller UI
 │   └── notify/                      # Notification handlers
-│       ├── email_handler.py         # Elastic Cloud SMTP
-│       ├── twilio_handler.py        # SMS + voice via Twilio
-│       └── slack_handler.py         # Slack webhooks
+│       └── email_handler.py         # Elastic Cloud SMTP
 ├── scenarios/
 │   ├── base.py                      # BaseScenario ABC
 │   ├── __init__.py                  # ScenarioRegistry — discovers scenarios/*/scenario.yaml

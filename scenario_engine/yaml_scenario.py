@@ -198,20 +198,12 @@ class YamlScenario(BaseScenario):
     def services(self) -> dict[str, dict[str, Any]]:
         """Identity/resource metadata for each service (cloud, region, language, subsystem).
 
-        Derived from per-service YAML files in sort_order; falls back to the
-        legacy ``services:`` block in scenario.yaml when no services/ dir exists.
+        Derived from per-service YAML files in sort_order.
         """
-        if self._service_specs:
-            return {
-                svc: {k: spec[k] for k in self._IDENTITY_KEYS if k in spec}
-                for svc, spec in self._service_specs.items()
-            }
-        # Legacy / test fallback: services: block in scenario.yaml
-        result: dict[str, dict[str, Any]] = {}
-        for svc, cfg in self._data.get("services", {}).items():
-            result[svc] = {k: v for k, v in cfg.items()
-                           if k in self._IDENTITY_KEYS}
-        return result
+        return {
+            svc: {k: spec[k] for k in self._IDENTITY_KEYS if k in spec}
+            for svc, spec in self._service_specs.items()
+        }
 
     @property
     def channel_registry(self) -> dict[int, dict[str, Any]]:
@@ -219,36 +211,27 @@ class YamlScenario(BaseScenario):
 
     @property
     def service_topology(self) -> dict[str, list[tuple[str, str, str]]]:
-        if self._service_specs:
-            return {
-                svc: [tuple(e) for e in spec.get("topology", [])]
-                for svc, spec in self._service_specs.items()
-                if spec.get("topology")
-            }
-        raw = self._data.get("service_topology", {})
-        return {svc: [tuple(e) for e in edges] for svc, edges in raw.items()}
+        return {
+            svc: [tuple(e) for e in spec.get("topology", [])]
+            for svc, spec in self._service_specs.items()
+            if spec.get("topology")
+        }
 
     @property
     def entry_endpoints(self) -> dict[str, list[tuple[str, str]]]:
-        if self._service_specs:
-            return {
-                svc: [tuple(e) for e in spec.get("entry_endpoints", [])]
-                for svc, spec in self._service_specs.items()
-                if spec.get("entry_endpoints")
-            }
-        raw = self._data.get("entry_endpoints", {})
-        return {svc: [tuple(e) for e in eps] for svc, eps in raw.items()}
+        return {
+            svc: [tuple(e) for e in spec.get("entry_endpoints", [])]
+            for svc, spec in self._service_specs.items()
+            if spec.get("entry_endpoints")
+        }
 
     @property
     def db_operations(self) -> dict[str, list[tuple[str, str, str]]]:
-        if self._service_specs:
-            return {
-                svc: [tuple(op) for op in spec.get("db_operations", [])]
-                for svc, spec in self._service_specs.items()
-                if spec.get("db_operations")
-            }
-        raw = self._data.get("db_operations", {})
-        return {svc: [tuple(op) for op in ops] for svc, ops in raw.items()}
+        return {
+            svc: [tuple(op) for op in spec.get("db_operations", [])]
+            for svc, spec in self._service_specs.items()
+            if spec.get("db_operations")
+        }
 
     # ── Infrastructure ───────────────────────────────────────────────────
 
@@ -269,10 +252,6 @@ class YamlScenario(BaseScenario):
     @property
     def assessment_tool_config(self) -> dict[str, Any]:
         return self._data.get("assessment_tool_config", {})
-
-    @property
-    def knowledge_base_docs(self) -> list[dict[str, Any]]:
-        return []  # Populated at deploy time from channel_registry
 
     # ── Raw Log Profile ──────────────────────────────────────────────────
 

@@ -21,13 +21,6 @@ OTLP_ENDPOINT = os.getenv("OTLP_ENDPOINT", "")
 OTLP_API_KEY = os.getenv("OTLP_API_KEY", "")
 OTLP_AUTH_TYPE = os.getenv("OTLP_AUTH_TYPE", "ApiKey")  # "ApiKey" or "Bearer"
 
-TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID", "")
-TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", "")
-TWILIO_FROM_NUMBER = os.getenv("TWILIO_FROM_NUMBER", "")
-TWILIO_TO_NUMBER = os.getenv("TWILIO_TO_NUMBER", "")
-
-SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL", "")
-
 SMTP_HOST = os.getenv("SMTP_HOST", "")
 SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
 SMTP_USER = os.getenv("SMTP_USER", "")
