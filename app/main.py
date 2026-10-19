@@ -45,6 +45,7 @@ logger = logging.getLogger("nova7")
 # ── Multi-tenancy singletons ──────────────────────────────────────────────────
 from app.op_queue import OperationQueue
 from app.progress import IDLE as PROGRESS_IDLE, ProgressStore
+from app.launch import Credentials, Launcher
 from app.registry import InstanceRegistry
 from app.store import ChaosStore, DeploymentStore
 
@@ -52,6 +53,7 @@ registry = InstanceRegistry()
 store = DeploymentStore()
 chaos_store = ChaosStore()
 op_queue = OperationQueue()
+launcher = Launcher(registry, store, chaos_store)
 
 
 def _purge_deployment_records(deployment_id: str) -> None:
@@ -124,7 +126,9 @@ async def lifespan(app: FastAPI):
             if not _pre_derived_otlp.endswith(":443"):
                 _pre_derived_otlp += ":443"
 
-        def _make_auto_deploy(dep_id, s_id, _scenario, _deployer):
+        creds = Credentials(kibana_url=kibana_url, elastic_url=elastic_url, api_key=api_key)
+
+        def _make_auto_deploy(dep_id, _scenario, _deployer):
             """Factory that binds per-scenario variables for each deploy thread."""
             _scenario_name = _scenario.scenario_name
 
@@ -144,110 +148,13 @@ async def lifespan(app: FastAPI):
                     )
 
             def _auto_deploy():
-                # Shared state between the early-start hook and the post-deploy
-                # fallback path.  Using a dict avoids nonlocal rebinding issues.
-                _state: dict = {"started": False, "instance": None, "endpoint": None}
-
-                def _on_otlp_ready(early_endpoint: str) -> None:
-                    """Start telemetry emission as soon as OTLP endpoint is known.
-
-                    Fires from within deploy_all() right after step 3
-                    (OTLP derivation), before the slow tail (ML, alerts, SLOs,
-                    integrations).  This means KPI gauges reach Elasticsearch
-                    minutes earlier and the executive dashboard tiles populate
-                    immediately when the operator opens it.
-                    """
-                    ep = OTLP_ENDPOINT or early_endpoint
-                    try:
-                        ctx = ScenarioContext.from_scenario(
-                            _scenario,
-                            otlp_endpoint=ep,
-                            otlp_api_key=api_key,
-                            elastic_url=elastic_url,
-                            elastic_api_key=api_key,
-                            kibana_url=kibana_url,
-                        )
-                        instance = ScenarioInstance(ctx, chaos_store=chaos_store)
-                        if ep:
-                            instance.otlp.reconfigure(ep, api_key)
-                        instance.start()
-                        registry.register(dep_id, instance)
-                        store.upsert(
-                            deployment_id=dep_id,
-                            scenario_id=s_id,
-                            otlp_endpoint=ep,
-                            otlp_api_key=api_key,
-                            elastic_url=elastic_url,
-                            elastic_api_key=api_key,
-                            kibana_url=kibana_url,
-                        )
-                        _state["started"] = True
-                        _state["instance"] = instance
-                        _state["endpoint"] = ep
-                        logger.info(
-                            "Auto-deploy: instance started early after OTLP derive (%s)",
-                            dep_id,
-                        )
-                    except Exception:
-                        logger.exception(
-                            "Auto-deploy: early start failed for %s; will retry after deploy_all",
-                            s_id,
-                        )
-
-                result = _deployer.deploy_all(
-                    callback=_progress_cb, on_otlp_ready=_on_otlp_ready
-                )
-
-                if _state["started"]:
-                    # Hook fired — instance is already running.
-                    # Reconfigure only if the final verified endpoint differs from
-                    # the early one (e.g. if OTLP_ENDPOINT env var wasn't set and
-                    # the deployer returned a different verified URL).
-                    final_endpoint = (
-                        OTLP_ENDPOINT or result.otlp_endpoint or _pre_derived_otlp
-                    )
-                    if final_endpoint and final_endpoint != _state["endpoint"]:
-                        inst = _state["instance"]
-                        if inst is not None:
-                            inst.otlp.reconfigure(final_endpoint, api_key)
-                            logger.info(
-                                "Auto-deploy: OTLP endpoint updated post-deploy for %s → %s",
-                                dep_id,
-                                final_endpoint,
-                            )
-                    logger.info("Auto-deploy complete: %s (%s)", dep_id, s_id)
-                    return
-
-                # Hook never fired (OTLP derivation failed or raised) — fall back
-                # to the original post-deploy start behavior.
                 # Priority: explicit env var → deployer-verified → pre-derived fallback
-                otlp_endpoint = OTLP_ENDPOINT or result.otlp_endpoint or _pre_derived_otlp
-                try:
-                    ctx = ScenarioContext.from_scenario(
-                        _scenario,
-                        otlp_endpoint=otlp_endpoint,
-                        otlp_api_key=api_key,
-                        elastic_url=elastic_url,
-                        elastic_api_key=api_key,
-                        kibana_url=kibana_url,
-                    )
-                    instance = ScenarioInstance(ctx, chaos_store=chaos_store)
-                    if otlp_endpoint:
-                        instance.otlp.reconfigure(otlp_endpoint, api_key)
-                    instance.start()
-                    registry.register(dep_id, instance)
-                    store.upsert(
-                        deployment_id=dep_id,
-                        scenario_id=s_id,
-                        otlp_endpoint=otlp_endpoint,
-                        otlp_api_key=api_key,
-                        elastic_url=elastic_url,
-                        elastic_api_key=api_key,
-                        kibana_url=kibana_url,
-                    )
-                    logger.info("Auto-deploy complete: %s (%s)", dep_id, s_id)
-                except Exception:
-                    logger.exception("Auto-deploy failed for %s", s_id)
+                launcher.deploy_and_start(
+                    _deployer, _scenario, dep_id, creds,
+                    otlp_override=OTLP_ENDPOINT,
+                    otlp_fallback=_pre_derived_otlp,
+                    progress_cb=_progress_cb,
+                )
 
             return _auto_deploy
 
@@ -268,7 +175,7 @@ async def lifespan(app: FastAPI):
             _deploy_progress.start_queued(scenario_id, scenario_id, scenario.scenario_name)
             op_queue.submit_deploy(
                 scenario_id,
-                _make_auto_deploy(scenario_id, scenario_id, scenario, deployer),
+                _make_auto_deploy(scenario_id, scenario, deployer),
                 _make_on_position(scenario_id),
             )
 
@@ -934,13 +841,8 @@ def test_connection(body: dict):
             scenario_id = body.get("scenario_id", ACTIVE_SCENARIO)
             scenario = _get_scenario_by_id(scenario_id)
             deployer = ScenarioDeployer(scenario, elastic_url, kibana_url, api_key)
-            explicit_otlp = body.get("otlp_url") or ""
-            if explicit_otlp:
-                otlp_ok = deployer._verify_otlp_candidate(client, explicit_otlp)
-                otlp_url = explicit_otlp if otlp_ok else ""
-            else:
-                otlp_url = deployer._derive_otlp_endpoint(client) or ""
-                otlp_ok = bool(otlp_url)
+            otlp_url = deployer.probe_otlp(client, explicit=body.get("otlp_url") or "")
+            otlp_ok = bool(otlp_url)
             result["otlp_ok"] = otlp_ok
             result["otlp_error"] = None if otlp_ok else "Endpoint unreachable"
             result["otlp_endpoint"] = otlp_url or None
@@ -958,8 +860,6 @@ def launch_setup(body: dict):
     """
     from scenario_engine import get_scenario as _get_scenario_by_id
     from elastic_config.deployer import ScenarioDeployer
-    from app.context import ScenarioContext
-    from app.instance import ScenarioInstance
 
     scenario_id = body.get("scenario_id", ACTIVE_SCENARIO)
     _def_elastic, _def_kibana, _def_key = _get_default_creds()
@@ -1003,6 +903,10 @@ def launch_setup(body: dict):
         )
 
     cloud_api_key = (body.get("cloud_api_key") or "").strip()
+    creds = Credentials(
+        kibana_url=kibana_url, elastic_url=elastic_url, api_key=api_key,
+        cloud_api_key=cloud_api_key,
+    )
     deployer = ScenarioDeployer(
         scenario, elastic_url, kibana_url, api_key,
         kibana_proxy=KIBANA_PROXY,
@@ -1032,114 +936,11 @@ def launch_setup(body: dict):
             except Exception as exc:
                 logger.warning("Error stopping old instance: %s", exc)
 
-        # Shared state between the early-start hook and the post-deploy fallback.
-        _state: dict = {"started": False, "instance": None, "endpoint": None}
-
-        def _on_otlp_ready(early_endpoint: str) -> None:
-            """Start telemetry as soon as the OTLP endpoint is confirmed (step 3),
-            before the slow tail of deploy_all() runs.
-            """
-            ep = explicit_otlp or early_endpoint
-            try:
-                ctx = ScenarioContext.from_scenario(
-                    scenario,
-                    otlp_endpoint=ep,
-                    otlp_api_key=api_key,
-                    elastic_url=elastic_url,
-                    elastic_api_key=api_key,
-                    kibana_url=kibana_url,
-                )
-                instance = ScenarioInstance(ctx, chaos_store=chaos_store)
-                if ep:
-                    instance.otlp.reconfigure(ep, api_key)
-                    logger.info(
-                        "OTLPClient for %s reconfigured early to %s", scenario_id, ep
-                    )
-                instance.start()
-                registry.register(deployment_id, instance)
-                store.upsert(
-                    deployment_id=deployment_id,
-                    scenario_id=scenario_id,
-                    otlp_endpoint=ep,
-                    otlp_api_key=api_key,
-                    elastic_url=elastic_url,
-                    elastic_api_key=api_key,
-                    kibana_url=kibana_url,
-                    cloud_api_key=cloud_api_key,
-                )
-                _state["started"] = True
-                _state["instance"] = instance
-                _state["endpoint"] = ep
-                logger.info(
-                    "Launch: instance started early after OTLP derive (%s)", deployment_id
-                )
-            except Exception as exc:
-                logger.exception(
-                    "Launch: early start failed for %s; will retry after deploy_all",
-                    scenario_id,
-                )
-
-        result = deployer.deploy_all(
-            callback=_progress_cb, on_otlp_ready=_on_otlp_ready
+        launcher.deploy_and_start(
+            deployer, scenario, deployment_id, creds,
+            otlp_override=explicit_otlp,
+            progress_cb=_progress_cb,
         )
-
-        if _state["started"]:
-            # Hook fired — instance is already running.
-            # Reconfigure only if the final endpoint differs from the early one.
-            final_endpoint = explicit_otlp or result.otlp_endpoint
-            if final_endpoint and final_endpoint != _state["endpoint"]:
-                inst = _state["instance"]
-                if inst is not None:
-                    inst.otlp.reconfigure(final_endpoint, api_key)
-                    logger.info(
-                        "OTLPClient for %s updated post-deploy to %s",
-                        scenario_id,
-                        final_endpoint,
-                    )
-            logger.info("Deployment %s (%s) live", deployment_id, scenario_id)
-            return
-
-        # Hook never fired — fall back to original post-deploy start behavior.
-        # Use explicit OTLP override if provided, otherwise use derived
-        otlp_endpoint = explicit_otlp or result.otlp_endpoint
-
-        # Create ScenarioContext + ScenarioInstance
-        try:
-            ctx = ScenarioContext.from_scenario(
-                scenario,
-                otlp_endpoint=otlp_endpoint or "",
-                otlp_api_key=api_key,
-                elastic_url=elastic_url,
-                elastic_api_key=api_key,
-                kibana_url=kibana_url,
-            )
-            instance = ScenarioInstance(ctx, chaos_store=chaos_store)
-
-            # Reconfigure OTLP if we have an endpoint
-            if otlp_endpoint:
-                instance.otlp.reconfigure(otlp_endpoint, api_key)
-                logger.info(
-                    "OTLPClient for %s reconfigured to %s", scenario_id, otlp_endpoint
-                )
-
-            instance.start()
-            registry.register(deployment_id, instance)
-
-            # Persist to SQLite
-            store.upsert(
-                deployment_id=deployment_id,
-                scenario_id=scenario_id,
-                otlp_endpoint=otlp_endpoint or "",
-                otlp_api_key=api_key,
-                elastic_url=elastic_url,
-                elastic_api_key=api_key,
-                kibana_url=kibana_url,
-                cloud_api_key=cloud_api_key,
-            )
-
-            logger.info("Deployment %s (%s) live", deployment_id, scenario_id)
-        except Exception as exc:
-            logger.exception("Failed to start instance for %s: %s", scenario_id, exc)
 
     def _on_position(position: int, total: int) -> None:
         _deploy_progress.set_queue_position(deployment_id, position, total)
