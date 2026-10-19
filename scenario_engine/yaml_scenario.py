@@ -79,7 +79,7 @@ class YamlScenario(BaseScenario):
                     "sensor_type", "affected_services", "cascade_services",
                     "description", "investigation_notes", "remediation_action",
                     "error_message", "stack_trace", "infrastructure_events",
-                    "business_impact",
+                    "business_impact", "infra_impact",
                 )
                 if k in ch
             }

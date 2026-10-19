@@ -20,6 +20,8 @@ Checks performed for each scenario:
       get_fault_params(ch) — and every fault_params key is referenced
       by at least one placeholder (orphan check)
   10. every affected_services / cascade_services value is a key in services
+  10b. infra_impact (optional) only sets cpu_pct / memory_pct /
+      k8s_oom_intensity (0–100) and latency_multiplier (1.0–10.0)
   11. every k8s_clusters[].services value is a key in services
   12. agent_config.system_prompt references all 20 channel error_types, and
       every error_type in the prompt is present in a channel (bidirectional)
@@ -82,6 +84,16 @@ _CHANNEL_REQUIRED_FIELDS = (
     "stack_trace",
     "fault_params",
 )
+
+
+# Spike keys a channel's infra_impact may set, with the same ranges as the
+# chaos UI sliders (app/chaos_ui/static/index.html).
+_INFRA_IMPACT_RANGES = {
+    "cpu_pct": (0, 100),
+    "memory_pct": (0, 100),
+    "k8s_oom_intensity": (0, 100),
+    "latency_multiplier": (1.0, 10.0),
+}
 
 
 def _placeholders(text: str) -> set[str]:
@@ -234,6 +246,27 @@ def check_scenario(scenario_id: str) -> tuple[list[str], list[str]]:
             for svc in ch.get(field, []):
                 if svc not in svc_keys:
                     errors.append(f"ch {ch_num}: {field} '{svc}' not in services")
+
+    # ── Check 10b: infra_impact keys and ranges ──────────────────────────────
+    for ch_num, ch in sorted(reg.items()):
+        impact = ch.get("infra_impact")
+        if impact is None:
+            continue
+        if not isinstance(impact, dict):
+            errors.append(f"ch {ch_num}: infra_impact must be a mapping")
+            continue
+        for key, val in impact.items():
+            if key not in _INFRA_IMPACT_RANGES:
+                errors.append(
+                    f"ch {ch_num}: infra_impact key '{key}' is not one of "
+                    f"{sorted(_INFRA_IMPACT_RANGES)}"
+                )
+                continue
+            lo, hi = _INFRA_IMPACT_RANGES[key]
+            if isinstance(val, bool) or not isinstance(val, (int, float)) or not lo <= val <= hi:
+                errors.append(
+                    f"ch {ch_num}: infra_impact.{key}={val!r} must be a number in [{lo}, {hi}]"
+                )
 
     # ── Check 11: k8s_clusters services membership ────────────────────────────
     for cluster in s.k8s_clusters:
