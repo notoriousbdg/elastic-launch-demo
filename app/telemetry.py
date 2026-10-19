@@ -465,6 +465,11 @@ class OTLPClient:
         if self.client:
             self.client.close()
 
+    def ensure_open(self) -> None:
+        """Recreate the HTTP client if :meth:`close` was called (instance restart)."""
+        if self.client is None or self.client.is_closed:
+            self.reconfigure(self.endpoint, self.api_key, self.auth_type)
+
 
 class ESBulkClient:
     """Posts plain ECS-shaped documents to an Elasticsearch data stream via `_bulk`.
@@ -574,3 +579,8 @@ class ESBulkClient:
                 self.client.close()
             except Exception:
                 pass
+
+    def ensure_open(self) -> None:
+        """Recreate the HTTP client if :meth:`close` was called (instance restart)."""
+        if self.client is None or self.client.is_closed:
+            self.reconfigure(self.elastic_url, self.api_key)

@@ -22,17 +22,21 @@ class InstanceRegistry:
         self._instances: dict[str, ScenarioInstance] = {}
 
     def register(self, deployment_id: str, instance: ScenarioInstance) -> None:
-        """Register an instance, stopping any existing one with the same id."""
+        """Register an instance, stopping any existing one with the same id.
+
+        The old instance is stopped after the lock is released: stopping joins
+        threads for several seconds and must not block other registry calls.
+        """
         with self._lock:
             old = self._instances.get(deployment_id)
-            if old:
-                logger.info("Replacing existing instance %s", deployment_id)
-                try:
-                    old.stop()
-                except Exception:
-                    logger.exception("Error stopping old instance %s", deployment_id)
             instance.deployment_id = deployment_id
             self._instances[deployment_id] = instance
+        if old and old is not instance:
+            logger.info("Replacing existing instance %s", deployment_id)
+            try:
+                old.stop()
+            except Exception:
+                logger.exception("Error stopping old instance %s", deployment_id)
 
     def get(self, deployment_id: str) -> ScenarioInstance | None:
         """Get an instance by deployment id."""
@@ -59,13 +63,14 @@ class InstanceRegistry:
     def stop_all(self) -> None:
         """Stop all registered instances."""
         with self._lock:
-            for dep_id, inst in self._instances.items():
-                try:
-                    inst.stop()
-                    logger.info("Stopped instance %s", dep_id)
-                except Exception:
-                    logger.exception("Error stopping instance %s", dep_id)
+            instances = dict(self._instances)
             self._instances.clear()
+        for dep_id, inst in instances.items():
+            try:
+                inst.stop()
+                logger.info("Stopped instance %s", dep_id)
+            except Exception:
+                logger.exception("Error stopping instance %s", dep_id)
 
     def __len__(self) -> int:
         with self._lock:
