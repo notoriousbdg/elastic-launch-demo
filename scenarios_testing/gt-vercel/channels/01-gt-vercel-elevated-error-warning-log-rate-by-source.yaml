@@ -1,0 +1,37 @@
+name: "GT vercel_otel: elevated_error_warning_log_rate_by_source"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-VERCEL-ELEVATED-ERROR-WARNING-LOG-RATE-BY-SOURCE
+sensor_type: impact_key_probe
+affected_services:
+  - gt-vercel-aws-svc-1
+cascade_services:
+  - gt-vercel-aws-svc-2
+description: "Tests impact_key elevated_error_warning_log_rate_by_source on generator vercel_otel."
+investigation_notes: |-
+  1. Verify vercel_otel is active and reporting metrics.
+  2. Check that the elevated_error_warning_log_rate_by_source metric has reached the trigger value (0.4).
+  3. Confirm generator_impact for vercel_otel.elevated_error_warning_log_rate_by_source is set to 0.4.
+  4. Look for correlated changes in service gt-vercel-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_elevated_error_warning_log_rate_by_source_baseline
+error_message: "GT-PROBE: gen=vercel_otel key=elevated_error_warning_log_rate_by_source value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=vercel_otel
+  impact_key: elevated_error_warning_log_rate_by_source
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 0.4
+  svc_name: gt-vercel-aws-svc-1
+rca_clues:
+  gt-vercel-aws-svc-1:
+    probe.generator: vercel_otel
+    probe.impact_key: elevated_error_warning_log_rate_by_source
+    probe.trigger_value: 0.4
+  gt-vercel-aws-svc-2:
+    probe.upstream_generator: vercel_otel
+    probe.upstream_key: elevated_error_warning_log_rate_by_source
+generator_impact:
+  vercel_otel:
+    elevated_error_warning_log_rate_by_source: 0.4

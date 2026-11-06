@@ -1,0 +1,117 @@
+service: embedding-service
+sort_order: 6
+cloud_provider: azure
+cloud_region: eastus2
+cloud_platform: azure_vm
+cloud_availability_zone: eastus2-3
+subsystem: embeddings
+language: python
+
+# Topology: [downstream-service, endpoint, METHOD]
+topology: []
+
+db_operations: []
+
+emit_fault_logs: true
+kpi_emitter: false
+
+constants: {}
+
+state:
+  _batch_count:
+    init: 0
+  _last_summary:
+    init: now
+
+steps:
+  - sample:
+      embedding_model:
+        choice: [text-embedding-3-large, text-embedding-3-large, text-embedding-3-small]
+      source_corpus:
+        choice: [support-articles, product-manuals, policy-documents, release-notes]
+      batch_size:
+        randint: [16, 96]
+      vector_dimension:
+        if_active:
+          choice: [1536, 3072, 1024]
+        else:
+          choice: [3072]
+      queue_depth:
+        if_active:
+          randint: [1800, 9500]
+        else:
+          randint: [0, 60]
+      embed_latency_ms:
+        if_active:
+          uniform: [900.0, 6500.0]
+          round: 1
+        else:
+          uniform: [45.0, 240.0]
+          round: 1
+      tokens_embedded:
+        randint: [4000, 52000]
+  - counter:
+      state_key: _batch_count
+      by: 1
+  - log:
+      level: INFO
+      message: '[EMBEDDING] batch_embedded model={embedding_model} corpus={source_corpus} batch_size={batch_size} dimension={vector_dimension} tokens={tokens_embedded} latency={embed_latency_ms}ms'
+      attrs:
+        operation: batch_embedded
+        embed.model:
+          var: embedding_model
+        embed.corpus:
+          var: source_corpus
+        embed.batch_size:
+          var: batch_size
+        embed.dimension:
+          var: vector_dimension
+        embed.tokens:
+          var: tokens_embedded
+        embed.latency_ms:
+          var: embed_latency_ms
+  - log:
+      level: INFO
+      message: '[EMBEDDING] queue_health depth={queue_depth} expected_dimension=3072 index=kb-passages-v4 ai_search_index_lag=NORMAL status=NORMAL'
+      attrs:
+        operation: queue_health
+        embed.queue_depth:
+          var: queue_depth
+        embed.expected_dimension: 3072
+        embed.index: kb-passages-v4
+  - every:
+      seconds: 10
+      state_key: _last_summary
+      steps:
+        - log:
+            level: INFO
+            message: '[EMBEDDING] embedding_summary batches_total={_batch_count} deployment=embeddings-prod-eastus2 dimension_check=PASS status=NORMAL'
+            attrs:
+              operation: embedding_summary
+              embed.batches_total:
+                var: _batch_count
+  - metric:
+      name: embedding_service.latency_ms
+      value:
+        var: embed_latency_ms
+      unit: ms
+  - metric:
+      name: embedding_service.batch_size
+      value:
+        var: batch_size
+      unit: '{texts}'
+  - metric:
+      name: embedding_service.vector_dimension
+      value:
+        var: vector_dimension
+      unit: '{dimensions}'
+  - metric:
+      name: embedding_service.queue_depth
+      value:
+        var: queue_depth
+      unit: '{batches}'
+  - metric:
+      name: embedding_service.tokens_embedded
+      value:
+        var: tokens_embedded
+      unit: '{tokens}'

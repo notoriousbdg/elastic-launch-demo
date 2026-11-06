@@ -9,15 +9,15 @@ affected_services:
 cascade_services:
 - cloud-cdn-service
 - network-intelligence
-description: DNS record changes taking abnormally long to propagate across Cloud DNS servers
+description: DNS record changes taking abnormally long to propagate because the Cloud SQL for SQL Server record store is blocking and deadlocking
 investigation_notes: |-
-  Root cause: Cloud DNS record changes normally propagate within 60 seconds, but delays occur when authoritative name servers are under heavy query load, when the zone has a very large record set, or when there are pending DNSSEC re-signing operations. Check change status:
+  Root cause: cloud-dns-resolver stages record changes in its dns_records table on Cloud SQL for SQL Server before publishing them. A long bulk update holds locks, so other record writers are blocked or picked as deadlock victims, and changes reach the zone late. Confirm on the GCP Cloud SQL for SQL Server OTel dashboards (processes blocked, deadlocks by locked resource). Cloud DNS record changes normally propagate within 60 seconds, but delays occur when authoritative name servers are under heavy query load, when the zone has a very large record set, or when there are pending DNSSEC re-signing operations. Name server response under 50 ms and zero pending re-signing operations rule those out here. Check change status:
     gcloud dns record-sets changes describe <change-id> --zone=<zone>
     gcloud dns record-sets changes list --zone=<zone> --sort-by=startTime --limit=5
   Remediation: If change is stuck in PENDING, verify the zone is not locked by another operation. Flush local DNS caches on affected VMs:
-    sudo systemd-resolve --flush-caches (on Container-Optimized OS)
+    sudo resolvectl flush-caches (node cache; pods resolve via kube-dns/NodeLocal DNSCache)
   For external clients, reduce TTL on the record before making changes (set TTL to 60s, wait for old TTL to expire, then make the change). Check if Cloud DNS name servers are responding:
-    dig <record> @ns-cloud-a1.googledomains.com
+    dig <record> @ns-cloud-a1.googledomains.com (public zones; for private zones query 169.254.169.254 from a VM in an authorized network)
   If servers are unresponsive, check Cloud DNS quota and zone status in Console > Network Services > Cloud DNS.
 remediation_action: flush_dns_cache
 error_message: 'cloud-dns: DNS-ZONE-PROPAGATION-DELAY zone={dns_zone} change_id={dns_change_id} record={dns_record_name} propagation_time={dns_prop_time_sec}s
@@ -30,7 +30,7 @@ stack_trace: |-
   Record:             {dns_record_name}
   Propagation Time:   {dns_prop_time_sec}s (SLA: {dns_prop_sla_sec}s)
   Servers Updated:    {dns_servers_updated}/{dns_servers_total}
-  Status:             PENDING
+  Status:             QUEUED in record store (not yet submitted to Cloud DNS)
   Action: Wait for propagation or flush DNS cache
 correlation_attr:
   key: deployment.dns_ttl_override
@@ -42,11 +42,14 @@ fault_params:
   dns_prop_time_sec: {randint: [120, 600]}
   dns_prop_sla_sec: 60
   dns_servers_updated: {randint: [1, 3]}
-  dns_servers_total: {randint: [4, 8]}
+  dns_servers_total: 4
 rca_clues:
   cloud-dns-resolver:
     dns.propagation_lag_sec: {randint: [120, 600]}
-    dns.change_status: PENDING
+    dns.change_status: QUEUED_IN_RECORD_STORE
+    dns.record_store_blocked_writers: {randint: [5, 20]}
+    dns.nameserver_response_ms: {randint: [5, 20]}
+    dns.pending_dnssec_resign_ops: 0
   cloud-load-balancer:
     lb.dns_stale_ip: true
     lb.traffic_to_old_backend: {uniform: [10, 40], round: 1}
@@ -59,8 +62,12 @@ business_impact:
   - kpi: business.api_success_rate_pct
     factor: {uniform: [0.65, 0.85]}
   - kpi: business.cdn_cache_hit_rate_pct
-    factor: {uniform: [0.60, 0.82]}
+    factor: {uniform: [0.6, 0.82]}
   - kpi: business.load_balancer_rps
-    factor: {uniform: [0.58, 0.80]}
+    value: {uniform: [16926.0, 19474.0]}
   - kpi: business.edge_latency_p50_ms
     factor: {uniform: [2.5, 6.0]}
+generator_impact:
+  gcp_cloudsql_sqlserver_otel:
+    blocked_processes_high: 40.0
+    deadlocks_high: 20.0

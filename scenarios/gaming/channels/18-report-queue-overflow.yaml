@@ -13,7 +13,7 @@ investigation_notes: |-
   Root cause: 8 of 12 report processing workers have crashed (likely OOM on GPU inference nodes), reducing processing capacity by 67%. Auto-resolve is disabled due to high false positive rates from the automod model, creating a dual failure mode.
   1. Check worker pods: `kubectl get pods -l app=report-processor` on the AKS cluster — look for OOMKilled or CrashLoopBackOff status on GPU-attached pods.
   2. Review SLA breaches: harassment reports at 12h (SLA: 4h) and hate_speech at 6h (SLA: 1h) are critical compliance violations — escalate to the T&S lead.
-  3. Inspect GPU memory: `nvidia-smi` on inference nodes — if 2 nodes show OOM, the batch size for the classification model may need to be reduced.
+  3. Inspect GPU memory: `nvidia-smi` on inference nodes for memory near 40GB and the worker logs for `CUDA out of memory` — if 2 nodes show OOM, the batch size for the classification model may need to be reduced.
   4. Remediate: issue `restart_report_workers` to recover crashed processors and `prioritize_sla_breached` to reorder the queue by SLA violation severity.
   5. Enable CPU-fallback inference for lower-priority categories (spam, exploits) to free GPU capacity for high-SLA categories (hate_speech, harassment).
 remediation_action: restart_report_workers
@@ -44,13 +44,13 @@ correlation_attr:
   key: infra.gpu_memory_config
   value: a100-40gb-batch-oversized
 fault_params:
-  report_queue_depth: {randint: [5000, 50000]}
+  report_queue_depth: {randint: [18000, 50000]}
   processing_rate: {uniform: [5.0, 30.0], round: 1}
   oldest_report_hours: {uniform: [4.0, 72.0], round: 1}
   report_category: {choice: [harassment, cheating, hate_speech, exploits, spam]}
 rca_clues:
   moderation-engine:
-    moderation.workers_crashed: {randint: [4, 10]}
+    moderation.workers_crashed: 8
     moderation.gpu_inference_status: OOM
   chat-service:
     chat.unmoderated_messages_pct: {uniform: [10.0, 40.0], round: 1}
@@ -66,3 +66,7 @@ business_impact:
     factor: {uniform: [0.30, 0.60]}
   - kpi: business.net_satisfaction_proxy_nps
     factor: {uniform: [0.20, 0.45]}
+generator_impact:
+  kubernetes_otel:
+    oomkilled_containers: 0.8
+    pod_crashloopbackoff: 0.6

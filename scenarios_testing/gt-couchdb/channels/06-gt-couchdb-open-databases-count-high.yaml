@@ -1,0 +1,37 @@
+name: "GT couchdb_otel: open_databases_count_high"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-COUCHDB-OPEN-DATABASES-COUNT-HIGH
+sensor_type: impact_key_probe
+affected_services:
+  - gt-couchdb-aws-svc-1
+cascade_services:
+  - gt-couchdb-aws-svc-2
+description: "Tests impact_key open_databases_count_high on generator couchdb_otel."
+investigation_notes: |-
+  1. Verify couchdb_otel is active and reporting metrics.
+  2. Check that the open_databases_count_high metric has reached the trigger value (750.0).
+  3. Confirm generator_impact for couchdb_otel.open_databases_count_high is set to 750.0.
+  4. Look for correlated changes in service gt-couchdb-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_open_databases_count_high_baseline
+error_message: "GT-PROBE: gen=couchdb_otel key=open_databases_count_high value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=couchdb_otel
+  impact_key: open_databases_count_high
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 750.0
+  svc_name: gt-couchdb-aws-svc-1
+rca_clues:
+  gt-couchdb-aws-svc-1:
+    probe.generator: couchdb_otel
+    probe.impact_key: open_databases_count_high
+    probe.trigger_value: 750.0
+  gt-couchdb-aws-svc-2:
+    probe.upstream_generator: couchdb_otel
+    probe.upstream_key: open_databases_count_high
+generator_impact:
+  couchdb_otel:
+    open_databases_count_high: 750.0

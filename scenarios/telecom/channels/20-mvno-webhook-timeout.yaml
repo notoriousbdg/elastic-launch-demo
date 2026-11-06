@@ -12,7 +12,7 @@ description: MVNO partner webhook endpoints timing out preventing activation sta
 investigation_notes: |
   1. Check MVNO webhook endpoint health — partner webhook endpoint returning timeout after configured ms. This is the partner's infrastructure, not Meridian's.
   2. MVNO partners (Lycamobile, Lebara, etc.) depend on webhook callbacks for activation confirmations. Without callbacks, MVNO subscribers show 'activation pending' indefinitely.
-  3. Webhook retry policy: 3 retries with exponential backoff (5s, 30s, 300s). After 3 failures, notification is queued for manual reconciliation.
+  3. Webhook retry policy: 3 attempts with exponential backoff between them (30s, 300s). After 3 failed attempts, the notification is queued for manual reconciliation.
   4. Enable webhook circuit breaker — if a partner endpoint fails >50% of calls in a 5-minute window, stop sending to avoid overwhelming their recovering system.
   5. BSS-billing is affected because MVNO wholesale billing reconciliation depends on successful webhook delivery confirmations. Unacknowledged activations cannot be billed to the MVNO partner.
 remediation_action: enable_webhook_circuit_breaker
@@ -36,7 +36,7 @@ stack_trace: |
     partner_sla_breach_risk=HIGH
   ACTION: circuit_breaker=true  queue_for_reconciliation=true  alert=NOTIF-MVNO-WEBHOOK-TIMEOUT
 infrastructure_events:
-- body: '[CloudWatch] MVNOWebhookTimeout: partner=Lycamobile endpoint=api.lycamobile.eu/webhooks/activate timeout_ms=15000 sla_ms=5000 circuit_breaker=OPEN region=eu-central-1'
+- body: '[CloudWatch] MVNOWebhookTimeout: partner=Lycamobile endpoint=api.lycamobile.eu/v1/activation/callback timeout_ms=15000 sla_ms=5000 circuit_breaker=OPEN region=eu-central-1'
   severity: ERROR
   event_name: aws.cloudwatch.alarm.MVNOWebhookTimeout
   service: api-gateway
@@ -50,16 +50,17 @@ correlation_attr:
   key: notification.webhook_client_version
   value: webhook-v2.3.0-timeout-patch
 fault_params:
-  mvno_partner: {choice: [Lycamobile, Lebara, Aldi Talk, Congstar]}
-  webhook_endpoint: {choice: ['https://api.lycamobile.eu/v1/activation/callback', 'https://api.lebara.eu/v2/activation/webhook', 'https://partners.alditalk.de/api/activation/notify']}
-  webhook_timeout_ms: {randint: [5000, 30000]}
+  mvno_partner: Lycamobile
+  webhook_endpoint: 'https://api.lycamobile.eu/v1/activation/callback'
+  webhook_timeout_ms: {randint: [5500, 30000]}
   webhook_failures: {randint: [50, 500]}
   webhook_pending: {randint: [20, 200]}
-  webhook_success_rate: {uniform: [10.0, 60.0], round: 1}
+  webhook_success_rate: {uniform: [10.0, 45.0], round: 1}
 rca_clues:
   notification-service:
     notification.webhook_circuit_breaker: OPEN
     notification.failed_callbacks: {randint: [50, 500]}
+    notification.webhook_success_rate_pct: {uniform: [10.0, 45.0], round: 1}
   api-gateway:
     gateway.mvno_status_queries_spike: {randint: [500, 3000]}
     gateway.partner_api_errors: true
@@ -68,9 +69,9 @@ rca_clues:
     billing.wholesale_reconciliation: BLOCKED
 business_impact:
   - kpi: business.mvno_net_adds_per_min
-    factor: {uniform: [0.15, 0.45]}
+    value: {uniform: [27.2, 31.3]}
   - kpi: business.mvno_partner_revenue_usd_per_min
-    factor: {uniform: [0.15, 0.45]}
+    value: {uniform: [1674.0, 1926.0], round: 1}
   - kpi: business.port_ins_per_min
     factor: {uniform: [0.25, 0.55]}
   - kpi: business.trouble_to_billing_ratio_pct

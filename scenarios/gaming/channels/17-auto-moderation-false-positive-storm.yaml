@@ -10,7 +10,7 @@ cascade_services:
 - analytics-pipeline
 description: Automated content moderation system producing excessive false positives, silencing legitimate player communication
 investigation_notes: |-
-  Root cause: the automod NLP classifier model was updated to a new version that has dramatically higher sensitivity for the hate_speech category (fp_rate jumped from 2.1% to 34.8%), likely due to training data contamination or threshold miscalibration.
+  Root cause: the automod NLP classifier model was updated to a new version that has dramatically higher sensitivity for the hate_speech category (fp_rate jumped from 2.1% to 34.8%), due to decision-threshold miscalibration (hate_speech threshold lowered to 0.60). Recall unchanged at ~0.95 rules out training data contamination.
   1. Check model versioning: compare precision/recall between current and previous model version — if recall stayed at 0.95 but precision dropped to 0.42, the decision threshold was lowered too aggressively during the update.
   2. Review silenced players: {affected_players} wrongly silenced players with 847 pending appeals — prioritize unsilencing by checking if their messages match known-good patterns.
   3. Inspect category breakdown: hate_speech fp_rate of 34.8% is the primary driver — this category likely needs a higher confidence threshold (0.85 instead of 0.60).
@@ -23,7 +23,7 @@ stack_trace: |-
   === AUTOMOD ACCURACY METRICS ===
   model={model_version}  window={window_minutes}min
   ----------- classification stats ----
-    total_scanned    = 84,201
+    total_scanned    = 2,412 (human-labelled audit sample)
     true_positives   = 412
     false_positives  = {false_positive_count}
     false_negatives  = 23
@@ -46,9 +46,9 @@ correlation_attr:
   key: deployment.automod_model
   value: nlp-classifier-v4.0-beta-sensitive
 fault_params:
-  false_positive_count: {randint: [100, 5000]}
+  false_positive_count: {randint: [450, 700]}
   window_minutes: {randint: [5, 60]}
-  fp_rate_pct: {uniform: [15.0, 45.0], round: 1}
+  fp_rate_pct: {uniform: [22.0, 35.0], round: 1}
   model_version:
     format: "automod-v{major}.{minor}"
     major: {randint: [3, 7]}
@@ -58,8 +58,10 @@ rca_clues:
   moderation-engine:
     moderation.model_precision: {uniform: [0.30, 0.50], round: 2}
     moderation.hate_speech_fp_rate_pct: {uniform: [20.0, 45.0], round: 1}
+    moderation.model_recall: {uniform: [0.93, 0.97], round: 2}
+    moderation.hate_speech_threshold: 0.6
   chat-service:
-    chat.silenced_players: {randint: [500, 5000]}
+    chat.silenced_players: {randint: [50, 2000]}
     chat.appeal_queue_depth: {randint: [200, 2000]}
   analytics-pipeline:
     analytics.moderation_accuracy_alert: true

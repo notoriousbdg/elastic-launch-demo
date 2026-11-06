@@ -13,8 +13,8 @@ description: Cross-cloud telemetry relay latency exceeds acceptable bounds
 investigation_notes: 'Root cause: relay buffer saturation at 87% utilization causing queuing delay, compounded by 342 retransmits
   indicating packet loss on the inter-cloud link. High buffer utilization points to a congestion event — either a telemetry
   data burst from upstream sensors or a bandwidth reduction on the cross-cloud peering link. Check if the affected route has
-  a degraded BGP path (longer AS path) or if cloud provider maintenance reduced link capacity. 42ms jitter on the nominal
-  routes confirms the issue is isolated to the affected hop. Remediation: failover to backup route (RLY_ROUTE_FAILOVER {source}->{dest}
+  a degraded BGP path (AS path longer than the nominal 3) or if cloud provider maintenance reduced link capacity. 42ms jitter on the affected route vs 5-8ms on the nominal
+  routes confirms the issue is isolated to the affected hop. Remediation: failover to backup route (RLY_ROUTE_FAILOVER {source_cloud}->{dest_cloud}
   BACKUP), flush relay buffers (RLY_BUFFER_FLUSH), and enable QoS priority tagging for telemetry frames (RLY_QOS TELEMETRY
   HIGH). Monitor latency convergence below 200ms threshold.'
 remediation_action: reset_relay_link
@@ -35,17 +35,18 @@ correlation_attr:
   key: network.bgp_as_path
   value: 64512-64513-64515
 fault_params:
-  source_cloud: {choice: [aws, gcp, azure]}
-  dest_cloud: {choice: [aws, gcp, azure]}
+  source_cloud: aws
+  dest_cloud: gcp
   latency_ms: {randint: [500, 3000]}
   threshold_ms_relay: 200
 rca_clues:
   telemetry-relay:
     relay.buffer_utilization_pct: {uniform: [75.0, 95.0], round: 1}
     relay.retransmit_count: {randint: [200, 600]}
+    relay.bgp_as_path_len: {randint: [5, 7]}
   sensor-validator:
     validation.relay_health: degraded
-    validation.affected_route: {choice: [aws->gcp, gcp->azure, aws->azure]}
+    validation.affected_route: aws->gcp
   mission-control:
     upstream.degraded_subsystem: relay
     telemetry.data_freshness: stale

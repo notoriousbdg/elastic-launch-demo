@@ -1,0 +1,37 @@
+name: "GT redisenterprise_otel: database_memory_utilization_critical"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-REDISENTERPRISE-DATABASE-MEMORY-UTI
+sensor_type: impact_key_probe
+affected_services:
+  - gt-redisenterprise-aws-svc-1
+cascade_services:
+  - gt-redisenterprise-aws-svc-2
+description: "Tests impact_key database_memory_utilization_critical on generator redisenterprise_otel."
+investigation_notes: |-
+  1. Verify redisenterprise_otel is active and reporting metrics.
+  2. Check that the database_memory_utilization_critical metric has reached the trigger value (675.0).
+  3. Confirm generator_impact for redisenterprise_otel.database_memory_utilization_critical is set to 675.0.
+  4. Look for correlated changes in service gt-redisenterprise-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_database_memory_utilization_critical_baseline
+error_message: "GT-PROBE: gen=redisenterprise_otel key=database_memory_utilization_critical value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=redisenterprise_otel
+  impact_key: database_memory_utilization_critical
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 675.0
+  svc_name: gt-redisenterprise-aws-svc-1
+rca_clues:
+  gt-redisenterprise-aws-svc-1:
+    probe.generator: redisenterprise_otel
+    probe.impact_key: database_memory_utilization_critical
+    probe.trigger_value: 675.0
+  gt-redisenterprise-aws-svc-2:
+    probe.upstream_generator: redisenterprise_otel
+    probe.upstream_key: database_memory_utilization_critical
+generator_impact:
+  redisenterprise_otel:
+    database_memory_utilization_critical: 675.0

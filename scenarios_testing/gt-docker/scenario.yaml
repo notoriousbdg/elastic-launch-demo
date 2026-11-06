@@ -1,0 +1,359 @@
+scenario_id: gt-docker
+scenario_name: '[GT] docker_otel Impact Key Coverage'
+scenario_description: 'Generator impact_key coverage scenario for docker_otel. Each HITL channel tests one impact_key via generator_impact.'
+namespace: gtdocker
+scenario_icon: 🔬
+sort_order: 900
+nominal_label: NOMINAL
+schema_version: '1.2'
+apm_ml_bucket_span: 1m
+hosts:
+  - host.name: gtdocker-aws-host-01
+    host.id: i-6c11d189b463386f3
+    host.arch: amd64
+    host.type: m5.2xlarge
+    host.cpu.model.name: Intel(R) Xeon(R) Platinum 8259CL CPU @ 2.50GHz
+    host.cpu.vendor.id: GenuineIntel
+    host.cpu.family: '6'
+    host.cpu.model.id: '85'
+    host.cpu.stepping: '7'
+    host.cpu.cache.l2.size: 1310720
+    host.ip:
+      - 10.0.1.10
+      - 172.16.0.10
+    host.mac:
+      - 0a:1b:2c:3d:4e:5f
+      - 0a:1b:2c:3d:4e:60
+    os.type: linux
+    os.description: Amazon Linux 2023.6.20250115
+    cloud.provider: aws
+    cloud.platform: aws_ec2
+    cloud.region: us-east-1
+    cloud.availability_zone: us-east-1a
+    cloud.account.id: '468239439753'
+    cloud.instance.id: i-6c11d189b463386f3
+    cpu_count: 8
+    memory_total_bytes: 34359738368
+    disk_total_bytes: 536870912000
+  - host.name: gtdocker-gcp-host-02
+    host.id: '6851613328610124'
+    host.arch: amd64
+    host.type: n2-standard-8
+    host.cpu.model.name: Intel(R) Xeon(R) CPU @ 2.80GHz
+    host.cpu.vendor.id: GenuineIntel
+    host.cpu.family: '6'
+    host.cpu.model.id: '85'
+    host.cpu.stepping: '7'
+    host.cpu.cache.l2.size: 1048576
+    host.ip:
+      - 10.128.0.10
+      - 10.128.0.11
+    host.mac:
+      - 42:01:0a:80:00:0a
+      - 42:01:0a:80:00:0b
+    os.type: linux
+    os.description: Debian GNU/Linux 12 (bookworm)
+    cloud.provider: gcp
+    cloud.platform: gcp_compute_engine
+    cloud.region: us-central1
+    cloud.availability_zone: us-central1-a
+    cloud.account.id: gtdocker-project
+    cloud.instance.id: '6851613328610124'
+    cpu_count: 8
+    memory_total_bytes: 34359738368
+    disk_total_bytes: 274877906944
+  - host.name: gtdocker-azure-host-03
+    host.id: /subscriptions/3dfe1107-a7e3-5157-aeae-0f00f1f2f2fb/resourceGroups/gtdocker-rg/providers/Microsoft.Compute/virtualMachines/gtdocker-vm-01
+    host.arch: amd64
+    host.type: Standard_D4s_v3
+    host.cpu.model.name: Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz
+    host.cpu.vendor.id: GenuineIntel
+    host.cpu.family: '6'
+    host.cpu.model.id: '106'
+    host.cpu.stepping: '6'
+    host.cpu.cache.l2.size: 1310720
+    host.ip:
+      - 10.0.2.10
+      - 10.0.2.11
+    host.mac:
+      - 00:0d:3a:1b:2c:3d
+      - 00:0d:3a:1b:2c:3e
+    os.type: linux
+    os.description: Ubuntu 22.04.5 LTS
+    cloud.provider: azure
+    cloud.platform: azure_vm
+    cloud.region: eastus
+    cloud.availability_zone: eastus-1
+    cloud.account.id: 3dfe1107-a7e3-5157-aeae-0f00f1f2f2fb
+    cloud.instance.id: gtdocker-vm-01
+    cpu_count: 4
+    memory_total_bytes: 17179869184
+    disk_total_bytes: 137438953472
+k8s_clusters:
+  - name: gtdocker-aws-k8s
+    provider: aws
+    platform: aws_eks
+    region: us-east-1
+    zones:
+      - us-east-1a
+    os_description: Amazon Linux 2
+    services:
+      - gt-docker-aws-svc-1
+      - gt-docker-aws-svc-2
+      - gt-docker-aws-svc-3
+  - name: gtdocker-gcp-k8s
+    provider: gcp
+    platform: gcp_gke
+    region: us-central1
+    zones:
+      - us-central1-a
+    os_description: Container-Optimized OS
+    services:
+      - gt-docker-gcp-svc-1
+      - gt-docker-gcp-svc-2
+      - gt-docker-gcp-svc-3
+  - name: gtdocker-azure-k8s
+    provider: azure
+    platform: azure_aks
+    region: eastus
+    zones:
+      - eastus-1
+    os_description: Ubuntu 22.04
+    services:
+      - gt-docker-azure-svc-1
+      - gt-docker-azure-svc-2
+      - gt-docker-azure-svc-3
+agent_config:
+  id: gtdocker-analyst
+  name: '[GT] docker_otel Impact Key Coverage Operations Analyst'
+  assessment_tool_name: gtdocker_readiness_assessment
+  system_prompt: "You are an expert SRE assistant for the [GT] docker_otel Impact Key Coverage.\n\nWhen an incident is reported,\
+    \ your job is to:\n1. Diagnose the root cause from the error_type, stack traces, and RCA clues\n2. Recommend a specific\
+    \ remediation action\n3. Explain business impact in terms the executive team understands\n\nKnown fault channels and their\
+    \ error types:\n  - GT-DOCKER-CPU-UTILIZATION-MULTIPLIER: Gt Docker Cpu Utilization Multiplier\n  - GT-DOCKER-MEMORY-UTILIZATION-MULTIPLIE:\
+    \ Gt Docker Memory Utilization Multiplier\n  - GT-DOCKER-CPU-THROTTLE-RATE: Gt Docker Cpu Throttle Rate\n  - GT-DOCKER-MEMORY-LIMIT-BYTES:\
+    \ Gt Docker Memory Limit Bytes\n  - GT-DOCKER-PIDS-MULTIPLIER: Gt Docker Pids Multiplier\n  - GT-PLACEHOLDER-06: Gt Placeholder\
+    \ 06\n  - GT-PLACEHOLDER-07: Gt Placeholder 07\n  - GT-PLACEHOLDER-08: Gt Placeholder 08\n  - GT-PLACEHOLDER-09: Gt Placeholder\
+    \ 09\n  - GT-PLACEHOLDER-10: Gt Placeholder 10\n  - GT-PLACEHOLDER-11: Gt Placeholder 11\n  - GT-PLACEHOLDER-12: Gt Placeholder\
+    \ 12\n  - GT-PLACEHOLDER-13: Gt Placeholder 13\n  - GT-PLACEHOLDER-14: Gt Placeholder 14\n  - GT-PLACEHOLDER-15: Gt Placeholder\
+    \ 15\n  - GT-AUTO-PH-16: Gt Auto Placeholder 16\n  - GT-AUTO-PH-17: Gt Auto Placeholder 17\n  - GT-AUTO-PH-18: Gt Auto\
+    \ Placeholder 18\n  - GT-AUTO-PH-19: Gt Auto Placeholder 19\n  - GT-AUTO-PH-20: Gt Auto Placeholder 20\n\nFor each fault,\
+    \ examine the affected_services first, then look for cascade_services that may be experiencing downstream effects."
+assessment_tool_config:
+  id: gtdocker_readiness_assessment
+  description: 'Validates that each impact_key for docker_otel correctly drives generator behaviour. Checks that chaos channels produce expected metric deviations when individual impact_keys are activated.'
+executive_kpi_emitter_service_name: gt-docker-aws-svc-2
+executive_dashboard_intro: '**Generator test view** — synthetic platform metrics for docker_otel coverage testing.'
+executive_kpi_sections:
+  - header: '**Platform** — throughput, errors, latency, and availability'
+    specs:
+      - - Primary KPI (unit)
+        - metrics.business.primary_kpi
+      - - Secondary KPI (unit)
+        - metrics.business.secondary_kpi
+      - - Throughput (req/min)
+        - metrics.business.throughput_rpm
+      - - Error Rate (%)
+        - metrics.business.error_rate_pct
+      - - P99 Latency (ms)
+        - metrics.business.latency_p99_ms
+      - - Availability (%)
+        - metrics.business.availability_pct
+executive_trend_charts:
+  - title: Primary KPI trend
+    field: metrics.business.primary_kpi
+    y_label: units
+  - title: Throughput trend
+    field: metrics.business.throughput_rpm
+    y_label: req/min
+  - title: Error Rate trend
+    field: metrics.business.error_rate_pct
+    y_label: '%'
+  - title: Latency P99 trend
+    field: metrics.business.latency_p99_ms
+    y_label: ms
+  - title: Availability trend
+    field: metrics.business.availability_pct
+    y_label: '%'
+executive_kpi_emissions:
+  - name: business.primary_kpi
+    value:
+      uniform: &id001
+        - 100.0
+        - 1000.0
+      round: 1
+    unit: units
+  - name: business.secondary_kpi
+    value:
+      uniform: *id001
+      round: 1
+    unit: units
+  - name: business.throughput_rpm
+    value:
+      uniform:
+        - 1000.0
+        - 50000.0
+      round: 0
+    unit: units
+  - name: business.error_rate_pct
+    value:
+      uniform:
+        - 0.0
+        - 5.0
+      round: 2
+    unit: units
+  - name: business.latency_p99_ms
+    value:
+      uniform:
+        - 50.0
+        - 500.0
+      round: 0
+    unit: units
+  - name: business.availability_pct
+    value:
+      uniform:
+        - 99.0
+        - 100.0
+      round: 2
+    unit: units
+raw_log_profile:
+  service_name: gtdocker-gt-docker-aws-svc-1
+  user_id_prefix: u
+  tier_field: user_tier
+  tier_values:
+    - - standard
+      - 80
+    - - premium
+      - 20
+  country_weights:
+    US: 35
+    GB: 15
+    DE: 15
+    FR: 10
+    JP: 10
+    IN: 15
+  methods:
+    - GET
+    - POST
+    - PUT
+    - DELETE
+  paths:
+    - /api/v1/gtdocker/process
+    - /api/v1/health
+  change_point_path: /api/v1/gtdocker/process
+trace_attributes:
+  base:
+    platform.region:
+      choice:
+        - us-east-1
+        - us-east-1
+        - us-east-1
+    platform.traffic_tier:
+      choice:
+        - normal
+        - normal
+        - elevated
+        - peak
+  services:
+    gt-docker-aws-svc-1:
+      svc.version:
+        choice:
+          - 1.0.0
+          - 1.0.1
+          - 1.1.0
+      svc.environment:
+        choice:
+          - prod
+          - prod
+          - staging
+    gt-docker-aws-svc-2:
+      svc.version:
+        choice:
+          - 1.0.0
+          - 1.0.1
+          - 1.1.0
+      svc.environment:
+        choice:
+          - prod
+          - prod
+          - staging
+    gt-docker-aws-svc-3:
+      svc.version:
+        choice:
+          - 1.0.0
+          - 1.0.1
+          - 1.1.0
+      svc.environment:
+        choice:
+          - prod
+          - prod
+          - staging
+    gt-docker-gcp-svc-1:
+      svc.version:
+        choice:
+          - 1.0.0
+          - 1.0.1
+          - 1.1.0
+      svc.environment:
+        choice:
+          - prod
+          - prod
+          - staging
+    gt-docker-gcp-svc-2:
+      svc.version:
+        choice:
+          - 1.0.0
+          - 1.0.1
+          - 1.1.0
+      svc.environment:
+        choice:
+          - prod
+          - prod
+          - staging
+    gt-docker-gcp-svc-3:
+      svc.version:
+        choice:
+          - 1.0.0
+          - 1.0.1
+          - 1.1.0
+      svc.environment:
+        choice:
+          - prod
+          - prod
+          - staging
+    gt-docker-azure-svc-1:
+      svc.version:
+        choice:
+          - 1.0.0
+          - 1.0.1
+          - 1.1.0
+      svc.environment:
+        choice:
+          - prod
+          - prod
+          - staging
+    gt-docker-azure-svc-2:
+      svc.version:
+        choice:
+          - 1.0.0
+          - 1.0.1
+          - 1.1.0
+      svc.environment:
+        choice:
+          - prod
+          - prod
+          - staging
+    gt-docker-azure-svc-3:
+      svc.version:
+        choice:
+          - 1.0.0
+          - 1.0.1
+          - 1.1.0
+      svc.environment:
+        choice:
+          - prod
+          - prod
+          - staging
+
+generators:
+  docker_otel: true

@@ -3,15 +3,12 @@ subsystem: notifications
 vehicle_section: push_channel
 error_type: NOTIF-PUSH-BACKPRESSURE
 sensor_type: push_delivery
-affected_services:
-- notification-service
-cascade_services:
-- activation-service
-- provisioning-service
+affected_services: [notification-service, activation-service]
+cascade_services: [provisioning-service]
 description: FCM/APNs push notification delivery backpressure causing activation confirmation delays
 investigation_notes: |
-  1. Check FCM/APNs rate limit status — Firebase Cloud Messaging and Apple Push Notification service have per-app rate limits. Exceeding limits causes 429 responses and message queuing.
-  2. Backpressure source: activation volume spike (e.g., marketing campaign, device launch event) driving notification volume above normal 200/min to elevated rates.
+  1. Check the FCM quota — the FCM HTTP v1 API enforces a per-project messages-per-minute quota (default 600,000/min) and returns 429 QUOTA_EXCEEDED above it. Check Cloud Console > IAM & Admin > Quotas for a lowered override on this project (here 500/min). APNs has no per-app rate limit.
+  2. Backpressure source: activation volume spike (e.g., marketing campaign, device launch event) driving notification volume above normal 200/min to elevated rates (above the 500/min platform limit). With priority-5 background traffic nearly empty, quota competition from marketing notifications is ruled out.
   3. APNs priority channels: activation confirmations should use priority=10 (immediate). Background notifications (usage alerts, marketing) should use priority=5 to avoid quota competition.
   4. Provisioning-service waits for notification-service acknowledgment before marking activation complete. Push backpressure delays this acknowledgment, causing provisioning timeout.
   5. Decouple notification from activation flow — make notification async so provisioning-service doesn't block on notification delivery. Queue notifications for background delivery.
@@ -23,7 +20,7 @@ stack_trace: |
   --- DELIVERY STATUS ---
     PLATFORM     RATE        LIMIT       QUEUE     STATUS
     FCM          {push_current_rate}/min  {push_rate_limit}/min  {push_queue_depth}     THROTTLED
-    APNs         {push_current_rate}/min  {push_rate_limit}/min  {push_queue_depth}     THROTTLED
+    APNs         180/min      ---          0         OK
   --- BACKPRESSURE ANALYSIS ---
     retry_backoff={push_backoff_ms}ms  max_retries=5
     activation_confirms_delayed={activation_confirms_delayed}
@@ -44,18 +41,19 @@ correlation_attr:
   key: notification.push_sdk_version
   value: fcm-sdk-v24.1.0-beta
 fault_params:
-  push_platform: {choice: [FCM, APNs, HMS]}
-  push_current_rate: {randint: [500, 2000]}
+  push_platform: FCM
+  push_current_rate: {randint: [600, 2000]}
   push_rate_limit: 500
   push_queue_depth: {randint: [1000, 10000]}
   push_backoff_ms: {randint: [1000, 8000]}
   activation_confirms_delayed: {randint: [200, 2000]}
   priority_high_queued: {randint: [100, 500]}
-  priority_low_queued: {randint: [500, 5000]}
+  priority_low_queued: {randint: [0, 50]}
 rca_clues:
   notification-service:
     notification.push_rate_limited: true
     notification.fcm_429_count: {randint: [200, 2000]}
+    notification.push_send_rate_per_min: {randint: [600, 2000]}
   activation-service:
     activation.notification_ack_delayed: true
     activation.completion_blocked: true
@@ -64,7 +62,7 @@ rca_clues:
     provisioning.async_queue_building: true
 business_impact:
   - kpi: business.activations_per_min
-    factor: {uniform: [0.25, 0.55]}
+    value: {uniform: [230.87, 265.63]}
   - kpi: business.esim_provisions_per_min
     factor: {uniform: [0.25, 0.55]}
   - kpi: business.support_tickets_per_min

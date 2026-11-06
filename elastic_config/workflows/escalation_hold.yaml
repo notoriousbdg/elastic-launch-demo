@@ -1,5 +1,6 @@
 version: "1"
 name: __SCENARIO_NAME__ Escalation and Hold Management
+enabled: true
 description: >
   Manage escalation of critical anomalies and launch hold decisions.
   Implements the hold protocol: escalate -> hold -> investigate -> resolve -> resume.

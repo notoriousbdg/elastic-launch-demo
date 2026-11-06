@@ -11,8 +11,8 @@ cascade_services:
 - scheduling-api
 description: Blood bank inventory management system loses sync with transfusion service records
 investigation_notes: |-
-  Root Cause: Blood bank inventory discrepancies arise when the ISBT 128-coded product tracking system loses sync with the transfusion service module — typically after manual dispensing without barcode scanning, product expiration dispositions not recorded, or crossmatch cancellations not propagated back.
-  Remediation: 1) Initiate a physical recount per blood bank SOP: `bb-admin recount --product {blood_product} --type {blood_type}`. 2) Check the ISBT barcode scanner interface: `bb-admin scanner-status --station all`. 3) Reconcile system inventory with physical counts: `bb-admin reconcile --auto-adjust --audit-trail`. 4) Review the crossmatch pending list for unreturned units: `bb-admin crossmatch-pending --older-than 4h`. 5) Restart the blood bank inventory sync service: `systemctl restart bb-inventory-sync`. 6) Notify the blood bank medical director if discrepancy exceeds 2 units per AABB standards.
+  Root Cause: Blood bank inventory discrepancies arise when the ISBT 128-coded product tracking system loses sync with the transfusion service module — typically after manual dispensing without barcode scanning, product expiration dispositions not recorded, or crossmatch cancellations not propagated back. An offline ISBT scanner with unscanned dispenses (system count above the physical count), no unrecorded expirations and no expired crossmatch holds points to manual dispensing without barcode scanning.
+  Remediation: 1) Initiate a physical recount per blood bank SOP: `bb-admin recount --product {blood_product} --type {blood_type}`. 2) Check the ISBT barcode scanner interface: `bb-admin scanner-status --station all`. 3) Reconcile system inventory with physical counts: `bb-admin reconcile --auto-adjust --audit-trail`. 4) Review the crossmatch pending list for unreturned units: `bb-admin crossmatch-pending --older-than 4h`. 5) Restart the blood bank inventory sync service: `systemctl restart bb-inventory-sync`. 6) Notify the blood bank medical director if the discrepancy exceeds the threshold in the blood bank's inventory discrepancy SOP.
 remediation_action: reconcile_blood_bank
 error_message: '[LIS] BB-INVENTORY-SYNC: product={blood_product} type={blood_type} on_hand={units_on_hand} system={system_count}
   discrepancy={discrepancy}'
@@ -34,18 +34,20 @@ correlation_attr:
   key: deployment.bb_isbt_driver
   value: isbt128-scanner-v1.7.3-patched
 fault_params:
-  blood_product: {choice: [PRBC, FFP, Platelets, Cryoprecipitate]}
-  blood_type: {choice: ["O+", "O-", "A+", "A-", "B+", "B-", "AB+", "AB-"]}
-  units_on_hand: {randint: [2, 15]}
-  system_count: {randint: [8, 25]}
-  discrepancy: {randint: [3, 12]}
+  blood_product: Cryoprecipitate
+  blood_type: {choice: ["A", "B", "AB"]}
+  units_on_hand: 4
+  system_count: 11
+  discrepancy: 7
 rca_clues:
   lab-integration:
     bb.isbt_scanner_status: offline
     bb.physical_count_mismatch: true
+    bb.unscanned_dispense_count: 7
+    bb.expired_units_unrecorded: 0
   clinical-alerts:
     alerts.blood_shortage_alert: true
-    alerts.crossmatch_pending_expired: {randint: [2, 8]}
+    alerts.crossmatch_pending_expired: 0
   ehr-system:
     ehr.transfusion_orders_held: {randint: [1, 5]}
   scheduling-api:
@@ -53,10 +55,10 @@ rca_clues:
     sched.blood_type_screen_pending: true
 business_impact:
   - kpi: business.or_utilization_pct
-    factor: {uniform: [0.20, 0.45]}
+    factor: {uniform: [0.2, 0.45]}
   - kpi: business.patient_safety_events_per_min
     factor: {uniform: [2.5, 5.5]}
   - kpi: business.discharges_per_min
-    factor: {uniform: [0.25, 0.55]}
+    value: {uniform: [0.36, 0.42], round: 2}
   - kpi: business.lab_critical_notification_pct
-    factor: {uniform: [0.20, 0.50]}
+    factor: {uniform: [0.2, 0.5]}

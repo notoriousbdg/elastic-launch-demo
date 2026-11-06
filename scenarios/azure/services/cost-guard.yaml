@@ -1,0 +1,223 @@
+service: cost-guard
+sort_order: 8
+cloud_provider: azure
+cloud_region: westeurope
+cloud_platform: azure_vm
+cloud_availability_zone: westeurope-2
+subsystem: cost_control
+language: dotnet
+
+# Topology: [downstream-service, endpoint, METHOD]
+topology: []
+
+db_operations: []
+
+emit_fault_logs: true
+kpi_emitter: false
+
+constants:
+  TENANT_TIERS:
+  - enterprise
+  - business
+  - standard
+  - trial
+  MODEL_DEPLOYMENTS:
+  - gpt-4o-prod
+  - gpt-4o-mini-prod
+  - foundry-reasoning-eu
+
+state:
+  _checks:
+    init: 0
+  _throttled:
+    init: 0
+  _last_summary:
+    init: now
+
+steps:
+- sample:
+    tier:
+      choice: TENANT_TIERS
+    deployment:
+      choice: MODEL_DEPLOYMENTS
+    decision:
+      if_active:
+        choice:
+        - allow
+        - throttle
+        - throttle
+        - deny
+      else:
+        choice:
+        - allow
+        - allow
+        - allow
+        - allow
+        - allow
+        - allow
+        - allow
+        - allow
+        - allow
+        - throttle
+    tokens_per_conversation:
+      if_active:
+        randint:
+        - 28000
+        - 190000
+      else:
+        randint:
+        - 900
+        - 6500
+    check_latency_ms:
+      if_active:
+        uniform:
+        - 150.0
+        - 1800.0
+        round: 1
+      else:
+        uniform:
+        - 3.0
+        - 25.0
+        round: 1
+- counter:
+    state_key: _checks
+    by: 1
+- log:
+    level: INFO
+    message: 'budget_check tier={tier} deployment={deployment} tokens_in_conversation={tokens_per_conversation} decision={decision} latency={check_latency_ms}ms'
+    attrs:
+      operation: budget_check
+      cost.tier:
+        var: tier
+      cost.deployment:
+        var: deployment
+      cost.tokens_per_conversation:
+        var: tokens_per_conversation
+      cost.decision:
+        var: decision
+      cost.check_latency_ms:
+        var: check_latency_ms
+- metric:
+    name: cost_guard.budget_check_latency_ms
+    value:
+      var: check_latency_ms
+    unit: ms
+- metric:
+    name: cost_guard.tokens_per_conversation
+    value:
+      var: tokens_per_conversation
+    unit: tokens
+- sample:
+    monthly_budget_usd: 85000
+    spend_mtd_usd:
+      if_active:
+        randint:
+        - 82000
+        - 128000
+      else:
+        randint:
+        - 31000
+        - 56000
+    spend_pct:
+      expr: round(spend_mtd_usd / monthly_budget_usd * 100, 1)
+    burn_rate_usd_per_h:
+      if_active:
+        uniform:
+        - 1400.0
+        - 5200.0
+        round: 1
+      else:
+        uniform:
+        - 55.0
+        - 95.0
+        round: 1
+    tokens_per_min_k:
+      if_active:
+        randint:
+        - 2400
+        - 9800
+      else:
+        randint:
+        - 420
+        - 900
+- metric:
+    name: cost_guard.spend_month_to_date_usd
+    value:
+      var: spend_mtd_usd
+    unit: USD
+- metric:
+    name: cost_guard.budget_utilization_pct
+    value:
+      var: spend_pct
+    unit: '%'
+- metric:
+    name: cost_guard.burn_rate_usd_per_hour
+    value:
+      var: burn_rate_usd_per_h
+    unit: USD/h
+- metric:
+    name: cost_guard.tokens_per_minute_k
+    value:
+      var: tokens_per_min_k
+    unit: ktokens/min
+- log:
+    level: INFO
+    message: 'spend_snapshot spend_mtd=${spend_mtd_usd} budget=${monthly_budget_usd} utilization={spend_pct}% burn_rate=${burn_rate_usd_per_h}/h tokens_per_min={tokens_per_min_k}k source=cost-management-export'
+    attrs:
+      operation: spend_snapshot
+      cost.spend_mtd_usd:
+        var: spend_mtd_usd
+      cost.budget_usd:
+        var: monthly_budget_usd
+      cost.utilization_pct:
+        var: spend_pct
+      cost.burn_rate_usd_per_h:
+        var: burn_rate_usd_per_h
+- sample:
+    throttle_events:
+      if_active:
+        randint:
+        - 60
+        - 420
+      else:
+        randint:
+        - 0
+        - 6
+    budget_alerts_open:
+      if_active:
+        randint:
+        - 2
+        - 6
+      else:
+        randint:
+        - 0
+        - 1
+- counter:
+    state_key: _throttled
+    by:
+      var: throttle_events
+- metric:
+    name: cost_guard.throttle_decisions
+    value:
+      var: throttle_events
+    unit: decisions
+- metric:
+    name: cost_guard.budget_alerts_open
+    value:
+      var: budget_alerts_open
+    unit: alerts
+- every:
+    seconds: 10
+    state_key: _last_summary
+    steps:
+    - log:
+        level: INFO
+        message: 'cost_summary checks={_checks} throttled_total={_throttled} open_budget_alerts={budget_alerts_open} enforcement=enabled status=NORMAL'
+        attrs:
+          operation: cost_summary
+          cost.total_checks:
+            var: _checks
+          cost.total_throttled:
+            var: _throttled
+          cost.open_budget_alerts:
+            var: budget_alerts_open

@@ -12,18 +12,22 @@ description: Recommendation model experiencing feature drift — predictions deg
   conversion rates
 investigation_notes: |-
   1. Check recommendation-engine logs for RECO-MODEL-DRIFT — personalization_hit_rate_pct={hit_rate_pct}% below threshold {hit_rate_threshold_pct}%.
-  2. Review feature distribution shift: if the input feature distribution has diverged from training data distribution by >{drift_threshold_pct}%, the model is unreliable.
+  2. Review feature distribution shift: a feature drift score (PSI) above 0.25 means the input distribution has diverged from the training data and the model is unreliable; the current score is {drift_score}.
   3. Check the model's online metrics (click-through rate, add-to-cart rate) against the A/B test baseline — a >10% degradation is a drift signal.
-  4. Inspect recent feature pipeline changes — a schema change in user behavior events can silently zero-out key features causing systematic errors.
+  4. Inspect recent feature pipeline changes — a schema change in user behavior events can silently zero-out key features causing systematic errors (a zero-valued key feature count above 0 points to a schema change rather than drift).
   5. Rollback to the previous stable model version (v{prev_model_version}) while retraining — degraded recommendations are worse than generic ones.
   6. Ad-platform targeting also uses recommendation signals — notify the ads team that targeting quality is degraded until the model is retrained.
 remediation_action: rollback_reco_model
 error_message: '[RecommendationEngine] RECO-MODEL-DRIFT: model_version=v{model_version} hit_rate={hit_rate_pct}% (threshold
   {hit_rate_threshold_pct}%) feature_drift={drift_score:.2f} prev_stable_version=v{prev_model_version}'
 stack_trace: |-
-  ModelDriftException: RECO-MODEL-DRIFT
-    at ModelMonitor.checkDrift(model=v{model_version})
-    at RecommendationService.serve(user_id={user_id})
+  Traceback (most recent call last):
+    File "/app/reco/service.py", line 141, in serve
+      self.monitor.check_drift(model=self.model)
+    File "/app/reco/monitoring.py", line 77, in check_drift
+      raise ModelDriftError("RECO-MODEL-DRIFT")
+  reco.monitoring.ModelDriftError: RECO-MODEL-DRIFT
+  User:               {user_id}
   Model version:      v{model_version}
   Hit rate:           {hit_rate_pct}% (threshold: {hit_rate_threshold_pct}%)
   Feature drift score:{drift_score}
@@ -33,17 +37,19 @@ correlation_attr:
   key: reco.model_drifting
   value: true
 fault_params:
-  model_version: {randint: [8, 12]}
+  model_version: 9
   hit_rate_pct: {uniform: [20, 45], round: 1}
   hit_rate_threshold_pct: 60.0
+  drift_threshold_pct: 15
   drift_score: {uniform: [0.3, 0.8], round: 2}
-  prev_model_version: {randint: [6, 9]}
+  prev_model_version: 8
   user_id: {format: "USR-{n}", n: {randint: [100000, 999999]}}
   affected_users_hr: {randint: [10000, 500000]}
 rca_clues:
   recommendation-engine:
     reco.feature_drift_score: {uniform: [0.3, 0.8], round: 2}
-    reco.ctr_delta_pct: {uniform: [-30, -10], round: 1}
+    reco.ctr_delta_pct: {uniform: [-30, -12], round: 1}
+    reco.zero_valued_feature_count: 0
   ad-platform:
     ads.targeting_signal_quality_pct: {uniform: [40, 70], round: 1}
     ads.cpc_increase_pct: {uniform: [10, 40], round: 1}
@@ -52,10 +58,10 @@ rca_clues:
     storefront.personalization_confidence: LOW
 business_impact:
   - kpi: business.conversion_rate_pct
-    factor: {uniform: [0.30, 0.55]}
+    value: {uniform: [0.67, 0.77], round: 2}
   - kpi: business.ad_revenue_usd_per_min
-    factor: {uniform: [0.30, 0.55]}
+    value: {uniform: [10416.0, 11984.0], round: 1}
   - kpi: business.page_views_per_min
-    factor: {uniform: [0.35, 0.60]}
+    value: {uniform: [5138.0, 5912.0]}
   - kpi: business.cart_adds_per_min
-    factor: {uniform: [0.30, 0.55]}
+    factor: {uniform: [0.3, 0.55]}

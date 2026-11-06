@@ -25,14 +25,18 @@ function and called directly by the telemetry DSL executor:
 
 from __future__ import annotations
 
+import logging
 import random
+import time
 from pathlib import Path
 from typing import Any
 
 import yaml
 
 from scenario_engine.base import BaseScenario
-from scenario_engine.fault_spec import resolve, resolve_dict
+from scenario_engine.fault_spec import describe, resolve, resolve_dict
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -54,7 +58,7 @@ def _channel_num_from_path(p: Path) -> int:
 # ---------------------------------------------------------------------------
 
 class YamlScenario(BaseScenario):
-    """A :class:`~scenarios.base.BaseScenario` whose data lives in YAML files.
+    """A :class:`~scenario_engine.base.BaseScenario` whose data lives in YAML files.
 
     Instantiate via :func:`load_yaml_scenario` rather than directly.
     """
@@ -79,7 +83,7 @@ class YamlScenario(BaseScenario):
                     "sensor_type", "affected_services", "cascade_services",
                     "description", "investigation_notes", "remediation_action",
                     "error_message", "stack_trace", "infrastructure_events",
-                    "business_impact",
+                    "business_impact", "generator_impact", "infra_impact",
                 )
                 if k in ch
             }
@@ -216,6 +220,35 @@ class YamlScenario(BaseScenario):
     def channel_registry(self) -> dict[int, dict[str, Any]]:
         return self._channel_registry
 
+    # ── Generator configuration ──────────────────────────────────────────
+
+    @property
+    def generators(self) -> dict[str, Any]:
+        """Raw ``generators:`` block from scenario.yaml.
+
+        Keys are generator ids.  Values are per-generator config dicts.
+        Returns an empty dict when the block is absent.
+        """
+        return self._data.get("generators", {}) or {}
+
+    def get_generator_config(self, gen_id: str) -> dict[str, Any]:
+        """Return the config dict for a single generator, or {}."""
+        cfg = self.generators.get(gen_id, {})
+        if isinstance(cfg, bool):
+            return {}
+        return cfg or {}
+
+    @property
+    def llm_profile(self) -> dict[str, Any]:
+        raw = self._data.get("llm_profile")
+        if raw is None:
+            return super().llm_profile
+        # Merge over the base defaults so partial overrides work.
+        base = super().llm_profile
+        merged = dict(base)
+        merged.update(raw)
+        return merged
+
     @property
     def service_topology(self) -> dict[str, list[tuple[str, str, str]]]:
         if self._service_specs:
@@ -253,7 +286,9 @@ class YamlScenario(BaseScenario):
 
     @property
     def hosts(self) -> list[dict[str, Any]]:
-        return self._data.get("hosts", [])
+        from generator_engine.identity import apply_host_identity
+
+        return apply_host_identity(self._data.get("hosts", []), self.namespace)
 
     @property
     def k8s_clusters(self) -> list[dict[str, Any]]:
@@ -269,9 +304,12 @@ class YamlScenario(BaseScenario):
     def assessment_tool_config(self) -> dict[str, Any]:
         return self._data.get("assessment_tool_config", {})
 
+    # ── Library workflow inputs ──────────────────────────────────────────
+
     @property
-    def knowledge_base_docs(self) -> list[dict[str, Any]]:
-        return []  # Populated at deploy time from channel_registry
+    def workflow_template_inputs(self) -> dict[str, Any]:
+        raw = self._data.get("workflow_template_inputs")
+        return dict(raw) if isinstance(raw, dict) else super().workflow_template_inputs
 
     # ── Raw Log Profile ──────────────────────────────────────────────────
 
@@ -317,6 +355,14 @@ class YamlScenario(BaseScenario):
         ch = self._channels.get(channel, {})
         raw = ch.get("fault_params", {})
         return resolve_dict(raw)  # unseeded rng for true randomness
+
+    def fault_param_ranges(self, channel: int) -> dict[str, str]:
+        raw = self._channels.get(channel, {}).get("fault_params", {})
+        return {k: describe(v) for k, v in raw.items()}
+
+    def rca_clue_ranges(self, channel: int, service_name: str) -> dict[str, str]:
+        raw = self._channels.get(channel, {}).get("rca_clues", {}).get(service_name, {})
+        return {k: describe(v) for k, v in raw.items()}
 
     # ── Trace Attributes & RCA ───────────────────────────────────────────
 
@@ -424,6 +470,12 @@ def emit_executive_business_metrics_if_eligible(service: Any) -> None:
         for ch_id in active_channels:
             ch_entry = registry.get(ch_id, {})
             for impact in ch_entry.get("business_impact", []):
+                if not isinstance(impact, dict) or not ("factor" in impact or "value" in impact):
+                    logger.warning(
+                        "channel %s: ignoring malformed business_impact entry %r "
+                        "(expected {kpi, factor|value})", ch_id, impact,
+                    )
+                    continue
                 kpi_name = impact.get("kpi")
                 if not kpi_name:
                     continue
@@ -469,3 +521,58 @@ def emit_executive_business_metrics_if_eligible(service: Any) -> None:
 
     if metrics:
         service.otlp.send_metrics(service.resource, metrics)
+        # OTLP often accepts 200 but never indexes on the demo ES (ALERTS #96).
+        # Dual-write co-located business.* gauges so executive dashboards stay live.
+        try:
+            from app.telemetry import ESBulkClient
+
+            ctx = getattr(service, "_ctx", None)
+            es = ESBulkClient(
+                elastic_url=getattr(ctx, "elastic_url", None) or None,
+                api_key=getattr(ctx, "elastic_api_key", None) or None,
+            )
+            try:
+                if es.configured:
+                    attrs: dict[str, Any] = {}
+                    for attr in (service.resource or {}).get("attributes", []):
+                        key = attr.get("key")
+                        if not key or str(key).startswith("data_stream."):
+                            continue
+                        val = attr.get("value") or {}
+                        if "stringValue" in val:
+                            attrs[key] = val["stringValue"]
+                        elif "intValue" in val:
+                            attrs[key] = int(val["intValue"])
+                        elif "doubleValue" in val:
+                            attrs[key] = float(val["doubleValue"])
+                    # Flatten gauges into metrics.<name> for Lens fields.
+                    flat: dict[str, float] = {}
+                    for m in metrics:
+                        name = m.get("name")
+                        dps = ((m.get("gauge") or {}).get("dataPoints") or [])
+                        if not name or not dps:
+                            continue
+                        dp = dps[0]
+                        if "asDouble" in dp:
+                            flat[name] = float(dp["asDouble"])
+                        elif "asInt" in dp:
+                            flat[name] = float(dp["asInt"])
+                    if flat:
+                        es.send_bulk(
+                            "metrics-generic.otel-default",
+                            [{
+                                "@timestamp": int(time.time() * 1000),
+                                "unit": "1",
+                                "data_stream": {
+                                    "type": "metrics",
+                                    "dataset": "generic.otel",
+                                    "namespace": "default",
+                                },
+                                "resource": {"attributes": attrs},
+                                "metrics": flat,
+                            }],
+                        )
+            finally:
+                es.close()
+        except Exception:
+            logger.debug("business-metrics dual-write failed", exc_info=True)

@@ -9,7 +9,7 @@ These rules are non-negotiable. Hold them for the entire session.
 **Only modify files under `scenarios/<id>/`** — specifically the channel YAML file and `scenario.yaml` (for the system_prompt update).
 
 Never touch:
-- Any file in `log_generators/`, `app/`, `elastic_config/`, or `scenarios/base.py`
+- Any file in `generators/`, `generator_engine/`, `app/`, `elastic_config/`, or `scenario_engine/`
 - Any other scenario folder
 - Service files under `scenarios/<id>/services/`
 
@@ -58,6 +58,8 @@ Test: "Would a well-run SRE team add this to their auto-remediation runbook?" If
 Every `{placeholder}` name in `error_message` and `stack_trace` must be a key in `fault_params` in the same channel YAML file. Missing keys cause `KeyError` at runtime.
 
 Collect all placeholder names from both strings before writing `fault_params`.
+
+The same holds for `investigation_notes`: every `{placeholder}` there must be a `fault_params` key, or it is shown as literal text in the KB doc, Cortex runbook and channel runbook skill (verifier Check 35).
 
 ---
 

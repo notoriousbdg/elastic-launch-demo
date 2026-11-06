@@ -1,14 +1,15 @@
 version: "1"
 name: __SCENARIO_NAME__ Significant Event Notification (Human in the Loop)
+enabled: true
 description: >
   Notify launch operations team when a significant event is detected on a
   HITL channel (1-15). Triggered by alert rules — uses event.rule.tags[1] for
   the error_type search, extracts user_email from event_name, runs AI root
   cause analysis, creates a case, attaches the alert to the case, then sends
   an email notification requesting human approval. The agent invokes the
-  remediation_action workflow tool which pauses at a waitForInput step;
-  Agent Builder surfaces the approval prompt inside the conversation for the
-  operator to approve or deny.
+  remediation_action workflow tool, which pauses at a waitForInput step. That
+  step is the single approval point: the agent relays its request in the
+  conversation and resumes the execution with the operator's reply.
 
   Kibana does NOT scope .workflows system-connector actions to a specific
   action group (a "group" key on the action is accepted by the create API
@@ -75,7 +76,7 @@ steps:
         Total errors in last 15 minutes: {{ steps.count_errors.output.values[0][0] }}
 
         ## Required checks
-        - Call the knowledge-base tool (`search_known_anomalies` or the channel runbook) for prior incidents and documented procedures matching this error type or affected services.
+        - Call the knowledge-base tool from the channel runbook skill for prior incidents and documented procedures matching this error type or affected services.
         - Identify blast radius and earliest confirmed break point when evidence supports them; state when they cannot be determined confidently.
         - Use compressed-output observability tools (topology, change points, correlations) when they help; parameterized log tools remain valid especially for this error type.
         - Prefer the **alert** time window for Discover/APM links and any second-pass query. The 15-minute parameterized tools are fine as a first look while the alert is fresh; do not use NOW()-relative windows for evidence links.
@@ -225,7 +226,9 @@ steps:
       message: |
         Generate a concise, informative case title based on the root cause analysis provided at the end of this message.
         Title rules:
-        - Return ONLY the title.
+        - Return ONLY the title text on a single line.
+        - Do not add any preface, explanation, notes, or commentary before or after it.
+        - Do not start with phrases like "I'll" or "Here is".
         - Maximum 12 words.
         - Maximum 160 characters (hard limit; longer titles fail case creation).
         - Do not use markdown, quotes, or a trailing period.
@@ -257,7 +260,9 @@ steps:
     type: cases.createCase
     if: "${{ event.alerts[0].kibana.alert.action_group != 'recovered' }}"
     with:
-      title: "{{ steps.create_case_title.output.message | strip | truncate: 160 }}"
+      # The title agent sometimes wraps the title in commentary ("I'll generate ... **Title** ...").
+      # Prefer the first **bold** span when present, else use the whole message.
+      title: "{%- assign raw = steps.create_case_title.output.message | strip -%}{%- assign bold = raw | split: '**' -%}{%- if bold.size > 2 -%}{{ bold[1] | strip | truncate: 160 }}{%- else -%}{{ raw | truncate: 160 }}{%- endif -%}"
       description: |
         {%- assign conv_url = context.kibanaUrl | append: "/app/agent_builder/conversations/" | append: steps.run_rca.output.conversation_id -%}
         {%- assign rca = steps.run_rca.output.message | replace: "__CONVERSATION_URL__", conv_url -%}
@@ -344,24 +349,25 @@ steps:
           - channel: {{ event.rule.tags[3] }}
           - error_type: {{ event.rule.tags[1] }}
 
-          Present this recommendation and ask the operator explicitly:
-          "Do you approve this remediation? (Yes / No)"
-
-          Do NOT call remediation_action yet. The receipt of this message is not approval —
-          wait for the operator to respond in this conversation.
-
-          If they approve, call remediation_action with:
+          Present this recommendation, then call remediation_action with:
           - action_type: {{ event.rule.tags[2] }}
           - channel: {{ event.rule.tags[3] }}
           - error_type: {{ event.rule.tags[1] }}
           - case_id: {{ steps.create_case.output.case.id }}
           - dry_run: false
           - approval_mode: required
-          - justification: Operator explicitly approved in Agent Builder
+          - justification: RCA-recommended remediation; pending operator approval
 
-          If they deny, add a brief comment to case {{ steps.create_case.output.case.id }}
-          stating remediation was not approved — do not retry or try an alternative action.
-          The case closes automatically once the alert recovers — do not close it yourself.
+          The remediation_action workflow includes a human-in-the-loop step that requests
+          the operator's approval. Continue until the workflow stops and requests approval
+          natively through its waitForInput step. Relay that approval request to the
+          operator and end your turn. The operator's reply to that request is the decision:
+          resume the execution with exactly what they answer.
+
+          The workflow handles both outcomes: on approval it queues the remediation and
+          closes the case, and on denial it comments on case {{ steps.create_case.output.case.id }}
+          and leaves it open. The case also closes automatically once the alert recovers, so
+          do not close it yourself.
 
   - name: audit_log
     type: elasticsearch.index

@@ -1,0 +1,37 @@
+name: "GT mysql_otel: high_connection_error_rate"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-MYSQL-HIGH-CONNECTION-ERROR-RATE
+sensor_type: impact_key_probe
+affected_services:
+  - gt-mysql-aws-svc-1
+cascade_services:
+  - gt-mysql-aws-svc-2
+description: "Tests impact_key high_connection_error_rate on generator mysql_otel."
+investigation_notes: |-
+  1. Verify mysql_otel is active and reporting metrics.
+  2. Check that the high_connection_error_rate metric has reached the trigger value (50.0).
+  3. Confirm generator_impact for mysql_otel.high_connection_error_rate is set to 50.0.
+  4. Look for correlated changes in service gt-mysql-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_high_connection_error_rate_baseline
+error_message: "GT-PROBE: gen=mysql_otel key=high_connection_error_rate value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=mysql_otel
+  impact_key: high_connection_error_rate
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 50.0
+  svc_name: gt-mysql-aws-svc-1
+rca_clues:
+  gt-mysql-aws-svc-1:
+    probe.generator: mysql_otel
+    probe.impact_key: high_connection_error_rate
+    probe.trigger_value: 50.0
+  gt-mysql-aws-svc-2:
+    probe.upstream_generator: mysql_otel
+    probe.upstream_key: high_connection_error_rate
+generator_impact:
+  mysql_otel:
+    high_connection_error_rate: 50.0

@@ -1,0 +1,37 @@
+name: "GT zookeeper_otel: data_tree_size_excessive"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-ZOOKEEPER-DATA-TREE-SIZE-EXCESSIVE
+sensor_type: impact_key_probe
+affected_services:
+  - gt-zookeeper-aws-svc-1
+cascade_services:
+  - gt-zookeeper-aws-svc-2
+description: "Tests impact_key data_tree_size_excessive on generator zookeeper_otel."
+investigation_notes: |-
+  1. Verify zookeeper_otel is active and reporting metrics.
+  2. Check that the data_tree_size_excessive metric has reached the trigger value (1610612736.0).
+  3. Confirm generator_impact for zookeeper_otel.data_tree_size_excessive is set to 1610612736.0.
+  4. Look for correlated changes in service gt-zookeeper-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_data_tree_size_excessive_baseline
+error_message: "GT-PROBE: gen=zookeeper_otel key=data_tree_size_excessive value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=zookeeper_otel
+  impact_key: data_tree_size_excessive
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 1610612736.0
+  svc_name: gt-zookeeper-aws-svc-1
+rca_clues:
+  gt-zookeeper-aws-svc-1:
+    probe.generator: zookeeper_otel
+    probe.impact_key: data_tree_size_excessive
+    probe.trigger_value: 1610612736.0
+  gt-zookeeper-aws-svc-2:
+    probe.upstream_generator: zookeeper_otel
+    probe.upstream_key: data_tree_size_excessive
+generator_impact:
+  zookeeper_otel:
+    data_tree_size_excessive: 1610612736.0

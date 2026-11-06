@@ -1,0 +1,37 @@
+name: "GT redis_otel: high_eviction_rate"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-REDIS-HIGH-EVICTION-RATE
+sensor_type: impact_key_probe
+affected_services:
+  - gt-redis-aws-svc-1
+cascade_services:
+  - gt-redis-aws-svc-2
+description: "Tests impact_key high_eviction_rate on generator redis_otel."
+investigation_notes: |-
+  1. Verify redis_otel is active and reporting metrics.
+  2. Check that the high_eviction_rate metric has reached the trigger value (750.0).
+  3. Confirm generator_impact for redis_otel.high_eviction_rate is set to 750.0.
+  4. Look for correlated changes in service gt-redis-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_high_eviction_rate_baseline
+error_message: "GT-PROBE: gen=redis_otel key=high_eviction_rate value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=redis_otel
+  impact_key: high_eviction_rate
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 750.0
+  svc_name: gt-redis-aws-svc-1
+rca_clues:
+  gt-redis-aws-svc-1:
+    probe.generator: redis_otel
+    probe.impact_key: high_eviction_rate
+    probe.trigger_value: 750.0
+  gt-redis-aws-svc-2:
+    probe.upstream_generator: redis_otel
+    probe.upstream_key: high_eviction_rate
+generator_impact:
+  redis_otel:
+    high_eviction_rate: 750.0

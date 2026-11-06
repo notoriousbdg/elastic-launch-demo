@@ -1,0 +1,156 @@
+"""GeneratorSpec for the ``supabase`` telemetry generator."""
+from generator_engine.spec import GeneratorSpec
+
+SPEC = GeneratorSpec(
+    id="supabase_otel",
+    thread_name="gen-supabase-otel",
+    module="generators.supabase_otel.generator",
+    client="otlp",
+    signals=("metrics",),
+    datasets=("supabase.metrics.otel",),
+    integrations=("supabase_otel",),
+    always_install=False,
+    data_views=(),
+    wants_chaos=True,
+    default_enabled=False,
+    core=False,
+    chaos_mode="explicit",
+    family="database",
+    impact_keys={
+        "auth_api_server_errors": {
+            "type": "float",
+            "default": 0.0,
+            "range": [0.0, 1.0],
+            "doc": 'Drive alert "[Supabase OTel] Auth API server errors": fraction of auth requests that return 5xx; set at or above 0.05 (Server Error % >= 5) to breach; 0=healthy.',
+        },
+        "auth_service_is_down": {
+            "type": "float",
+            "default": 0.0,
+            "range": [0.0, 1.0],
+            "doc": 'Drive alert "[Supabase OTel] Auth service is down": above 0 reports gotrue_running = 0 (Auth Running == 0); 0=healthy.',
+        },
+        "disk_io_saturation": {
+            "type": "float",
+            "default": 0.0,
+            "range": [0.0, 1.0],
+            "doc": 'Drive alert "[Supabase OTel] Disk IO saturation": fraction of each second the disk is busy; set at or above 0.9 (Disk IO Utilisation % >= 90) to breach; 0=healthy.',
+        },
+        "filesystem_nearly_full": {
+            "type": "float",
+            "default": 0.0,
+            "range": [0.0, 1.0],
+            "doc": 'Drive alert "[Supabase OTel] Filesystem nearly full": used fraction of the /var/lib/postgresql filesystem; set at or above 0.85 (Used % >= 85) to breach; 0=healthy.',
+        },
+        "filesystem_is_read_only": {
+            "type": "float",
+            "default": 0.0,
+            "range": [0.0, 1.0],
+            "doc": 'Drive alert "[Supabase OTel] Filesystem is read-only": above 0 remounts /var/lib/postgresql read-only (node_filesystem_readonly == 1); 0=healthy.',
+        },
+        "host_cpu_saturation": {
+            "type": "float",
+            "default": 0.0,
+            "range": [0.0, 1.0],
+            "doc": 'Drive alert "[Supabase OTel] Host CPU saturation": CPU utilisation fraction (1 - idle); set at or above 0.9 (CPU Utilisation % >= 90) to breach; 0=healthy.',
+        },
+        "host_memory_pressure": {
+            "type": "float",
+            "default": 0.0,
+            "range": [0.0, 1.0],
+            "doc": 'Drive alert "[Supabase OTel] Host memory pressure": used memory fraction; set above 0.9 (Available Memory % < 10) to breach; 0=healthy.',
+        },
+        "host_oom_kill_detected": {
+            "type": "float",
+            "default": 0.0,
+            "range": [0.0, 10.0],
+            "doc": 'Drive alert "[Supabase OTel] Host OOM kill detected": OOM kills added per emit; set at or above 1 (OOM Kills > 0) to breach; 0=healthy.',
+        },
+        "long_running_transaction": {
+            "type": "float",
+            "default": 0.0,
+            "range": [0.0, 7200.0],
+            "doc": 'Drive alert "[Supabase OTel] Long-running transaction": longest open transaction in seconds; set above 900 (Longest Transaction (s) > 900) to breach; 0=healthy.',
+        },
+        "metrics_collection_is_failing": {
+            "type": "float",
+            "default": 0.0,
+            "range": [0.0, 1.0],
+            "doc": 'Drive alert "[Supabase OTel] Metrics collection is failing": above 0 reports up = 0 (Scrape Up == 0); 0=healthy.',
+        },
+        "pgbouncer_clients_queueing_for_connections": {
+            "type": "float",
+            "default": 0.0,
+            "range": [0.0, 120.0],
+            "doc": 'Drive alert "[Supabase OTel] PgBouncer clients queueing for connections": client max wait in seconds; set above 1 (Avg Client Wait (s) > 1) to breach; 0=healthy.',
+        },
+        "pgbouncer_is_down": {
+            "type": "float",
+            "default": 0.0,
+            "range": [0.0, 1.0],
+            "doc": 'Drive alert "[Supabase OTel] PgBouncer is down": above 0 reports pgbouncer_up = 0 (PgBouncer Up == 0); 0=healthy.',
+        },
+        "postgresql_connection_budget_nearly_exhausted": {
+            "type": "float",
+            "default": 0.0,
+            "range": [0.0, 1.0],
+            "doc": 'Drive alert "[Supabase OTel] PostgreSQL connection budget nearly exhausted": backends as a fraction of max_connections; set at or above 0.9 (Connection Utilisation % >= 90) to breach; 0=healthy.',
+        },
+        "postgresql_deadlocks_detected": {
+            "type": "float",
+            "default": 0.0,
+            "range": [0.0, 20.0],
+            "doc": 'Drive alert "[Supabase OTel] PostgreSQL deadlocks detected": deadlocks added per emit; set at or above 1 (Deadlocks > 0) to breach; 0=healthy.',
+        },
+        "postgresql_is_down": {
+            "type": "float",
+            "default": 0.0,
+            "range": [0.0, 1.0],
+            "doc": 'Drive alert "[Supabase OTel] PostgreSQL is down": above 0 reports pg_up = 0 (Postgres Up == 0); 0=healthy.',
+        },
+        "postgresql_restarted": {
+            "type": "float",
+            "default": 0.0,
+            "range": [0.0, 5.0],
+            "doc": 'Drive alert "[Supabase OTel] PostgreSQL restarted": restarts added per emit; set at or above 1 (Restarts > 0) to breach; 0=healthy.',
+        },
+        "postgrest_database_pool_timeouts": {
+            "type": "float",
+            "default": 0.0,
+            "range": [0.0, 50.0],
+            "doc": 'Drive alert "[Supabase OTel] PostgREST database pool timeouts": pool timeouts added per emit; set at or above 1 (Pool Timeouts > 0) to breach; 0=healthy.',
+        },
+        "replication_lag_is_high": {
+            "type": "float",
+            "default": 0.0,
+            "range": [0.0, 3600.0],
+            "doc": 'Drive alert "[Supabase OTel] Replication lag is high": physical replication lag in seconds; set above 300 (Lag (s) > 300) to breach; 0=healthy.',
+        },
+        "replication_slot_retaining_wal": {
+            "type": "float",
+            "default": 0.0,
+            "range": [0.0, 100.0],
+            "doc": 'Drive alert "[Supabase OTel] Replication slot retaining WAL": WAL retained by the slot in GiB; set above 10 (Slot Max Lag GB > 10) to breach; 0=healthy.',
+        },
+        "supavisor_pool_exhausted": {
+            "type": "float",
+            "default": 0.0,
+            "range": [0.0, 1.0],
+            "doc": 'Drive alert "[Supabase OTel] Supavisor pool exhausted": checked-out fraction of the Supavisor pool; set at or above 0.95 (Checked Out % >= 95) to breach; 0=healthy.',
+        },
+    },
+    config_fields={
+        "service_name": {
+            "type": "str",
+            "required": False,
+            "default": "supabase",
+            "doc": "service.name for the Supabase Prometheus endpoint.",
+        },
+        "project_ref": {
+            "type": "str",
+            "required": False,
+            "default": None,
+            "doc": "Supabase project reference.  Defaults to <namespace>-project.",
+        },
+    },
+    schema_version="1.0"
+)

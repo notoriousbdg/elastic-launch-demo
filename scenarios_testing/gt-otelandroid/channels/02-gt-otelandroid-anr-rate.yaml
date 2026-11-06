@@ -1,0 +1,37 @@
+name: "GT otel_android_dashboards: anr_rate"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-OTELANDROID-ANR-RATE
+sensor_type: impact_key_probe
+affected_services:
+  - gt-otelandroid-azure-svc-1
+cascade_services:
+  - gt-otelandroid-azure-svc-2
+description: "Tests impact_key anr_rate on generator otel_android_dashboards."
+investigation_notes: |-
+  1. Verify otel_android_dashboards is active and reporting metrics.
+  2. Check that the anr_rate metric has reached the trigger value (0.2).
+  3. Confirm generator_impact for otel_android_dashboards.anr_rate is set to 0.2.
+  4. Look for correlated changes in service gt-otelandroid-azure-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_anr_rate_baseline
+error_message: "GT-PROBE: gen=otel_android_dashboards key=anr_rate value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=otel_android_dashboards
+  impact_key: anr_rate
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 0.2
+  svc_name: gt-otelandroid-azure-svc-1
+rca_clues:
+  gt-otelandroid-azure-svc-1:
+    probe.generator: otel_android_dashboards
+    probe.impact_key: anr_rate
+    probe.trigger_value: 0.2
+  gt-otelandroid-azure-svc-2:
+    probe.upstream_generator: otel_android_dashboards
+    probe.upstream_key: anr_rate
+generator_impact:
+  otel_android_dashboards:
+    anr_rate: 0.2

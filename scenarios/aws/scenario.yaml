@@ -1,0 +1,693 @@
+scenario_id: aws
+scenario_name: AWS Orders Platform
+scenario_description: Retail orders platform running entirely on AWS across us-east-1, us-west-2 and eu-west-1. ALB and ECS
+  front the order path, RDS Postgres stores orders, Lambda charges payments, SQS drives fulfillment, and Amazon Bedrock powers
+  support and recommendations. 20 fault channels, led by an RDS connection leak that cascades into gateway and ALB 5xx.
+namespace: awsorders
+scenario_icon: 📦
+sort_order: 10
+nominal_label: ONLINE
+schema_version: '1.2'
+apm_ml_bucket_span: 1m
+generators:
+  aws_rds_otel:
+    instance_id: orders-db
+    connections_baseline: [0, 2]
+  aws_cloudwatch_logs:
+    gateway_service: orders-gateway
+  aws_elb_metrics_otel: true
+  aws_lambda_otel: true
+  aws_ecs_otel: true
+  aws_ec2_otel: true
+  aws_waf_otel: true
+  aws_cloudtrail_otel: true
+  aws_vpcflow_otel: true
+  aws_bedrock_agentcore: true
+  aws_elb_otel: true
+  aws_sqs_otel: true
+  aws_bedrock: true
+  gcp_vpcflow_otel: false
+  azure_vnetflow_otel: false
+workflow_template_inputs:
+  service_name: orders-gateway
+  aws-rds-connection-exhaustion-investigation-otel:
+    service_name: orders-service
+  aws-sqs-consumer-lag-investigation-otel:
+    service_name: fulfillment-worker
+hosts:
+  - host.name: awsorders-aws-host-use1
+    host.id: i-560912f2c034d7fab
+    host.arch: amd64
+    host.type: m5.2xlarge
+    host.cpu.model.name: Intel(R) Xeon(R) Platinum 8259CL CPU @ 2.50GHz
+    host.cpu.vendor.id: GenuineIntel
+    host.cpu.family: '6'
+    host.cpu.model.id: '85'
+    host.cpu.stepping: '7'
+    host.cpu.cache.l2.size: 1310720
+    host.ip:
+      - 10.1.1.10
+      - 172.16.1.10
+    host.mac:
+      - 0a:1b:2c:3d:4e:10
+      - 0a:1b:2c:3d:4e:11
+    os.type: linux
+    os.description: Amazon Linux 2023.6.20250115
+    cloud.provider: aws
+    cloud.platform: aws_ec2
+    cloud.region: us-east-1
+    cloud.availability_zone: us-east-1a
+    cloud.account.id: '781386958653'
+    cloud.instance.id: i-560912f2c034d7fab
+    cpu_count: 8
+    memory_total_bytes: 34359738368
+    disk_total_bytes: 536870912000
+  - host.name: awsorders-aws-host-usw2
+    host.id: i-3aefceadad6508fd6
+    host.arch: amd64
+    host.type: m5.2xlarge
+    host.cpu.model.name: Intel(R) Xeon(R) Platinum 8259CL CPU @ 2.50GHz
+    host.cpu.vendor.id: GenuineIntel
+    host.cpu.family: '6'
+    host.cpu.model.id: '85'
+    host.cpu.stepping: '7'
+    host.cpu.cache.l2.size: 1310720
+    host.ip:
+      - 10.2.1.10
+      - 172.16.2.10
+    host.mac:
+      - 0a:1b:2c:3d:4e:20
+      - 0a:1b:2c:3d:4e:21
+    os.type: linux
+    os.description: Amazon Linux 2023.6.20250115
+    cloud.provider: aws
+    cloud.platform: aws_ec2
+    cloud.region: us-west-2
+    cloud.availability_zone: us-west-2a
+    cloud.account.id: '781386958653'
+    cloud.instance.id: i-3aefceadad6508fd6
+    cpu_count: 8
+    memory_total_bytes: 34359738368
+    disk_total_bytes: 536870912000
+  - host.name: awsorders-aws-host-euw1
+    host.id: i-51522141871416fdb
+    host.arch: amd64
+    host.type: m5.2xlarge
+    host.cpu.model.name: Intel(R) Xeon(R) Platinum 8259CL CPU @ 2.50GHz
+    host.cpu.vendor.id: GenuineIntel
+    host.cpu.family: '6'
+    host.cpu.model.id: '85'
+    host.cpu.stepping: '7'
+    host.cpu.cache.l2.size: 1310720
+    host.ip:
+      - 10.3.1.10
+      - 172.16.3.10
+    host.mac:
+      - 0a:1b:2c:3d:4e:30
+      - 0a:1b:2c:3d:4e:31
+    os.type: linux
+    os.description: Amazon Linux 2023.6.20250115
+    cloud.provider: aws
+    cloud.platform: aws_ec2
+    cloud.region: eu-west-1
+    cloud.availability_zone: eu-west-1a
+    cloud.account.id: '781386958653'
+    cloud.instance.id: i-51522141871416fdb
+    cpu_count: 8
+    memory_total_bytes: 34359738368
+    disk_total_bytes: 536870912000
+k8s_clusters:
+  - name: awsorders-eks-use1
+    provider: aws
+    platform: aws_eks
+    region: us-east-1
+    zones:
+      - us-east-1a
+      - us-east-1b
+      - us-east-1c
+    os_description: Amazon Linux 2
+    services:
+      - storefront-web
+      - orders-gateway
+      - orders-service
+      - orders-db
+  - name: awsorders-eks-usw2
+    provider: aws
+    platform: aws_eks
+    region: us-west-2
+    zones:
+      - us-west-2a
+      - us-west-2b
+      - us-west-2c
+    os_description: Amazon Linux 2
+    services:
+      - payment-processor
+      - fulfillment-worker
+      - inventory-service
+  - name: awsorders-eks-euw1
+    provider: aws
+    platform: aws_eks
+    region: eu-west-1
+    zones:
+      - eu-west-1a
+      - eu-west-1b
+      - eu-west-1c
+    os_description: Amazon Linux 2
+    services:
+      - support-assistant
+      - recommendation-service
+agent_config:
+  id: awsorders-analyst
+  name: AWS Orders Platform Operations Analyst
+  assessment_tool_name: awsorders_readiness_assessment
+  system_prompt: "You are an expert SRE assistant for the AWS Orders Platform.\n\nWhen an incident is reported, your job is\
+    \ to:\n1. Diagnose the root cause from the error_type, stack traces, and RCA clues\n2. Recommend a specific remediation\
+    \ action\n3. Explain business impact in terms the executive team understands\n\nKnown fault channels and their error types:\n\
+    \  - ORD-DB-CONNECTION-EXHAUSTION: Rds Connection Leak\n  - ALB-NO-HEALTHY-TARGETS: Alb No Healthy Targets\n  - PAY-LAMBDA-ERROR-SPIKE:\
+    \ Payment Lambda Error Spike\n  - ORD-ECS-MEMORY-LEAK: Orders Service Memory Leak\n  - WEB-EC2-CREDIT-EXHAUSTION: Storefront\
+    \ Burst Credit Exhaustion\n  - WEB-WAF-FALSE-POSITIVE: Checkout Waf False Positive\n  - INV-IAM-ACCESS-DENIED: Iam Access\
+    \ Denied Storm\n  - NET-SG-REJECTS-DB-TRAFFIC: Security Group Rejects Db Traffic\n  - SUP-AGENTCORE-GATEWAY-ERRORS: Agentcore\
+    \ Gateway Failures\n  - ORD-GW-5XX-BAD-DEPLOY: Gateway 5xx Bad Deploy\n  - INV-DDB-HOT-PARTITION: Dynamodb Hot Partition\n\
+    \  - PAY-KMS-THROTTLED: Kms Throttling\n  - ORD-SECRET-ROTATION-MISMATCH: Secrets Rotation Mismatch\n  - NET-R53-RESOLUTION-FAILURE:\
+    \ Route53 Private Zone Resolution\n  - PAY-IDEMPOTENCY-COLLISION: Idempotency Key Collision\n  - FUL-SQS-CONSUMER-LAG:\
+    \ Sqs Fulfillment Consumer Lag\n  - REC-BEDROCK-THROTTLED: Bedrock Throttling\n  - PAY-LAMBDA-COLD-START: Lambda Cold\
+    \ Start Latency\n  - WEB-ACM-CERT-EXPIRY: Acm Certificate Expiry\n  - ORD-ECS-SCALING-LAG: Ecs Autoscaling Lag\n\nFor\
+    \ each fault, examine the affected_services first, then look for cascade_services that may be experiencing downstream\
+    \ effects."
+assessment_tool_config:
+  id: awsorders_readiness_assessment
+  description: 'Comprehensive AWS orders platform readiness assessment. Evaluates the storefront, the ALB and ECS order path,
+    RDS Postgres connection and storage headroom, Lambda payment health, SQS fulfillment backlog and Bedrock capacity against
+    operational criteria. Returns CloudWatch-backed evidence for each dimension, judged against its own baseline, so risks
+    and causal chains can be surfaced. Log message field: body.text (never use ''body'' alone).'
+executive_kpi_emitter_service_name: orders-service
+executive_dashboard_intro: '**AWS Orders Platform KPIs** — orders and revenue, checkout and payments, fulfillment and inventory,
+  and platform reliability. Synthetic `business.*` OTLP gauges from `orders-service`.'
+executive_kpi_sections:
+  - header: '**Orders and revenue** — orders, revenue, basket, shoppers'
+    specs:
+      - - Orders / min
+        - metrics.business.orders_per_min
+      - - Revenue (USD/min)
+        - metrics.business.revenue_usd_per_min
+      - - Average order value (USD)
+        - metrics.business.avg_order_value_usd
+      - - Units sold / min
+        - metrics.business.units_sold_per_min
+      - - Cart abandonment (%)
+        - metrics.business.cart_abandonment_pct
+      - - Active shoppers
+        - metrics.business.active_shoppers
+  - header: '**Checkout and payments** — success, authorization, declines, refunds'
+    specs:
+      - - Checkout success (%)
+        - metrics.business.checkout_success_pct
+      - - Payment authorization rate (%)
+        - metrics.business.payment_auth_rate_pct
+      - - Payment declines / min
+        - metrics.business.payment_declines_per_min
+      - - Checkout p95 latency (ms)
+        - metrics.business.checkout_latency_p95_ms
+      - - Refunds (USD/min)
+        - metrics.business.refunds_usd_per_min
+      - - Duplicate charge flags / hr
+        - metrics.business.duplicate_charge_flags_per_hr
+  - header: '**Fulfillment and inventory** — backlog, shipping, stock'
+    specs:
+      - - Fulfillment backlog (orders)
+        - metrics.business.fulfillment_backlog
+      - - Orders shipped / min
+        - metrics.business.orders_shipped_per_min
+      - - Oldest unfulfilled order (min)
+        - metrics.business.oldest_unfulfilled_order_min
+      - - Stock reservation success (%)
+        - metrics.business.stock_reservation_success_pct
+      - - Out-of-stock SKUs
+        - metrics.business.out_of_stock_skus
+      - - Support chats / min
+        - metrics.business.support_chats_per_min
+  - header: '**Platform reliability** — throughput, errors, latency, availability, cost'
+    specs:
+      - - Throughput (req/min)
+        - metrics.business.throughput_rpm
+      - - Error rate (%)
+        - metrics.business.error_rate_pct
+      - - P99 latency (ms)
+        - metrics.business.latency_p99_ms
+      - - Availability (%)
+        - metrics.business.availability_pct
+      - - Cloud spend (USD/hr)
+        - metrics.business.cloud_spend_usd_per_hr
+      - - Recommendation CTR (%)
+        - metrics.business.recommendation_ctr_pct
+executive_trend_charts:
+  - title: Revenue (USD/min)
+    field: metrics.business.revenue_usd_per_min
+    y_label: USD/min
+  - title: Orders / min
+    field: metrics.business.orders_per_min
+    y_label: orders/min
+  - title: Checkout success (%)
+    field: metrics.business.checkout_success_pct
+    y_label: '%'
+  - title: Fulfillment backlog (orders)
+    field: metrics.business.fulfillment_backlog
+    y_label: orders
+  - title: P99 latency (ms)
+    field: metrics.business.latency_p99_ms
+    y_label: ms
+  - title: Availability (%)
+    field: metrics.business.availability_pct
+    y_label: '%'
+executive_kpi_emissions:
+  - name: business.orders_per_min
+    better: higher
+    value:
+      uniform:
+        - 200.0
+        - 1200.0
+      round: 0
+    unit: orders/min
+  - name: business.revenue_usd_per_min
+    better: higher
+    value:
+      uniform:
+        - 8000.0
+        - 60000.0
+      round: 0
+    unit: USD/min
+  - name: business.avg_order_value_usd
+    value:
+      uniform:
+        - 45.0
+        - 120.0
+      round: 2
+    unit: USD
+  - name: business.units_sold_per_min
+    value:
+      randint:
+        - 500
+        - 3600
+    unit: units/min
+  - name: business.cart_abandonment_pct
+    value:
+      uniform:
+        - 55.0
+        - 72.0
+      round: 1
+    unit: '%'
+  - name: business.active_shoppers
+    value:
+      randint:
+        - 4000
+        - 22000
+    unit: shoppers
+  - name: business.checkout_success_pct
+    better: higher
+    value:
+      uniform:
+        - 97.0
+        - 99.6
+      round: 2
+    unit: '%'
+  - name: business.payment_auth_rate_pct
+    better: higher
+    value:
+      uniform:
+        - 96.5
+        - 99.4
+      round: 2
+    unit: '%'
+  - name: business.payment_declines_per_min
+    value:
+      randint:
+        - 3
+        - 40
+    unit: declines/min
+  - name: business.checkout_latency_p95_ms
+    value:
+      randint:
+        - 350
+        - 900
+    unit: ms
+  - name: business.refunds_usd_per_min
+    value:
+      uniform:
+        - 150.0
+        - 1400.0
+      round: 0
+    unit: USD/min
+  - name: business.duplicate_charge_flags_per_hr
+    better: lower
+    value:
+      randint:
+        - 0
+        - 3
+    unit: flags/hr
+  - name: business.fulfillment_backlog
+    better: lower
+    value:
+      randint:
+        - 50
+        - 600
+    unit: orders
+  - name: business.orders_shipped_per_min
+    value:
+      randint:
+        - 150
+        - 1100
+    unit: orders/min
+  - name: business.oldest_unfulfilled_order_min
+    better: lower
+    value:
+      randint:
+        - 2
+        - 15
+    unit: min
+  - name: business.stock_reservation_success_pct
+    value:
+      uniform:
+        - 98.0
+        - 99.8
+      round: 2
+    unit: '%'
+  - name: business.out_of_stock_skus
+    value:
+      randint:
+        - 10
+        - 80
+    unit: SKUs
+  - name: business.support_chats_per_min
+    value:
+      randint:
+        - 20
+        - 140
+    unit: chats/min
+  - name: business.throughput_rpm
+    better: higher
+    value:
+      uniform:
+        - 1000.0
+        - 50000.0
+      round: 0
+    unit: req/min
+  - name: business.error_rate_pct
+    better: lower
+    value:
+      uniform:
+        - 0.0
+        - 5.0
+      round: 2
+    unit: '%'
+  - name: business.latency_p99_ms
+    better: lower
+    value:
+      uniform:
+        - 50.0
+        - 500.0
+      round: 0
+    unit: ms
+  - name: business.availability_pct
+    better: higher
+    value:
+      uniform:
+        - 99.0
+        - 100.0
+      round: 2
+    unit: '%'
+  - name: business.cloud_spend_usd_per_hr
+    value:
+      uniform:
+        - 180.0
+        - 420.0
+      round: 0
+    unit: USD/hr
+  - name: business.recommendation_ctr_pct
+    value:
+      uniform:
+        - 3.5
+        - 7.5
+      round: 2
+    unit: '%'
+raw_log_profile:
+  service_name: awsorders-storefront-web
+  user_id_prefix: u
+  tier_field: user_tier
+  tier_values:
+    - - standard
+      - 80
+    - - premium
+      - 20
+  country_weights:
+    US: 35
+    GB: 15
+    DE: 15
+    FR: 10
+    JP: 10
+    IN: 15
+  methods:
+    - GET
+    - POST
+    - PUT
+    - DELETE
+  paths:
+    - /api/v1/catalog/search
+    - /api/v1/cart
+    - /api/v1/orders
+    - /api/v1/recommendations
+    - /api/v1/support/chat
+    - /api/v1/health
+  change_point_path: /api/v1/orders
+trace_attributes:
+  base:
+    platform.region:
+      choice:
+        - us-east-1
+        - us-east-1
+        - us-west-2
+        - eu-west-1
+    platform.traffic_tier:
+      choice:
+        - normal
+        - normal
+        - elevated
+        - peak
+  services:
+    storefront-web:
+      svc.version:
+        choice:
+          - 1.0.0
+          - 1.0.1
+          - 1.1.0
+      svc.environment:
+        choice:
+          - prod
+          - prod
+          - staging
+      customer.segment:
+        choice:
+          - guest
+          - member
+          - member
+          - premium
+      checkout.flow:
+        choice:
+          - web
+          - mobile
+          - mobile
+      cdn.cache_status:
+        choice:
+          - hit
+          - hit
+          - miss
+    orders-gateway:
+      svc.version:
+        choice:
+          - 1.0.0
+          - 1.0.1
+          - 1.1.0
+      svc.environment:
+        choice:
+          - prod
+          - prod
+          - staging
+      alb.target_group:
+        choice:
+          - orders-gw-tg-blue
+          - orders-gw-tg-blue
+          - orders-gw-tg-green
+      ecs.cluster:
+        choice:
+          - awsorders-ecs-prod
+      deploy.strategy:
+        choice:
+          - rolling
+          - rolling
+          - blue-green
+    orders-service:
+      svc.version:
+        choice:
+          - 1.0.0
+          - 1.0.1
+          - 1.1.0
+      svc.environment:
+        choice:
+          - prod
+          - prod
+          - staging
+      ecs.task_definition:
+        choice:
+          - orders-service:41
+          - orders-service:42
+          - orders-service:42
+      db.pool_max:
+        choice:
+          - 20
+          - 20
+          - 40
+      order.channel:
+        choice:
+          - web
+          - mobile
+          - api
+    orders-db:
+      svc.version:
+        choice:
+          - 1.0.0
+          - 1.0.1
+          - 1.1.0
+      svc.environment:
+        choice:
+          - prod
+          - prod
+          - staging
+      rds.instance_class:
+        choice:
+          - db.r6g.large
+      rds.engine_version:
+        choice:
+          - '15.5'
+          - '15.5'
+          - '16.1'
+      rds.multi_az:
+        choice:
+          - true
+    payment-processor:
+      svc.version:
+        choice:
+          - 1.0.0
+          - 1.0.1
+          - 1.1.0
+      svc.environment:
+        choice:
+          - prod
+          - prod
+          - staging
+      lambda.runtime:
+        choice:
+          - python3.12
+      lambda.memory_mb:
+        choice:
+          - 512
+          - 512
+          - 1024
+      payment.method:
+        choice:
+          - card
+          - card
+          - wallet
+    fulfillment-worker:
+      svc.version:
+        choice:
+          - 1.0.0
+          - 1.0.1
+          - 1.1.0
+      svc.environment:
+        choice:
+          - prod
+          - prod
+          - staging
+      sqs.queue:
+        choice:
+          - awsorders-fulfillment
+      ecs.desired_count:
+        choice:
+          - 4
+          - 4
+          - 6
+      fulfillment.priority:
+        choice:
+          - standard
+          - standard
+          - expedited
+    inventory-service:
+      svc.version:
+        choice:
+          - 1.0.0
+          - 1.0.1
+          - 1.1.0
+      svc.environment:
+        choice:
+          - prod
+          - prod
+          - staging
+      dynamodb.table:
+        choice:
+          - awsorders-stock
+      warehouse:
+        choice:
+          - use1-a
+          - usw2-b
+          - euw1-a
+      sku.class:
+        choice:
+          - fast
+          - fast
+          - long-tail
+    support-assistant:
+      svc.version:
+        choice:
+          - 1.0.0
+          - 1.0.1
+          - 1.1.0
+      svc.environment:
+        choice:
+          - prod
+          - prod
+          - staging
+      bedrock.agent:
+        choice:
+          - support-agent-v3
+      agentcore.runtime:
+        choice:
+          - prod
+      session.channel:
+        choice:
+          - chat
+          - chat
+          - voice-transcript
+    recommendation-service:
+      svc.version:
+        choice:
+          - 1.0.0
+          - 1.0.1
+          - 1.1.0
+      svc.environment:
+        choice:
+          - prod
+          - prod
+          - staging
+      bedrock.model:
+        choice:
+          - text-generation-small
+          - text-generation-medium
+      reco.surface:
+        choice:
+          - home
+          - pdp
+          - cart
+      experiment.cohort:
+        choice:
+          - control
+          - treatment-a
+          - treatment-b

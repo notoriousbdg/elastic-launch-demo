@@ -1,0 +1,37 @@
+name: "GT vsphere_otel: entity_status_unhealthy"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-VSPHERE-ENTITY-STATUS-UNHEALTHY
+sensor_type: impact_key_probe
+affected_services:
+  - gt-vsphere-aws-svc-1
+cascade_services:
+  - gt-vsphere-aws-svc-2
+description: "Tests impact_key entity_status_unhealthy on generator vsphere_otel."
+investigation_notes: |-
+  1. Verify vsphere_otel is active and reporting metrics.
+  2. Check that the entity_status_unhealthy metric has reached the trigger value (50.0).
+  3. Confirm generator_impact for vsphere_otel.entity_status_unhealthy is set to 50.0.
+  4. Look for correlated changes in service gt-vsphere-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_entity_status_unhealthy_baseline
+error_message: "GT-PROBE: gen=vsphere_otel key=entity_status_unhealthy value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=vsphere_otel
+  impact_key: entity_status_unhealthy
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 50.0
+  svc_name: gt-vsphere-aws-svc-1
+rca_clues:
+  gt-vsphere-aws-svc-1:
+    probe.generator: vsphere_otel
+    probe.impact_key: entity_status_unhealthy
+    probe.trigger_value: 50.0
+  gt-vsphere-aws-svc-2:
+    probe.upstream_generator: vsphere_otel
+    probe.upstream_key: entity_status_unhealthy
+generator_impact:
+  vsphere_otel:
+    entity_status_unhealthy: 50.0

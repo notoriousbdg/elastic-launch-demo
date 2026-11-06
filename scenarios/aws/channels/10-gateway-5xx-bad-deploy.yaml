@@ -1,0 +1,90 @@
+name: Gateway 5xx Bad Deploy
+subsystem: api_gateway
+vehicle_section: api_gateway_pipeline
+error_type: ORD-GW-5XX-BAD-DEPLOY
+sensor_type: health_check
+affected_services: [orders-gateway]
+cascade_services: [storefront-web]
+
+description: >
+  A new ECS task definition revision for orders-gateway ships a misconfigured upstream timeout, and the ALB access log shows roughly a third of requests returning 5xx.
+
+investigation_notes: |
+  1. Search body.text for *ORD-GW-5XX-BAD-DEPLOY* and note the task definition revision ({task_def_new}) now serving traffic.
+  2. In the ALB access log, filter elb_status_code 5xx on orders-gateway: {error_pct}% of {sampled_requests} requests, with target_processing_time near {upstream_timeout_ms}ms and many 504 responses.
+  3. Compare task definition {task_def_new} with {task_def_prev}: UPSTREAM_TIMEOUT_MS changed from {prev_timeout_ms} to {upstream_timeout_ms}.
+  4. Check the ECS service events and CloudTrail UpdateService to confirm the rollout time ({deploy_time}) lines up with the first 5xx.
+  5. Verify the cascade: storefront-web checkout calls to orders-gateway fail or retry, while orders-service and orders-db metrics stay normal (orders-service p99 stays at 450-900ms: above the new timeout, far under the previous 5000ms).
+  6. Immediate action: roll the ECS service back to {task_def_prev} and confirm the ALB 5xx share returns to baseline.
+
+remediation_action: rollback_ecs_task_definition
+
+error_message: |
+  ORD-GW-5XX-BAD-DEPLOY: orders-gateway 5xx share {error_pct}% after deploy task_definition={task_def_new} upstream_timeout_ms={upstream_timeout_ms}
+
+stack_trace: |
+  === ALB 5XX REPORT ===
+  load_balancer=app/awsorders-gateway-alb  service=orders-gateway  cluster=awsorders-prod
+  --- DEPLOYMENT ---
+    new_task_definition={task_def_new}  previous={task_def_prev}
+    deployed_at={deploy_time}  change=UPSTREAM_TIMEOUT_MS {prev_timeout_ms} -> {upstream_timeout_ms}
+  --- ALB ACCESS LOG ---
+    sampled_requests={sampled_requests}  elb_5xx_pct={error_pct}
+    dominant_status=504  target_processing_time_ms={upstream_timeout_ms}
+  --- IMPACT ---
+    storefront-web checkout_retries={checkout_retries}
+  ACTION: rollback_to={task_def_prev}  alert=ORD-GW-5XX-BAD-DEPLOY
+
+infrastructure_events:
+  - body: '[CloudTrail] UpdateService: cluster=awsorders-prod service=orders-gateway task_definition=orders-gateway:48 previous=orders-gateway:47 region=us-east-1 event_source=ecs.amazonaws.com'
+    severity: WARN
+    event_name: aws.cloudtrail.UpdateService
+    service: orders-gateway
+    attributes:
+      cloud.provider: aws
+      cloud.service: ecs
+      aws.cloudtrail.event_name: UpdateService
+      aws.ecs.service: orders-gateway
+      aws.ecs.task_definition: orders-gateway:48
+      infrastructure.source: CloudTrail
+
+correlation_attr:
+  key: infra.ecs_task_definition
+  value: orders-gateway:48
+
+fault_params:
+  task_def_new: orders-gateway:48
+  task_def_prev: orders-gateway:47
+  prev_timeout_ms: 5000
+  upstream_timeout_ms: {choice: [150, 250, 400]}
+  deploy_time: 2026-10-21T15:22:00Z
+  error_pct: {randint: [30, 40]}
+  sampled_requests: {randint: [800, 4000]}
+  checkout_retries: {randint: [200, 1200]}
+
+rca_clues:
+  orders-gateway:
+    deploy.task_definition: orders-gateway:48
+    deploy.config_changed: UPSTREAM_TIMEOUT_MS
+    alb.elb_5xx_pct: {randint: [30, 40]}
+    upstream.orders_service_p99_ms: {randint: [450, 900]}
+  storefront-web:
+    checkout.gateway_5xx_count: {randint: [200, 1200]}
+    checkout.retry_storm: true
+
+business_impact:
+  - kpi: business.orders_per_min
+    factor: {uniform: [0.55, 0.75]}
+  - kpi: business.error_rate_pct
+    factor: {uniform: [5.0, 9.0]}
+  - kpi: business.availability_pct
+    factor: {uniform: [0.92, 0.97]}
+
+generator_impact:
+  aws_elb_otel:
+    error_fraction: 0.35
+    records_per_cycle: 60
+  aws_cloudwatch_logs:
+    gateway_error_fraction: 0.35
+  aws_elb_metrics_otel:
+    high_application_load_balancer_target_5xx_error_rate: 300.0

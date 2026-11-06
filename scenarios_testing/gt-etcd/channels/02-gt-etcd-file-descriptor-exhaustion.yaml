@@ -1,0 +1,37 @@
+name: "GT etcd_otel: file_descriptor_exhaustion"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-ETCD-FILE-DESCRIPTOR-EXHAUSTION
+sensor_type: impact_key_probe
+affected_services:
+  - gt-etcd-aws-svc-1
+cascade_services:
+  - gt-etcd-aws-svc-2
+description: "Tests impact_key file_descriptor_exhaustion on generator etcd_otel."
+investigation_notes: |-
+  1. Verify etcd_otel is active and reporting metrics.
+  2. Check that the file_descriptor_exhaustion metric has reached the trigger value (85.0).
+  3. Confirm generator_impact for etcd_otel.file_descriptor_exhaustion is set to 85.0.
+  4. Look for correlated changes in service gt-etcd-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_file_descriptor_exhaustion_baseline
+error_message: "GT-PROBE: gen=etcd_otel key=file_descriptor_exhaustion value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=etcd_otel
+  impact_key: file_descriptor_exhaustion
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 85.0
+  svc_name: gt-etcd-aws-svc-1
+rca_clues:
+  gt-etcd-aws-svc-1:
+    probe.generator: etcd_otel
+    probe.impact_key: file_descriptor_exhaustion
+    probe.trigger_value: 85.0
+  gt-etcd-aws-svc-2:
+    probe.upstream_generator: etcd_otel
+    probe.upstream_key: file_descriptor_exhaustion
+generator_impact:
+  etcd_otel:
+    file_descriptor_exhaustion: 85.0

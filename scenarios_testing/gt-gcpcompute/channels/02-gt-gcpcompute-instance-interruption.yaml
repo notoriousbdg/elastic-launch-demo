@@ -1,0 +1,37 @@
+name: "GT gcp_compute_otel: instance_interruption"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-GCPCOMPUTE-INSTANCE-INTERRUPTION
+sensor_type: impact_key_probe
+affected_services:
+  - gt-gcpcompute-gcp-svc-1
+cascade_services:
+  - gt-gcpcompute-gcp-svc-2
+description: "Tests impact_key instance_interruption on generator gcp_compute_otel."
+investigation_notes: |-
+  1. Verify gcp_compute_otel is active and reporting metrics.
+  2. Check that the instance_interruption metric has reached the trigger value (3.0).
+  3. Confirm generator_impact for gcp_compute_otel.instance_interruption is set to 3.0.
+  4. Look for correlated changes in service gt-gcpcompute-gcp-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_instance_interruption_baseline
+error_message: "GT-PROBE: gen=gcp_compute_otel key=instance_interruption value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=gcp_compute_otel
+  impact_key: instance_interruption
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 3.0
+  svc_name: gt-gcpcompute-gcp-svc-1
+rca_clues:
+  gt-gcpcompute-gcp-svc-1:
+    probe.generator: gcp_compute_otel
+    probe.impact_key: instance_interruption
+    probe.trigger_value: 3.0
+  gt-gcpcompute-gcp-svc-2:
+    probe.upstream_generator: gcp_compute_otel
+    probe.upstream_key: instance_interruption
+generator_impact:
+  gcp_compute_otel:
+    instance_interruption: 3.0

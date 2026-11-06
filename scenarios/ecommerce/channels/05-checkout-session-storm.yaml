@@ -13,18 +13,23 @@ description: Surge of concurrent checkout sessions exhausting session pool capac
   traffic
 investigation_notes: |-
   1. Check storefront-gateway logs for SESSION-STORM — active_sessions={active_sessions} vs max_sessions={max_sessions} shows utilization.
-  2. Identify the traffic source: check storefront.active_sessions metric trend — a sudden spike suggests a flash sale, bot storm, or marketing campaign.
-  3. Check for sticky session imbalance: if sessions are pinned to specific instances, some nodes may be at 100% while others are idle.
-  4. Review session TTL settings — sessions not expiring after abandonment keep slots occupied; default 30min TTL is too long for checkout flows.
-  5. Enable the rate limiter: if requests per IP exceed {rps_threshold}/s, apply throttling to prevent individual clients from monopolizing the pool.
+  2. Identify the traffic source: check storefront.active_sessions metric trend — a sudden spike suggests a flash sale, bot storm, or marketing campaign. A single source IP above 20% of requests (storefront.top_ip_request_share_pct) marks a bot storm; a flash sale or campaign spreads traffic across many IPs.
+  3. Check whether the storefront-gateway HPA is already at max replicas and nginx active connections are climbing, then check for sticky session imbalance: if sessions are pinned to specific instances, some nodes may be at 100% while others are idle (session skew above 25% between instances indicates sticky-session imbalance).
+  4. Review session TTL settings — sessions not expiring after abandonment keep slots occupied; default 30min TTL is too long for checkout flows. Idle sessions above 30% of the pool point to abandoned sessions holding slots.
+  5. Enable the per-IP rate limiter: total rps={current_rps} is above the {rps_threshold} rps gateway threshold and one IP ({top_source_ip}) carries a disproportionate share, so apply a per-client limit (e.g., a WAF rate-based rule or nginx `limit_req` keyed on the client IP) to stop a single client monopolizing the pool.
   6. As a circuit breaker, redirect overflow traffic to a static 'temporarily busy' page rather than queuing — queued requests timeout and hold slots longer.
 remediation_action: drain_session_pool
 error_message: '[StorefrontGateway] SESSION-STORM: active_sessions={active_sessions}/{max_sessions} ({session_util_pct}%)
   new_sessions_rejected={rejected_sessions} rps={current_rps} threshold={rps_threshold} top_source_ip={top_source_ip}'
 stack_trace: |-
-  SessionPoolExhaustedException: SESSION-STORM
-    at SessionManager.acquire(pool_id={pool_id})
-    at CheckoutController.initSession(request_id={request_id})
+  Traceback (most recent call last):
+    File "/app/storefront/checkout.py", line 88, in init_session
+      session = self.sessions.acquire(pool_id=self.pool_id)
+    File "/app/storefront/sessions.py", line 141, in acquire
+      raise SessionPoolExhausted("SESSION-STORM")
+  storefront.sessions.SessionPoolExhausted: SESSION-STORM
+  Pool:               {pool_id}
+  Request:            {request_id}
   Active sessions:    {active_sessions}/{max_sessions} ({session_util_pct}%)
   Rejected sessions:  {rejected_sessions}
   Current RPS:        {current_rps}
@@ -35,11 +40,11 @@ correlation_attr:
   key: storefront.session_pressure
   value: true
 fault_params:
-  active_sessions: {randint: [48000, 55000]}
+  active_sessions: {randint: [48000, 50000]}
   max_sessions: 50000
-  session_util_pct: {randint: [94, 110]}
+  session_util_pct: {randint: [96, 100]}
   rejected_sessions: {randint: [100, 5000]}
-  current_rps: {randint: [5000, 20000]}
+  current_rps: {randint: [10500, 20000]}
   rps_threshold: 10000
   top_source_ip:
     format: "203.{a}.{b}.{c}"
@@ -50,8 +55,11 @@ fault_params:
   request_id: {format: "REQ-{n}", n: {randint: [100000, 999999]}}
 rca_clues:
   storefront-gateway:
-    storefront.session_pool_utilization_pct: {uniform: [90, 100], round: 1}
-    storefront.new_sessions_rejected: {randint: [100, 2000]}
+    storefront.session_pool_utilization_pct: {uniform: [96, 100], round: 1}
+    storefront.new_sessions_rejected: {randint: [100, 5000]}
+    storefront.top_ip_request_share_pct: {uniform: [35, 60], round: 1}
+    storefront.idle_session_pct: {uniform: [3, 8], round: 1}
+    storefront.instance_session_skew_pct: {uniform: [2, 8], round: 1}
   order-management:
     order.cart_creation_rate_drop_pct: {uniform: [20, 70], round: 1}
     order.checkout_queue_depth: {randint: [50, 500]}
@@ -63,10 +71,16 @@ rca_clues:
     analytics.ingest_rate_multiplier: {uniform: [3, 10], round: 1}
 business_impact:
   - kpi: business.conversion_rate_pct
-    factor: {uniform: [0.20, 0.45]}
+    value: {uniform: [0.67, 0.77], round: 2}
   - kpi: business.orders_placed_per_min
-    factor: {uniform: [0.25, 0.50]}
+    value: {uniform: [31.62, 36.38]}
   - kpi: business.sessions_per_min
-    factor: {uniform: [0.30, 0.55]}
+    value: {uniform: [725.4, 834.6]}
   - kpi: business.cancel_rate_pct
     factor: {uniform: [2.0, 4.0]}
+
+generator_impact:
+  nginx_otel:
+    high_active_connections: 500.0
+  kubernetes_otel:
+    hpa_at_max_replicas: 1.0

@@ -1,0 +1,58 @@
+name: Entra Token Expiry
+subsystem: authentication
+vehicle_section: authentication_pipeline
+error_type: IDENTITY-TOKEN-EXPIRED
+sensor_type: health_check
+affected_services: [identity-broker, assistant-web]
+cascade_services: []
+
+description: The identity-broker Entra ID client secret has expired, so token acquisition fails and user sign-ins to assistant-web are rejected.
+
+investigation_notes: |
+  1. Search body.text for *IDENTITY-TOKEN-EXPIRED* and note error code {aad_error_code} for app registration {app_id}.
+  2. Check the secret expiry: secret_expired_at={secret_expired_at} is in the past, which matches the first failure timestamp.
+  3. Confirm the failures started abruptly rather than gradually; token_failures_per_min={token_failures_per_min} jumps from zero with no deployment change.
+  4. Verify assistant-web sign-in errors correlate with the same window and that no other app registration is affected.
+  5. Create a new client secret on the app registration, store it in Key Vault {key_vault_name}, and restart identity-broker to pick it up.
+  6. Confirm token acquisition succeeds and sign-ins recover; add a secret-expiry alert for 30 days ahead.
+
+remediation_action: rotate_entra_client_secret
+
+error_message: |
+  IDENTITY-TOKEN-EXPIRED: app_id={app_id} error={aad_error_code} secret_expired_at={secret_expired_at} failures_per_min={token_failures_per_min}
+
+stack_trace: |
+  com.microsoft.aad.msal4j.MsalServiceException: {aad_error_code}: The provided client secret keys for app '{app_id}' are expired.
+    at com.microsoft.aad.msal4j.ConfidentialClientApplication.acquireToken(AuthorizationCodeParameters)
+    at IdentityBroker.redeemAuthorizationCode(app_id={app_id})
+  Secret expired:   {secret_expired_at}
+  Failures per min: {token_failures_per_min}
+  Secret source:    Key Vault {key_vault_name}
+
+correlation_attr:
+  key: entra.client_secret_id
+  value: secret-2025-10-prod-a41c
+
+fault_params:
+  app_id: 3f2a9c1e-7b44-4d0a-9e61-5c8d2b7a10f4
+  aad_error_code: AADSTS7000222
+  secret_expired_at: {choice: ["2026-10-20T23:59:59Z", "2026-10-21T00:00:00Z"]}
+  token_failures_per_min: {randint: [200, 1500]}
+  key_vault_name: kv-azureai-identity-prod
+
+rca_clues:
+  identity-broker:
+    entra.secret_days_to_expiry: 0
+    entra.token_requests_failed_pct: {uniform: [95.0, 100.0], round: 1}
+    entra.last_successful_token_min_ago: {randint: [5, 120]}
+  assistant-web:
+    auth.signin_failures: {randint: [100, 1500]}
+    auth.redirect_loop_detected: true
+
+business_impact:
+  - kpi: business.throughput_rpm
+    value: {uniform: [604.5, 695.5], round: 0}
+  - kpi: business.availability_pct
+    factor: {uniform: [0.6, 0.85]}
+  - kpi: business.error_rate_pct
+    factor: {uniform: [4.0, 10.0]}

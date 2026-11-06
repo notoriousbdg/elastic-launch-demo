@@ -8,13 +8,13 @@ affected_services:
 - cloud-load-balancer
 cascade_services:
 - cloud-cdn-service
-description: Cloud NAT endpoint-independent mapping failing for new connections
+description: Cloud NAT endpoint-independent mapping failing for new connections, so the checkout-api Cloud Run service's outbound calls fail with 5xx and it scales out
 investigation_notes: |-
-  Root cause: NAT mapping type determines how source ports are reused. ENDPOINT_INDEPENDENT mapping reuses the same external IP:port for all destinations from a given VM, which is required for protocols like STUN/TURN but consumes ports faster. ADDRESS_DEPENDENT mapping allows port reuse per destination IP. Mapping failures occur when port pool is exhausted for the configured mapping type. Diagnose with:
-    gcloud compute routers nats describe <nat> --router=<router> --region=<region> --format='value(natIpAllocateOption,sourceSubnetworkIpRangesToNat,endpointTypes)'
+  Root cause: The checkout-api Cloud Run service sends its outbound calls through Direct VPC egress and this Cloud NAT gateway. When new mappings fail, those calls hang or are refused, so the service returns 500/503, request latency climbs and the autoscaler adds instances to absorb the stalled requests. Confirm on the GCP Cloud Run OTel dashboards (5xx by response_code_class, request latency percentiles, instance count by revision). NAT mapping type determines how source ports are reused. ENDPOINT_INDEPENDENT mapping reuses the same external IP:port for all destinations from a given VM, which is required for protocols like STUN/TURN but consumes ports faster. With endpoint-independent mapping disabled (the default), a NAT IP:port can be reused for different destinations. Mapping failures occur when port pool is exhausted (above 95% utilization) for the configured mapping type. Diagnose with:
+    gcloud compute routers nats describe <nat> --router=<router> --region=<region> --format='value(natIpAllocateOption,sourceSubnetworkIpRangesToNat,enableEndpointIndependentMapping)'
   Remediation for static NAT (manual IP assignment): add more NAT IPs:
     gcloud compute routers nats update <nat> --router=<router> --region=<region> --nat-external-ip-pool=<ip1>,<ip2>,<ip3>
-  For dynamic NAT (auto-allocated): switch to manual allocation with a larger pool. If ENDPOINT_INDEPENDENT is not required, switch to ADDRESS_DEPENDENT to reduce port pressure. Review Cloud NAT logs: Console > Logging > resource.type='nat_gateway'.
+  For dynamic NAT (auto-allocated): switch to manual allocation with a larger pool. If endpoint-independent mapping is not required, disable it to reduce port pressure: gcloud compute routers nats update <nat> --router=<router> --region=<region> --no-enable-endpoint-independent-mapping Review Cloud NAT logs: Console > Logging > resource.type='nat_gateway'.
 remediation_action: reconfigure_nat_mapping
 error_message: 'cloudnat: NAT-ENDPOINT-MAPPING-FAILURE gateway={nat_gateway_name} mapping_type={nat_mapping_type} failures={nat_mapping_failures}/m
   nat_ip={nat_external_ip} subnet={subnet_name} protocol={nat_protocol}'
@@ -32,23 +32,24 @@ correlation_attr:
   key: deployment.nat_mapping_mode
   value: endpoint-independent-v2
 fault_params:
-  nat_gateway_name: {choice: [gcpnet-nat-central1, gcpnet-nat-east1, gcpnet-nat-europe1]}
-  nat_mapping_type: {choice: [ENDPOINT_INDEPENDENT, ADDRESS_DEPENDENT]}
+  nat_gateway_name: gcpnet-nat-central1
+  nat_mapping_type: ENDPOINT_INDEPENDENT
   nat_mapping_failures: {randint: [100, 2000]}
   nat_external_ip:
     format: "34.{a}.{b}.{c}"
     a: {randint: [64, 127]}
     b: {randint: [0, 255]}
     c: {randint: [1, 254]}
-  subnet_name: {choice: [gcpnet-subnet-central1, gcpnet-subnet-east1, gcpnet-subnet-europe1, gcpnet-subnet-services]}
-  nat_protocol: {choice: [TCP, UDP, "TCP+UDP"]}
+  subnet_name: gcpnet-subnet-central1
+  nat_protocol: {choice: [TCP, UDP]}
 rca_clues:
   cloud-nat-gateway:
     nat.mapping_type_current: ENDPOINT_INDEPENDENT
     nat.port_reuse_blocked: true
+    nat.port_pool_util_pct: {uniform: [96.0, 100.0], round: 1}
   cloud-load-balancer:
     lb.nat_path_affected: true
-    lb.connection_draining_stuck: {choice: [true, false]}
+    lb.connection_draining_stuck: true
   cloud-cdn-service:
     cdn.origin_fetch_via_nat: failing
     cdn.stale_content_served: true
@@ -61,3 +62,8 @@ business_impact:
     factor: {uniform: [0.55, 0.78]}
   - kpi: business.api_success_rate_pct
     factor: {uniform: [0.65, 0.85]}
+generator_impact:
+  gcp_cloudrun_otel:
+    error_5xx_rate: 0.25
+    latency_multiplier: 8.0
+    instance_count_spike: 6.0

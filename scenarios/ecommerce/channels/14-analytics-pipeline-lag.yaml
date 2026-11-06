@@ -12,18 +12,22 @@ description: Real-time analytics pipeline falling behind — dashboards showing 
   metrics
 investigation_notes: |-
   1. Check analytics-pipeline logs for ANALYTICS-PIPELINE-LAG — pipeline_lag_ms={pipeline_lag_ms}ms vs acceptable {max_pipeline_lag_ms}ms.
-  2. Check consumer group lag on the analytics stream: if consumer_lag={consumer_lag} events, the pipeline is not keeping up with ingest volume.
+  2. Check consumer group lag on the analytics Kafka topic: if consumer_lag={consumer_lag} events, the pipeline is not keeping up with ingest volume (ingest within ±10% of baseline rules out a volume surge).
   3. Identify the slow stage: ETL transforms, aggregation, or index writes — each has distinct latency signatures in the pipeline metrics.
-  4. Check for a data skew issue: if one partition has {hot_partition_events}x more events than others, the partition key is not evenly distributed.
+  4. Check for a data skew issue: if one partition has {hot_partition_events}x more events than others, the partition key is not evenly distributed (a skew above 3x confirms it).
   5. Ad-platform's budget optimization queries rely on fresh analytics — with {pipeline_lag_ms}ms lag, spend data is stale and bidding may over- or under-spend.
-  6. Scale the analytics consumers and increase parallelism on the aggregation step to drain the backlog within {eta_drain_min}min.
+  6. Fix the partition key (salt it or use a higher-cardinality key) so events spread across partitions. Adding consumers will not help: one partition is read by only one consumer in the group. To drain the existing backlog on {hot_partition} within {eta_drain_min}min, raise per-key processing parallelism inside the consumer for that partition.
 remediation_action: restart_analytics_pipeline
 error_message: '[AnalyticsPipeline] ANALYTICS-PIPELINE-LAG: lag={pipeline_lag_ms}ms (max {max_pipeline_lag_ms}ms) consumer_lag={consumer_lag}
   events_per_sec={events_per_sec} hot_partition={hot_partition}'
 stack_trace: |-
-  PipelineLagException: ANALYTICS-PIPELINE-LAG
-    at StreamConsumer.checkLag(group=analytics-consumer-group)
-    at AnalyticsPipeline.processBatch(batch_id={batch_id})
+  Traceback (most recent call last):
+    File "/app/analytics/pipeline.py", line 203, in process_batch
+      self.consumer.check_lag(group="analytics-consumer-group")
+    File "/app/analytics/consumer.py", line 118, in check_lag
+      raise PipelineLagError("ANALYTICS-PIPELINE-LAG")
+  analytics.errors.PipelineLagError: ANALYTICS-PIPELINE-LAG
+  Batch:             {batch_id}
   Pipeline lag:      {pipeline_lag_ms}ms
   Consumer lag:      {consumer_lag} events
   Events/sec:        {events_per_sec}
@@ -40,12 +44,14 @@ fault_params:
   events_per_sec: {randint: [10000, 100000]}
   hot_partition: {format: "partition-{n}", n: {randint: [0, 31]}}
   batch_id: {format: "BATCH-{n}", n: {randint: [10000, 99999]}}
-  hot_partition_events: {randint: [3, 15]}
+  hot_partition_events: {randint: [5, 15]}
   eta_drain_min: {randint: [10, 60]}
 rca_clues:
   analytics-pipeline:
     analytics.pipeline_lag_ms: {randint: [60000, 600000]}
     analytics.consumer_lag_events: {randint: [50000, 500000]}
+    analytics.partition_skew_ratio: {randint: [5, 15]}
+    analytics.ingest_rate_delta_pct: {uniform: [-5, 8], round: 1}
   ad-platform:
     ads.budget_optimization_stale: true
     ads.bid_using_lag_min: {randint: [10, 120]}
@@ -54,6 +60,13 @@ rca_clues:
     order.realtime_reporting_delayed: true
 business_impact:
   - kpi: business.ad_revenue_usd_per_min
-    factor: {uniform: [0.25, 0.50]}
+    value: {uniform: [10416.0, 11984.0], round: 1}
   - kpi: business.gmv_usd_per_min
-    factor: {uniform: [0.35, 0.60]}
+    value: {uniform: [51382.0, 59118.0], round: 1}
+  - kpi: business.average_order_value_usd
+    value: {uniform: [15.62, 17.98], round: 2}
+
+generator_impact:
+  kafka_otel:
+    high_consumer_lag_by_topic: 250000.0
+    high_consumer_lag_per_partition: 60000.0

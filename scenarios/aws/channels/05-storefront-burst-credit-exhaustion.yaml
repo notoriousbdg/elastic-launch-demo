@@ -1,0 +1,87 @@
+name: Storefront Burst Credit Exhaustion
+subsystem: storefront
+vehicle_section: storefront_pipeline
+error_type: WEB-EC2-CREDIT-EXHAUSTION
+sensor_type: health_check
+affected_services: [storefront-web]
+cascade_services: [orders-gateway]
+
+description: >
+  Burstable storefront-web EC2 instances run out of CPU credits during a promotion and CPU is throttled, so page and checkout requests slow down and time out.
+
+investigation_notes: |
+  1. Search body.text containing *WEB-EC2-CREDIT-EXHAUSTION* and check CPUCreditBalance for the {instance_type} instances: the balance has fallen to {credit_balance} credits and stays near zero.
+  2. Check CPUUtilization for the same instances: it flat-lines at {cpu_pct}%, the t3.large baseline that standard mode throttles to once credits run out, while request volume stays high from the {promotion_name} promotion (inside the guest, top shows high steal time).
+  3. Compare CPUSurplusCreditBalance and CPUCreditUsage: credit usage exceeds the earn rate and the instances are in standard credit mode ({credit_specification}), so the CPU is capped rather than allowed to burst.
+  4. Check CloudTrail for RunInstances and ModifyInstanceCreditSpecification events and the Auto Scaling group {asg_name}: the fleet was sized for normal traffic with {instance_count} instances.
+  5. Confirm the cascade in orders-gateway: checkout calls from storefront-web arrive late, with {slow_requests} requests over {slow_threshold_ms}ms and client timeouts in the access log.
+  6. Switch the instances to unlimited credit mode and add capacity to {asg_name}, then watch CPUUtilization drop and request latency recover.
+
+remediation_action: enable_unlimited_cpu_credits
+
+error_message: |
+  WEB-EC2-CREDIT-EXHAUSTION: asg={asg_name} instance_type={instance_type} cpu_credit_balance={credit_balance} cpu_pct={cpu_pct} mode={credit_specification} promotion={promotion_name}
+
+stack_trace: |
+  === EC2 CPU CREDIT EXHAUSTION REPORT ===
+  asg={asg_name}  instances={instance_count}  instance_type={instance_type}  region=us-east-1
+  --- CLOUDWATCH ---
+    METRIC                BASELINE     CURRENT
+    CPUCreditBalance      healthy      {credit_balance}
+    CPUUtilization        low          {cpu_pct}
+    credit_specification  -            {credit_specification}
+  --- TRIGGER ---
+    promotion={promotion_name}  traffic well above the normal daily peak
+  --- IMPACT ---
+    storefront-web throttled  slow_requests={slow_requests}  threshold_ms={slow_threshold_ms}
+    orders-gateway checkout calls arriving late
+  ACTION: set_credit_specification=unlimited  scale_out_asg={asg_name}  alert=WEB-EC2-CREDIT-EXHAUSTION
+
+infrastructure_events:
+- body: '[CloudWatch] Alarm storefront-web-CPUCreditBalance-Low in ALARM: CPUCreditBalance below threshold for asg=storefront-web-asg region=us-east-1'
+  severity: WARN
+  event_name: aws.cloudwatch.AlarmStateChange
+  service: storefront-web
+  attributes:
+    cloud.provider: aws
+    cloud.service: ec2
+    aws.cloudwatch.alarm_name: storefront-web-CPUCreditBalance-Low
+    aws.autoscaling.group: storefront-web-asg
+    infrastructure.source: CloudWatch
+
+correlation_attr:
+  key: infra.ec2_credit_specification
+  value: t3.large-standard
+
+fault_params:
+  asg_name: storefront-web-asg
+  instance_type: t3.large
+  instance_count: {randint: [4, 8]}
+  credit_balance: {randint: [0, 5]}
+  cpu_pct: {randint: [29, 31]}
+  credit_specification: standard
+  promotion_name: autumn-flash-sale
+  slow_requests: {randint: [500, 5000]}
+  slow_threshold_ms: 3000
+
+rca_clues:
+  storefront-web:
+    ec2.cpu_credit_balance: {randint: [0, 5]}
+    ec2.cpu_utilization_pct: {randint: [29, 31]}
+    ec2.credit_specification: standard
+  orders-gateway:
+    gateway.slow_upstream_calls: {randint: [200, 2000]}
+    gateway.client_timeouts_from_storefront: {randint: [50, 600]}
+
+business_impact:
+  - kpi: business.throughput_rpm
+    value: {uniform: [604.5, 695.5], round: 0}
+  - kpi: business.latency_p99_ms
+    factor: {uniform: [3.0, 6.0]}
+
+generator_impact:
+  aws_ec2_otel:
+    low_cpu_credit_balance: 5.0
+    high_cpu_utilization: 30.0
+  aws_elb_metrics_otel:
+    high_application_load_balancer_target_response_time_tail: 8.0

@@ -3,17 +3,14 @@ subsystem: network_access
 vehicle_section: wireless_lan
 error_type: INTERFERENCE_DETECTED
 sensor_type: rf_spectrum
-affected_services:
-- wifi-controller
-- network-controller
-cascade_services:
-- packaging-fulfillment
+affected_services: [wifi-controller, network-controller, packaging-fulfillment]
+cascade_services: []
 description: Co-channel and adjacent-channel interference degrading wireless performance
 investigation_notes: |-
   1. Check the Mist RRM (Radio Resource Management) dashboard for channel utilization heatmaps and neighbor AP counts.
-  2. High co-channel interference with many neighbor APs indicates over-deployment — reduce AP transmit power or disable radios on overlapping APs.
+  2. High co-channel interference (above 20%) with many neighbor APs indicates over-deployment, which is then the cause — reduce AP transmit power or disable radios on overlapping APs.
   3. Verify channel assignments: in dense warehouse environments, use only non-overlapping 5GHz channels (36, 40, 44, 48 for UNII-1; 149, 153, 157, 161 for UNII-3).
-  4. Check for non-WiFi interference sources (microwave ovens, Bluetooth, cordless phones) using a spectrum analyzer or Mist's built-in spectrum analysis.
+  4. Check for non-WiFi interference sources (microwave ovens, Bluetooth, cordless phones) using a spectrum analyzer or Mist's built-in spectrum analysis — a noise floor above -80 dBm would indicate them; here it stays below -85 dBm, ruling them out.
   5. Enable Mist Auto-RRM to dynamically adjust channel and power assignments based on real-time RF conditions.
   6. For persistent interference in warehouse environments, consider deploying directional antennas to reduce signal bleed between aisles.
 remediation_action: optimize_channels
@@ -27,7 +24,7 @@ correlation_attr:
   key: infra.rrm_algorithm
   value: auto-rrm-v3.1-aggressive
 fault_params:
-  channel_number: {choice: [1, 6, 11, 36, 40, 44, 48, 149, 153, 157, 161]}
+  channel_number: {choice: [149, 153, 157, 161]}
   ap_name:
     choice:
     - AP-WAREHOUSE-01
@@ -37,13 +34,15 @@ fault_params:
     - AP-SHIPPING-01
     - AP-DOCK-01
   interference_pct: {uniform: [25.0, 75.0], round: 1}
-  noise_floor_dbm: {uniform: [-80.0, -60.0], round: 1}
+  noise_floor_dbm: {uniform: [-95.0, -85.0], round: 1}
   retransmit_pct: {uniform: [10.0, 40.0], round: 1}
   neighbor_ap_count: {randint: [5, 20]}
 rca_clues:
   wifi-controller:
-    wifi.co_channel_aps: {randint: [5, 15]}
-    wifi.rrm_auto_channel_change: {choice: [true, false]}
+    wifi.co_channel_aps: {randint: [5, 20]}
+    wifi.rrm_auto_channel_change: true
+    wifi.co_channel_interference_pct: {uniform: [25.0, 75.0], round: 1}
+    wifi.noise_floor_dbm: {uniform: [-95.0, -85.0], round: 1}
   network-controller:
     network.wlan_vlan_util_pct: {uniform: [70, 95], round: 1}
     network.broadcast_domain_size: {randint: [200, 800]}
@@ -52,8 +51,10 @@ rca_clues:
     warehouse.throughput_degraded: true
 business_impact:
   - kpi: business.merch_gmv_usd_per_min
-    factor: {uniform: [0.35, 0.65]}
+    value: {uniform: [10416.0, 11984.0], round: 1}
   - kpi: business.app_sessions_per_min
-    factor: {uniform: [0.40, 0.70]}
+    value: {uniform: [544.05, 625.95]}
   - kpi: business.churn_risk_index_0_100
     factor: {uniform: [1.4, 2.8]}
+  - kpi: business.ad_revenue_usd_per_min
+    value: {uniform: [31620.0, 36380.0], round: 1}

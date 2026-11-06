@@ -1,0 +1,73 @@
+name: Openai Quota Exhaustion
+subsystem: orchestration
+vehicle_section: orchestration_pipeline
+error_type: OPENAI-QUOTA-EXHAUSTED
+sensor_type: health_check
+affected_services: [chat-orchestrator]
+cascade_services: [assistant-web]
+
+description: The chat-orchestrator Azure OpenAI deployment exhausts its tokens-per-minute quota, returning 429 errors and rising completion latency.
+
+investigation_notes: |
+  1. Search body.text for *OPENAI-QUOTA-EXHAUSTED* and confirm 429 responses from deployment={deployment_name}.
+  2. Compare tpm_used={tpm_used} against tpm_quota={tpm_quota}; the [Azure OpenAI] Quota Error Rates alert fires when throttled requests are above zero.
+  3. Check the Retry-After header ({retry_after_s}s) and request latency on chat-orchestrator; latency climbs as retries queue behind the throttle.
+  4. Confirm a standby deployment in {standby_region} has headroom (more than 50% of its TPM quota free); the quota-limited deployment is a bounded capacity issue, not a code defect.
+  5. Fail model traffic over to the standby deployment and verify 429s stop and assistant-web chat latency returns to baseline.
+  6. Follow up by requesting a higher TPM quota for {deployment_name} from the Quotas page in the Microsoft Foundry portal.
+
+remediation_action: fail_over_openai_deployment
+
+error_message: |
+  OPENAI-QUOTA-EXHAUSTED: deployment={deployment_name} status=429 tpm_used={tpm_used} tpm_quota={tpm_quota} retry_after={retry_after_s}s
+
+stack_trace: |
+  RateLimitError: Azure OpenAI deployment {deployment_name} exceeded token rate limit
+    at AzureOpenAI.chat.completions.create(model={deployment_name})
+    at ChatOrchestrator.complete(model={deployment_name})
+  Status:         429 Too Many Requests
+  TPM used:       {tpm_used}
+  TPM quota:      {tpm_quota}
+  Retry-After:    {retry_after_s}s
+  Standby region: {standby_region}
+
+correlation_attr:
+  key: azure.openai.deployment_version
+  value: gpt-4o-2024-11-20-tpm-450k
+
+fault_params:
+  deployment_name: chat-gpt4o-eastus
+  tpm_used: {randint: [446000, 450000]}
+  tpm_quota: 450000
+  retry_after_s: {randint: [5, 45]}
+  standby_region: {choice: [eastus2, westeurope]}
+
+rca_clues:
+  chat-orchestrator:
+    openai.quota_remaining_pct: {uniform: [0.0, 2.0], round: 1}
+    openai.throttled_requests_per_min: {randint: [300, 2500]}
+    openai.retry_backoff_ms: {randint: [2000, 30000]}
+    openai.standby_quota_remaining_pct: {uniform: [55.0, 80.0], round: 1}
+  assistant-web:
+    chat.response_timeouts: {randint: [40, 600]}
+    chat.upstream_status: 429
+
+business_impact:
+- kpi: business.throttled_requests_per_min
+  factor:
+    uniform: [20.0, 60.0]
+    round: 1
+- kpi: business.openai_quota_headroom_pct
+  factor:
+    uniform: [0.0, 0.1]
+    round: 2
+- kpi: business.throughput_rpm
+  factor:
+    uniform: [0.35, 0.65]
+- kpi: business.latency_p99_ms
+  factor:
+    uniform: [3.0, 6.0]
+generator_impact:
+  azure_openai:
+    quota_error_rates_above_threshold: 1.0
+    latency_high: 8000.0

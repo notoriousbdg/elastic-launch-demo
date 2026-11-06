@@ -12,7 +12,7 @@ cascade_services:
 - analytics-pipeline
 description: Player session migration between regional game server clusters fails during rebalancing or failover operations
 investigation_notes: |-
-  Root cause: the state transfer phase times out because the cross-region network path between {source_region} and {target_region} has elevated latency and 4.2% packet loss, causing the 84.2KB state payload to fail TCP delivery within the migration timeout.
+  Root cause: the state transfer phase times out because the cross-region network path between {source_region} and {target_region} has elevated latency and {packet_loss_pct}% packet loss (above 1%), causing the 84.2KB state payload to fail TCP delivery within the migration timeout.
   1. Check network path: `mtr -rwzbc 100 <target_region_endpoint>` from the source region to identify which hop introduces the latency and packet loss.
   2. Review migration phase: if failure is at 'transfer', it is network; if at 'injection', the target server rejected the state payload (version mismatch or schema change).
   3. Inspect payload size: 84.2KB with 247 inventory items is large — consider compressing the state payload (zstd typically achieves 3:1 on game state data).
@@ -32,7 +32,7 @@ stack_trace: |-
   ----------- phase timeline ----------
     state_extraction  : 847ms   OK
     serialization     : 124ms   OK
-    transfer          : {latency_ms}ms  TIMEOUT
+    transfer          : timeout  TIMEOUT (rtt {latency_ms}ms, {packet_loss_pct}% loss)
     injection         : --      SKIPPED
     validation        : --      SKIPPED
   ----------- state payload -----------
@@ -42,7 +42,7 @@ stack_trace: |-
     total_payload   = 84.2KB
   ----------- network diagnostic ------
     rtt_{source_region}->{target_region} = {latency_ms}ms
-    packet_loss    = 4.2%
+    packet_loss    = {packet_loss_pct}%
     tcp_retransmit = 12
   ----------- action ------------------
     ROLLBACK to source  RETRY with smaller payload
@@ -56,7 +56,8 @@ fault_params:
     n: {randint: [100000, 999999]}
   source_region: {choice: [us-east-1, eu-west-1]}
   target_region: {choice: [us-west-2, ap-southeast-1]}
-  migration_phase: {choice: [state_extraction, transfer, injection, validation]}
+  migration_phase: transfer
+  packet_loss_pct: {uniform: [2.0, 8.0], round: 1}
   session_id:
     format: "SESS-{n}"
     n: {randint: [10000000, 99999999]}
@@ -67,7 +68,7 @@ rca_clues:
     matchmaking.cross_region_packet_loss_pct: {uniform: [2.0, 8.0], round: 1}
   auth-gateway:
     auth.session_transfer_status: failed
-    auth.token_region_mismatch: true
+    auth.token_region_mismatch: false
   game-server:
     game.state_payload_kb: {uniform: [40.0, 120.0], round: 1}
     game.migration_rollback: true
@@ -77,10 +78,10 @@ rca_clues:
     analytics.migration_failure_events: {randint: [10, 100]}
 business_impact:
   - kpi: business.sessions_per_min
-    factor: {uniform: [0.25, 0.55]}
+    value: {uniform: [669.6, 770.4]}
   - kpi: business.matches_played_per_min
-    factor: {uniform: [0.20, 0.50]}
+    value: {uniform: [229.71, 264.29]}
   - kpi: business.churn_risk_index_0_100
     factor: {uniform: [1.5, 3.0]}
   - kpi: business.net_satisfaction_proxy_nps
-    factor: {uniform: [0.25, 0.50]}
+    value: {uniform: [9.3, 10.7], round: 1}

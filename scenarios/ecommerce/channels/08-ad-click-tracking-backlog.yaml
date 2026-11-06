@@ -12,18 +12,22 @@ description: Click tracking event queue backing up — attribution data delayed,
   to use stale data
 investigation_notes: |-
   1. Check ad-platform logs for ADS-CLICK-BACKLOG — click_queue_depth={click_queue_depth} vs max {click_queue_max}.
-  2. Check the click event consumer throughput: if consumer_throughput={consumer_throughput_eps}eps but ingest_rate={ingest_rate_eps}eps, the consumer is too slow.
-  3. Look for dead-letter queue growth — malformed click events that fail validation keep re-queuing and inflate the backlog count.
-  4. Review click deduplication logic — a dedup window too large ({dedup_window_sec}s) can cause hash table exhaustion under high click volume.
-  5. Identify the backpressure source: check analytics-pipeline lag metric — if the pipeline is lagged, click events are waiting for downstream capacity.
+  2. Check the click event consumer group lag on the click events Kafka topic and its throughput: if consumer_throughput={consumer_throughput_eps}eps but ingest_rate={ingest_rate_eps}eps, the consumer is too slow.
+  3. Look for dead-letter queue growth — malformed click events that fail validation keep re-queuing and inflate the backlog count (a DLQ above 1,000 events indicates malformed-event requeue).
+  4. Review click deduplication logic — a dedup window above 600s can cause hash table exhaustion under high click volume; the current {dedup_window_sec}s window is within limits.
+  5. Identify the backpressure source: check analytics-pipeline lag metric — if the pipeline is lagged, click events are waiting for downstream capacity (a downstream sink lag above 60s indicates backpressure).
   6. Scale click consumers horizontally — add {suggested_consumer_count} consumers to the click processing group to reduce backlog within {eta_min}min.
 remediation_action: flush_click_queue
 error_message: '[AdPlatform] ADS-CLICK-BACKLOG: click_queue_depth={click_queue_depth}/{click_queue_max} consumer_throughput={consumer_throughput_eps}eps
   ingest_rate={ingest_rate_eps}eps attribution_delay={attribution_delay_min}min dedup_window={dedup_window_sec}s'
 stack_trace: |-
-  ClickTrackingException: ADS-CLICK-BACKLOG
-    at ClickConsumer.process(queue_depth={click_queue_depth})
-    at AttributionEngine.attribute(event_id={click_event_id})
+  Traceback (most recent call last):
+    File "/app/adplatform/attribution.py", line 97, in attribute
+      self.click_consumer.process(event)
+    File "/app/adplatform/clicks.py", line 163, in process
+      raise ClickBacklogError("ADS-CLICK-BACKLOG")
+  adplatform.errors.ClickBacklogError: ADS-CLICK-BACKLOG
+  Click event:        {click_event_id}
   Queue depth:        {click_queue_depth}/{click_queue_max}
   Consumer tput:      {consumer_throughput_eps} eps
   Ingest rate:        {ingest_rate_eps} eps
@@ -40,23 +44,30 @@ fault_params:
   attribution_delay_min: {randint: [15, 120]}
   dedup_window_sec: {randint: [60, 300]}
   click_event_id: {format: "CLK-{n}", n: {randint: [100000, 999999]}}
-  dlq_size: {randint: [100, 10000]}
+  dlq_size: {randint: [20, 150]}
   suggested_consumer_count: {randint: [5, 20]}
   eta_min: {randint: [10, 60]}
 rca_clues:
   ad-platform:
-    ads.click_queue_depth: {randint: [10000, 500000]}
+    ads.click_queue_depth: {randint: [50000, 500000]}
+    ads.click_consumer_throughput_eps: {randint: [500, 2000]}
+    ads.click_ingest_rate_eps: {randint: [5000, 20000]}
     ads.attribution_delay_min: {randint: [15, 120]}
   analytics-pipeline:
     analytics.click_consumer_lag: {randint: [5000, 100000]}
-    analytics.dlq_depth: {randint: [100, 5000]}
+    analytics.dlq_depth: {randint: [20, 150]}
+    analytics.downstream_sink_lag_s: {randint: [1, 5]}
   recommendation-engine:
     reco.click_signal_stale: true
     reco.behavioral_features_lag_min: {randint: [10, 60]}
 business_impact:
   - kpi: business.ad_revenue_usd_per_min
-    factor: {uniform: [0.25, 0.55]}
+    value: {uniform: [10416.0, 11984.0], round: 1}
   - kpi: business.conversion_rate_pct
-    factor: {uniform: [0.35, 0.60]}
+    value: {uniform: [0.67, 0.77], round: 2}
   - kpi: business.gmv_usd_per_min
-    factor: {uniform: [0.35, 0.60]}
+    value: {uniform: [51382.0, 59118.0], round: 1}
+
+generator_impact:
+  kafka_otel:
+    high_consumer_lag_by_topic: 80000.0

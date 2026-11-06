@@ -3,15 +3,13 @@ subsystem: notifications
 vehicle_section: sms_channel
 error_type: NOTIF-SMS-FAIL
 sensor_type: sms_delivery
-affected_services:
-- notification-service
-cascade_services:
-- activation-service
+affected_services: [notification-service, activation-service]
+cascade_services: []
 description: SMPP gateway connection failure preventing activation confirmation SMS delivery to subscribers
 investigation_notes: |
   1. Check SMPP connection status — SMPP bind to SMS aggregator failed or connection dropped. Verify: notification-service metrics for smpp.connection_status and smpp.bind_state.
   2. SMS delivery is required for activation confirmation — subscribers expect an SMS within 60s of successful activation. Delayed SMS causes customer confusion and support calls.
-  3. SMPP aggregator may be throttling — check for ESME_RTHROTTLED responses. Meridian's contracted throughput is 500 SMS/min. Verify current send rate against contract.
+  3. SMPP aggregator may be throttling — check for ESME_RTHROTTLED responses. Meridian's contracted throughput is 500 SMS/min. Verify current send rate against contract. Zero ESME_RTHROTTLED responses with the bind UNBOUND and a send rate of 0/min rule out throttling: the bind itself has failed.
   4. Enable fallback delivery channels: push notification via mobile app, email notification. For Enterprise customers, also trigger webhook notification to their systems.
   5. OTP/2FA SMS are CRITICAL — if SMS is used for authentication OTP delivery, auth-service must fall back to email OTP or TOTP. Check auth-service MFA configuration.
 remediation_action: reconnect_smpp_gateway
@@ -34,7 +32,7 @@ stack_trace: |
     otp_delivery=BLOCKED  auth_impact=HIGH
   ACTION: reconnect_smpp=true  enable_fallback=true  alert=NOTIF-SMS-FAIL
 infrastructure_events:
-- body: '[GCP-Monitoring] SMPPConnectionLost: aggregator=twilio-smpp bind_state=UNBOUND last_bind=45s_ago error=CONNECTION_REFUSED region=europe-west3'
+- body: '[GCP-Monitoring] SMPPConnectionLost: aggregator=infobip-smpp bind_state=UNBOUND last_bind=45s_ago error=CONNECTION_REFUSED region=europe-west3'
   severity: ERROR
   event_name: gcp.monitoring.SMPPConnectionLost
   service: notification-service
@@ -47,16 +45,17 @@ correlation_attr:
   key: notification.smpp_gateway_version
   value: smpp-gw-v4.2.0-hotfix
 fault_params:
-  smpp_status: {choice: [UNBOUND, BIND_FAILED, CONNECTION_LOST, THROTTLED]}
+  smpp_status: UNBOUND
   sms_delivery_rate: {uniform: [0.0, 60.0], round: 1}
   sms_queued: {randint: [500, 5000]}
-  sms_aggregator: {choice: [Nexmo, Twilio, MessageBird, Infobip]}
-  sms_error: {choice: [SMPP_BIND_FAILED, CONNECTION_TIMEOUT, ESME_RTHROTTLED, DELIVERY_FAILED]}
+  sms_aggregator: Infobip
+  sms_error: SMPP_BIND_FAILED
   sms_failed: {randint: [200, 2000]}
   activation_confirms_pending: {randint: [100, 1000]}
 rca_clues:
   notification-service:
     notification.smpp_bind_state: UNBOUND
+    notification.esme_rthrottled_count: 0
     notification.sms_queue_depth: {randint: [500, 5000]}
   activation-service:
     activation.confirm_sms_pending: {randint: [100, 1000]}

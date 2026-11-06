@@ -50,8 +50,9 @@ rca_clues:
   claims-processor:
     claims.gpu_utilization_pct: {uniform: [93, 99], round: 1}
     claims.model_inference_queue: {randint: [500, 1200]}
+    claims.photo_estimate_volume_x: {uniform: [10, 20], round: 1}
   document-vault:
-    document.damage_photo_resolution: {choice: [4K, 1080p, 720p]}
+    document.damage_photo_resolution: 4K
     document.image_preprocessing_ms: {randint: [300, 800]}
   member-portal:
     portal.estimate_eta_display: DELAYED
@@ -61,8 +62,10 @@ rca_clues:
     gateway.damage_estimate_timeout: true
 business_impact:
   - kpi: business.net_satisfaction_proxy_nps
-    factor: {uniform: [0.35, 0.65]}
+    value: {uniform: [14.28, 16.42], round: 1}
   - kpi: business.csat_score_0_5
-    factor: {uniform: [0.45, 0.70]}
+    factor: {uniform: [0.45, 0.7]}
   - kpi: business.complaint_tickets_per_min
     factor: {uniform: [2.0, 4.0]}
+  - kpi: business.mobile_logins_per_min
+    value: {uniform: [148.8, 171.2]}

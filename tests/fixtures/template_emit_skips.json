@@ -1,0 +1,10 @@
+{
+ "slo": {
+  "rabbitmq_otel-consumer-availability-99.5-Rolling30Days": {
+   "reason": "Upstream template defect: the SLI counts every rabbitmqreceiver queue document as an occurrence and calls it good only if rabbitmq.consumer.count >= 1, but the receiver writes rabbitmq.message.current per state (ready, unacknowledged) as separate documents without the consumer gauge, so real data also scores about 33%. Fixing it in the generator would triple the dashboards' consumer sums.",
+   "generators": [
+    "rabbitmq_otel"
+   ]
+  }
+ }
+}

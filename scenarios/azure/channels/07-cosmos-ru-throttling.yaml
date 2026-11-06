@@ -1,0 +1,65 @@
+name: Cosmos Ru Throttling
+subsystem: database
+vehicle_section: database_pipeline
+error_type: COSMOS-RU-THROTTLED
+sensor_type: health_check
+affected_services: [conversation-store, chat-orchestrator]
+cascade_services: []
+
+description: >
+  A hot partition key exhausts one physical partition's share of the provisioned RU/s on the conversation-store Cosmos DB container, which returns 429 request rate too large and stalls history reads and writes.
+
+investigation_notes: |
+  1. Search body.text for *COSMOS-RU-THROTTLED* and note status_code={status_code} and retry_after_ms={retry_after_ms} on each throttled call.
+  2. Compare consumed_ru={consumed_ru} against provisioned_ru={provisioned_ru} on container {container_name}; total consumption sits well below provisioned while Normalized RU Consumption reads 100%, because RU/s are split evenly across physical partitions and one partition key range is saturated while total traffic is flat.
+  3. Check the partition key metrics: partition {hot_partition} takes {hot_partition_pct}% of normalized RU consumption, which points to a skewed key such as a shared tenant id (above 50% on one key indicates a skewed partition key).
+  4. On chat-orchestrator, look for rising history_read_latency_ms and retries exhausted; conversations lose context when writes are dropped.
+  5. Review Cosmos DB Activity Log for a recent throughput change or a new tenant onboarding that concentrates traffic on one key; no throughput change and total request rate within 5% of normal confirm the skewed key, not a capacity cut or a traffic surge.
+  6. Approve raising throughput as a short-term relief, then re-key the container with a synthetic partition key to spread load.
+
+remediation_action: raise_cosmos_throughput_and_rekey
+
+error_message: |
+  [ConversationStore] COSMOS-RU-THROTTLED: status={status_code} container={container_name} consumed_ru={consumed_ru} provisioned_ru={provisioned_ru} hot_partition={hot_partition} retry_after_ms={retry_after_ms}
+
+stack_trace: |
+  CosmosHttpResponseError: (429) Request rate is large. COSMOS-RU-THROTTLED
+    at ConversationStore.append_message(container={container_name})
+    at ContainerProxy.upsert_item(partition_key={hot_partition})
+  Status code:        {status_code}
+  Provisioned RU/s:   {provisioned_ru}
+  Consumed RU/s:      {consumed_ru}
+  Hot partition:      {hot_partition} ({hot_partition_pct}% of RU)
+  Retry after:        {retry_after_ms}ms
+
+correlation_attr:
+  key: cosmos.container_throughput_config
+  value: manual-4000ru-pk-tenantId
+
+fault_params:
+  status_code: 429
+  container_name: {choice: [conversations, messages, session-state]}
+  provisioned_ru: 4000
+  consumed_ru: {randint: [1700, 2600]}
+  hot_partition: {choice: [tenant-4417, tenant-0932, tenant-7781]}
+  hot_partition_pct: {uniform: [55.0, 92.0], round: 1}
+  retry_after_ms: {randint: [250, 4000]}
+
+rca_clues:
+  conversation-store:
+    cosmos.normalized_ru_consumption_pct: 100
+    cosmos.hot_partition_share_pct: {uniform: [55.0, 92.0], round: 1}
+    cosmos.throttled_requests_per_min: {randint: [300, 6000]}
+    cosmos.throughput_changed_last_24h: false
+    cosmos.total_request_rate_change_pct: {uniform: [-5.0, 5.0], round: 1}
+  chat-orchestrator:
+    orchestrator.history_read_latency_ms: {randint: [900, 6000]}
+    orchestrator.history_write_retries_exhausted: {randint: [20, 400]}
+
+business_impact:
+  - kpi: business.conversations_per_min
+    value: {uniform: [120.9, 139.1], round: 0}
+  - kpi: business.error_rate_pct
+    factor: {uniform: [2.5, 5.0]}
+  - kpi: business.latency_p99_ms
+    value: {uniform: [737.03, 847.98], round: 0}

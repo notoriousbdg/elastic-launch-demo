@@ -1,0 +1,34 @@
+service: gt-awsrds-azure-svc-1
+sort_order: 7
+cloud_provider: azure
+cloud_region: eastus
+cloud_platform: azure_vm
+cloud_availability_zone: eastus-1
+subsystem: platform
+language: go
+
+# Topology: [downstream-service, endpoint, METHOD]
+topology: []
+
+db_operations: []
+
+emit_fault_logs: true
+kpi_emitter: false
+
+constants: {}
+
+steps:
+  - sample:
+      latency_ms:
+        if_active: {uniform: [500.0, 3000.0], round: 1}
+        else: {uniform: [20.0, 150.0], round: 1}
+  - metric:
+      name: gt_awsrds_azure_svc_1.latency_ms
+      value: {var: latency_ms}
+      unit: ms
+  - log:
+      level: INFO
+      message: '[gt_awsrds_azure_svc_1] health_check latency={latency_ms}ms status=OK'
+      attrs:
+        operation: health_check
+        svc.latency_ms: {var: latency_ms}

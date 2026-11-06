@@ -9,11 +9,11 @@ affected_services:
 cascade_services:
 - auth-gateway
 - analytics-pipeline
-description: Matchmaking queue depth exceeds capacity causing player wait times to spike beyond acceptable thresholds
+description: Matchmaking queue depth exceeds capacity while the game-server HPA sits at max replicas and new pods stay Pending, causing player wait times to spike beyond acceptable thresholds
 investigation_notes: |-
   Root cause: inflow rate (enqueue/s) far exceeds outflow (dequeue/s), typically caused by a game server allocation bottleneck — the matchmaker finds groups but cannot place them because server provisioning is lagging behind demand.
-  1. Check server pool: query `kubectl get pods -l app=game-server` on the EKS cluster to verify available game server instances; if pool is exhausted, scale the fleet.
-  2. Review per-tier breakdown: diamond+ queues with 891 waiting is normal, but bronze-silver at 4201 indicates a systemic issue, not a thin-population problem.
+  1. Check server pool: query `kubectl get pods -l app=game-server` on the EKS cluster to verify available game server instances; if pool is exhausted (fewer than 10 available instances, allocation lag above 1000ms), scale the fleet.
+  2. Review per-tier breakdown: diamond+ holding 11% of the queue is normal, but bronze-silver at 53% indicates a systemic issue, not a thin-population problem.
   3. Inspect matchmaker logs for `EXPAND mmr_range` actions — repeated range expansions with no matches means the issue is server supply, not rating spread.
   4. Remediate: issue `restart_matchmaker` to clear stale queue entries and reset internal timers; simultaneously scale game-server pods to increase placement capacity.
   5. If region-locked, temporarily relax region constraints to allow cross-region placement while new servers spin up.
@@ -32,9 +32,9 @@ stack_trace: |-
     dequeue/s   = 89
     drain_eta   = NEVER (inflow > outflow)
   ----------- pool breakdown ----------
-    bronze-silver  : 4201 waiting
-    gold-platinum  : 2847 waiting
-    diamond+       : 891 waiting
+    bronze-silver  : 53% of waiting
+    gold-platinum  : 36% of waiting
+    diamond+       : 11% of waiting
   ----------- action ------------------
     EXPAND mmr_range +200  RELAX region_lock
   MM-QUEUE-OVERFLOW: pool {queue_name} saturated at {queue_depth}/{max_capacity}
@@ -45,7 +45,7 @@ fault_params:
   queue_name: {choice: [ranked-solo, ranked-duo, casual-squad, tournament-5v5]}
   queue_depth: {randint: [5000, 50000]}
   max_capacity: 3000
-  wait_time_ms: {randint: [30000, 300000]}
+  wait_time_ms: {randint: [95000, 300000]}
   region: {choice: [us-east-1, us-west-2, eu-west-1, ap-southeast-1]}
 rca_clues:
   matchmaking-engine:
@@ -55,16 +55,20 @@ rca_clues:
     game.server_pool_available: {randint: [0, 5]}
     game.allocation_lag_ms: {randint: [2000, 8000]}
   auth-gateway:
-    auth.login_surge_detected: true
-    auth.concurrent_sessions: {randint: [50000, 150000]}
+    auth.login_surge_detected: false
+    auth.concurrent_sessions: {randint: [40000, 60000]}
   analytics-pipeline:
     analytics.queue_depth_trend: exponential_growth
 business_impact:
   - kpi: business.matches_played_per_min
-    factor: {uniform: [0.10, 0.35]}
+    value: {uniform: [141.36, 162.64]}
   - kpi: business.sessions_per_min
-    factor: {uniform: [0.25, 0.50]}
+    value: {uniform: [1088.0, 1252.0]}
   - kpi: business.churn_risk_index_0_100
     factor: {uniform: [1.8, 3.5]}
   - kpi: business.net_satisfaction_proxy_nps
-    factor: {uniform: [0.20, 0.45]}
+    value: {uniform: [9.3, 10.7], round: 1}
+generator_impact:
+  kubernetes_otel:
+    hpa_at_max_replicas: 1.0
+    pods_stuck_in_pending_phase: 0.8

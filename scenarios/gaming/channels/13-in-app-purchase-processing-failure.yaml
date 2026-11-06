@@ -10,10 +10,10 @@ cascade_services:
 - analytics-pipeline
 description: In-app purchase transactions failing at the payment gateway level due to provider timeouts or validation errors
 investigation_notes: |-
-  Root cause: the payment provider is returning HTTP 402 with elevated latency (8412ms vs normal <500ms), indicating provider-side degradation. The gateway retry logic compounds the issue by sending duplicate requests that may result in double charges.
+  Root cause: provider calls are timing out with no response at elevated latency ({provider_latency_ms}ms vs normal <500ms), indicating provider-side degradation. The gateway retry logic compounds the issue by sending duplicate requests that may result in double charges.
   1. Check provider status: visit the payment provider status page (Stripe/PayPal/Apple/Google) for active incidents — if provider is degraded, enable circuit breaker to fail fast.
   2. Review error code distribution: TIMEOUT and PROVIDER_ERROR indicate provider issues; DECLINED and INSUFFICIENT_FUNDS are normal user errors and should not trigger alerts.
-  3. Verify idempotency: the `{purchase_id}-r{retry_count}` key must be honored by the provider — check for duplicate gateway_txn IDs in the transaction log.
+  3. Verify idempotency: the `{purchase_id}` key must be reused unchanged on every retry and honored by the provider — check for duplicate gateway_txn IDs in the transaction log.
   4. Remediate: issue `reset_payment_gateway` to restart connection pools and clear stuck transactions; switch to backup payment provider if primary remains degraded.
   5. Queue failed purchases for automatic retry once provider recovers; notify affected players with an in-game message about the temporary payment disruption.
 remediation_action: reset_payment_gateway
@@ -26,11 +26,11 @@ stack_trace: |-
     amount       = {amount} {currency}
     provider     = {payment_provider}
     item_sku     = SKU-PREMIUM-PACK-01
-    idempotency  = {purchase_id}-r{retry_count}
+    idempotency  = {purchase_id}
   ----------- provider response -------
-    status_code  = 402
+    status_code  = none (client timeout, no response)
     error_code   = {error_code}
-    latency_ms   = 8,412
+    latency_ms   = {provider_latency_ms}
     gateway_txn  = GW-8a4f2e1b-c930
   ----------- retry state -------------
     attempt      = {retry_count}/{max_retries}
@@ -51,26 +51,27 @@ fault_params:
     format: "PLR-{n}"
     n: {randint: [100000, 999999]}
   amount: {uniform: [0.99, 99.99], round: 2}
-  currency: {choice: [USD, EUR, GBP, JPY]}
-  payment_provider: {choice: [stripe, paypal, apple_iap, google_play]}
-  error_code: {choice: [TIMEOUT, DECLINED, INSUFFICIENT_FUNDS, FRAUD_HOLD, PROVIDER_ERROR]}
-  retry_count: {randint: [1, 5]}
+  currency: {choice: [USD, EUR, GBP, CAD]}
+  payment_provider: stripe
+  error_code: TIMEOUT
+  retry_count: {randint: [1, 3]}
+  provider_latency_ms: {randint: [3000, 12000]}
   max_retries: 3
 rca_clues:
   payment-processor:
     payment.provider_latency_ms: {randint: [3000, 12000]}
     payment.circuit_breaker_state: {choice: [HALF_OPEN, OPEN]}
   auth-gateway:
-    auth.purchase_identity_verify: timeout
+    auth.purchase_identity_verify: success
     auth.token_valid: true
   analytics-pipeline:
     analytics.failed_txn_count: {randint: [100, 2000]}
 business_impact:
   - kpi: business.revenue_usd_per_min
-    factor: {uniform: [0.10, 0.35]}
+    value: {uniform: [4464.0, 5136.0], round: 1}
   - kpi: business.in_app_purchases_per_min
-    factor: {uniform: [0.10, 0.35]}
+    value: {uniform: [51.38, 59.12]}
   - kpi: business.battle_pass_conversions_per_min
-    factor: {uniform: [0.15, 0.40]}
+    factor: {uniform: [0.15, 0.4]}
   - kpi: business.churn_risk_index_0_100
     factor: {uniform: [2.0, 4.5]}

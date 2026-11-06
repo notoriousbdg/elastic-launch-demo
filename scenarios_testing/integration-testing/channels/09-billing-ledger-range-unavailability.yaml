@@ -1,0 +1,82 @@
+name: Billing Ledger Range Unavailability
+subsystem: billing
+vehicle_section: billing_pipeline
+error_type: LEDGER-RANGE-UNAVAILABLE
+sensor_type: health_check
+affected_services:
+- billing-service
+cascade_services:
+- session-service
+description: 'A synthetic CockroachDB range on {ledger_shard} has lost quorum, making
+  a subset of the billing ledger unavailable and causing settlement writes to stall
+  or retry.
+
+  '
+investigation_notes: '1. Search for body.text containing *LEDGER-RANGE-UNAVAILABLE*
+  to find the affected shard.
+
+  2. Check billing-service billing.range_unavailable_pct and settlement_latency_ms
+  for the spike.
+
+  3. Confirm cockroachdb_otel replica_unavailable_rate/cpu_multiplier rise for {ledger_shard}.
+
+  4. Check session-service session.pool_exhaustion_pct for cascading pressure from
+  retried lookups.
+
+  5. Verify range availability recovers once the replica is rebalanced or restarted.
+
+  '
+remediation_action: rebalance_ledger_replicas
+error_message: 'LEDGER-RANGE-UNAVAILABLE: shard={ledger_shard} unavailable_pct={range_unavailable_pct}%
+  replicas_down={replicas_down}
+
+  '
+stack_trace: "LedgerRangeUnavailableError: shard={ledger_shard}\n  at BillingService.postSettlement()\n\
+  \  unavailable_pct={range_unavailable_pct}% replicas_down={replicas_down}\n"
+fault_params:
+  ledger_shard:
+    choice:
+    - shard-0
+    - shard-1
+    - shard-2
+  range_unavailable_pct:
+    uniform:
+    - 10.0
+    - 60.0
+    round: 1
+  replicas_down:
+    randint:
+    - 1
+    - 2
+rca_clues:
+  billing-service:
+    billing.range_unavailable_pct:
+      uniform:
+      - 10.0
+      - 60.0
+      round: 1
+    billing.settlement_latency_ms:
+      uniform:
+      - 400.0
+      - 6000.0
+      round: 1
+  session-service:
+    session.pool_exhaustion_pct:
+      uniform:
+      - 40.0
+      - 85.0
+      round: 1
+    session.ledger_lookup_retry_count:
+      randint:
+      - 50
+      - 700
+generator_impact:
+  cockroachdb_otel:
+    unavailable_ranges_detected:
+      uniform:
+      - 0.2
+      - 0.7
+    cpu_utilization_high:
+      uniform:
+      - 2.0
+      - 4.5

@@ -1,0 +1,37 @@
+name: "GT gcp_cloudrun_otel: latency_multiplier"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-GCPCLOUDRUN-LATENCY-MULTIPLIER
+sensor_type: impact_key_probe
+affected_services:
+  - gt-gcpcloudrun-gcp-svc-1
+cascade_services:
+  - gt-gcpcloudrun-gcp-svc-2
+description: "Tests impact_key latency_multiplier on generator gcp_cloudrun_otel."
+investigation_notes: |-
+  1. Verify gcp_cloudrun_otel is active and reporting metrics.
+  2. Check that the latency_multiplier metric has reached the trigger value (8.0).
+  3. Confirm generator_impact for gcp_cloudrun_otel.latency_multiplier is set to 8.0.
+  4. Look for correlated changes in service gt-gcpcloudrun-gcp-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_latency_multiplier_baseline
+error_message: "GT-PROBE: gen=gcp_cloudrun_otel key=latency_multiplier value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=gcp_cloudrun_otel
+  impact_key: latency_multiplier
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 8.0
+  svc_name: gt-gcpcloudrun-gcp-svc-1
+rca_clues:
+  gt-gcpcloudrun-gcp-svc-1:
+    probe.generator: gcp_cloudrun_otel
+    probe.impact_key: latency_multiplier
+    probe.trigger_value: 8.0
+  gt-gcpcloudrun-gcp-svc-2:
+    probe.upstream_generator: gcp_cloudrun_otel
+    probe.upstream_key: latency_multiplier
+generator_impact:
+  gcp_cloudrun_otel:
+    latency_multiplier: 8.0

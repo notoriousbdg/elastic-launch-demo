@@ -14,7 +14,7 @@ investigation_notes: 'Root cause: burst error pattern on CRC32-C failures indica
   and point to a specific link segment. Check NIC firmware version against known-good baseline. Inspect SFP optical power
   levels (TX and RX) for the affected route — RX power below -18dBm indicates a dirty connector or damaged fiber. Verify no
   recent rack maintenance that could have disturbed fiber runs. Remediation: replace suspect SFP transceiver on the affected
-  route, clean fiber connectors with IPA wipes. If NIC firmware is outdated, schedule firmware update (NIC_FW_UPDATE {route}).
+  route, clean fiber connectors with IPA wipes. If NIC firmware is outdated, schedule firmware update (NIC_FW_UPDATE {route_id}).
   Enable relay packet retransmission (RLY_RETRANSMIT ENABLE) as interim mitigation.'
 remediation_action: reset_relay_link
 error_message: '[RLY] RLY-PACKET-CORRUPT: route={route_id} corrupted={corrupted_count}/{total_count} crc_fail_rate={corrupted_count}pkt'
@@ -34,16 +34,16 @@ correlation_attr:
   key: infra.sfp_model
   value: FTRJ1319P1BTL-v2
 fault_params:
-  route_id: {choice: [AWS-GCP-01, GCP-AZ-01, AWS-AZ-01]}
+  route_id: AWS-GCP-01
   corrupted_count: {randint: [5, 50]}
   total_count: {randint: [100, 500]}
 rca_clues:
   telemetry-relay:
     relay.crc_fail_pattern: burst
-    relay.sfp_rx_power_dbm: {uniform: [-20.0, -16.0], round: 1}
+    relay.sfp_rx_power_dbm: {uniform: [-22.0, -18.5], round: 1}
   sensor-validator:
     validation.data_integrity: compromised
-    validation.corrupt_route: {choice: [AWS-GCP-01, GCP-AZ-01]}
+    validation.corrupt_route: AWS-GCP-01
   mission-control:
     upstream.degraded_subsystem: relay
 business_impact:

@@ -1,0 +1,37 @@
+name: "GT memcached_otel: high_connection_count"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-MEMCACHED-HIGH-CONNECTION-COUNT
+sensor_type: impact_key_probe
+affected_services:
+  - gt-memcached-aws-svc-1
+cascade_services:
+  - gt-memcached-aws-svc-2
+description: "Tests impact_key high_connection_count on generator memcached_otel."
+investigation_notes: |-
+  1. Verify memcached_otel is active and reporting metrics.
+  2. Check that the high_connection_count metric has reached the trigger value (6000.0).
+  3. Confirm generator_impact for memcached_otel.high_connection_count is set to 6000.0.
+  4. Look for correlated changes in service gt-memcached-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_high_connection_count_baseline
+error_message: "GT-PROBE: gen=memcached_otel key=high_connection_count value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=memcached_otel
+  impact_key: high_connection_count
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 6000.0
+  svc_name: gt-memcached-aws-svc-1
+rca_clues:
+  gt-memcached-aws-svc-1:
+    probe.generator: memcached_otel
+    probe.impact_key: high_connection_count
+    probe.trigger_value: 6000.0
+  gt-memcached-aws-svc-2:
+    probe.upstream_generator: memcached_otel
+    probe.upstream_key: high_connection_count
+generator_impact:
+  memcached_otel:
+    high_connection_count: 6000.0

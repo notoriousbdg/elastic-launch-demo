@@ -1,0 +1,63 @@
+service: billing-service
+sort_order: 7
+cloud_provider: azure
+cloud_region: eastus
+cloud_platform: azure_vm
+cloud_availability_zone: eastus-1
+subsystem: billing
+language: dotnet
+
+topology: []
+
+db_operations:
+  - [SELECT, ledger_ranges, "SELECT range_id, status FROM ledger_ranges WHERE shard = ?"]
+  - [UPDATE, ledger_entries, "UPDATE ledger_entries SET status = 'POSTED' WHERE txn_id = ?"]
+
+emit_fault_logs: true
+kpi_emitter: false
+
+constants:
+  SHARDS: [shard-0, shard-1, shard-2]
+
+state:
+  _txns_posted: {init: 0}
+  _last_summary: {init: now}
+
+steps:
+  - sample:
+      shard: {choice: SHARDS}
+      range_unavailable_pct:
+        if_active: {uniform: [10.0, 60.0], round: 1}
+        else: {uniform: [0.0, 1.0], round: 1}
+      settlement_latency_ms:
+        if_active: {uniform: [400.0, 6000.0], round: 1}
+        else: {uniform: [15.0, 100.0], round: 1}
+  - counter:
+      state_key: _txns_posted
+      by: 1
+  - log:
+      level: INFO
+      message: '[billing-service] ledger_cycle shard={shard} range_unavailable={range_unavailable_pct}% settlement_latency={settlement_latency_ms}ms total={_txns_posted}'
+      attrs:
+        operation: ledger_cycle
+        billing.ledger_shard: {var: shard}
+        billing.range_unavailable_pct: {var: range_unavailable_pct}
+        billing.settlement_latency_ms: {var: settlement_latency_ms}
+  - metric:
+      name: billing_service.range_unavailable_pct
+      value: {var: range_unavailable_pct}
+      unit: '%'
+  - metric:
+      name: billing_service.settlement_latency_ms
+      value: {var: settlement_latency_ms}
+      unit: ms
+  - every:
+      seconds: 15
+      state_key: _last_summary
+      steps:
+        - log:
+            level: INFO
+            message: '[billing-service] summary txns_posted={_txns_posted} status=NOMINAL'
+            attrs:
+              operation: summary
+              billing.txns_posted: {var: _txns_posted}

@@ -1,0 +1,80 @@
+name: Cache Tier Memory Pressure
+subsystem: caching
+vehicle_section: caching_pipeline
+error_type: CACHE-MEM-PRESSURE
+sensor_type: memory_usage
+affected_services:
+- cache-tier
+cascade_services:
+- edge-gateway
+description: 'Synthetic memcached and Redis Enterprise nodes are showing rising eviction
+  rates and memory pressure, driving cache hit ratio down and increasing lookup latency
+  for callers.
+
+  '
+investigation_notes: "1. Search for body.text containing *CACHE-MEM-PRESSURE* to find\
+  \ the affected node and window.\n2. Check cache-tier cache.eviction_rate_per_min\
+  \ and cache.memory_used_pct for the spike.\n3. Confirm memcached eviction/miss-rate\
+  \ metrics and Redis Enterprise memory_pressure/latency\n   metrics rise together\
+  \ on {cache_node}.\n4. Check edge-gateway gateway.cache_miss_retry_count for cascading\
+  \ retries caused by misses.\n5. Verify hit ratio recovers after an eviction sweep\
+  \ or node restart.\n"
+remediation_action: flush_and_rebalance_cache
+error_message: 'CACHE-MEM-PRESSURE: node={cache_node} evictions_per_min={eviction_count}
+  hit_ratio={hit_ratio_pct}%
+
+  '
+stack_trace: "CacheMemoryPressureError: node={cache_node}\n  at CacheTier.evictionSweep()\n\
+  \  evictions_per_min={eviction_count} hit_ratio={hit_ratio_pct}%\n"
+fault_params:
+  cache_node:
+    choice:
+    - memcached-01
+    - memcached-02
+    - redis-ent-node-1
+    - redis-ent-node-2
+  eviction_count:
+    randint:
+    - 2000
+    - 12000
+  hit_ratio_pct:
+    uniform:
+    - 15.0
+    - 45.0
+    round: 1
+rca_clues:
+  cache-tier:
+    cache.eviction_rate_per_min:
+      randint:
+      - 2000
+      - 12000
+    cache.memory_used_pct:
+      uniform:
+      - 88.0
+      - 99.0
+      round: 1
+  edge-gateway:
+    gateway.cache_miss_retry_count:
+      randint:
+      - 200
+      - 1500
+    gateway.downstream_latency_flag: true
+generator_impact:
+  memcached_otel:
+    high_eviction_rate:
+      uniform:
+      - 8.0
+      - 30.0
+    low_hit_ratio_for_get_operations:
+      uniform:
+      - 4.0
+      - 15.0
+  redisenterprise_otel:
+    database_memory_utilization_critical:
+      uniform:
+      - 0.6
+      - 0.95
+    database_high_latency:
+      uniform:
+      - 5.0
+      - 15.0

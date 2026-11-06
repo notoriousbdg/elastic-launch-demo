@@ -1,0 +1,66 @@
+name: Foundry Model Availability Drop
+subsystem: ml_inference
+vehicle_section: ml_inference_pipeline
+error_type: AI-FOUNDRY-AVAILABILITY-DROP
+sensor_type: health_check
+affected_services: [model-router, chat-orchestrator]
+cascade_services: [assistant-web]
+description: The Microsoft Foundry model deployment behind model-router falls below its availability target and answers slowly, so chat-orchestrator retries and assistant-web serves degraded answers.
+investigation_notes: |-
+  1. Search body.text for *AI-FOUNDRY-AVAILABILITY-DROP* and confirm deployment={deployment_name} is the one failing; model_availability_above_threshold fires when availability drops below 99%.
+  2. Compare availability_pct={availability_pct}% against the {target_availability_pct}% target and check latency_high (p95={p95_latency_ms}ms) on the same deployment in the Microsoft Foundry metrics.
+  3. Check the Azure Activity Log for the recent model version update on {deployment_name} and Service Health for region={region}; a version update minutes before the drop while regional Service Health stays Available points at the new model version, not a regional incident.
+  4. Look at chat-orchestrator for retry storms (retries={retry_count} per request) and at assistant-web for degraded-answer fallbacks.
+  5. Confirm the secondary deployment {secondary_deployment} has headroom, then shift model-router traffic to it and watch availability recover.
+remediation_action: shift_traffic_to_secondary_deployment
+error_message: '[ModelRouter] AI-FOUNDRY-AVAILABILITY-DROP: deployment={deployment_name} region={region} availability={availability_pct}% (target {target_availability_pct}%) p95_latency={p95_latency_ms}ms'
+stack_trace: |-
+  FoundryDeploymentUnavailableException: AI-FOUNDRY-AVAILABILITY-DROP
+    at ModelRouter.selectDeployment(deployment={deployment_name})
+    at ModelRouter.invokeChatCompletion(region={region})
+  Availability:         {availability_pct}% (target: {target_availability_pct}%)
+  p95 latency:          {p95_latency_ms}ms
+  Orchestrator retries: {retry_count}
+  Failover candidate:   {secondary_deployment}
+correlation_attr:
+  key: deployment.foundry_model_version
+  value: gpt-4o-2024-11-20
+fault_params:
+  deployment_name: gpt-4o-chat-prod
+  secondary_deployment: gpt-4o-chat-weu-secondary
+  region: {choice: [eastus2, eastus]}
+  availability_pct: {uniform: [93.0, 97.0], round: 1}
+  target_availability_pct: 99.0
+  p95_latency_ms: {randint: [7000, 14000]}
+  retry_count: {randint: [2, 6]}
+rca_clues:
+  model-router:
+    foundry.deployment_availability_pct: {uniform: [93.0, 97.0], round: 1}
+    foundry.http_5xx_count: {randint: [200, 4000]}
+    foundry.secondary_deployment_ready: true
+    foundry.model_version_updated_min_ago: {randint: [5, 45]}
+    foundry.region_service_health: Available
+  chat-orchestrator:
+    orchestrator.model_call_retries: {randint: [2, 6]}
+    orchestrator.model_call_timeouts: {randint: [50, 900]}
+  assistant-web:
+    web.degraded_answer_fallbacks: {randint: [100, 2500]}
+    web.answer_latency_p95_ms: {randint: [7000, 15000]}
+business_impact:
+- kpi: business.model_availability_pct
+  factor:
+    uniform: [0.9, 0.96]
+    round: 3
+- kpi: business.availability_pct
+  factor:
+    uniform: [0.55, 0.85]
+- kpi: business.latency_p99_ms
+  factor:
+    uniform: [3.0, 6.0]
+- kpi: business.error_rate_pct
+  factor:
+    uniform: [4.0, 9.0]
+generator_impact:
+  azure_ai_foundry:
+    model_availability_above_threshold: 950.0
+    latency_high: 7000.0

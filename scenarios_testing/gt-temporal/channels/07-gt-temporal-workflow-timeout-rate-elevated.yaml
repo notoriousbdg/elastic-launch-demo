@@ -1,0 +1,37 @@
+name: "GT temporal_otel: workflow_timeout_rate_elevated"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-TEMPORAL-WORKFLOW-TIMEOUT-RATE-ELEVATED
+sensor_type: impact_key_probe
+affected_services:
+  - gt-temporal-aws-svc-1
+cascade_services:
+  - gt-temporal-aws-svc-2
+description: "Tests impact_key workflow_timeout_rate_elevated on generator temporal_otel."
+investigation_notes: |-
+  1. Verify temporal_otel is active and reporting metrics.
+  2. Check that the workflow_timeout_rate_elevated metric has reached the trigger value (0.5).
+  3. Confirm generator_impact for temporal_otel.workflow_timeout_rate_elevated is set to 0.5.
+  4. Look for correlated changes in service gt-temporal-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_workflow_timeout_rate_elevated_baseline
+error_message: "GT-PROBE: gen=temporal_otel key=workflow_timeout_rate_elevated value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=temporal_otel
+  impact_key: workflow_timeout_rate_elevated
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 0.5
+  svc_name: gt-temporal-aws-svc-1
+rca_clues:
+  gt-temporal-aws-svc-1:
+    probe.generator: temporal_otel
+    probe.impact_key: workflow_timeout_rate_elevated
+    probe.trigger_value: 0.5
+  gt-temporal-aws-svc-2:
+    probe.upstream_generator: temporal_otel
+    probe.upstream_key: workflow_timeout_rate_elevated
+generator_impact:
+  temporal_otel:
+    workflow_timeout_rate_elevated: 0.5

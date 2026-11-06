@@ -16,13 +16,13 @@ investigation_notes: 'Root cause: thermocouple junction degradation or reference
   sensors TC-48/49/50 to isolate single-sensor vs zone-wide drift. Remediation: run TCS_RECAL procedure from MCC console,
   update calibration coefficients in the sensor registry, and confirm readings converge within 2.5K tolerance band.'
 remediation_action: recalibrate_engine
-error_message: '[TCS] TCS-DRIFT-CRITICAL: sensor=TC-47 reading={deviation}K nominal=310.2K deviation=+{deviation}K epoch={epoch}'
+error_message: '[TCS] TCS-DRIFT-CRITICAL: sensor=TC-47 nominal=310.2K deviation=+{deviation}K epoch={epoch}'
 stack_trace: |-
   == TELEMETRY FRAME DUMP == TCS THERMAL CONTROL SUBSYSTEM ==
-  TIMESTAMP: MET+00:04:12.337 | FRAME: 0x4A2F | SEQ: 18442
+  TIMESTAMP: T-00:04:12.337 | FRAME: 0x4A2F | SEQ: 18442
   ---------------------------------------------------------------
   SENSOR    READING    NOMINAL    DELTA     STATUS
-  TC-47     {deviation}K     310.2K     +{deviation}K   **CRITICAL**
+  TC-47     >312.7K    310.2K     +{deviation}K   **CRITICAL**
   TC-48     311.4K     310.2K     +1.2K     NOMINAL
   TC-49     309.8K     310.2K     -0.4K     NOMINAL
   TC-50     310.0K     310.2K     -0.2K     NOMINAL
@@ -39,10 +39,11 @@ fault_params:
 rca_clues:
   fuel-system:
     thermal.sensor_zone: engine_bay_sector_7
-    thermal.calibration_epoch: stale
+    thermal.calibration_epoch_age_h: {uniform: [5.0, 14.0], round: 1}
   sensor-validator:
     validation.drift_detected: true
     validation.sensor_id: TC-47
+    validation.adjacent_sensor_max_delta_k: {uniform: [0.2, 1.2], round: 1}
   mission-control:
     upstream.degraded_subsystem: propulsion
     telemetry.quality: degraded

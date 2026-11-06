@@ -6,6 +6,7 @@ rather than being lost when the process recycles.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import sqlite3
@@ -100,16 +101,6 @@ class DeploymentStore:
                     ),
                 )
 
-    def get(self, deployment_id: str) -> dict[str, Any] | None:
-        """Return a single deployment record or None."""
-        with self._lock:
-            with self._connect() as conn:
-                row = conn.execute(
-                    "SELECT * FROM deployments WHERE deployment_id = ?",
-                    (deployment_id,),
-                ).fetchone()
-                return dict(row) if row else None
-
     def get_all_active(self) -> list[dict[str, Any]]:
         """Return all deployments with status='active'."""
         with self._lock:
@@ -145,7 +136,6 @@ CREATE TABLE IF NOT EXISTS chaos_channels (
     deployment_id   TEXT NOT NULL,
     channel         INTEGER NOT NULL,
     state           TEXT NOT NULL DEFAULT 'STANDBY',
-    mode            TEXT,
     se_name         TEXT,
     session_id      TEXT,
     triggered_at    REAL,
@@ -158,13 +148,30 @@ CREATE TABLE IF NOT EXISTS chaos_channels (
 
 _CREATE_SPIKES_TABLE = """
 CREATE TABLE IF NOT EXISTS chaos_spikes (
-    deployment_id       TEXT PRIMARY KEY,
-    cpu_pct             REAL NOT NULL DEFAULT 0,
-    memory_pct          REAL NOT NULL DEFAULT 0,
-    k8s_oom_intensity   REAL NOT NULL DEFAULT 0,
-    latency_multiplier  REAL NOT NULL DEFAULT 1.0
+    deployment_id             TEXT PRIMARY KEY,
+    cpu_pct                   REAL NOT NULL DEFAULT 0,
+    memory_pct                REAL NOT NULL DEFAULT 0,
+    k8s_oom_intensity         REAL NOT NULL DEFAULT 0,
+    k8s_pod_cpu_intensity     REAL NOT NULL DEFAULT 0,
+    k8s_pod_memory_intensity  REAL NOT NULL DEFAULT 0,
+    latency_multiplier        REAL NOT NULL DEFAULT 1.0,
+    extra_json                TEXT NOT NULL DEFAULT '{}'
 );
 """
+
+# Columns added after the initial schema — applied via ALTER on existing PVCs.
+_SPIKES_MIGRATIONS = (
+    ("k8s_pod_cpu_intensity", "REAL NOT NULL DEFAULT 0"),
+    ("k8s_pod_memory_intensity", "REAL NOT NULL DEFAULT 0"),
+    ("extra_json", "TEXT NOT NULL DEFAULT '{}'"),
+)
+
+# Spike keys with their own column; every other key round-trips through extra_json so
+# new channel augmentations need no schema change.
+_SPIKE_COLUMNS = (
+    "cpu_pct", "memory_pct", "k8s_oom_intensity",
+    "k8s_pod_cpu_intensity", "k8s_pod_memory_intensity", "latency_multiplier",
+)
 
 
 class ChaosStore:
@@ -180,6 +187,17 @@ class ChaosStore:
         with self._connect() as conn:
             conn.execute(_CREATE_CHAOS_TABLE)
             conn.execute(_CREATE_SPIKES_TABLE)
+            self._migrate_spikes_table(conn)
+
+    def _migrate_spikes_table(self, conn: sqlite3.Connection) -> None:
+        """Add new spike columns on long-lived PVC DBs created before those keys existed."""
+        existing = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(chaos_spikes)").fetchall()
+        }
+        for col, decl in _SPIKES_MIGRATIONS:
+            if col not in existing:
+                conn.execute(f"ALTER TABLE chaos_spikes ADD COLUMN {col} {decl}")
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self._db_path, check_same_thread=False)
@@ -192,7 +210,6 @@ class ChaosStore:
         channel: int,
         *,
         state: str = "ACTIVE",
-        mode: str | None = None,
         se_name: str = "",
         session_id: str = "",
         triggered_at: float | None = None,
@@ -205,14 +222,13 @@ class ChaosStore:
             with self._connect() as conn:
                 conn.execute(
                     """INSERT OR REPLACE INTO chaos_channels
-                       (deployment_id, channel, state, mode, se_name, session_id,
+                       (deployment_id, channel, state, se_name, session_id,
                         triggered_at, resolved_at, callback_url, user_email)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         deployment_id,
                         channel,
                         state,
-                        mode,
                         se_name,
                         session_id,
                         triggered_at,
@@ -230,7 +246,7 @@ class ChaosStore:
             with self._connect() as conn:
                 conn.execute(
                     """UPDATE chaos_channels
-                       SET state = 'STANDBY', mode = NULL, session_id = NULL,
+                       SET state = 'STANDBY', session_id = NULL,
                            resolved_at = ?, callback_url = '', user_email = ''
                        WHERE deployment_id = ? AND channel = ?""",
                     (resolved_at, deployment_id, channel),
@@ -252,14 +268,22 @@ class ChaosStore:
             with self._connect() as conn:
                 conn.execute(
                     """INSERT OR REPLACE INTO chaos_spikes
-                       (deployment_id, cpu_pct, memory_pct, k8s_oom_intensity, latency_multiplier)
-                       VALUES (?, ?, ?, ?, ?)""",
+                       (deployment_id, cpu_pct, memory_pct, k8s_oom_intensity,
+                        k8s_pod_cpu_intensity, k8s_pod_memory_intensity, latency_multiplier,
+                        extra_json)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         deployment_id,
                         spikes.get("cpu_pct", 0),
                         spikes.get("memory_pct", 0),
                         spikes.get("k8s_oom_intensity", 0),
+                        spikes.get("k8s_pod_cpu_intensity", 0),
+                        spikes.get("k8s_pod_memory_intensity", 0),
                         spikes.get("latency_multiplier", 1.0),
+                        json.dumps({
+                            k: v for k, v in spikes.items()
+                            if k not in _SPIKE_COLUMNS and isinstance(v, (int, float))
+                        }),
                     ),
                 )
 
@@ -271,7 +295,15 @@ class ChaosStore:
                     "SELECT * FROM chaos_spikes WHERE deployment_id = ?",
                     (deployment_id,),
                 ).fetchone()
-                return dict(row) if row else None
+                if not row:
+                    return None
+                out = dict(row)
+                try:
+                    extra = json.loads(out.pop("extra_json", None) or "{}")
+                except ValueError:
+                    extra = {}
+                out.update(extra)
+                return out
 
     def delete_spikes_for_deployment(self, deployment_id: str) -> None:
         """Remove persisted spike values for a deployment (e.g. on teardown)."""
@@ -291,17 +323,6 @@ class ChaosStore:
                     (deployment_id,),
                 )
 
-    def validate_session(self, deployment_id: str, session_id: str) -> list[int]:
-        """Return list of channel IDs owned by this session_id."""
-        with self._lock:
-            with self._connect() as conn:
-                rows = conn.execute(
-                    """SELECT channel FROM chaos_channels
-                       WHERE deployment_id = ? AND session_id = ? AND state = 'ACTIVE'""",
-                    (deployment_id, session_id),
-                ).fetchall()
-                return [r["channel"] for r in rows]
-
     def expire_channels(self, deployment_id: str, max_age: float) -> list[int]:
         """Expire channels older than max_age seconds. Returns expired channel IDs."""
         now = time.time()
@@ -318,7 +339,7 @@ class ChaosStore:
                 if expired:
                     conn.execute(
                         """UPDATE chaos_channels
-                            SET state = 'STANDBY', mode = NULL, session_id = NULL,
+                            SET state = 'STANDBY', session_id = NULL,
                                 resolved_at = ?, callback_url = '', user_email = ''
                             WHERE deployment_id = ? AND state = 'ACTIVE'
                               AND triggered_at IS NOT NULL AND triggered_at < ?""",

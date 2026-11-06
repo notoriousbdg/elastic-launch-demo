@@ -11,12 +11,12 @@ cascade_services:
 - payment-engine
 description: Mass member session invalidation causing authentication storm and portal outage
 investigation_notes: |-
-  1. Redis cluster primary failure caused the session store to lose all active sessions. Check Redis sentinel logs: redis-cli -p 26379 SENTINEL get-master-addr-by-name banking-sessions.
+  1. Redis session-store primary failure lost the sessions that had not reached a replica: before it failed, the primary reported no connected replicas (connected_slaves:0 in INFO replication), so the replica Sentinel promoted was missing recent session writes. The primary was also rejecting new connections, and the portal nginx ingress returns 5xx. Check Redis sentinel logs: redis-cli -p 26379 SENTINEL get-master-addr-by-name banking-sessions.
   2. Thundering herd problem: reauth rate exceeds auth-gateway capacity (rate vs 500/min). Implement token extension — issue new JWT tokens with extended TTL to surviving sessions without requiring full re-authentication.
   3. Circuit breaker on auth-gateway opened at T+12s — this prevents total auth system collapse but blocks all new logins. Set circuit breaker to HALF_OPEN with 10% traffic sampling.
   4. Redis cluster recovery: verify replicas 2/3 are healthy, promote a replica to primary. Command: redis-cli -p 26379 SENTINEL failover banking-sessions. Estimated recovery 5min.
   5. Rate limit re-authentication attempts with exponential backoff on the client side — mobile app and portal should retry with jitter to prevent synchronized retry storms.
-  6. Post-incident: implement session persistence to a secondary store (DynamoDB/Elasticache Global) so Redis primary failure doesn't cascade to full session loss.
+  6. Post-incident: implement session persistence to a secondary store (Azure Cache for Redis with geo-replication, or Cosmos DB) so Redis primary failure doesn't cascade to full session loss.
 remediation_action: reset_session_pool
 error_message: '[PORTAL] PORTAL-SESSION-CASCADE: invalidated={sessions_invalidated} active_before={sessions_active} trigger={session_trigger}
   reauth_rate={reauth_rate}/min'
@@ -28,8 +28,8 @@ stack_trace: |-
     reauth_attempts={reauth_rate}/min  auth_capacity=500/min
     overflow={reauth_rate}/min vs 500/min capacity  <<< THUNDERING HERD
   --- TIMELINE ---
-    T+0s    session_store_failover triggered
-    T+2s    redis_cluster primary failed
+    T+0s    redis primary failed (connected_slaves=0)
+    T+2s    sentinel failover triggered
     T+5s    {sessions_invalidated} sessions lost
     T+8s    reauth storm begins ({reauth_rate}/min)
     T+12s   auth-gateway circuit breaker OPEN
@@ -43,7 +43,7 @@ correlation_attr:
 fault_params:
   sessions_invalidated: {randint: [5000, 50000]}
   sessions_active: {randint: [50000, 200000]}
-  session_trigger: {choice: [redis_failover, session_store_corruption, config_push_error, cert_rotation_failure]}
+  session_trigger: redis_failover
   reauth_rate: {randint: [1000, 5000]}
 rca_clues:
   member-portal:
@@ -60,10 +60,17 @@ rca_clues:
     payment.session_dependent_holds: {randint: [20, 100]}
 business_impact:
   - kpi: business.active_digital_sessions
-    factor: {uniform: [0.10, 0.35]}
+    value: {uniform: [4464.0, 5136.0]}
   - kpi: business.mobile_logins_per_min
-    factor: {uniform: [0.15, 0.40]}
+    value: {uniform: [241.8, 278.2]}
   - kpi: business.digital_transaction_pct
-    factor: {uniform: [0.20, 0.50]}
+    factor: {uniform: [0.2, 0.5]}
   - kpi: business.net_satisfaction_proxy_nps
-    factor: {uniform: [0.25, 0.55]}
+    value: {uniform: [8.18, 9.42], round: 1}
+
+generator_impact:
+  redis_otel:
+    primary_has_no_connected_replicas: 1.0
+    rejected_connections: 25.0
+  nginx_otel:
+    high_5xx_error_rate: 800.0

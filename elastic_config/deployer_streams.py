@@ -19,6 +19,54 @@ logger = logging.getLogger("deployer")
 _STREAM_FORK_ROUNDS = 4
 _STREAM_FORK_ROUND_DELAY = 5.0
 
+# [serverless] Nightshift sources.  KI, significant-event and onboarding APIs address a
+# source (an ES|QL view over a stream) by id.  Writes right after a source is created
+# or changed answer 409 while Kibana holds its per-source lease; creating a source
+# for a stream that does not resolve yet is rejected, so both are retried.
+_SOURCES_PATH = "/internal/nightshift/sources"
+_SOURCE_LEASE_ATTEMPTS = 18
+_SOURCE_LEASE_DELAY = 10.0
+_SOURCE_CREATE_WAIT = 300.0
+_SOURCE_CREATE_POLL = 10.0
+
+# Explicit k8s resource-attribute mappings for the scenario OTel log stream.
+# Wired streams do not dynamically map nested resource.attributes.*; without
+# these declarations the fields exist in _source but are invisible to Streams /
+# Discover field caps (same set o11y-metrics puts on logs.otel.otel-demo).
+_K8S_WIRED_FIELDS: dict[str, dict[str, str]] = {
+    "resource.attributes.k8s.cluster.name": {"type": "keyword"},
+    "resource.attributes.k8s.deployment.name": {"type": "keyword"},
+    "resource.attributes.k8s.namespace.name": {"type": "keyword"},
+    "resource.attributes.k8s.node.name": {"type": "keyword"},
+    "resource.attributes.k8s.pod.ip": {"type": "ip"},
+    "resource.attributes.k8s.pod.name": {"type": "keyword"},
+    "resource.attributes.k8s.pod.start_time": {"type": "date"},
+    "resource.attributes.k8s.pod.uid": {"type": "keyword"},
+    "resource.attributes.k8s.replicaset.name": {"type": "keyword"},
+}
+
+# The fault's error code and telemetry frame dump live in log attributes, which the
+# wired stream does not map either: ES|QL reads none of attributes.* without these.
+_ERROR_WIRED_FIELDS: dict[str, dict[str, str]] = {
+    "attributes.error.type": {"type": "keyword"},
+    "attributes.exception.type": {"type": "keyword"},
+    "attributes.exception.message": {"type": "match_only_text"},
+    "attributes.exception.stacktrace": {"type": "match_only_text"},
+}
+
+
+def _strip_stream_runtime_keys(obj: Any) -> Any:
+    """Drop server-owned keys (e.g. processing.updated_at) before PUT _ingest."""
+    if isinstance(obj, dict):
+        return {
+            k: _strip_stream_runtime_keys(v)
+            for k, v in obj.items()
+            if k not in ("updated_at",)
+        }
+    if isinstance(obj, list):
+        return [_strip_stream_runtime_keys(x) for x in obj]
+    return obj
+
 
 class StreamsMixin:
 
@@ -93,12 +141,77 @@ class StreamsMixin:
 
     def _create_stream(self, client: httpx.Client) -> bool:
         """Fork logs.otel into a scenario-specific child stream."""
-        return self._fork_stream(
+        ok = self._fork_stream(
             client,
             parent="logs.otel",
             child=self._stream_name,
             filter_field="resource.attributes.service.namespace",
         )
+        if ok:
+            self._ensure_k8s_stream_fields(client, self._stream_name)
+        return ok
+
+    def _ensure_k8s_stream_fields(
+        self, client: httpx.Client, stream_name: str | None = None
+    ) -> bool:
+        """Merge k8s resource-attribute and error-attribute field mappings onto a wired stream.
+
+        Mirrors o11y-metrics' ``ingest.wired.fields`` declarations so pod /
+        node / namespace attrs are queryable on the scenario log partition.
+        Idempotent: existing fields are preserved; only missing k8s keys are
+        added. Returns True on success (or if the stream is missing).
+        """
+        name = stream_name or self._stream_name
+        resp = client.get(
+            f"{self.kibana_url}/api/streams/{name}",
+            headers=_kibana_headers(self.api_key),
+        )
+        if resp.status_code != 200:
+            logger.warning(
+                "Cannot map k8s fields on %s — stream GET returned HTTP %s",
+                name, resp.status_code,
+            )
+            return False
+
+        ingest = _strip_stream_runtime_keys(
+            (resp.json().get("stream") or {}).get("ingest") or {}
+        )
+        if not isinstance(ingest, dict):
+            ingest = {}
+        wired = ingest.setdefault("wired", {})
+        if not isinstance(wired, dict):
+            wired = {}
+            ingest["wired"] = wired
+        fields = wired.setdefault("fields", {})
+        if not isinstance(fields, dict):
+            fields = {}
+            wired["fields"] = fields
+
+        changed = False
+        for field_name, field_def in {**_K8S_WIRED_FIELDS, **_ERROR_WIRED_FIELDS}.items():
+            if field_name not in fields:
+                fields[field_name] = dict(field_def)
+                changed = True
+
+        if not changed:
+            return True
+
+        put = client.put(
+            f"{self.kibana_url}/api/streams/{name}/_ingest",
+            headers=_kibana_headers(self.api_key),
+            json={"ingest": ingest},
+        )
+        if put.status_code >= 300:
+            logger.warning(
+                "Failed to map k8s fields on %s (HTTP %s): %s",
+                name, put.status_code, put.text[:500],
+            )
+            return False
+        logger.info(
+            "Mapped %d k8s resource attributes on stream %s",
+            len(_K8S_WIRED_FIELDS) + len(_ERROR_WIRED_FIELDS), name,
+        )
+        return True
 
     def _create_ecs_stream(self, client: httpx.Client) -> bool:
         """Fork logs.ecs into this scenario's partition."""
@@ -399,10 +512,11 @@ class StreamsMixin:
     def _significant_events_available(self, client: httpx.Client) -> bool:
         """Probe whether significant events are enabled on the target cluster.
 
-        A 403 carrying "not available in this environment" is the definitive
-        "feature disabled" signal — distinct from a privilege 403 or any other
-        error.  Any non-403 status is treated as available (fail-open) so genuine
-        write errors still surface rather than being silently masked as skipped.
+        Uses GET /internal/significant_events/availability which returns
+        {"available": true} or {"available": false, "reason": "<gate>"}.
+        Any error (network, 404 if the plugin isn't loaded) is treated as
+        unavailable; any unexpected non-JSON response is fail-open so genuine
+        errors still surface rather than being silently masked as skipped.
 
         Cached on first call per deploy so the probe is made at most once.
         """
@@ -412,23 +526,48 @@ class StreamsMixin:
 
         try:
             resp = client.get(
-                f"{self.kibana_url}/api/streams/{self._stream_name}/queries",
+                f"{self.kibana_url}/internal/significant_events/availability",
                 headers=_kibana_headers(self.api_key),
             )
-            if resp.status_code == 403 and "not available in this environment" in resp.text:
+            if resp.status_code == 404:
+                # Plugin not loaded — treat as unavailable.
                 result = False
+                self._se_unavailable_reason = "plugin not loaded (HTTP 404)"
             else:
-                result = True
+                data = resp.json()
+                result = bool(data.get("available", True))
+                if not result:
+                    self._se_unavailable_reason = data.get("reason", "unknown gate")
         except Exception:
-            result = True  # fail-open
+            result = True  # fail-open on unexpected errors
         self._se_available_cache = result  # type: ignore[attr-defined]
         return result
 
-    _SE_UNAVAILABLE_DETAIL = (
-        "Significant events not available in this environment — "
-        "requires the streams.significantEventsAvailable feature flag "
-        "(enabled Elastic-side; not configurable on serverless)."
-    )
+    # Shown when the availability probe says significant events are off.  The gate
+    # differs per stack generation, so the hint does too.
+    _SE_UNAVAILABLE_DETAIL_BY_GEN = {
+        # [9.5] remove with 9.5 support
+        "9.5": (
+            "requires the observability:streamsEnableSignificantEvents uiSetting "
+            "(set by the platform step or the Kibana cluster plan)"
+        ),
+        # [9.6] update as the Nightshift gates change
+        "9.6": (
+            "requires the nightshift.enabled feature flag (or streams.significantEventsAvailable "
+            "on builds before kibana#292333)"
+        ),
+        # [serverless] flags are managed by Elastic; nothing to set from here
+        "serverless": "the feature flags are managed by Elastic on serverless",
+    }
+
+    @property
+    def _SE_UNAVAILABLE_DETAIL(self) -> str:
+        gate = self._SE_UNAVAILABLE_DETAIL_BY_GEN[self._stack_generation()]
+        return (
+            f"Significant events not available in this environment — {gate}, and an "
+            "Enterprise license. Run GET /internal/significant_events/availability "
+            "to see which gate is failing (reason field)."
+        )
 
     def _deploy_scenario_stream(self, client: httpx.Client, notify: ProgressCallback):
         """Step: (re)create the per-scenario stream partition.
@@ -466,7 +605,8 @@ class StreamsMixin:
 
         if not self._significant_events_available(client):
             step.status = "skipped"
-            step.detail = self._SE_UNAVAILABLE_DETAIL
+            reason = getattr(self, "_se_unavailable_reason", None)
+            step.detail = self._SE_UNAVAILABLE_DETAIL + (f" Gate: {reason}." if reason else "")
             notify(self.progress)
             return
 
@@ -474,17 +614,36 @@ class StreamsMixin:
         step.items_total = len(features)
 
         if features:
-            resp = client.post(
-                f"{self.kibana_url}/internal/streams/{self._stream_name}/features/_bulk",
-                headers=_kibana_headers(self.api_key),
-                json={"operations": [{"index": {"feature": f}} for f in features]},
-            )
+            if self._stack_generation() == "serverless":
+                # [serverless] KIs belong to the stream's Nightshift source.
+                source = self._ensure_source_serverless(client)
+                if source is None:
+                    step.status = "failed"
+                    step.detail = (
+                        f"Could not create a Nightshift source for {self._stream_name}"
+                    )
+                    notify(self.progress)
+                    return
+                for feat in features:
+                    feat.pop("stream_name", None)
+                resp = self._source_request(
+                    client, "POST",
+                    f"/internal/streams/{source['id']}/features/_bulk",
+                    label=f"knowledge indicators on {self._stream_name}",
+                    json={"operations": [{"index": {"feature": f}} for f in features]},
+                )
+            else:
+                resp = client.post(
+                    f"{self.kibana_url}/internal/streams/{self._stream_name}/features/_bulk",
+                    headers=_kibana_headers(self.api_key),
+                    json={"operations": [{"index": {"feature": f}} for f in features]},
+                )
             if resp.status_code < 300:
                 step.items_done = len(features)
                 step.detail = (
                     f"Created {len(features)} knowledge indicators on {self._stream_name}"
                 )
-            elif resp.status_code == 403 and "not available in this environment" in resp.text:
+            elif resp.status_code == 403:
                 # Backstop: availability changed between probe and write.
                 step.status = "skipped"
                 step.detail = self._SE_UNAVAILABLE_DETAIL
@@ -500,26 +659,48 @@ class StreamsMixin:
         notify(self.progress)
 
     # ── Significant events ────────────────────────────────────────────────
+    #
+    # The creation API differs per stack generation (see _stack_generation):
+    #   [9.5]        POST /api/streams/{stream}/queries/_bulk      (_create_se_queries_95)
+    #   [9.6]        PUT  /api/streams/{child}/_query, one query stream per channel
+    #                (_create_se_query_streams_96)
+    #   [serverless] none: the Universal alert rules (deployer_alerting.py) replace them.
+    #                The stream's Nightshift source still holds the knowledge indicators.
+    # The dispatcher below owns the shared step reporting.
 
     def _deploy_significant_events(self, client: httpx.Client, notify: ProgressCallback):
-        """Step: create ES|QL significant-event queries on the scenario stream.
-
-        Assumes the stream already exists (_deploy_scenario_stream runs first).
-        Skipped when the streams.significantEventsAvailable feature flag is off.
-        """
+        """Step: create the significant-event queries on the scenario stream."""
         step = self._step(StepIdx.SIGNIFICANT_EVENTS)
         step.status = "running"
         notify(self.progress)
 
-        if not self._significant_events_available(client):
-            step.status = "skipped"
-            step.detail = self._SE_UNAVAILABLE_DETAIL
-            notify(self.progress)
-            return
-
-        # Build bulk operations — one ES|QL query per fault channel
-        operations = []
         registry = self.scenario.channel_registry
+        step.items_total = len(registry)
+
+        gen = self._stack_generation()
+        if gen == "9.5":
+            self._create_se_queries_95(client, step, registry)
+        elif gen == "serverless":
+            # [serverless] The chaos-channel Universal alert rules (step 15) are the
+            # only per-channel rules; a significant-event query per channel would
+            # just mirror them.
+            step.items_total = 0
+            step.status = "skipped"
+            step.detail = "Serverless uses the Universal alert rules (step 15) instead of significant-event queries"
+        else:
+            self._create_se_query_streams_96(client, step, registry)
+        notify(self.progress)
+
+    # ── [9.5] remove when 9.5 support is dropped ──────────────────────────
+
+    def _create_se_queries_95(self, client: httpx.Client, step, registry) -> None:
+        """[9.5] Bulk-create ES|QL queries with POST /api/streams/{stream}/queries/_bulk.
+
+        Needs the observability:streamsEnableSignificantEvents uiSetting (set in
+        _enable_gates_95 / the plan).  Queries target the scenario stream and its
+        children directly.
+        """
+        operations = []
         for ch_num, ch_data in sorted(registry.items()):
             num_str = f"{int(ch_num):02d}"
             error_type = ch_data["error_type"]
@@ -536,35 +717,259 @@ class StreamsMixin:
                 }
             })
 
-        step.items_total = len(operations)
+        if not operations:
+            step.status = "failed"
+            step.detail = "No fault channels to create queries for"
+            return
 
-        if operations:
-            resp = client.post(
-                f"{self.kibana_url}/api/streams/{self._stream_name}/queries/_bulk",
-                headers=_kibana_headers(self.api_key),
-                json={"operations": operations},
+        resp = client.post(
+            f"{self.kibana_url}/api/streams/{self._stream_name}/queries/_bulk",
+            headers=_kibana_headers(self.api_key),
+            json={"operations": operations},
+        )
+        if resp.status_code < 300:
+            step.items_done = len(operations)
+            step.status = "ok"
+            step.detail = f"Created {len(operations)} stream queries on {self._stream_name}"
+        elif resp.status_code == 403 and "not available in this environment" in resp.text:
+            # Backstop: availability changed between probe and write.
+            step.status = "skipped"
+            step.detail = self._SE_UNAVAILABLE_DETAIL
+        else:
+            logger.warning("Significant events bulk create failed: %s", resp.text[:500])
+            step.status = "failed"
+            step.detail = f"Bulk create failed (HTTP {resp.status_code})"
+
+    # ── [serverless] Nightshift sources ───────────────────────────────────
+
+    def _source_request(
+        self, client: httpx.Client, method: str, path: str, *, label: str, **kwargs: Any
+    ) -> httpx.Response | None:
+        """Call a Kibana /internal/ endpoint, retrying while the source lease is held (409)."""
+        resp: httpx.Response | None = None
+        for attempt in range(_SOURCE_LEASE_ATTEMPTS):
+            try:
+                resp = client.request(
+                    method, f"{self.kibana_url}{path}",
+                    headers=_kibana_headers(self.api_key), **kwargs,
+                )
+            except (httpx.TimeoutException, httpx.NetworkError) as exc:
+                logger.warning("%s raised %s", label, exc.__class__.__name__)
+                resp = None
+            else:
+                if resp.status_code != 409:
+                    return resp
+                logger.warning(
+                    "%s: source busy (HTTP 409, attempt %d/%d)",
+                    label, attempt + 1, _SOURCE_LEASE_ATTEMPTS,
+                )
+            if attempt < _SOURCE_LEASE_ATTEMPTS - 1:
+                time.sleep(_SOURCE_LEASE_DELAY)
+        return resp
+
+    def _find_source_serverless(self, client: httpx.Client) -> dict[str, Any] | None:
+        """Return the Nightshift source titled with this scenario's stream, if any."""
+        page = 1
+        while True:
+            resp = self._source_request(
+                client, "GET", f"{_SOURCES_PATH}?page={page}&per_page=100",
+                label="list nightshift sources",
             )
+            if resp is None or resp.status_code >= 300:
+                return None
+            data = resp.json()
+            sources = data.get("sources", [])
+            for source in sources:
+                if source.get("title") == self._stream_name:
+                    return source
+            if not sources or page * 100 >= data.get("total", 0):
+                return None
+            page += 1
+
+    def _ensure_source_serverless(self, client: httpx.Client) -> dict[str, Any] | None:
+        """[serverless] Get or create the Nightshift source for the scenario stream.
+
+        KI and significant-event APIs are keyed by source id.  Kibana starts an LLM
+        onboarding run for every new source revision; the demo ships curated
+        knowledge, so that run is cancelled.  Cached for the rest of the deploy.
+        """
+        cached = getattr(self, "_source_cache", None)
+        if cached is not None:
+            return cached
+
+        source = self._find_source_serverless(client)
+        created = False
+        if source is None:
+            body = {
+                "title": self._stream_name,
+                "description": f"{self.scenario.scenario_name} scenario logs",
+                "tags": ["otel"],
+                "esql": f"FROM {self._stream_name} METADATA _id, _source",
+            }
+            deadline = time.monotonic() + _SOURCE_CREATE_WAIT
+            while True:
+                resp = self._source_request(
+                    client, "POST", _SOURCES_PATH, label="create nightshift source", json=body,
+                )
+                if resp is not None and resp.status_code < 300:
+                    source = resp.json().get("source")
+                    created = True
+                    break
+                if time.monotonic() >= deadline:
+                    logger.warning(
+                        "Nightshift source create failed for %s: %s", self._stream_name,
+                        resp.text[:300] if resp is not None else "no response",
+                    )
+                    return None
+                time.sleep(_SOURCE_CREATE_POLL)
+        elif not source.get("enabled", True):
+            self._source_request(
+                client, "POST", f"{_SOURCES_PATH}/{source['id']}/_enable",
+                label="enable nightshift source",
+            )
+
+        if source and created:
+            self._cancel_source_onboarding(client, source)
+        self._source_cache = source  # type: ignore[attr-defined]
+        return source
+
+    def _cancel_source_onboarding(self, client: httpx.Client, source: dict[str, Any]) -> None:
+        """Cancel the automatic onboarding run Kibana schedules for a new source."""
+        base = f"/internal/streams/{source['id']}/onboarding"
+        for _ in range(30):
+            resp = self._source_request(
+                client, "GET", f"{base}/_status", label="nightshift onboarding status",
+            )
+            status = resp.json().get("status") if resp is not None and resp.status_code < 300 else None
+            if status == "in_progress":
+                self._source_request(
+                    client, "POST", f"{base}/_execute",
+                    label="cancel nightshift onboarding", json={"action": "cancel"},
+                )
+                return
+            if status != "not_started":
+                return
+            time.sleep(3.0)
+
+    def _delete_source_serverless(self, client: httpx.Client) -> None:
+        """[serverless] Delete the stream's source; its KIs and queries go with it."""
+        self._source_cache = None  # type: ignore[attr-defined]
+        source = self._find_source_serverless(client)
+        if source is None:
+            return
+        resp = self._source_request(
+            client, "DELETE", f"{_SOURCES_PATH}/{source['id']}",
+            label=f"delete nightshift source {self._stream_name}",
+        )
+        if resp is None or resp.status_code >= 300:
+            logger.warning(
+                "Failed to delete nightshift source %s: HTTP %s",
+                self._stream_name, resp.status_code if resp is not None else "none",
+            )
+
+    # ── [9.6] / [serverless] update as 9.6 matures ────────────────────────
+
+    def _create_se_query_streams_96(self, client: httpx.Client, step, registry) -> None:
+        """[9.6] Create one ES|QL query stream per channel with PUT /api/streams/{child}/_query.
+
+        Replaces the removed queries/_bulk endpoint.  Needs the uiSetting
+        'observability:streamsEnableQueryStreams: true' in uiSettings.overrides in
+        kibana.yml — it is readonly at runtime on 9.6, so the Cloud plan must set it.
+        """
+        failed = 0
+
+        # Kibana 9.6 validates the ES|QL FROM clause against ES, but ES doesn't
+        # natively understand the $.stream_name reference syntax. Create an ES alias
+        # named exactly "$.stream_name" so the validation query resolves successfully.
+        # This is a workaround for a Kibana 9.6 snapshot validation bug.
+        alias_name = f"$.{self._stream_name}"
+        self._ensure_dollar_stream_alias(alias_name)
+
+        for ch_num, ch_data in sorted(registry.items()):
+            num_str = f"{int(ch_num):02d}"
+            error_type = ch_data["error_type"]
+            esql_query = (
+                f"FROM $.{self._stream_name} METADATA _id, _source"
+                f' | WHERE body.text LIKE "*{error_type}*" AND severity_text == "ERROR"'
+            )
+            # Child stream name: <parent_stream>.<ns>-se-ch<num>
+            # e.g. logs.otel.nova7.nova7-se-ch01
+            child_name = f"{self._stream_name}.{self.ns}-se-ch{num_str}"
+
+            resp = client.put(
+                f"{self.kibana_url}/api/streams/{child_name}/_query",
+                headers=_kibana_headers(self.api_key),
+                json={"query": {"esql": esql_query}},
+            )
+
             if resp.status_code < 300:
-                step.items_done = len(operations)
-                step.detail = f"Created {len(operations)} stream queries on {self._stream_name}"
-            elif resp.status_code == 403 and "not available in this environment" in resp.text:
-                # Backstop: availability changed between probe and write.
+                step.items_done += 1
+            elif resp.status_code == 422:
+                # 'observability:streamsEnableQueryStreams' is false — it's a readonly
+                # uiSetting that must be set via uiSettings.overrides in kibana.yml.
                 step.status = "skipped"
-                step.detail = self._SE_UNAVAILABLE_DETAIL
-                notify(self.progress)
+                step.detail = (
+                    "Query streams not enabled — add "
+                    "'observability:streamsEnableQueryStreams: true' "
+                    "to uiSettings.overrides in the Kibana cluster plan and redeploy."
+                )
+                return
+            elif resp.status_code == 404:
+                # API endpoint absent — older Kibana build without query stream support.
+                step.status = "skipped"
+                step.detail = "Query stream API not available on this Kibana build (HTTP 404)."
                 return
             else:
-                logger.warning("Significant events bulk create failed: %s", resp.text[:500])
-                step.detail = f"Bulk create failed (HTTP {resp.status_code})"
+                logger.warning(
+                    "Query stream create failed for ch%s (HTTP %s): %s",
+                    num_str, resp.status_code, resp.text[:300],
+                )
+                failed += 1
 
-        step.status = "ok" if step.items_done > 0 else "failed"
-        notify(self.progress)
+        if step.items_done > 0:
+            step.status = "ok"
+            step.detail = f"Created {step.items_done} query streams on {self._stream_name}"
+            if failed:
+                step.detail += f" ({failed} failed)"
+        else:
+            step.status = "failed"
+            step.detail = f"All {len(registry)} query stream creates failed"
+
+    def _ensure_dollar_stream_alias(self, alias_name: str) -> None:
+        """[9.6] Create an ES alias named '$.stream_name' pointing to the parent stream.
+
+        Kibana 9.6 validates query-stream ES|QL queries against ES, passing the
+        literal '$.stream_name' FROM reference. ES doesn't natively understand
+        this Kibana-level notation, so validation fails. Creating a real ES alias
+        with that exact name lets the validation query resolve successfully.
+        This is a workaround for a Kibana 9.6 snapshot validation bug.
+        """
+        stream_name = alias_name.lstrip("$.")
+        try:
+            resp = httpx.post(
+                f"{self.elastic_url}/_aliases",
+                headers=_es_headers(self.api_key),
+                json={"actions": [{"add": {"index": stream_name, "alias": alias_name}}]},
+                timeout=10.0,
+            )
+            if resp.status_code < 300:
+                logger.debug("Created ES alias %s -> %s", alias_name, stream_name)
+            else:
+                logger.warning(
+                    "Failed to create ES alias %s (HTTP %s): %s",
+                    alias_name, resp.status_code, resp.text[:200],
+                )
+        except Exception as exc:
+            logger.warning("ES alias creation raised: %s", exc)
 
     def _delete_stream(self, client: httpx.Client) -> bool:
         """Delete the scenario-specific stream (also removes its significant events).
 
         Returns True if the stream is gone (deleted or 404), False if still present.
         """
+        if self._stack_generation() == "serverless":
+            # [serverless] The source holds the KIs and queries and views this stream.
+            self._delete_source_serverless(client)
         resp = _retry_http(
             lambda: client.delete(
                 f"{self.kibana_url}/api/streams/{self._stream_name}",

@@ -1,0 +1,37 @@
+name: "GT zookeeper_otel: unsynced_followers_detected"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-ZOOKEEPER-UNSYNCED-FOLLOWERS-DETECT
+sensor_type: impact_key_probe
+affected_services:
+  - gt-zookeeper-aws-svc-1
+cascade_services:
+  - gt-zookeeper-aws-svc-2
+description: "Tests impact_key unsynced_followers_detected on generator zookeeper_otel."
+investigation_notes: |-
+  1. Verify zookeeper_otel is active and reporting metrics.
+  2. Check that the unsynced_followers_detected metric has reached the trigger value (75.0).
+  3. Confirm generator_impact for zookeeper_otel.unsynced_followers_detected is set to 75.0.
+  4. Look for correlated changes in service gt-zookeeper-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_unsynced_followers_detected_baseline
+error_message: "GT-PROBE: gen=zookeeper_otel key=unsynced_followers_detected value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=zookeeper_otel
+  impact_key: unsynced_followers_detected
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 75.0
+  svc_name: gt-zookeeper-aws-svc-1
+rca_clues:
+  gt-zookeeper-aws-svc-1:
+    probe.generator: zookeeper_otel
+    probe.impact_key: unsynced_followers_detected
+    probe.trigger_value: 75.0
+  gt-zookeeper-aws-svc-2:
+    probe.upstream_generator: zookeeper_otel
+    probe.upstream_key: unsynced_followers_detected
+generator_impact:
+  zookeeper_otel:
+    unsynced_followers_detected: 75.0

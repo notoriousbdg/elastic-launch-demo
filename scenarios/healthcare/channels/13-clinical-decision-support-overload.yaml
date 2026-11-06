@@ -9,10 +9,10 @@ affected_services:
 cascade_services:
 - pharmacy-system
 - patient-monitor
-description: Clinical decision support rule engine overloaded, unable to evaluate rules within SLA
+description: Clinical decision support rule engine overloaded and CPU-throttled, unable to evaluate rules within SLA
 investigation_notes: |-
-  Root Cause: CDS rule engine overload occurs when complex rule sets (sepsis screening, VTE prophylaxis, fall risk) are evaluated against large patient populations simultaneously, typically during shift change when nursing assessments trigger bulk re-evaluations. The Arden Syntax MLM execution pool becomes saturated.
-  Remediation: 1) Check the CDS rule engine thread pool: `cds-admin pool-status --engine RULE-EVAL`. 2) Restart the CDS evaluation service: `systemctl restart cds-rule-engine`. 3) Prioritize critical rule sets: `cds-admin prioritize --ruleset sepsis-screening --level URGENT`. 4) Temporarily disable low-priority rule sets: `cds-admin disable --ruleset fall-risk --duration 30m`. 5) Scale the rule engine worker pool: `cds-admin scale-workers --count 8 --engine RULE-EVAL`. 6) Verify the patient context cache is not stale — flush if needed: `cds-admin cache-flush --scope patient-context`.
+  Root Cause: CDS rule engine overload occurs when complex rule sets (sepsis screening, VTE prophylaxis, fall risk) are evaluated against large patient populations simultaneously, typically during shift change when nursing assessments trigger bulk re-evaluations. The Arden Syntax MLM execution pool becomes saturated. A saturated MLM execution pool with the patient context cache current confirms engine overload rather than stale context data.
+  Remediation: 1) Check the CDS rule engine thread pool: `cds-admin pool-status --engine RULE-EVAL`. 2) Restart the CDS evaluation service: `systemctl restart cds-rule-engine`. 3) Prioritize critical rule sets: `cds-admin prioritize --ruleset sepsis-screening --level URGENT`. 4) Temporarily disable low-priority rule sets: `cds-admin disable --ruleset fall-risk --duration 30m`. 5) Scale the rule engine out, not just up: with the container CPU-throttled, raise its CPU limit or add replicas before raising the worker pool (`cds-admin scale-workers --count 8 --engine RULE-EVAL`). 6) Verify the patient context cache is not stale — flush if needed: `cds-admin cache-flush --scope patient-context`.
 remediation_action: restart_cds_engine
 error_message: '[CDS] CDS-OVERLOAD: rules_queued={pending_rules} eval_ms={eval_ms} threshold={max_eval_ms}ms patient={patient_id}'
 stack_trace: |-
@@ -44,6 +44,7 @@ rca_clues:
   clinical-alerts:
     cds.rule_eval_pool_saturated: true
     cds.arden_mlm_queue: {randint: [50, 300]}
+    cds.patient_context_cache_status: current
   ehr-system:
     ehr.cds_evaluation_lag_s: {randint: [30, 180]}
     ehr.pending_cds_results: {randint: [20, 100]}
@@ -62,3 +63,6 @@ business_impact:
     factor: {uniform: [0.20, 0.50]}
   - kpi: business.hcahps_proxy_score
     factor: {uniform: [0.25, 0.55]}
+generator_impact:
+  kubernetes_otel:
+    container_cpu_throttling: 0.95

@@ -1,0 +1,37 @@
+name: "GT microsoft_sqlserver_otel: tempdb_version_store_large"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-MICROSOFTSQLSERVER-TEMPDB-VERSION-S
+sensor_type: impact_key_probe
+affected_services:
+  - gt-microsoftsqlserver-aws-svc-1
+cascade_services:
+  - gt-microsoftsqlserver-aws-svc-2
+description: "Tests impact_key tempdb_version_store_large on generator microsoft_sqlserver_otel."
+investigation_notes: |-
+  1. Verify microsoft_sqlserver_otel is active and reporting metrics.
+  2. Check that the tempdb_version_store_large metric has reached the trigger value (7864320.0).
+  3. Confirm generator_impact for microsoft_sqlserver_otel.tempdb_version_store_large is set to 7864320.0.
+  4. Look for correlated changes in service gt-microsoftsqlserver-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_tempdb_version_store_large_baseline
+error_message: "GT-PROBE: gen=microsoft_sqlserver_otel key=tempdb_version_store_large value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=microsoft_sqlserver_otel
+  impact_key: tempdb_version_store_large
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 7864320.0
+  svc_name: gt-microsoftsqlserver-aws-svc-1
+rca_clues:
+  gt-microsoftsqlserver-aws-svc-1:
+    probe.generator: microsoft_sqlserver_otel
+    probe.impact_key: tempdb_version_store_large
+    probe.trigger_value: 7864320.0
+  gt-microsoftsqlserver-aws-svc-2:
+    probe.upstream_generator: microsoft_sqlserver_otel
+    probe.upstream_key: tempdb_version_store_large
+generator_impact:
+  microsoft_sqlserver_otel:
+    tempdb_version_store_large: 7864320.0

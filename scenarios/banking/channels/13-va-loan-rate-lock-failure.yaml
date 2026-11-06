@@ -14,7 +14,7 @@ investigation_notes: |-
   1. Check GNMA (Ginnie Mae) MBS pricing feed status — STALE data 47min old means the secondary market pricing API is not responding. Verify connectivity to the pricing vendor feed.
   2. Secondary market conditions: 10yr Treasury at 4.28% with HIGH volatility means MBS prices are moving rapidly. Stale pricing creates risk of locking at incorrect rates.
   3. VA loan rate locks require current GNMA MBS pricing because VA loans are pooled into Ginnie Mae securities. Without accurate MBS pricing, the bank cannot calculate its margin correctly.
-  4. Honor the quoted rate for members who received a rate quote before the feed went down — this is both regulatory best practice and member trust policy. Queue locks for execution when feed recovers.
+  4. Honor the quoted rate for members who received a rate quote before the feed went down — this is member trust policy (a quote is not a lock, so no rule requires it); secondary marketing carries the pricing exposure. Queue locks for execution when feed recovers.
   5. Check Certificate of Eligibility (COE) verification — ensure the VA eligibility service is still operational even if rate locking is paused. Members can continue applications without locking.
   6. Monitor the VA funding fee calculation — first-time use vs subsequent use rates differ, and disabled veterans may qualify for fee exemption. These calculations don't depend on MBS pricing.
 remediation_action: restart_ratelock_service
@@ -45,7 +45,7 @@ fault_params:
   va_rate: {uniform: [5.5, 7.5], round: 3}
   lock_days: {choice: [30, 45, 60]}
   member_id: {format: "M-{n}", n: {randint: [1000000, 9999999]}}
-  ratelock_error: {choice: [GNMA_MBS_FEED_DOWN, SECONDARY_MARKET_CLOSED, PRICING_ENGINE_TIMEOUT, RATE_SHEET_EXPIRED]}
+  ratelock_error: GNMA_MBS_FEED_DOWN
   loan_amount: {uniform: [150000, 750000], round: 0}
   va_funding_fee: {uniform: [1.25, 3.3], round: 2}
 rca_clues:
@@ -63,10 +63,10 @@ rca_clues:
     document.loan_package_generation: BLOCKED
 business_impact:
   - kpi: business.loan_origination_usd_per_min
-    factor: {uniform: [0.15, 0.40]}
+    value: {uniform: [104160.0, 119840.0], round: 1}
   - kpi: business.net_interest_income_usd_per_min
-    factor: {uniform: [0.55, 0.80]}
+    value: {uniform: [66960.0, 77040.0], round: 1}
   - kpi: business.fee_revenue_usd_per_min
-    factor: {uniform: [0.25, 0.55]}
+    value: {uniform: [4464.0, 5136.0], round: 1}
   - kpi: business.account_openings_per_min
-    factor: {uniform: [0.20, 0.50]}
+    value: {uniform: [0.48, 0.56], round: 2}

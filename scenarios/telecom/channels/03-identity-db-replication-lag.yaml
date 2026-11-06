@@ -8,13 +8,13 @@ affected_services:
 - auth-service
 cascade_services:
 - api-gateway
-description: Azure PostgreSQL cross-region replication lag causing stale authentication reads and session failures
+description: Azure PostgreSQL read-replica replication lag causing stale authentication reads and session failures
 investigation_notes: |
   1. Check Azure PostgreSQL replication metrics — replica lag exceeding 5000ms causes stale session reads where auth-service validates expired tokens as active.
-  2. WAL replay rate deficit indicates the replica cannot keep up with write throughput. Check disk IOPS saturation on the replica: az postgres flexible-server show --name identity-db-replica.
+  2. WAL replay rate deficit indicates the replica cannot keep up with write throughput. Check disk IOPS saturation on the replica (above 95% utilization): az monitor metrics list --resource <identity-db-replica resource id> --metric disk_iops_consumed_percentage.
   3. Auth-service reads from replica for session validation — stale reads cause 30% of sessions to appear invalid, triggering unnecessary re-authentication storms on the primary.
-  4. Route all reads to primary immediately: UPDATE pg_settings SET setting='primary' WHERE name='read_routing'. This increases primary load but prevents stale authentication data.
-  5. Scale replica compute tier: az postgres flexible-server update --sku-name Standard_E4s_v3 to increase IOPS capacity and reduce WAL replay deficit.
+  4. Route all reads to primary immediately: point auth-service's read connection string at identity-db-primary (or turn off replica reads in its DB config) and roll the pods. This increases primary load but prevents stale authentication data.
+  5. Scale replica compute tier: az postgres flexible-server update --resource-group meridian-rg --name identity-db-replica --tier MemoryOptimized --sku-name Standard_E4s_v3 to increase IOPS capacity and reduce WAL replay deficit.
 remediation_action: failover_identity_db
 error_message: '[DB] DB-REPLICATION-LAG: lag_ms={repl_lag_ms} max_ms={repl_max_ms} replica={repl_node} pending_txns={repl_pending_txns} stale_reads_pct={stale_reads_pct}%'
 stack_trace: |
@@ -47,15 +47,16 @@ correlation_attr:
   key: infra.azure_pg_replica_sku
   value: flex-replica-v1.2.0-rc1
 fault_params:
-  repl_lag_ms: {randint: [5000, 30000]}
-  repl_max_ms: 3000
+  repl_lag_ms: {randint: [5100, 30000]}
+  repl_max_ms: 5000
   repl_node: identity-db-replica
   repl_pending_txns: {randint: [5000, 50000]}
   stale_reads_pct: {uniform: [20.0, 40.0], round: 1}
 rca_clues:
   identity-db:
-    db.replication_lag_ms: {randint: [5000, 30000]}
-    db.wal_replay_deficit_pct: {uniform: [20.0, 50.0], round: 0}
+    db.replication_lag_ms: {randint: [5100, 30000]}
+    db.wal_replay_deficit_pct: {uniform: [36.0, 39.0], round: 0}
+    db.replica_disk_iops_util_pct: {uniform: [97, 100], round: 0}
   auth-service:
     auth.stale_session_reads_pct: {uniform: [20.0, 40.0], round: 1}
     auth.invalid_token_false_positive: true

@@ -1,0 +1,37 @@
+name: "GT haproxy_otel: session_saturation_approaching_limit"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-HAPROXY-SESSION-SATURATION-APPROACH
+sensor_type: impact_key_probe
+affected_services:
+  - gt-haproxy-aws-svc-1
+cascade_services:
+  - gt-haproxy-aws-svc-2
+description: "Tests impact_key session_saturation_approaching_limit on generator haproxy_otel."
+investigation_notes: |-
+  1. Verify haproxy_otel is active and reporting metrics.
+  2. Check that the session_saturation_approaching_limit metric has reached the trigger value (85.0).
+  3. Confirm generator_impact for haproxy_otel.session_saturation_approaching_limit is set to 85.0.
+  4. Look for correlated changes in service gt-haproxy-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_session_saturation_approaching_limit_baseline
+error_message: "GT-PROBE: gen=haproxy_otel key=session_saturation_approaching_limit value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=haproxy_otel
+  impact_key: session_saturation_approaching_limit
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 85.0
+  svc_name: gt-haproxy-aws-svc-1
+rca_clues:
+  gt-haproxy-aws-svc-1:
+    probe.generator: haproxy_otel
+    probe.impact_key: session_saturation_approaching_limit
+    probe.trigger_value: 85.0
+  gt-haproxy-aws-svc-2:
+    probe.upstream_generator: haproxy_otel
+    probe.upstream_key: session_saturation_approaching_limit
+generator_impact:
+  haproxy_otel:
+    session_saturation_approaching_limit: 85.0

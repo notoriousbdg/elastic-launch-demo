@@ -204,30 +204,6 @@ body {
     line-height: 1.6;
 }
 
-/* ── Mode Selector ──────────────────────────────────── */
-.mode-selector {
-    margin-bottom: 24px;
-}
-
-.mode-option {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 8px 0;
-    font-size: 13px;
-    cursor: pointer;
-    color: var(--text-secondary);
-    transition: color 0.2s;
-}
-
-.mode-option:hover {
-    color: var(--text-primary);
-}
-
-.mode-option input[type="radio"] {
-    accent-color: var(--elastic-blue);
-}
-
 /* ── Notification Settings ──────────────────────────── */
 .notification-settings {
     margin-bottom: 24px;
@@ -659,6 +635,41 @@ body {
     box-shadow: 0 0 8px rgba(255, 149, 125, 0.45);
 }
 
+.spike-group-title {
+    margin-top: 18px;
+    font-size: 10px;
+    letter-spacing: 3px;
+    font-weight: 700;
+    color: var(--text-secondary);
+}
+
+.spikes-scope {
+    margin-top: 6px;
+    font-size: 10px;
+    letter-spacing: 1px;
+    color: var(--text-dim);
+}
+
+/* Toggle controls: a checkbox in the same card as the sliders */
+.spike-toggle {
+    width: 18px;
+    height: 18px;
+    accent-color: var(--caution);
+    cursor: pointer;
+}
+
+.spike-control.spike-kind-toggle {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+}
+
+.spike-control.spike-kind-toggle .spike-header {
+    margin-bottom: 0;
+    flex: 1;
+}
+
 .spikes-note {
     margin-top: 12px;
     font-size: 10px;
@@ -675,16 +686,10 @@ body {
     .spikes-panel {
         grid-column: 1 / -1;
     }
-    .spikes-grid {
-        grid-template-columns: repeat(2, 1fr);
-    }
 }
 
 @media (max-width: 700px) {
     .main-layout {
-        grid-template-columns: 1fr;
-    }
-    .spikes-grid {
         grid-template-columns: 1fr;
     }
 }

@@ -29,11 +29,11 @@ correlation_attr:
   value: session-pool-v3.1-leak
 fault_params:
   pool_used: {randint: [58, 64]}
-  leaked_count: {randint: [15, 45]}
+  leaked_count: {randint: [38, 44]}
 rca_clues:
   scada-gateway:
     scada.session_pool_used: {randint: [58, 64]}
-    scada.leaked_session_count: {randint: [15, 45]}
+    scada.leaked_session_count: {randint: [38, 44]}
   mes-controller:
     mes.scada_connection_refused_count: {randint: [3, 25]}
 business_impact:

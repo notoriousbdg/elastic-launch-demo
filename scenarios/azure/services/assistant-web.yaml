@@ -1,0 +1,81 @@
+service: assistant-web
+sort_order: 1
+cloud_provider: azure
+cloud_region: eastus
+cloud_platform: azure_vm
+cloud_availability_zone: eastus-1
+subsystem: frontend
+language: dotnet
+
+# Topology: [downstream-service, endpoint, METHOD]
+topology:
+  - [chat-orchestrator, /api/v1/chat, POST]
+
+# Customer-facing endpoints behind Azure Application Gateway (WAF v2)
+entry_endpoints:
+  - [/api/v1/chat, POST]
+  - [/api/v1/chat/stream, POST]
+  - [/api/v1/conversations, GET]
+  - [/api/v1/conversations/history, GET]
+  - [/api/v1/feedback, POST]
+
+db_operations: []
+
+emit_fault_logs: true
+kpi_emitter: false
+
+constants:
+  CLIENTS: [web-chat, teams-embed, mobile-webview]
+
+steps:
+  - sample:
+      active_sessions: {randint: [1200, 9500]}
+      first_token_ms:
+        if_active: {uniform: [2800.0, 9000.0], round: 1}
+        else: {uniform: [350.0, 900.0], round: 1}
+      agw_healthy_hosts:
+        if_active: {randint: [1, 2]}
+        else: {randint: [3, 3]}
+      waf_blocked_pct:
+        if_active: {uniform: [8.0, 35.0], round: 2}
+        else: {uniform: [0.1, 1.2], round: 2}
+      stream_disconnect_pct:
+        if_active: {uniform: [6.0, 22.0], round: 2}
+        else: {uniform: [0.2, 1.5], round: 2}
+      client: {choice: CLIENTS}
+  - metric:
+      name: assistant_web.active_sessions
+      value: {var: active_sessions}
+      unit: sessions
+  - metric:
+      name: assistant_web.first_token_ms
+      value: {var: first_token_ms}
+      unit: ms
+  - metric:
+      name: assistant_web.appgw_healthy_backend_hosts
+      value: {var: agw_healthy_hosts}
+      unit: hosts
+  - metric:
+      name: assistant_web.waf_blocked_pct
+      value: {var: waf_blocked_pct}
+      unit: '%'
+  - metric:
+      name: assistant_web.stream_disconnect_pct
+      value: {var: stream_disconnect_pct}
+      unit: '%'
+  - log:
+      level: INFO
+      message: 'chat.edge_health active_sessions={active_sessions} first_token_ms={first_token_ms} appgw_healthy_hosts={agw_healthy_hosts}/3 waf_blocked={waf_blocked_pct}%'
+      attrs:
+        operation: edge_health
+        chat.active_sessions: {var: active_sessions}
+        chat.first_token_ms: {var: first_token_ms}
+        appgw.healthy_hosts: {var: agw_healthy_hosts}
+        appgw.waf_blocked_pct: {var: waf_blocked_pct}
+  - log:
+      level: INFO
+      message: 'chat.stream_summary client={client} disconnect_rate={stream_disconnect_pct}% sessions={active_sessions}'
+      attrs:
+        operation: stream_summary
+        chat.client: {var: client}
+        chat.stream_disconnect_pct: {var: stream_disconnect_pct}

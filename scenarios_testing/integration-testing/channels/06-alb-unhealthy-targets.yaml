@@ -1,0 +1,84 @@
+name: Alb Unhealthy Targets
+subsystem: platform
+vehicle_section: platform_pipeline
+error_type: ALB-UNHEALTHY-TARGETS
+sensor_type: health_check
+affected_services:
+- edge-gateway
+cascade_services:
+- worker-pool
+description: 'The synthetic AWS ALB in front of edge-gateway is marking a growing
+  number of targets unhealthy in target group {target_group}, forcing traffic onto
+  a shrinking healthy pool.
+
+  '
+investigation_notes: "1. Search for body.text containing *ALB-UNHEALTHY-TARGETS* to\
+  \ find the affected target group.\n2. Check edge-gateway gateway.request_latency_ms\
+  \ for the resulting latency increase.\n3. Confirm aws_elb_otel error_fraction/records_per_cycle\
+  \ and aws_elb_metrics_otel\n   unhealthy_host_count/response_time_multiplier rise\
+  \ together for {target_group}.\n4. Check worker-pool worker_pool.queue_depth for\
+  \ cascading backlog from throttled routing.\n5. Verify healthy host count recovers\
+  \ once targets are deregistered and replaced.\n"
+remediation_action: deregister_unhealthy_targets
+error_message: 'ALB-UNHEALTHY-TARGETS: target_group={target_group} unhealthy_count={unhealthy_host_count}
+  error_fraction={alb_error_fraction}
+
+  '
+stack_trace: "AlbUnhealthyTargetsError: target_group={target_group}\n  at LoadBalancer.healthCheck()\n\
+  \  unhealthy_count={unhealthy_host_count} error_fraction={alb_error_fraction}\n"
+fault_params:
+  target_group:
+    choice:
+    - edge-gateway-tg-1
+    - edge-gateway-tg-2
+  unhealthy_host_count:
+    randint:
+    - 5
+    - 40
+  alb_error_fraction:
+    uniform:
+    - 0.2
+    - 0.8
+    round: 2
+rca_clues:
+  edge-gateway:
+    gateway.request_latency_ms:
+      uniform:
+      - 500.0
+      - 4000.0
+      round: 1
+    gateway.unhealthy_target_ratio_pct:
+      uniform:
+      - 30.0
+      - 80.0
+      round: 1
+  worker-pool:
+    worker_pool.queue_depth:
+      randint:
+      - 300
+      - 3000
+    worker_pool.throttled_flag: true
+generator_impact:
+  aws_elb_otel:
+    error_fraction:
+      uniform:
+      - 0.2
+      - 0.8
+    records_per_cycle:
+      randint:
+      - 200
+      - 900
+  aws_elb_metrics_otel:
+    high_application_load_balancer_5xx_error_rate: &id001
+      uniform:
+      - 0.2
+      - 0.8
+    high_application_load_balancer_target_5xx_error_rate: *id001
+    high_application_load_balancer_target_response_time_average:
+      uniform:
+      - 5.0
+      - 30.0
+    application_load_balancer_unhealthy_targets_detected:
+      randint:
+      - 5
+      - 40

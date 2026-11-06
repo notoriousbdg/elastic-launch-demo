@@ -11,12 +11,12 @@ cascade_services:
 description: Integration bridge between nurse call system and EHR loses connectivity
 investigation_notes: |-
   Root Cause: The nurse call system (Hill-Rom/Rauland) integration bridge communicates with the EHR via a middleware TCP socket. Bridge failures cause call events to queue without EHR documentation, leading to undelivered notifications and potential patient safety events. Emergency calls default to overhead paging.
-  Remediation: 1) Check the nurse call bridge connectivity: `ncs-admin bridge-status --station {station_id}`. 2) Restart the EHR-NCS bridge service: `systemctl restart ehr-nursecall-bridge`. 3) Verify the TCP socket connection to the nurse call server: `ncs-admin test-connection --host ncs-server --port 3001`. 4) Clear the undelivered call queue: `ncs-admin flush-queue --unit {nursing_unit}`. 5) Confirm overhead paging failover is active for emergency and code calls. 6) Review the call escalation timers — ensure STAT calls escalate to charge nurse after 60s unacknowledged.
+  Remediation: 1) Check the nurse call bridge connectivity: `ncs-admin bridge-status --station {station_id}`. 2) Restart the EHR-NCS bridge service: `systemctl restart ehr-nursecall-bridge`. 3) Verify the TCP socket connection to the nurse call server: `ncs-admin test-connection --host ncs-server --port 3001`. 4) Once the bridge reconnects, replay the undelivered call queue instead of discarding it: `ncs-admin replay-queue --unit {nursing_unit}`. (A bridge socket stuck in CLOSE_WAIT means the nurse call server closed the connection and the bridge never closed and reconnected.) 5) Confirm overhead paging failover is active for emergency and code calls. 6) Review the call escalation timers — ensure STAT calls escalate to charge nurse after 60s unacknowledged.
 remediation_action: restart_nursecall_bridge
 error_message: '[CDS] NURSE-CALL-STORM: station={station_id} unit={nursing_unit} bed={bed_id} call_type={call_type} undelivered={undelivered_seconds}s'
 stack_trace: |-
   === NURSE CALL SYSTEM STATUS — {nursing_unit} ===
-  Station: {station_id} | Bridge: EHR-NCS-BRIDGE-01 | Status: DEGRADED
+  Station: {station_id} | Bridge: EHR-NCS-BRIDGE-01 | Status: DISCONNECTED
   ------------------------------------------------------------------------
   BED       | CALL TYPE       | INITIATED   | DELIVERED | WAIT (s)
   ------------------------------------------------------------------------
@@ -25,7 +25,7 @@ stack_trace: |-
   C-312     | bathroom        | 20260217143052 | YES       | 0
   ------------------------------------------------------------------------
   NURSE-CALL-STORM: {station_id} — {call_type} call from bed {bed_id} undelivered for {undelivered_seconds}s
-  EHR bridge connectivity degraded on {nursing_unit}
+  EHR bridge disconnected on {nursing_unit}
   Failover to overhead paging initiated
 correlation_attr:
   key: infra.nursecall_bridge_fw
@@ -39,12 +39,13 @@ fault_params:
   bed_id:
     format: "{ward}-{num}"
     ward: {choice: [A, B, C, D]}
-    num: {randint: [101, 450]}
+    num: {randint: [400, 450]}
   call_type: {choice: [emergency, routine, bathroom, pain_management]}
   undelivered_seconds: {randint: [30, 300]}
 rca_clues:
   clinical-alerts:
     ncs.bridge_status: disconnected
+    ncs.bridge_socket_state: CLOSE_WAIT
     ncs.undelivered_calls: {randint: [5, 30]}
   patient-monitor:
     vitals.nurse_response_lag_s: {randint: [60, 300]}

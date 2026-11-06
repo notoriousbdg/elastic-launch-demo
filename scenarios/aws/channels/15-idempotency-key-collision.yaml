@@ -1,0 +1,66 @@
+name: Idempotency Key Collision
+subsystem: payments
+vehicle_section: payments_pipeline
+error_type: PAY-IDEMPOTENCY-COLLISION
+sensor_type: health_check
+affected_services: [payment-processor]
+cascade_services: [orders-service]
+
+description: >
+  After an idempotency key format change, payment-processor derives identical keys for distinct orders, so some legitimate charges are rejected as duplicates and some retries slip through as double charges.
+
+investigation_notes: |
+  1. Search body.text for *PAY-IDEMPOTENCY-COLLISION* and group by idempotency_key; keys such as {idempotency_key} appear for more than one order_id.
+  2. Check the deploy history for payment-processor: version {key_format_version} changed the key from the full order_id to a 16-bit truncated hash, producing {colliding_keys} collisions. Retries of orders first charged before the deploy carry a new-format key that does not match the stored old-format key, so those retries are charged a second time.
+  3. Query the DynamoDB idempotency table for conditional-put failures (ConditionalCheckFailedException) that map to different order_id values with the same key.
+  4. Compare ALB and Lambda logs for the same customer: {duplicate_charges} orders show two successful charges, while {false_duplicates} orders were rejected as duplicates and never charged.
+  5. Confirm orders-service impact: orders stuck in PAYMENT_PENDING ({stuck_orders}) after receiving a duplicate-request response.
+  6. A human must review affected orders before any fix; after approval, quarantine the colliding payments, refund or re-run per order, then roll back the key format.
+
+remediation_action: quarantine_colliding_payments
+
+error_message: |
+  PAY-IDEMPOTENCY-COLLISION: key={idempotency_key} key_format={key_format_version} colliding_keys={colliding_keys} false_duplicates={false_duplicates} duplicate_charges={duplicate_charges}
+
+stack_trace: |
+  IdempotencyConflictError: key {idempotency_key} already bound to a different order_id
+    File "payment_processor/idempotency.py", line 63, in claim_key
+      table.put_item(Item=item, ConditionExpression="attribute_not_exists(pk)")
+    File "payment_processor/handler.py", line 101, in charge
+      claim_key(request_key, order_id)
+    botocore.exceptions.ClientError: An error occurred (ConditionalCheckFailedException) when calling the PutItem operation: The conditional request failed
+    key_format={key_format_version}  colliding_keys={colliding_keys}
+    false_duplicates={false_duplicates}  duplicate_charges={duplicate_charges}  stuck_orders={stuck_orders}
+
+correlation_attr:
+  key: deployment.idempotency_key_format
+  value: payment-processor-v2.8.0-truncated-sha-key
+
+fault_params:
+  idempotency_key: {format: "idem-{n:X}", n: {randint: [4096, 65535]}}
+  key_format_version: payment-processor-v2.8.0
+  colliding_keys: {randint: [20, 400]}
+  false_duplicates: {randint: [10, 250]}
+  duplicate_charges: {randint: [2, 60]}
+  stuck_orders: {randint: [15, 300]}
+
+rca_clues:
+  payment-processor:
+    idempotency.key_format: truncated-sha-v2
+    idempotency.collision_count: {randint: [20, 400]}
+    payment.duplicate_charge_count: {randint: [2, 60]}
+  orders-service:
+    order.stuck_payment_pending: {randint: [15, 300]}
+    order.duplicate_response_received: true
+
+business_impact:
+- kpi: business.duplicate_charge_flags_per_hr
+  factor:
+    uniform: [20.0, 60.0]
+    round: 0
+- kpi: business.throughput_rpm
+  factor:
+    uniform: [0.6, 0.9]
+- kpi: business.error_rate_pct
+  factor:
+    uniform: [2.0, 4.0]

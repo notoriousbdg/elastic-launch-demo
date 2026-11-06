@@ -4,6 +4,7 @@ If SMTP_HOST is configured, sends real emails via smtplib.
 Otherwise, logs the email content and returns success (demo mode).
 """
 
+import asyncio
 import logging
 import smtplib
 from email.mime.text import MIMEText
@@ -12,6 +13,22 @@ from typing import Any
 from app.config import SMTP_FROM, SMTP_HOST, SMTP_PASSWORD, SMTP_PORT, SMTP_USER
 
 logger = logging.getLogger("nova7.notify.email")
+
+
+def _smtp_send(to: str, subject: str, body: str) -> None:
+    """Blocking SMTP send; called via asyncio.to_thread so it never stalls the event loop."""
+    msg = MIMEText(body)
+    msg["Subject"] = subject
+    msg["From"] = SMTP_FROM
+    msg["To"] = to
+
+    with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=10) as server:
+        server.ehlo()
+        if SMTP_PORT != 25:
+            server.starttls()
+        if SMTP_USER and SMTP_PASSWORD:
+            server.login(SMTP_USER, SMTP_PASSWORD)
+        server.sendmail(SMTP_FROM, [to], msg.as_string())
 
 
 async def send_email(to: str, subject: str, body: str) -> dict[str, Any]:
@@ -36,19 +53,7 @@ async def send_email(to: str, subject: str, body: str) -> dict[str, Any]:
 
     if SMTP_HOST:
         try:
-            msg = MIMEText(body)
-            msg["Subject"] = subject
-            msg["From"] = SMTP_FROM
-            msg["To"] = to
-
-            with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=10) as server:
-                server.ehlo()
-                if SMTP_PORT != 25:
-                    server.starttls()
-                if SMTP_USER and SMTP_PASSWORD:
-                    server.login(SMTP_USER, SMTP_PASSWORD)
-                server.sendmail(SMTP_FROM, [to], msg.as_string())
-
+            await asyncio.to_thread(_smtp_send, to, subject, body)
             logger.info("Email sent to %s: %s", to, subject)
             return {"sent": True, "to": to, "subject": subject, "mode": "smtp"}
         except Exception as exc:

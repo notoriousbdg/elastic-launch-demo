@@ -8,28 +8,32 @@ affected_services:
 cascade_services:
 - storefront-gateway
 - product-catalog
-description: Recommendation inference cache mass eviction — cold cache forces expensive model re-inference for all users,
+description: Redis-backed recommendation inference cache mass eviction — cold cache forces expensive model re-inference for all users,
   spiking latency
 investigation_notes: |-
   1. Check recommendation-engine logs for RECO-CACHE-EVICTION — cache_hit_rate={cache_hit_rate_pct}% drop and latency spike are correlated.
-  2. Identify eviction trigger: a pod restart, memory pressure OOM eviction, or TTL misconfiguration can cause mass eviction.
+  2. Identify eviction trigger: Redis maxmemory pressure, pod restart flushing the Redis-backed cache, or TTL misconfiguration can cause mass eviction (high_eviction_rate / memory_approaching_maxmemory). Used memory above 90% of maxmemory confirms memory pressure; a Redis uptime under 1h would point to a restart flush, and a key TTL under 300s to TTL misconfiguration.
   3. Check inference latency: cold cache drives p99_latency_ms={p99_latency_ms}ms vs warm cache {warm_latency_ms}ms — storefront timeout risk.
   4. Enable a cache warm-up strategy: pre-compute recommendations for top {warm_user_count} users by traffic volume before routing traffic to the pod.
-  5. Review eviction policy: if using LRU, a cache size of {cache_size_mb}MB may be too small for the active user set — increase or switch to LFU.
+  5. Review Redis maxmemory and eviction policy: a cache size of {cache_size_mb}MB may be too small for the active user set — increase maxmemory or switch to allkeys-lfu.
   6. Serve generic (non-personalized) trending products as a fallback while the cache warms — this prevents timeout errors at the cost of relevance.
 remediation_action: warm_recommendation_cache
 error_message: '[RecommendationEngine] RECO-CACHE-EVICTION: cache_hit_rate={cache_hit_rate_pct}% (normal >{normal_cache_hit_pct}%)
   evicted_entries={evicted_entries} p99_latency={p99_latency_ms}ms cache_size={cache_size_mb}MB'
 stack_trace: |-
-  CacheEvictionException: RECO-CACHE-EVICTION
-    at RecommendationCache.get(user_id={user_id})
-    at RecommendationService.getRecs(user_id={user_id})
+  Traceback (most recent call last):
+    File "/app/reco/service.py", line 98, in get_recs
+      cached = self.cache.get(user_id)
+    File "/app/reco/redis_cache.py", line 64, in get
+      raise CacheEvictionStorm("RECO-CACHE-EVICTION")
+  reco.cache.CacheEvictionStorm: RECO-CACHE-EVICTION
+  User:              {user_id}
   Cache hit rate:    {cache_hit_rate_pct}% (normal: {normal_cache_hit_pct}%)
   Evicted entries:   {evicted_entries}
   P99 latency:       {p99_latency_ms}ms
   Warm cache p99:    {warm_latency_ms}ms
-  Cache size:        {cache_size_mb}MB
-  Eviction policy:   LRU
+  Redis maxmemory:   {cache_size_mb}MB
+  Eviction policy:   allkeys-lru
 correlation_attr:
   key: reco.cache_cold
   value: true
@@ -44,7 +48,10 @@ fault_params:
   warm_user_count: {randint: [10000, 100000]}
 rca_clues:
   recommendation-engine:
-    reco.cache_hit_rate_pct: {uniform: [2, 20], round: 1}
+    reco.cache_hit_rate_pct: {uniform: [2, 15], round: 1}
+    reco.redis_used_memory_pct: {uniform: [97, 100], round: 1}
+    reco.redis_uptime_hours: {randint: [100, 2000]}
+    reco.cache_ttl_s: 3600
     reco.cold_inference_p99_ms: {randint: [3000, 15000]}
   storefront-gateway:
     storefront.reco_timeout_count: {randint: [100, 5000]}
@@ -54,10 +61,14 @@ rca_clues:
     catalog.trending_fallback_serving: true
 business_impact:
   - kpi: business.conversion_rate_pct
-    factor: {uniform: [0.30, 0.55]}
+    value: {uniform: [0.67, 0.77], round: 2}
   - kpi: business.page_views_per_min
-    factor: {uniform: [0.35, 0.60]}
+    value: {uniform: [3162.0, 3638.0]}
   - kpi: business.cart_adds_per_min
-    factor: {uniform: [0.25, 0.50]}
+    value: {uniform: [229.71, 264.29]}
   - kpi: business.sessions_per_min
-    factor: {uniform: [0.35, 0.60]}
+    factor: {uniform: [0.35, 0.6]}
+generator_impact:
+  redis_otel:
+    high_eviction_rate: 400.0
+    memory_approaching_maxmemory: 93.0

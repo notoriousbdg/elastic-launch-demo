@@ -3,17 +3,13 @@ subsystem: security
 vehicle_section: ssl_inspection
 error_type: SYSTEM-cert-expire
 sensor_type: certificate
-affected_services:
-- firewall-gateway
-- dns-dhcp-service
-cascade_services:
-- digital-marketplace
-- auction-engine
+affected_services: [firewall-gateway, dns-dhcp-service, digital-marketplace]
+cascade_services: [auction-engine]
 description: SSL decryption forward proxy certificate expiring or expired, breaking TLS inspection
 investigation_notes: |-
-  1. Run `show system certificate detail` to check expiration dates for all installed certificates.
+  1. Run `show sslmgr-store config-certificate-info` to check expiration dates for all installed certificates.
   2. Identify which decryption profile references the expiring cert: `show config running | match ssl-decrypt`.
-  3. Count affected policy rules: `show rule-hit-count vsys vsys1 rule-base decryption` — each rule referencing this profile will fail.
+  3. Count affected policy rules: `show rule-hit-count vsys vsys-name vsys1 rule-base decryption rules all` — each rule referencing this profile will fail.
   4. Generate a new CSR from PAN-OS: `request certificate generate ...` or import a renewed cert from the internal CA.
   5. After replacement, commit and verify: `request certificate info` and test with `curl -v https://<internal-url>` from a client behind the firewall.
   6. Set up certificate expiration monitoring: configure SNMP traps or syslog alerts for certs expiring within 30 days to prevent recurrence.
@@ -32,7 +28,7 @@ stack_trace: |-
     Key Size: 2048
     Used by decryption profile: {cert_profile}
     Policy rules referencing: {cert_affected_rules}
-    Status: EXPIRING
+    Status: EXPIRING/EXPIRED (days remaining {cert_days_remaining})
 correlation_attr:
   key: infra.cert_chain_bundle
   value: internal-ca-v2-cross-signed
@@ -43,17 +39,13 @@ fault_params:
     - forward-proxy.fanatics.com
     - ssl-inspect.collectibles.prod
     - tls-decrypt.warehouse.local
-  cert_serial:
-    format: "{n:X}"
-    n: {randint: [100000, 999999]}
+  cert_serial: "A3F21C"
   cert_days_remaining: {randint: [-5, 3]}
   cert_profile: {choice: [ssl-forward-proxy, ssl-inbound-inspection, tls-decrypt-all]}
   cert_affected_rules: {randint: [15, 80]}
 rca_clues:
   firewall-gateway:
-    firewall.cert_serial:
-      format: "{n:X}"
-      n: {randint: [100000, 999999]}
+    firewall.cert_serial: "A3F21C"
     firewall.decryption_bypass_count: {randint: [100, 5000]}
   dns-dhcp-service:
     dns.tls_dot_failures: {randint: [10, 200]}
@@ -66,10 +58,10 @@ rca_clues:
     auction.bidder_disconnects: {randint: [5, 80]}
 business_impact:
   - kpi: business.app_sessions_per_min
-    factor: {uniform: [0.20, 0.50]}
+    value: {uniform: [334.8, 385.2]}
   - kpi: business.merch_gmv_usd_per_min
-    factor: {uniform: [0.20, 0.50]}
+    value: {uniform: [10416.0, 11984.0], round: 1}
   - kpi: business.subscription_mrr_usd_per_min
-    factor: {uniform: [0.25, 0.55]}
+    value: {uniform: [10881.0, 12519.0], round: 1}
   - kpi: business.churn_risk_index_0_100
     factor: {uniform: [2.0, 4.5]}

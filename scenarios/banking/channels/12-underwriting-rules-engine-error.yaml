@@ -14,7 +14,7 @@ investigation_notes: |-
   1. Identify the conflicting rule — check which specific rule in the 2,847-rule chain is producing inconsistent results. Cross-reference with change_set CS-4827 deployed on 2026-02-15.
   2. Conflict rate 2.4% vs 0.5% threshold indicates a systematic issue, not isolated cases. Review the rule deployment diff: git diff CS-4826..CS-4827 -- rules/ to identify changed rules.
   3. Check rule execution order dependencies — rules like military_discount_eligibility and multi_policy_bundle may have ordering conflicts when both conditions apply simultaneously.
-  4. Verify garaging_zip risk factors are using current ISO territory data — outdated territory mappings near military bases can cause incorrect risk classification (e.g., Fort Liberty zip codes).
+  4. Verify garaging_zip risk factors are using current ISO territory data — outdated territory mappings near military bases can cause incorrect risk classification (e.g., Fort Bragg zip codes).
   5. For affected applications, route to manual underwriting queue with full rule execution trace. Flag applications where expected=APPROVE but actual=DECLINE for priority review — these represent members being incorrectly denied coverage.
   6. Consider rules engine rollback if conflict rate doesn't stabilize within 1 hour. Rollback command: kubectl rollout undo deployment/rules-engine -n banking-underwriting.
 remediation_action: rollback_rules_engine
@@ -43,8 +43,8 @@ fault_params:
   app_id: {format: "APP-{n}", n: {randint: [100000, 999999]}}
   insurance_product: {choice: [AUTO_PERSONAL, AUTO_COMMERCIAL, HOMEOWNERS_HO3, RENTERS_HO4, UMBRELLA, VALUABLE_PERSONAL_PROPERTY]}
   failed_rule: {choice: [military_discount_eligibility, multi_policy_bundle, garaging_risk_factor, vehicle_safety_rating, deployment_surcharge_waiver, good_driver_discount]}
-  expected_decision: {choice: [APPROVE, REFER]}
-  actual_decision: {choice: [DECLINE, APPROVE, REFER]}
+  expected_decision: APPROVE
+  actual_decision: DECLINE
   garaging_zip: {choice: ["78209", "78216", "32225", "23452", "80917", "28307"]}
 rca_clues:
   quote-engine:
@@ -61,10 +61,10 @@ rca_clues:
     claims.rule_conflict_flag: true
 business_impact:
   - kpi: business.loan_origination_usd_per_min
-    factor: {uniform: [0.30, 0.60]}
+    value: {uniform: [104160.0, 119840.0], round: 1}
   - kpi: business.account_openings_per_min
-    factor: {uniform: [0.25, 0.55]}
+    value: {uniform: [0.3, 0.34], round: 2}
   - kpi: business.net_satisfaction_proxy_nps
-    factor: {uniform: [0.40, 0.70]}
+    value: {uniform: [14.28, 16.42], round: 1}
   - kpi: business.complaint_tickets_per_min
     factor: {uniform: [2.0, 4.0]}

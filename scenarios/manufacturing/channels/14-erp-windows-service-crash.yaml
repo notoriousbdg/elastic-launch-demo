@@ -10,8 +10,8 @@ cascade_services:
 - inventory-sync
 description: Windows service on the ERP bridge stopped unexpectedly; SAP IDoc transmission halted
 investigation_notes: |-
-  Root Cause: A Windows service (e.g., SAPHostControl) terminating unexpectedly emits Event ID 7031 (Service Control Manager) in the System channel. Common causes: a Windows Update reboot during a live IDoc batch, a memory leak in a long-running RFC connection, or an expired domain service account credential.
-  Remediation: 1) Pull the System event log: `Get-WinEvent -LogName System -FilterHashtable @{ID=7031,7034} -MaxEvents 50` on `mfg-sap-bridge-01`. 2) Inspect the service account: `sc.exe qc {win_service_name}`. 3) Restart the service: `sc.exe start {win_service_name}`. 4) If credentials expired, rotate via the AD service-account workflow. 5) Replay the IDoc backlog: `sap-admin replay-idoc --since {failure_time}`. 6) Add a Watcher on Windows event log channel `System` for event ID 7031 / 7034 on this host.
+  Root Cause: A Windows service (here the .NET IDoc bridge service built on SAP NCo) terminating unexpectedly emits Event ID 7031 (Service Control Manager) in the System channel. Common causes: a Windows Update reboot during a live IDoc batch, a memory leak in a long-running RFC connection, or an expired domain service account credential. RFC worker private memory above 2,048MB indicates the leak; no reboot in the last 24h rules out a Windows Update reboot, and zero service logon failures rules out an expired service account.
+  Remediation: 1) Pull the System event log: `Get-WinEvent -FilterHashtable @{LogName='System'; Id=7031,7034} -MaxEvents 50` on `mfg-sap-bridge-01`. 2) Inspect the service account: `sc.exe qc {win_service_name}`. 3) Restart the service: `sc.exe start {win_service_name}`. 4) If credentials expired, rotate via the AD service-account workflow. 5) Replay the IDoc backlog: `sap-admin replay-idoc --since {failure_time}`. 6) Add a Watcher on Windows event log channel `System` for event ID 7031 / 7034 on this host.
 remediation_action: restart_windows_service
 error_message: '[ERP-WIN] ERP-WIN-SERVICE-CRASH: host=mfg-sap-bridge-01 service={win_service_name} event_id=7031 idoc_backlog={idoc_backlog}
   elapsed_min={elapsed_min}'
@@ -26,14 +26,13 @@ stack_trace: |-
   The {win_service_name} service terminated unexpectedly. It has done this {crash_count} time(s).
   The following corrective action will be taken in 60000 milliseconds: Restart the service.
   ------------------------------------------------------------------------
-  Related Event ID 7034: The {win_service_name} service terminated unexpectedly.
   Related Event ID 7036: The {win_service_name} service entered the stopped state.
   ERP-WIN-SERVICE-CRASH: IDoc backlog={idoc_backlog}; SAP RFC unavailable for {elapsed_min}m; service stopped at {failure_time}
 correlation_attr:
   key: infra.windows_patch_level
-  value: win2022-kb5034441-pending
+  value: win2022-kb5034439-pending
 fault_params:
-  win_service_name: {choice: [SAPHostControl, SAPHostExec, MSSQLSERVER]}
+  win_service_name: MfgIdocBridgeSvc
   idoc_backlog: {randint: [20, 250]}
   elapsed_min: {randint: [5, 45]}
   crash_count: {randint: [1, 5]}
@@ -43,16 +42,19 @@ rca_clues:
     winlog.event_id: 7031
     winlog.crash_count: {randint: [1, 5]}
     erp.idoc_backlog: {randint: [20, 250]}
+    erp.rfc_worker_private_mb: {randint: [3500, 6000]}
+    winlog.last_boot_hours_ago: {randint: [200, 900]}
+    winlog.service_logon_failures: 0
   mes-controller:
     mes.erp_link_status: down
   inventory-sync:
     inventory.erp_master_sync_lag_s: {randint: [120, 900]}
 business_impact:
   - kpi: business.on_time_delivery_pct
-    factor: {uniform: [0.30, 0.60]}
+    factor: {uniform: [0.3, 0.6]}
   - kpi: business.inventory_turns
-    factor: {uniform: [0.40, 0.70]}
+    value: {uniform: [2.42, 2.78], round: 2}
   - kpi: business.material_variance_usd
-    factor: {uniform: [2.0, 4.5]}
+    value: {uniform: [14496.0, 16679.0], round: 1}
   - kpi: business.throughput_units_per_hour
-    factor: {uniform: [0.40, 0.70]}
+    factor: {uniform: [0.4, 0.7]}

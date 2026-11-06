@@ -3,17 +3,12 @@ subsystem: network_services
 vehicle_section: name_resolution
 error_type: NAMED-SERVFAIL-FORWARDER
 sensor_type: dns_query
-affected_services:
-- dns-dhcp-service
-- network-controller
-cascade_services:
-- digital-marketplace
-- auction-engine
-- cloud-inventory-scanner
+affected_services: [dns-dhcp-service, network-controller, digital-marketplace]
+cascade_services: [auction-engine, cloud-inventory-scanner]
 description: DNS queries traversing VPN tunnel failing to resolve internal records
 investigation_notes: |-
-  1. Verify VPN tunnel status first: if the tunnel carrying DNS traffic is down, all forwarded queries will fail — check `show vpn ike-sa` / `show vpn ipsec-sa`.
-  2. Test DNS resolution from within the tunnel: `dig @<forwarder_ip> <query_name> +tcp` — if TCP works but UDP fails, MTU/fragmentation is the issue.
+  1. Verify VPN tunnel status first: if the tunnel carrying DNS traffic is down, all forwarded queries will fail — check `show vpn ike-sa` / `show vpn ipsec-sa`. If the tunnel is DOWN because its IPsec SA expired and the rekey failed, that is the cause.
+  2. Test DNS resolution from within the tunnel: `dig @<forwarder_ip> <query_name> +tcp` — if TCP works but UDP fails, MTU/fragmentation is the issue; here TCP queries fail too, so it is not MTU.
   3. Check `named.conf` forwarder configuration: ensure both primary and fallback forwarders are reachable over the VPN and DNS port 53 is permitted.
   4. Run `rndc querylog on` to enable query logging on the DNS server, then trace the query path to identify where resolution breaks.
   5. If the forwarder is in Azure, verify Azure Private DNS zone is linked to the correct VNet and conditional forwarding rules are configured.
@@ -40,18 +35,20 @@ fault_params:
     - card-printer-01.warehouse.local
     - inventory.cloud-ops.internal
   dns_query_type: {choice: [A, AAAA, CNAME, SRV]}
-  vpn_tunnel_name: {choice: [aws-to-azure-01, aws-to-gcp-01, gcp-to-azure-01]}
-  dns_forwarder_ip: {choice: ["10.0.0.53", "10.1.0.53", "168.63.129.16"]}
+  vpn_tunnel_name: aws-to-azure-01
+  dns_forwarder_ip: {choice: ["10.0.0.53", "10.1.0.53", "10.2.0.4"]}
   dns_fallback_ip: {choice: ["10.0.1.53", "10.2.0.53"]}
   dns_timeout_ms: {randint: [3000, 10000]}
-  dns_rcode: {choice: [SERVFAIL, REFUSED, NXDOMAIN]}
+  dns_rcode: SERVFAIL
 rca_clues:
   dns-dhcp-service:
     dns.forwarder_timeout_ms: {randint: [3000, 10000]}
     dns.vpn_dependent_zones: {randint: [3, 12]}
+    dns.tcp_query_success: false
   network-controller:
     network.vpn_tunnel_state: DOWN
     network.ipsec_sa_expired: true
+    network.vpn_tunnel_down: aws-to-azure-01
   digital-marketplace:
     marketplace.internal_api_dns_failures: {randint: [50, 500]}
     marketplace.service_discovery_degraded: true
@@ -60,13 +57,13 @@ rca_clues:
     auction.failover_to_ip: true
   cloud-inventory-scanner:
     cloud_scan.cross_cloud_dns_broken: true
-    cloud_scan.affected_provider: {choice: [aws, azure, gcp]}
+    cloud_scan.affected_provider: azure
 business_impact:
   - kpi: business.app_sessions_per_min
-    factor: {uniform: [0.20, 0.50]}
+    value: {uniform: [334.8, 385.2]}
   - kpi: business.page_views_per_min
-    factor: {uniform: [0.20, 0.50]}
+    value: {uniform: [66960.0, 77040.0]}
   - kpi: business.merch_gmv_usd_per_min
-    factor: {uniform: [0.25, 0.55]}
+    value: {uniform: [10416.0, 11984.0], round: 1}
   - kpi: business.betting_handle_usd_per_min
-    factor: {uniform: [0.25, 0.55]}
+    value: {uniform: [108810.0, 125190.0], round: 1}

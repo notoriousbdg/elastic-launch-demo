@@ -1,0 +1,37 @@
+name: "GT vsphere_otel: vm_memory_ballooning"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-VSPHERE-VM-MEMORY-BALLOONING
+sensor_type: impact_key_probe
+affected_services:
+  - gt-vsphere-aws-svc-1
+cascade_services:
+  - gt-vsphere-aws-svc-2
+description: "Tests impact_key vm_memory_ballooning on generator vsphere_otel."
+investigation_notes: |-
+  1. Verify vsphere_otel is active and reporting metrics.
+  2. Check that the vm_memory_ballooning metric has reached the trigger value (75.0).
+  3. Confirm generator_impact for vsphere_otel.vm_memory_ballooning is set to 75.0.
+  4. Look for correlated changes in service gt-vsphere-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_vm_memory_ballooning_baseline
+error_message: "GT-PROBE: gen=vsphere_otel key=vm_memory_ballooning value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=vsphere_otel
+  impact_key: vm_memory_ballooning
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 75.0
+  svc_name: gt-vsphere-aws-svc-1
+rca_clues:
+  gt-vsphere-aws-svc-1:
+    probe.generator: vsphere_otel
+    probe.impact_key: vm_memory_ballooning
+    probe.trigger_value: 75.0
+  gt-vsphere-aws-svc-2:
+    probe.upstream_generator: vsphere_otel
+    probe.upstream_key: vm_memory_ballooning
+generator_impact:
+  vsphere_otel:
+    vm_memory_ballooning: 75.0

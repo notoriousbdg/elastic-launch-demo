@@ -13,13 +13,13 @@ investigation_notes: |-
   Root cause: GCP firewall rules use numeric priority where LOWER number = HIGHER priority. A DENY rule at priority 900 overrides an ALLOW rule at priority 1000, even if the ALLOW rule is more specific. This is the opposite of some on-prem firewalls. Diagnose with:
     gcloud compute firewall-rules list --filter='network:<vpc>' --sort-by=priority --format='table(name,priority,direction,action,sourceRanges,targetTags)'
     gcloud compute firewall-rules describe <rule_name> --format=json
-  Check VPC Flow Logs for dropped traffic: Console > VPC Network > Firewall > Firewall Insights.
-  Remediation: Adjust conflicting rule priorities so ALLOW rules have lower priority numbers than blanket DENY rules, or merge overlapping rules. Use Firewall Policy (hierarchical) for org-wide rules and VPC firewall rules for project-specific exceptions. Validate with:
+  Check Firewall Rules Logging on the deny rule for denied connections, and Network Intelligence Center > Firewall Insights for shadowed rules.
+  Remediation: Adjust conflicting rule priorities so ALLOW rules have lower priority numbers than blanket DENY rules, or merge overlapping rules. Use Firewall Policy (hierarchical) for org-wide rules and VPC firewall rules for project-specific exceptions. Apply with:
     gcloud compute firewall-rules update <rule> --priority=<new_priority>
 remediation_action: reconfigure_firewall_rules
 error_message: level=error ts={{timestamp}} caller=fw_policy_engine.go:445 msg="VPC-FIREWALL-RULE-CONFLICT" project={gcp_project}
   rule_a={fw_rule_a} rule_b={fw_rule_b} priority_a={fw_priority_a} priority_b={fw_priority_b} network={vpc_network} dropped_packets={fw_dropped_packets}/s
-stack_trace: "goroutine 312 [running]:\ncloud.google.com/go/compute/apiv1.(*FirewallsClient).List(0xc000518000)\n\t/app/internal/vpc/fw_policy_engine.go:445\
+stack_trace: "goroutine 312 [running]:\ngcpnet/internal/vpc.(*PolicyEngine).detectConflicts(0xc000518000)\n\t/app/internal/vpc/fw_policy_engine.go:445\
   \ +0x2f1\n  Conflicting Rules:\n    Rule A: {fw_rule_a} (priority {fw_priority_a}, ALLOW)\n    Rule B: {fw_rule_b} (priority\
   \ {fw_priority_b}, DENY)\n  Network: {vpc_network}\n  Dropped: {fw_dropped_packets} packets/s\n  Action: Adjust rule priorities\
   \ or merge conflicting rules"
@@ -29,10 +29,10 @@ correlation_attr:
 fault_params:
   gcp_project: {choice: [gcpnet-prod-001, gcpnet-prod-002, gcpnet-staging]}
   vpc_network: {choice: [gcpnet-vpc-prod, gcpnet-vpc-staging, gcpnet-vpc-shared]}
-  fw_rule_a: {choice: [allow-internal-all, allow-health-checks, allow-iap-ssh]}
-  fw_rule_b: {choice: [deny-egress-default, deny-all-ingress, deny-suspicious-ips]}
-  fw_priority_a: {choice: [1000, 1100, 1200]}
-  fw_priority_b: {choice: [900, 950, 1000]}
+  fw_rule_a: allow-internal-all
+  fw_rule_b: deny-all-ingress
+  fw_priority_a: 1000
+  fw_priority_b: 900
   fw_dropped_packets: {randint: [100, 5000]}
 rca_clues:
   vpc-network-manager:
@@ -43,7 +43,7 @@ rca_clues:
     armor.upstream_fw_conflict: deny-all-ingress
   cloud-interconnect:
     interconnect.onprem_traffic_blocked: true
-    interconnect.affected_fw_rule: deny-egress-default
+    interconnect.affected_fw_rule: deny-all-ingress
 business_impact:
   - kpi: business.api_success_rate_pct
     factor: {uniform: [0.60, 0.82]}

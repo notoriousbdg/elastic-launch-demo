@@ -1,0 +1,63 @@
+service: legacy-web-tier
+sort_order: 8
+cloud_provider: azure
+cloud_region: eastus
+cloud_platform: azure_vm
+cloud_availability_zone: eastus-2
+subsystem: legacy_web
+language: java
+
+topology:
+  - [billing-service, /api/v1/ledger/lookup, GET]
+
+db_operations:
+  - [SELECT, erp_orders, "SELECT order_id, status FROM erp_orders WHERE created_at > ?"]
+
+emit_fault_logs: true
+kpi_emitter: false
+
+constants:
+  APP_SERVERS: [apache_httpd, apache_tomcat, iis]
+
+state:
+  _requests_total: {init: 0}
+  _last_summary: {init: now}
+
+steps:
+  - sample:
+      app_server: {choice: APP_SERVERS}
+      thread_pool_saturation_pct:
+        if_active: {uniform: [80.0, 99.0], round: 1}
+        else: {uniform: [10.0, 45.0], round: 1}
+      response_time_ms:
+        if_active: {uniform: [800.0, 8000.0], round: 1}
+        else: {uniform: [30.0, 250.0], round: 1}
+  - counter:
+      state_key: _requests_total
+      by: 1
+  - log:
+      level: INFO
+      message: '[legacy-web-tier] request_cycle app_server={app_server} thread_saturation={thread_pool_saturation_pct}% response_time={response_time_ms}ms total={_requests_total}'
+      attrs:
+        operation: request_cycle
+        legacyweb.app_server: {var: app_server}
+        legacyweb.thread_pool_saturation_pct: {var: thread_pool_saturation_pct}
+        legacyweb.response_time_ms: {var: response_time_ms}
+  - metric:
+      name: legacy_web_tier.thread_pool_saturation_pct
+      value: {var: thread_pool_saturation_pct}
+      unit: '%'
+  - metric:
+      name: legacy_web_tier.response_time_ms
+      value: {var: response_time_ms}
+      unit: ms
+  - every:
+      seconds: 15
+      state_key: _last_summary
+      steps:
+        - log:
+            level: INFO
+            message: '[legacy-web-tier] summary total_requests={_requests_total} status=NOMINAL'
+            attrs:
+              operation: summary
+              legacyweb.total_requests: {var: _requests_total}

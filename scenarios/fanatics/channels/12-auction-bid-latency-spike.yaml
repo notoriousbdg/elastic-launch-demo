@@ -11,11 +11,11 @@ cascade_services:
 - firewall-gateway
 description: Real-time bid processing latency exceeding SLA thresholds
 investigation_notes: |-
-  1. Check the bid processing queue depth in the Go auction-engine metrics — a queue depth above 500 indicates the goroutine pool is saturated.
+  1. Check the bid processing queue depth in the Go auction-engine metrics — a queue depth above 500 indicates the goroutine pool is saturated and is the cause.
   2. Examine WebSocket broadcast latency: `ws_delay_ms` above 1000ms means the hub.broadcastBidUpdate is falling behind real-time.
-  3. Profile the database: `EXPLAIN ANALYZE` on the bid INSERT and auction UPDATE queries — lock contention on the `auctions` table during high-bid periods is common.
-  4. Check Redis pub/sub for bid event fanout delays: `redis-cli --latency-history -i 1` — if Redis is slow, all downstream WebSocket clients stall.
-  5. Scale horizontally: increase the auction-engine replica count in EKS and verify the ALB is distributing WebSocket connections evenly.
+  3. Profile the database: `EXPLAIN ANALYZE` on the bid INSERT and auction UPDATE queries — lock contention on the `auctions` table during high-bid periods is common (lock waits above 100ms); here lock waits stay under 20ms, ruling it out.
+  4. Check Redis pub/sub for bid event fanout delays: `redis-cli --latency-history -i 1` — if Redis is slow (above 50ms), all downstream WebSocket clients stall; here it stays under 5ms.
+  5. Scale horizontally: the auction-engine HPA is already pinned at max replicas, so raise its max replica count in EKS and verify the ALB is distributing WebSocket connections evenly.
   6. For immediate relief, increase the goroutine pool size and bid queue buffer, and enable connection draining on the load balancer.
 remediation_action: scale_auction_service
 error_message: level=error ts=2025-01-15T14:32:01.234Z caller=bid_processor.go:289 msg="BID_LATENCY_SLA_BREACH" auction={auction_id}
@@ -23,8 +23,8 @@ error_message: level=error ts=2025-01-15T14:32:01.234Z caller=bid_processor.go:2
 stack_trace: "goroutine 847 [running]:\nruntime/debug.Stack()\n\t/usr/local/go/src/runtime/debug/stack.go:24 +0x5e\ngithub.com/fanatics/auction-engine/internal/processor.(*BidProcessor).ProcessBid(0xc000518000,\
   \ {{0xc000a12480, 0x24}}, {{0xc000a124c0, 0x26}}, 0x{bid_latency_ms})\n\t/app/internal/processor/bid_processor.go:289 +0x3a2\n\
   github.com/fanatics/auction-engine/internal/processor.(*BidProcessor).handleBidQueue(0xc000518000)\n\t/app/internal/processor/bid_processor.go:145\
-  \ +0x1b8\ngithub.com/fanatics/auction-engine/internal/ws.(*Hub).broadcastBidUpdate(0xc000420000, {{0xc000a12480, 0x24}})\n\
-  \t/app/internal/ws/hub.go:89 +0x204\ncreated by github.com/fanatics/auction-engine/cmd/server.Run in goroutine 1\n\t/app/cmd/server/main.go:67\
+  \ +0x1b8\ngithub.com/fanatics/auction-engine/internal/processor.(*BidProcessor).Start.func1()\n\
+  \t/app/internal/processor/bid_processor.go:98 +0x25\ncreated by github.com/fanatics/auction-engine/cmd/server.Run in goroutine 1\n\t/app/cmd/server/main.go:67\
   \ +0x2a5"
 correlation_attr:
   key: deployment.auction_runtime
@@ -38,28 +38,34 @@ fault_params:
     n: {randint: [1000000, 9999999]}
   bid_latency_ms: {randint: [500, 5000]}
   bid_sla_ms: 200
-  bid_queue_depth: {randint: [100, 2000]}
-  ws_delay_ms: {randint: [200, 3000]}
+  bid_queue_depth: {randint: [500, 2000]}
+  ws_delay_ms: {randint: [1000, 3000]}
   affected_bidders: {randint: [10, 500]}
 rca_clues:
   auction-engine:
     auction.goroutine_pool_saturated: true
     auction.bid_queue_depth: {randint: [500, 2000]}
+    auction.db_lock_wait_ms: {randint: [2, 20]}
+    auction.redis_pubsub_latency_ms: {randint: [1, 5]}
   digital-marketplace:
-    marketplace.ws_broadcast_delay_ms: {randint: [1000, 5000]}
+    marketplace.ws_broadcast_delay_ms: {randint: [1000, 3000]}
     marketplace.stale_bid_display_count: {randint: [10, 200]}
   network-controller:
-    network.alb_latency_ms: {randint: [100, 1000]}
+    network.alb_latency_ms: {randint: [10, 40]}
     network.connection_draining: false
   firewall-gateway:
-    firewall.ws_inspection_overhead_ms: {randint: [20, 200]}
+    firewall.ws_inspection_overhead_ms: {randint: [2, 10]}
     firewall.deep_packet_inspection_enabled: true
 business_impact:
   - kpi: business.merch_gmv_usd_per_min
-    factor: {uniform: [0.20, 0.45]}
+    value: {uniform: [10416.0, 11984.0], round: 1}
   - kpi: business.live_event_ticketing_usd_per_min
-    factor: {uniform: [0.20, 0.45]}
+    value: {uniform: [2720.0, 3130.0], round: 1}
   - kpi: business.churn_risk_index_0_100
     factor: {uniform: [2.0, 4.5]}
-  - kpi: business.net_satisfaction_proxy_nps
-    factor: {uniform: [0.15, 0.45]}
+  - kpi: business.ad_revenue_usd_per_min
+    value: {uniform: [31620.0, 36380.0], round: 1}
+
+generator_impact:
+  kubernetes_otel:
+    hpa_at_max_replicas: 1.0

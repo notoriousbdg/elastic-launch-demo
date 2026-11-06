@@ -1,0 +1,61 @@
+name: Runaway Token Spend
+subsystem: authentication
+vehicle_section: authentication_pipeline
+error_type: AI-TOKEN-SPEND-RUNAWAY
+sensor_type: health_check
+affected_services: [cost-guard, chat-orchestrator]
+cascade_services: []
+description: An agent prompt loop multiplies token usage so Cost Management shows spend running at roughly 12x normal while cost-guard has not tripped its budget.
+investigation_notes: |-
+  1. Search body.text for *AI-TOKEN-SPEND-RUNAWAY* and check cost_multiplier={spend_multiplier}x against the normal hourly baseline of {baseline_cost_usd_per_hr} USD in Azure Cost Management.
+  2. Break down tokens by deployment and caller: tokens_per_min={tokens_per_min} on Azure OpenAI deployment {deployment_name} drives its provisioned utilization to about 95% (alert threshold 85%) and the overflow spills over to the pay-as-you-go standard deployment, which is where the extra tokens are billed (PTU hours are a fixed cost); one agent taking more than 80% of tokens points at that agent, not organic traffic growth.
+  3. Inspect chat-orchestrator traces for repeated tool/LLM calls within one conversation (loop depth={loop_depth}); the same prompt hash recurring indicates a prompt loop.
+  4. Check why cost-guard did not trip: the budget {budget_name} is at {budget_used_pct}% but alert evaluation lags by the Cost Management refresh window.
+  5. Apply a token budget cap (max_tokens and per-conversation limit) on the offending agent, then confirm spend returns to baseline within two cycles.
+remediation_action: apply_token_budget_cap
+error_message: '[CostGuard] AI-TOKEN-SPEND-RUNAWAY: spend={spend_usd_per_hr} USD/hr ({spend_multiplier}x baseline {baseline_cost_usd_per_hr}) tokens_per_min={tokens_per_min} budget={budget_name} used={budget_used_pct}% deployment={deployment_name}'
+stack_trace: |-
+  TokenBudgetNotEnforcedException: AI-TOKEN-SPEND-RUNAWAY
+    at CostGuard.evaluateBudget(budget={budget_name})
+    at CostGuard.IngestUsageSample(source=chat-orchestrator, loopDepth={loop_depth})
+  Spend rate:        {spend_usd_per_hr} USD/hr ({spend_multiplier}x normal)
+  Baseline:          {baseline_cost_usd_per_hr} USD/hr
+  Tokens per minute: {tokens_per_min}
+  Deployment:        {deployment_name}
+  Budget used:       {budget_used_pct}%
+correlation_attr:
+  key: agent.prompt_template_version
+  value: support-agent-v3.7.2-loop
+fault_params:
+  spend_multiplier: {uniform: [11.6, 12.4], round: 1}
+  baseline_cost_usd_per_hr: 55
+  spend_usd_per_hr: {randint: [640, 680]}
+  tokens_per_min: {randint: [900000, 2500000]}
+  budget_name: {choice: [genai-assistant-monthly, genai-prod-subscription-budget]}
+  budget_used_pct: {uniform: [58.0, 82.0], round: 1}
+  deployment_name: {choice: [gpt-4o-chat-prod, gpt-4.1-chat-prod]}
+  loop_depth: {randint: [25, 120]}
+rca_clues:
+  cost-guard:
+    costguard.budget_alert_fired: false
+    costguard.cost_multiplier_observed: {uniform: [10.5, 13.5], round: 1}
+    costguard.budget_refresh_lag_min: {randint: [30, 480]}
+  chat-orchestrator:
+    orchestrator.agent_loop_depth_max: {randint: [25, 120]}
+    orchestrator.repeated_prompt_hash_count: {randint: [200, 5000]}
+    orchestrator.top_agent_token_share_pct: {uniform: [85.0, 97.0], round: 1}
+business_impact:
+  - kpi: business.token_spend_usd_per_hr
+    factor: {uniform: [8.0, 14.0]}
+  - kpi: business.cost_per_conversation_usd
+    factor: {uniform: [6.0, 12.0]}
+  - kpi: business.conversations_per_min
+    value: {uniform: [120.9, 139.1], round: 0}
+  - kpi: business.throughput_rpm
+    factor: {uniform: [1.4, 2.5]}
+generator_impact:
+  azure_billing:
+    cost_multiplier: 12.0
+    usage_multiplier: 15.0
+  azure_openai:
+    provisioned_utilization_above_threshold: 95.0

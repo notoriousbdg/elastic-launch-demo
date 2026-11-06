@@ -10,7 +10,7 @@ cascade_services:
 - matchmaking-engine
 description: Player telemetry ring buffer overflows causing event data loss for analytics and anti-cheat systems
 investigation_notes: |-
-  Root cause: the ring buffer consumer (analytics pipeline) is draining slower than the producer (game server), and the buffer has no backpressure mechanism — when full, new events silently overwrite the oldest 20%, creating gaps in anti-cheat telemetry.
+  Root cause: the ring buffer consumer (analytics pipeline) is draining slower than the producer (game server) — drain latency above 250ms means the consumer cannot keep up — and the buffer has no backpressure mechanism — when full, new events silently overwrite the oldest 20%, creating gaps in anti-cheat telemetry.
   1. Check event breakdown: player_move at 42.1% of buffer is the largest category — consider downsampling movement events (every 5th tick instead of every tick).
   2. Review drop rate: 12.4% sustained drop rate means anti-cheat is blind to ~1 in 8 player actions — this creates exploitable detection gaps.
   3. Inspect buffer sizing: current max of 100,000 slots may be undersized for peak concurrent players; calculate required capacity as `events_per_second * drain_latency_s`.
@@ -25,9 +25,9 @@ stack_trace: |-
   ----------- buffer state ------------
     usage        = {buffer_usage_pct}%
     size         = {buffer_size}/{max_buffer_size}
-    head_offset  = 99,847
-    tail_offset  = 99,201
-    writable     = 646 slots
+    head_offset  = 48,299,847
+    tail_offset  = 48,200,201
+    writable     = {writable_slots} slots
   ----------- drop statistics ---------
     dropped_total   = {dropped_events}
     dropped_1min    = 1,204
@@ -47,9 +47,10 @@ correlation_attr:
 fault_params:
   buffer_id: {choice: [buf-player-events, buf-game-state, buf-combat-log]}
   buffer_usage_pct: {uniform: [95.0, 100.0], round: 1}
-  buffer_size: {randint: [90000, 100000]}
+  buffer_size: {randint: [99000, 99900]}
   max_buffer_size: 100000
   dropped_events: {randint: [100, 10000]}
+  writable_slots: {randint: [100, 1000]}
 rca_clues:
   analytics-pipeline:
     analytics.ring_buffer_writable_slots: {randint: [100, 1000]}
@@ -61,10 +62,10 @@ rca_clues:
     matchmaking.player_stats_stale: true
 business_impact:
   - kpi: business.matches_played_per_min
-    factor: {uniform: [0.25, 0.55]}
+    value: {uniform: [229.71, 264.29]}
   - kpi: business.sessions_per_min
-    factor: {uniform: [0.30, 0.55]}
+    factor: {uniform: [0.3, 0.55]}
   - kpi: business.crash_rate_pct
-    factor: {uniform: [1.5, 3.0]}
+    value: {uniform: [0.58, 0.66], round: 3}
   - kpi: business.player_bug_reports_per_min
-    factor: {uniform: [1.5, 3.0]}
+    value: {uniform: [12.92, 14.87], round: 2}

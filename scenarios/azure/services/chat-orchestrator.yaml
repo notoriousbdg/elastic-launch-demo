@@ -1,0 +1,101 @@
+service: chat-orchestrator
+sort_order: 2
+cloud_provider: azure
+cloud_region: eastus
+cloud_platform: azure_vm
+cloud_availability_zone: eastus-2
+subsystem: orchestration
+language: python
+
+# Topology: [downstream-service, endpoint, METHOD]
+topology:
+  - [identity-broker, /api/v1/token/validate, POST]
+  - [prompt-guard, /api/v1/guard/screen, POST]
+  - [retrieval-service, /api/v1/retrieve, POST]
+  - [model-router, /api/v1/route, POST]
+  - [conversation-store, /api/v1/conversations, PUT]
+  - [cost-guard, /api/v1/budget/check, POST]
+
+entry_endpoints:
+  - [/api/v1/chat, POST]
+
+db_operations: []
+
+emit_fault_logs: true
+kpi_emitter: true
+
+constants:
+  DEPLOYMENTS: [gpt-4o-eastus2, gpt-4o-mini-eastus, foundry-reasoning-eastus2]
+
+steps:
+  - sample:
+      conversations_per_min: {uniform: [180.0, 720.0], round: 1}
+      resolution_rate:
+        if_active: {uniform: [52.0, 71.0], round: 2}
+        else: {uniform: [82.0, 93.0], round: 2}
+      prompt_tokens: {randint: [900, 5200]}
+      completion_tokens: {randint: [150, 1100]}
+      token_cost_usd:
+        if_active: {uniform: [2.2, 6.8], round: 3}
+        else: {uniform: [0.35, 1.1], round: 3}
+      quota_headroom_pct:
+        if_active: {uniform: [0.0, 9.0], round: 1}
+        else: {uniform: [35.0, 78.0], round: 1}
+      tool_calls_per_turn:
+        if_active: {randint: [9, 25]}
+        else: {randint: [0, 3]}
+      turn_latency_ms:
+        if_active: {uniform: [4500.0, 14000.0], round: 1}
+        else: {uniform: [1100.0, 2800.0], round: 1}
+      deployment: {choice: DEPLOYMENTS}
+  - metric:
+      name: chat.conversations_per_minute
+      value: {var: conversations_per_min}
+      unit: conversations/min
+  - metric:
+      name: chat.resolution_rate_pct
+      value: {var: resolution_rate}
+      unit: '%'
+  - metric:
+      name: chat.prompt_tokens
+      value: {var: prompt_tokens}
+      unit: tokens
+  - metric:
+      name: chat.completion_tokens
+      value: {var: completion_tokens}
+      unit: tokens
+  - metric:
+      name: chat.token_cost_usd_per_conversation
+      value: {var: token_cost_usd}
+      unit: USD
+  - metric:
+      name: chat.openai_quota_headroom_pct
+      value: {var: quota_headroom_pct}
+      unit: '%'
+  - metric:
+      name: chat.tool_calls_per_turn
+      value: {var: tool_calls_per_turn}
+      unit: calls
+  - metric:
+      name: chat.turn_latency_ms
+      value: {var: turn_latency_ms}
+      unit: ms
+  - log:
+      level: INFO
+      message: 'chat.orchestration_health conversations_per_min={conversations_per_min} resolution_rate={resolution_rate}% turn_latency_ms={turn_latency_ms} tool_calls={tool_calls_per_turn}'
+      attrs:
+        operation: orchestration_health
+        chat.conversations_per_min: {var: conversations_per_min}
+        chat.resolution_rate_pct: {var: resolution_rate}
+        chat.turn_latency_ms: {var: turn_latency_ms}
+        chat.tool_calls_per_turn: {var: tool_calls_per_turn}
+  - log:
+      level: INFO
+      message: 'chat.token_usage deployment={deployment} prompt_tokens={prompt_tokens} completion_tokens={completion_tokens} cost_usd={token_cost_usd} quota_headroom={quota_headroom_pct}%'
+      attrs:
+        operation: token_usage
+        gen_ai.deployment: {var: deployment}
+        gen_ai.usage.input_tokens: {var: prompt_tokens}
+        gen_ai.usage.output_tokens: {var: completion_tokens}
+        chat.token_cost_usd: {var: token_cost_usd}
+        chat.quota_headroom_pct: {var: quota_headroom_pct}

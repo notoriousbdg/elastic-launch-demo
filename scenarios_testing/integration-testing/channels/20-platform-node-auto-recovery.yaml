@@ -1,0 +1,93 @@
+name: Platform Node Auto Recovery
+subsystem: platform
+vehicle_section: platform_pipeline
+error_type: PLATFORM-NODE-AUTO-RECOVERY
+sensor_type: health_check
+affected_services:
+- data-platform
+cascade_services:
+- session-service
+description: 'A synthetic vSphere host powers off a VM running data-platform''s scheduler,
+  and the ZooKeeper ensemble briefly loses its leader; the platform auto-recovers
+  by power-cycling the VM and re-electing a ZooKeeper leader, with a matching Vercel
+  edge deploy rollback.
+
+  '
+investigation_notes: "1. Search for body.text containing *PLATFORM-NODE-AUTO-RECOVERY*\
+  \ to find the affected VM/host.\n2. Check data-platform orchestration.control_plane_latency_ms\
+  \ for the brief instability.\n3. Confirm vsphere_otel vm_power_off_count/cpu_utilization_multiplier\
+  \ and zookeeper_otel\n   leader_election_count/follower_lag_multiplier both spike,\
+  \ alongside a vercel_otel\n   high_http_5xx_error_rate_by_log_source/poor_core_web_vitals_p75_by_route blip on the edge deploy.\n\
+  4. Check session-service session.replication_lag_ms for a brief cascading delay.\n\
+  5. Confirm the VM auto-restarts, ZooKeeper elects a new leader, and metrics return\
+  \ to baseline.\n"
+remediation_action: auto_power_cycle_and_reelect_leader
+error_message: 'PLATFORM-NODE-AUTO-RECOVERY: host={vsphere_host} vm_power_off={vm_power_off_count}
+  leader_elections={leader_election_count}
+
+  '
+stack_trace: "PlatformNodeAutoRecoveryError: host={vsphere_host}\n  at DataPlatform.schedulerHeartbeat()\n\
+  \  vm_power_off={vm_power_off_count} leader_elections={leader_election_count}\n"
+fault_params:
+  vsphere_host:
+    choice:
+    - esxi-host-01
+    - esxi-host-02
+  vm_power_off_count:
+    randint:
+    - 1
+    - 5
+  leader_election_count:
+    randint:
+    - 1
+    - 6
+rca_clues:
+  data-platform:
+    orchestration.control_plane_latency_ms:
+      uniform:
+      - 200.0
+      - 2500.0
+      round: 1
+    orchestration.auto_recovery_triggered: true
+  session-service:
+    session.replication_lag_ms:
+      uniform:
+      - 100.0
+      - 1500.0
+      round: 1
+    session.brief_outage_flag: true
+generator_impact:
+  vsphere_otel:
+    host_cpu_utilization_high:
+      uniform:
+      - 3.0
+      - 8.0
+    vm_memory_ballooning: &id001
+      uniform:
+      - 3.0
+      - 8.0
+    host_memory_utilization_high: *id001
+    host_power_state_unhealthy: &id002
+      randint:
+      - 1
+      - 5
+    entity_status_unhealthy: *id002
+  zookeeper_otel:
+    high_request_latency:
+      uniform:
+      - 8.0
+      - 30.0
+    unsynced_followers_detected: &id003
+      randint:
+      - 1
+      - 6
+    pending_syncs_buildup_on_leader: *id003
+  vercel_otel:
+    high_http_5xx_error_rate_by_log_source:
+      uniform:
+      - 0.025
+      - 0.045
+    poor_core_web_vitals_p75_by_route:
+      uniform:
+      - 1.6
+      - 3.5

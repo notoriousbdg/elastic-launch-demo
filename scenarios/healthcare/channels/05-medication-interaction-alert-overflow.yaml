@@ -10,7 +10,7 @@ cascade_services:
 - clinical-alerts
 description: Drug interaction checking engine overwhelmed by excessive concurrent medication orders
 investigation_notes: |-
-  Root Cause: The CPOE drug-drug interaction (DDI) engine uses a real-time screening database (First Databank or Medi-Span) that becomes overloaded when discharge reconciliation generates bulk medication orders. Critical interactions (QT prolongation, renal contraindications) queue behind lower-severity checks.
+  Root Cause: The CPOE drug-drug interaction (DDI) engine uses a real-time screening database (First Databank or Medi-Span) that becomes overloaded when discharge reconciliation generates bulk medication orders. Critical interactions (QT prolongation, renal contraindications) queue behind lower-severity checks. An interaction-checker thread pool above 90% busy during a discharge-reconciliation burst, with the FDB/Medi-Span cache current, confirms engine saturation rather than a stale knowledge base.
   Remediation: 1) Check the CPOE interaction queue: `cpoe-admin queue-depth --engine DDI`. 2) Reset the CPOE interface to clear stale sessions: `cpoe-admin reset-interface --service DDI-SCREENING`. 3) Restart the pharmacy queue processor: `systemctl restart pharmacy-order-queue`. 4) Verify the FDB/Medi-Span knowledge base subscription is active and the local cache is current. 5) For blocked CRITICAL interactions, escalate to attending physician for dual-sign override per pharmacy P&P. 6) Monitor the screening engine thread pool: `cpoe-admin thread-status --pool interaction-checker`.
 remediation_action: reset_cpoe_interface
 error_message: '[PHARM] CPOE-DDI-CRITICAL: patient={patient_id} med={medication_id} interactions_queued={interaction_count}
@@ -39,12 +39,14 @@ fault_params:
   medication_id:
     format: "MED-{n}"
     n: {randint: [10000, 99999]}
-  interaction_count: {randint: [50, 500]}
-  severity_level: {choice: [critical, major, moderate]}
+  interaction_count: {randint: [100, 500]}
+  severity_level: critical
 rca_clues:
   pharmacy-system:
     cpoe.ddi_queue_depth: {randint: [100, 500]}
-    cpoe.fdb_cache_stale: true
+    cpoe.fdb_cache_status: current
+    cpoe.interaction_checker_busy_pct: {uniform: [95, 100], round: 0}
+    cpoe.discharge_reconciliation_orders_per_min: {randint: [60, 200]}
   ehr-system:
     ehr.medication_orders_held: {randint: [10, 50]}
     ehr.cpoe_screening_lag_s: {randint: [30, 180]}

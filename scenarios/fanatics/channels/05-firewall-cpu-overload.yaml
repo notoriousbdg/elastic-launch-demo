@@ -3,20 +3,16 @@ subsystem: security
 vehicle_section: perimeter_defense
 error_type: SYSTEM-cpu-critical
 sensor_type: cpu_utilization
-affected_services:
-- firewall-gateway
-- network-controller
-cascade_services:
-- dns-dhcp-service
-- digital-marketplace
+affected_services: [firewall-gateway, network-controller, digital-marketplace]
+cascade_services: [dns-dhcp-service]
 description: Firewall data plane CPU exceeding safe operating threshold
 investigation_notes: |-
   1. Run `show running resource-monitor` to see per-DP CPU, packet buffer, and session rate in real time.
   2. Identify offending policy: `show rule-hit-count` — rules with high hit counts and complex App-ID or content inspection drive DP CPU.
-  3. Check threat prevention load: `show threat statistics` — if IPS/AV signature matching is spiking, a signature update or new attack pattern may be the cause.
-  4. Review decryption overhead: `show counter global filter aspect dp delta yes | match ssl` — SSL decryption is the #1 DP CPU consumer.
+  3. Check threat prevention load: `show counter global filter category ctd delta yes` — if IPS/AV signature matching is spiking, a signature update or new attack pattern may be the cause. If threat prevention takes over half of DP CPU right after a content update, the update is the cause.
+  4. Review decryption overhead: `show counter global filter delta yes | match ssl` — SSL decryption is normally the #1 DP CPU consumer; here its share is under 20%, so it is not the cause.
   5. Consider bypassing decryption for trusted high-bandwidth flows (e.g., Windows Update, CDN traffic) with a no-decrypt rule.
-  6. If CPU remains critical, enable hardware offload for IPSec tunnels and reduce logging verbosity on high-traffic rules.
+  6. If the content update is confirmed as the trigger, revert it: `request content downgrade install <previous-version>` (Device > Dynamic Updates > Revert), then confirm DP CPU drops below the 80% threshold.
 remediation_action: restart_management_plane
 error_message: 1,2025/01/15 14:32:01,007200001234,SYSTEM,general,0,SYSTEM-cpu-critical,Data plane CPU at {fw_dp_cpu_pct}%
   (threshold {fw_cpu_threshold}%), management plane {fw_mgmt_cpu_pct}%, packet buffer {fw_buffer_pct}%, active rules {fw_policy_count}
@@ -39,11 +35,13 @@ fault_params:
   fw_dp_cpu_pct: {uniform: [85.0, 99.0], round: 1}
   fw_cpu_threshold: 80
   fw_mgmt_cpu_pct: {uniform: [60.0, 90.0], round: 1}
-  fw_buffer_pct: {uniform: [75.0, 98.0], round: 1}
+  fw_buffer_pct: {uniform: [80.0, 98.0], round: 1}
   fw_policy_count: {randint: [800, 2500]}
 rca_clues:
   firewall-gateway:
-    firewall.dp_cpu_offender: {choice: [ssl-decrypt, threat-prevention, url-filtering]}
+    firewall.dp_cpu_offender: threat-prevention
+    firewall.threat_cpu_share_pct: {uniform: [55, 75], round: 1}
+    firewall.ssl_decrypt_cpu_share_pct: {uniform: [5, 15], round: 1}
     firewall.packet_buffer_pct: {uniform: [80, 98], round: 1}
   network-controller:
     network.throughput_degraded: true
@@ -56,10 +54,10 @@ rca_clues:
     marketplace.ssl_handshake_failures: {randint: [10, 100]}
 business_impact:
   - kpi: business.app_sessions_per_min
-    factor: {uniform: [0.25, 0.55]}
+    value: {uniform: [334.8, 385.2]}
   - kpi: business.page_views_per_min
-    factor: {uniform: [0.25, 0.55]}
+    value: {uniform: [66960.0, 77040.0]}
   - kpi: business.merch_gmv_usd_per_min
-    factor: {uniform: [0.20, 0.50]}
+    value: {uniform: [10416.0, 11984.0], round: 1}
   - kpi: business.ad_revenue_usd_per_min
-    factor: {uniform: [0.25, 0.55]}
+    value: {uniform: [51382.0, 59118.0], round: 1}

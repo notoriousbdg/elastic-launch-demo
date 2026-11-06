@@ -1,0 +1,37 @@
+name: "GT aws_rds_otel: free_storage_space_low"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-AWSRDS-FREE-STORAGE-SPACE-LOW
+sensor_type: impact_key_probe
+affected_services:
+  - gt-awsrds-aws-svc-1
+cascade_services:
+  - gt-awsrds-aws-svc-2
+description: "Tests impact_key free_storage_space_low on generator aws_rds_otel."
+investigation_notes: |-
+  1. Verify aws_rds_otel is active and reporting metrics.
+  2. Check that the free_storage_space_low metric has reached the trigger value (10737418240.0).
+  3. Confirm generator_impact for aws_rds_otel.free_storage_space_low is set to 10737418240.0.
+  4. Look for correlated changes in service gt-awsrds-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_free_storage_space_low_baseline
+error_message: "GT-PROBE: gen=aws_rds_otel key=free_storage_space_low value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=aws_rds_otel
+  impact_key: free_storage_space_low
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 10737418240.0
+  svc_name: gt-awsrds-aws-svc-1
+rca_clues:
+  gt-awsrds-aws-svc-1:
+    probe.generator: aws_rds_otel
+    probe.impact_key: free_storage_space_low
+    probe.trigger_value: 10737418240.0
+  gt-awsrds-aws-svc-2:
+    probe.upstream_generator: aws_rds_otel
+    probe.upstream_key: free_storage_space_low
+generator_impact:
+  aws_rds_otel:
+    free_storage_space_low: 10737418240.0

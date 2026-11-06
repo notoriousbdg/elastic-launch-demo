@@ -1,0 +1,37 @@
+name: "GT supabase_otel: filesystem_nearly_full"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-SUPABASE-FILESYSTEM-NEARLY-FULL
+sensor_type: impact_key_probe
+affected_services:
+  - gt-supabase-aws-svc-1
+cascade_services:
+  - gt-supabase-aws-svc-2
+description: "Tests impact_key filesystem_nearly_full on generator supabase_otel."
+investigation_notes: |-
+  1. Verify supabase_otel is active and reporting metrics.
+  2. Check that the filesystem_nearly_full metric has reached the trigger value (0.93).
+  3. Confirm generator_impact for supabase_otel.filesystem_nearly_full is set to 0.93.
+  4. Look for correlated changes in service gt-supabase-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_filesystem_nearly_full_baseline
+error_message: "GT-PROBE: gen=supabase_otel key=filesystem_nearly_full value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=supabase_otel
+  impact_key: filesystem_nearly_full
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 0.93
+  svc_name: gt-supabase-aws-svc-1
+rca_clues:
+  gt-supabase-aws-svc-1:
+    probe.generator: supabase_otel
+    probe.impact_key: filesystem_nearly_full
+    probe.trigger_value: 0.93
+  gt-supabase-aws-svc-2:
+    probe.upstream_generator: supabase_otel
+    probe.upstream_key: filesystem_nearly_full
+generator_impact:
+  supabase_otel:
+    filesystem_nearly_full: 0.93

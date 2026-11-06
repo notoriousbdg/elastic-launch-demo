@@ -8,9 +8,9 @@ affected_services:
 cascade_services:
 - activation-service
 - provisioning-service
-description: Billing mediation node failure causing CDR deduplication errors and incorrect charge application
+description: Billing mediation node failure leaving its CDR Kafka partitions unconsumed, causing CDR deduplication errors and incorrect charge application
 investigation_notes: |
-  1. Check mediation node health — node failure causes CDR routing to surviving nodes, which may lack the deduplication state for in-flight CDRs. This leads to duplicate charges.
+  1. Check mediation node health — the failed node's partitions (P2,P3) stay unconsumed (consumer lag grows) until a surviving node takes them over. That node replays from the last checkpoint without the failed node's dedup state, so CDRs rated before the crash can be charged again.
   2. CDR deduplication uses a 24-hour sliding window with SHA-256 hash of (MSISDN, timestamp, duration, APN). Node failure loses the in-memory dedup window for that node's partition.
   3. Duplicate charge detection: SELECT msisdn, COUNT(*) FROM cdr_rated WHERE ts > NOW() - INTERVAL 1 HOUR GROUP BY msisdn, event_hash HAVING COUNT(*) > 1. Flag these for reversal.
   4. Provisioning-service and activation-service are impacted because new activations require a billing validation step — if mediation is unhealthy, the validation returns errors.
@@ -45,8 +45,8 @@ correlation_attr:
   key: billing.mediation_node_config
   value: mediation-v3.0.0-rc2
 fault_params:
-  mediation_node: {choice: [mediation-01, mediation-02, mediation-03]}
-  mediation_partition: {choice: ['P0,P1', 'P2,P3', 'P4,P5']}
+  mediation_node: mediation-02
+  mediation_partition: 'P2,P3'
   duplicate_cdr_count: {randint: [100, 1000]}
   checkpoint_age_min: {randint: [5, 60]}
   cdrs_at_risk: {randint: [5000, 50000]}
@@ -69,3 +69,6 @@ business_impact:
     factor: {uniform: [3.0, 6.0]}
   - kpi: business.voluntary_churn_rate_pct
     factor: {uniform: [1.5, 3.5]}
+generator_impact:
+  kafka_otel:
+    high_consumer_lag_per_partition: 20000.0

@@ -1,0 +1,93 @@
+name: Sqs Fulfillment Consumer Lag
+subsystem: fulfillment
+vehicle_section: fulfillment_pipeline
+error_type: FUL-SQS-CONSUMER-LAG
+sensor_type: health_check
+affected_services: [fulfillment-worker]
+cascade_services: [orders-service]
+
+description: >
+  After an order surge the fulfillment-worker ECS consumers fall behind, so the SQS visible backlog grows and the oldest message age keeps climbing.
+
+investigation_notes: |
+  1. Search body.text LIKE *FUL-SQS-CONSUMER-LAG* and confirm queue={queue_name} reports backlog={visible_messages} with oldest_age_s={oldest_age_s}.
+  2. Compare CloudWatch ApproximateNumberOfMessagesVisible and ApproximateAgeOfOldestMessage for the queue against its own baseline; both rising while NumberOfMessagesDeleted stays flat means consumers are the bottleneck, not producers.
+  3. Check the fulfillment-worker ECS service: running_tasks={running_tasks} of desired={desired_tasks} and CPU near {task_cpu_pct}% show the consumers are saturated, not failing.
+  4. Confirm DLQ depth is 0 and ApproximateNumberOfMessagesNotVisible is below the in-flight limit (120,000 for a standard queue), so messages are only waiting and no poison messages are involved.
+  5. Check orders-service rca_clues (fulfillment.pending_orders): pending orders rise with the backlog, but order writes to orders-db still succeed.
+  6. Remediation is bounded and safe: scale out fulfillment-worker consumers (raise desired count to {target_tasks}); the backlog drains at the new consumer rate and the oldest message age recovers within minutes.
+remediation_action: scale_out_fulfillment_consumers
+
+error_message: |
+  FUL-SQS-CONSUMER-LAG: queue={queue_name} visible_messages={visible_messages} oldest_age_s={oldest_age_s} running_tasks={running_tasks}
+
+stack_trace: |
+  === SQS CONSUMER LAG REPORT ===
+  queue={queue_name}  region=us-west-2  consumer=fulfillment-worker (ECS Fargate)
+  --- CLOUDWATCH METRICS ---
+    ApproximateNumberOfMessagesVisible={visible_messages}  (baseline ~120)
+    ApproximateAgeOfOldestMessage={oldest_age_s}s  (baseline ~15s)
+    NumberOfMessagesDeleted=flat  NumberOfMessagesReceived=flat
+  --- CONSUMER STATE ---
+    ecs_service=fulfillment-worker  running_tasks={running_tasks}  desired_tasks={desired_tasks}
+    task_cpu_utilization={task_cpu_pct}%  receive_batch_size=10
+  --- ASSESSMENT ---
+    dlq_depth=0  poison_messages=false  cause=insufficient_consumer_capacity
+  ACTION: scale_out_consumers=true  target_tasks={target_tasks}  alert=FUL-SQS-CONSUMER-LAG
+
+infrastructure_events:
+- body: '[CloudWatch] Alarm in ALARM: awsorders-fulfillment-queue ApproximateAgeOfOldestMessage > 300s for 3 datapoints region=us-west-2'
+  severity: WARN
+  event_name: aws.cloudwatch.AlarmStateChange
+  service: fulfillment-worker
+  attributes:
+    cloud.provider: aws
+    cloud.service: sqs
+    aws.cloudwatch.alarm_name: awsorders-fulfillment-oldest-message-age
+    aws.sqs.queue_name: awsorders-fulfillment-queue
+    infrastructure.source: CloudWatch
+
+correlation_attr:
+  key: deployment.fulfillment_worker_desired_count
+  value: ecs-fulfillment-worker-desired-4
+
+fault_params:
+  queue_name: awsorders-fulfillment-queue
+  visible_messages: {randint: [5200, 14000]}
+  oldest_age_s: {randint: [920, 2400]}
+  running_tasks: 4
+  desired_tasks: 4
+  task_cpu_pct: {randint: [88, 99]}
+  target_tasks: {choice: [10, 12, 16]}
+
+rca_clues:
+  fulfillment-worker:
+    sqs.messages_visible: {randint: [5200, 14000]}
+    ecs.task_cpu_utilization_pct: {randint: [88, 99]}
+    sqs.dlq_depth: 0
+    sqs.messages_in_flight: {randint: [30, 40]}
+  orders-service:
+    fulfillment.pending_orders: {randint: [400, 3000]}
+    fulfillment.enqueue_rate_vs_baseline: {uniform: [2.5, 4.0], round: 1}
+
+business_impact:
+- kpi: business.oldest_unfulfilled_order_min
+  factor:
+    uniform: [5.0, 12.0]
+    round: 1
+- kpi: business.fulfillment_backlog
+  factor:
+    uniform: [4.0, 9.0]
+    round: 1
+- kpi: business.revenue_usd_per_min
+  factor:
+    uniform: [0.35, 0.65]
+- kpi: business.latency_p99_ms
+  factor:
+    uniform: [1.4, 2.2]
+generator_impact:
+  aws_sqs_otel:
+    high_backlog: 5000.0
+    oldest_message_age_high: 900.0
+  aws_ecs_otel:
+    cpu_utilization_high: 92.0

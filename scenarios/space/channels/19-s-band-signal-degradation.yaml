@@ -30,7 +30,7 @@ stack_trace: |-
   Eb/No                {snr_db}dB     {min_snr_db}dB     **BELOW_THRESHOLD**
   CHANNEL              {rf_channel}        --         --
   ---------------------------------------------------------------
-  LINK MARGIN: -{snr_db}dB | REQUIRED: +3.0dB
+  LINK MARGIN: NEGATIVE (Eb/No {snr_db}dB vs {min_snr_db}dB required) | DESIGN MARGIN: +3.0dB
   COMM-SIGNAL-DEGRAD: S-band Eb/No below threshold on channel {rf_channel}
   ACTION: Increase transmit power or switch to backup antenna feed
 correlation_attr:
@@ -45,8 +45,8 @@ rca_clues:
     comms.eirp_dbw: {uniform: [35.0, 39.0], round: 1}
     comms.antenna_gain_dbi: {uniform: [32.0, 35.0], round: 1}
   sensor-validator:
-    validation.link_margin_db: {uniform: [-3.0, 0.0], round: 1}
-    validation.rain_fade_detected: {choice: [true, false]}
+    validation.link_margin_db: {uniform: [-9.0, -4.0], round: 1}
+    validation.rain_fade_detected: false
   mission-control:
     upstream.degraded_subsystem: communications
     telemetry.comm_status: degraded
@@ -54,10 +54,10 @@ rca_clues:
     relay.s_band_quality: poor
 business_impact:
   - kpi: business.downlink_data_rate_mbps
-    factor: {uniform: [0.25, 0.55]}
+    value: {uniform: [75.56, 86.94], round: 1}
   - kpi: business.contact_window_utilization_pct
-    factor: {uniform: [0.50, 0.75]}
+    factor: {uniform: [0.5, 0.75]}
   - kpi: business.packet_loss_rate_pct
     factor: {uniform: [4.0, 9.0]}
   - kpi: business.ground_station_availability_pct
-    factor: {uniform: [0.60, 0.82]}
+    factor: {uniform: [0.6, 0.82]}

@@ -13,37 +13,42 @@ description: Inventory replication lag causing overselling — orders accepted f
   and customer complaints
 investigation_notes: |-
   1. Check inventory-service logs for INVENTORY-SYNC-LAG — sync_lag_ms={sync_lag_ms} vs max acceptable {max_lag_ms}ms.
-  2. Check the replication consumer group lag: if consumer_lag={consumer_lag} messages, the inventory event stream is backed up.
+  2. Check the replication consumer group lag on the inventory events Kafka topic: if consumer_lag={consumer_lag} messages, the inventory event stream is backed up.
   3. Identify affected SKUs: query `inventory.stockout_rate_pct` metric — SKUs above 5% oversell risk are immediate candidates for a hold.
-  4. Review the sync writer throughput — if write_throughput_eps={write_throughput_eps} events/sec, a sudden spike in order volume exceeds replication capacity.
+  4. Review the sync writer throughput — if write_throughput_eps={write_throughput_eps} events/sec, a sudden spike in order volume exceeds replication capacity (an inbound event rate above the writer throughput confirms the writer cannot keep up).
   5. As an immediate fix, enable pessimistic locking on high-velocity SKUs to prevent overselling at the cost of slightly higher checkout latency.
   6. Trigger a full inventory reconciliation: compare order-management committed stock with inventory-service available stock and cancel any excess orders.
 remediation_action: force_inventory_resync
 error_message: '[InventoryService] INVENTORY-SYNC-LAG: sync_lag={sync_lag_ms}ms (max {max_lag_ms}ms) consumer_lag={consumer_lag}
   oversell_risk_skus={oversell_risk_skus} write_throughput={write_throughput_eps}eps'
 stack_trace: |-
-  InventorySyncException: INVENTORY-SYNC-LAG
-    at InventoryReplicator.consume(partition={kafka_partition})
-    at InventoryService.reconcile(sku_batch={sku_batch_id})
-  Sync lag:          {sync_lag_ms}ms (max: {max_lag_ms}ms)
+  inventory sync failed: reconcile sku_batch={sku_batch_id}: consume partition={kafka_partition}: INVENTORY-SYNC-LAG: lag {sync_lag_ms}ms exceeds {max_lag_ms}ms
+  goroutine 214 [running]:
+  runtime/debug.Stack()
+  	/usr/local/go/src/runtime/debug/stack.go:26 +0x5e
+  github.com/ecommerce/inventory-service/internal/sync.(*Replicator).consume(0xc0003a2000, {{0x1d4e8a0, 0xc000412180}})
+  	/app/internal/sync/replicator.go:142 +0x2a5
+  github.com/ecommerce/inventory-service/internal/service.(*InventoryService).reconcile(0xc000188000, {{0x1d4e8a0, 0xc000412180}})
+  	/app/internal/service/reconcile.go:88 +0x1c4
   Consumer lag:      {consumer_lag} messages
-  Oversell risk SKUs:{oversell_risk_skus}
+  Oversell risk SKUs: {oversell_risk_skus}
   Write throughput:  {write_throughput_eps} eps
-  Kafka partition:   {kafka_partition}
 correlation_attr:
   key: inventory.sync_lagging
   value: true
 fault_params:
   sync_lag_ms: {randint: [30000, 300000]}
   max_lag_ms: 5000
-  consumer_lag: {randint: [5000, 100000]}
+  consumer_lag: {randint: [40000, 150000]}
   oversell_risk_skus: {randint: [10, 500]}
   write_throughput_eps: {randint: [500, 3000]}
   kafka_partition: {randint: [0, 15]}
   sku_batch_id: {format: "SKU-BATCH-{n}", n: {randint: [1000, 9999]}}
 rca_clues:
   inventory-service:
-    inventory.consumer_lag_events: {randint: [5000, 100000]}
+    inventory.consumer_lag_events: {randint: [40000, 150000]}
+    inventory.inbound_event_rate_eps: {randint: [4000, 9000]}
+    inventory.sync_write_throughput_eps: {randint: [500, 3000]}
     inventory.sync_lag_ms: {randint: [30000, 300000]}
   order-management:
     order.oversell_count: {randint: [5, 100]}
@@ -59,6 +64,11 @@ business_impact:
   - kpi: business.returns_per_min
     factor: {uniform: [2.0, 4.0]}
   - kpi: business.fulfillment_sla_pct
-    factor: {uniform: [0.25, 0.50]}
+    factor: {uniform: [0.25, 0.5]}
   - kpi: business.inventory_turn_rate
-    factor: {uniform: [0.30, 0.55]}
+    value: {uniform: [2.59, 2.99], round: 2}
+
+generator_impact:
+  kafka_otel:
+    high_consumer_lag_per_partition: 40000.0
+    high_consumer_lag_by_topic: 120000.0

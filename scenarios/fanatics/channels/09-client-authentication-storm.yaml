@@ -3,26 +3,23 @@ subsystem: network_access
 vehicle_section: wireless_auth
 error_type: AUTH_FAILURE_STORM
 sensor_type: radius_auth
-affected_services:
-- wifi-controller
-- dns-dhcp-service
-cascade_services:
-- network-controller
+affected_services: [wifi-controller, dns-dhcp-service, card-printing-system]
+cascade_services: [network-controller]
 description: RADIUS authentication requests spiking beyond server capacity
 investigation_notes: |-
   1. Check RADIUS server logs: `journalctl -u freeradius -f` or NPS Event Viewer — look for repeated Access-Reject with reason codes.
   2. Identify the NAS (Network Access Server) generating the storm: the NAS IP in the logs points to a specific WLC or switch.
-  3. Common root cause: a certificate change on the RADIUS server breaks PEAP-MSCHAPv2 — all clients simultaneously retry authentication.
-  4. Check for a Group Policy update that changed supplicant settings: `netsh wlan show profiles` on affected Windows clients.
+  3. Check whether the RADIUS server certificate changed recently: if it did and EAP failures report the server cert as untrusted, clients abort PEAP-MSCHAPv2 at the TLS step and all retry at once — that certificate change is the cause.
+  4. Check for a Group Policy update that changed supplicant settings: `netsh wlan show profiles` on affected Windows clients (no supplicant profile change was pushed, ruling this out).
   5. As immediate mitigation, enable RADIUS rate limiting on the WLC: set max auth requests per second per SSID.
-  6. If the RADIUS server is overloaded, temporarily switch the SSID to PSK or MAC-auth bypass for critical warehouse devices while investigating.
+  6. RADIUS server load is a symptom of the retries, not the cause. If the RADIUS server is overloaded, temporarily switch the SSID to PSK or MAC-auth bypass for critical warehouse devices while investigating.
 remediation_action: reset_radius_service
 error_message: 'AUTH_FAILURE_STORM event_id=mist-auth-storm: rate={auth_requests_per_sec}/s (threshold {auth_threshold}/s),
   failures={auth_failures} timeouts={auth_timeouts} nas={radius_nas_ip} server={radius_server}'
 stack_trace: '{{"type": "AUTH_FAILURE_STORM", "event_id": "mist-auth-storm", "org_id": "fanatics-org-001", "nas_ip": "{radius_nas_ip}",
   "radius_server": "{radius_server}", "auth_rate": {auth_requests_per_sec}, "threshold": {auth_threshold}, "failures": {auth_failures},
   "timeouts": {auth_timeouts}, "eap_type": "PEAP-MSCHAPv2", "ssid": "Fanatics-Corp", "reason_codes": ["timeout", "reject",
-  "invalid_credential"]}}'
+  "tls_alert_unknown_ca"]}}'
 correlation_attr:
   key: deployment.radius_config
   value: nps-policy-2025q1-draft
@@ -40,18 +37,21 @@ rca_clues:
   wifi-controller:
     wifi.radius_queue_depth: {randint: [200, 1000]}
     wifi.eap_type: PEAP-MSCHAPv2
+    wifi.radius_server_cert_changed: true
+    wifi.eap_failure_reason: server_cert_untrusted
   dns-dhcp-service:
     dhcp.new_lease_failures: {randint: [20, 200]}
     dhcp.auth_dependent_scope: {choice: ["10.1.0.0/24", "10.2.0.0/24"]}
   network-controller:
     network.dot1x_failures_per_sec: {randint: [50, 500]}
     network.radius_server_load_pct: {uniform: [85, 100], round: 1}
+    network.supplicant_profile_changed: false
 business_impact:
   - kpi: business.app_sessions_per_min
-    factor: {uniform: [0.20, 0.50]}
+    value: {uniform: [334.8, 385.2]}
   - kpi: business.merch_gmv_usd_per_min
-    factor: {uniform: [0.25, 0.55]}
+    value: {uniform: [16926.0, 19474.0], round: 1}
   - kpi: business.churn_risk_index_0_100
     factor: {uniform: [2.0, 4.0]}
-  - kpi: business.net_satisfaction_proxy_nps
-    factor: {uniform: [0.25, 0.55]}
+  - kpi: business.ad_revenue_usd_per_min
+    value: {uniform: [31620.0, 36380.0], round: 1}

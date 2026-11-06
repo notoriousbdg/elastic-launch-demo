@@ -1,0 +1,37 @@
+name: "GT activemq_otel: high_jvm_heap_utilization"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-ACTIVEMQ-HIGH-JVM-HEAP-UTILIZATION
+sensor_type: impact_key_probe
+affected_services:
+  - gt-activemq-aws-svc-1
+cascade_services:
+  - gt-activemq-aws-svc-2
+description: "Tests impact_key high_jvm_heap_utilization on generator activemq_otel."
+investigation_notes: |-
+  1. Verify activemq_otel is active and reporting metrics.
+  2. Check that the high_jvm_heap_utilization metric has reached the trigger value (0.92).
+  3. Confirm generator_impact for activemq_otel.high_jvm_heap_utilization is set to 0.92.
+  4. Look for correlated changes in service gt-activemq-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_high_jvm_heap_utilization_baseline
+error_message: "GT-PROBE: gen=activemq_otel key=high_jvm_heap_utilization value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=activemq_otel
+  impact_key: high_jvm_heap_utilization
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 0.92
+  svc_name: gt-activemq-aws-svc-1
+rca_clues:
+  gt-activemq-aws-svc-1:
+    probe.generator: activemq_otel
+    probe.impact_key: high_jvm_heap_utilization
+    probe.trigger_value: 0.92
+  gt-activemq-aws-svc-2:
+    probe.upstream_generator: activemq_otel
+    probe.upstream_key: high_jvm_heap_utilization
+generator_impact:
+  activemq_otel:
+    high_jvm_heap_utilization: 0.99

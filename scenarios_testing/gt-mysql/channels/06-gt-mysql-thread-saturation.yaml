@@ -1,0 +1,37 @@
+name: "GT mysql_otel: thread_saturation"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-MYSQL-THREAD-SATURATION
+sensor_type: impact_key_probe
+affected_services:
+  - gt-mysql-aws-svc-1
+cascade_services:
+  - gt-mysql-aws-svc-2
+description: "Tests impact_key thread_saturation on generator mysql_otel."
+investigation_notes: |-
+  1. Verify mysql_otel is active and reporting metrics.
+  2. Check that the thread_saturation metric has reached the trigger value (0.8).
+  3. Confirm generator_impact for mysql_otel.thread_saturation is set to 0.8.
+  4. Look for correlated changes in service gt-mysql-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_thread_saturation_baseline
+error_message: "GT-PROBE: gen=mysql_otel key=thread_saturation value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=mysql_otel
+  impact_key: thread_saturation
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 0.8
+  svc_name: gt-mysql-aws-svc-1
+rca_clues:
+  gt-mysql-aws-svc-1:
+    probe.generator: mysql_otel
+    probe.impact_key: thread_saturation
+    probe.trigger_value: 0.8
+  gt-mysql-aws-svc-2:
+    probe.upstream_generator: mysql_otel
+    probe.upstream_key: thread_saturation
+generator_impact:
+  mysql_otel:
+    thread_saturation: 0.8

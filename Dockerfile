@@ -18,6 +18,16 @@ RUN npm install -g @anthropic-ai/claude-code
 RUN npm install -g mcp-remote
 RUN npm install -g https://github.com/elastic/example-mcp-app-observability/releases/latest/download/example-mcp-app-observability.tgz
 RUN npm install -g @elastic/opentelemetry-node
+RUN npm install -g @elastic/cli
+
+# Pre-wire Elastic CLI to this demo's ES/Kibana via env resolvers. Credentials
+# come from Helm-injected ELASTICSEARCH_URL / ELASTICSEARCH_API_KEY / KIBANA_URL
+# at runtime — nothing secret is baked into the image.
+COPY elasticrc.yml /root/.elasticrc.yml
+RUN chmod 0600 /root/.elasticrc.yml \
+    && mkdir -p /etc/bash_completion.d \
+    && elastic completion bash > /etc/bash_completion.d/elastic \
+    && echo '[ -f /etc/bash_completion.d/elastic ] && . /etc/bash_completion.d/elastic' >> /root/.bashrc
 
 RUN code-server --install-extension anthropic.claude-code
 
@@ -55,11 +65,14 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
-# Move entrypoint outside /app so it is always executed from the image layer.
-# Snapshot only scenarios/ for first-boot seeding of the scenarios PVC.
+# Move entrypoint outside /app so it is always executed from the image layer
+# even when a PVC shadows /app on first boot.
+# Snapshot the full /app and /root/.claude trees for first-boot seeding of
+# the workspace and claude-home PVCs.
 RUN cp /app/entrypoint.sh /entrypoint.sh \
     && chmod +x /entrypoint.sh \
-    && cp -rp /app/scenarios /app-seed-scenarios
+    && cp -rp /app /app-seed \
+    && cp -rp /root/.claude /root-claude-seed
 
 EXPOSE 8080 8443
 

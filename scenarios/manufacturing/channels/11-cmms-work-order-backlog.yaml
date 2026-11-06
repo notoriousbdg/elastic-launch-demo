@@ -10,7 +10,7 @@ cascade_services:
 - oee-analytics
 description: Preventive maintenance backlog growing across multiple critical assets; MTBF risk
 investigation_notes: |-
-  Root Cause: PM backlogs grow when scheduling priority is dominated by reactive (corrective) work, when craft labor is short, or when a parts shortage blocks a critical PM. Backlogs over 90 days for Class A assets correlate strongly with future unplanned downtime.
+  Root Cause: PM backlogs grow when scheduling priority is dominated by reactive (corrective) work, when craft labor is short, or when a parts shortage blocks a critical PM. Backlogs over 90 days for Class A assets correlate strongly with future unplanned downtime. Reactive work above 40% of scheduled maintenance hours means reactive work dominates; craft labor within ±5% of plan and zero parts-blocked work orders rule out labor and parts.
   Remediation: 1) Pull backlog by criticality: `cmms-admin backlog --asset-class A --overdue-days 30`. 2) Reprioritize and approve overtime if MTBF is dropping. 3) Confirm parts availability: `cmms-admin parts-status --asset {asset_id}`. 4) Re-balance the schedule: `cmms-admin rebalance-schedule --week-of {week}`. 5) Escalate to maintenance manager if Class A backlog exceeds policy threshold.
 remediation_action: rebalance_pm_schedule
 error_message: '[CMMS] CMMS-WORK-ORDER-BACKLOG: overdue={overdue_count} class_a_overdue={class_a_overdue} oldest_days={oldest_days}'
@@ -33,12 +33,15 @@ fault_params:
   overdue_count: {randint: [15, 95]}
   class_a_overdue: {randint: [3, 18]}
   oldest_days: {randint: [30, 120]}
-  asset_id: {choice: [MTR-CONV-01, SPN-MILL-04, PMP-COOL-02, CMP-AIR-01]}
+  asset_id: MTR-CONV-01
   week: 2026-W19
 rca_clues:
   maintenance-scheduler:
     cmms.class_a_overdue: {randint: [3, 18]}
     cmms.oldest_overdue_days: {randint: [30, 120]}
+    cmms.reactive_wo_share_pct: {uniform: [60, 80], round: 0}
+    cmms.craft_labor_vs_plan_pct: {uniform: [97, 103], round: 0}
+    cmms.parts_blocked_wo_count: 0
   mes-controller:
     mes.maintenance_at_risk_lines: {randint: [1, 4]}
   oee-analytics:

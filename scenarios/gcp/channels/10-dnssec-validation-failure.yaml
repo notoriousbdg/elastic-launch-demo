@@ -35,15 +35,15 @@ correlation_attr:
   key: network.dnssec_key_id
   value: ksk-2024q4-rotation
 fault_params:
-  dns_zone: {choice: [gcpnet-internal, gcpnet-prod-zone, gcpnet-services]}
-  dns_record_name: {choice: [api.gcpnet.internal, lb.gcpnet.prod, cdn.gcpnet.internal, vpn.gcpnet.internal]}
+  dns_zone: {choice: [gcpnet-public-zone, gcpnet-prod-zone, gcpnet-edge-zone]}
+  dns_record_name: {choice: [api.gcpnet.example.com, lb.gcpnet.example.com, cdn.gcpnet.example.com, vpn.gcpnet.example.com]}
   dns_record_type: {choice: [A, AAAA, CNAME, MX]}
-  dnssec_rrsig_expiry: {choice: [EXPIRED, "2h remaining", "30m remaining"]}
-  dnssec_ds_status: {choice: [MISSING, STALE, MISMATCHED_ALGORITHM]}
+  dnssec_rrsig_expiry: "VALID (6d remaining)"
+  dnssec_ds_status: STALE
   dnssec_error_count: {randint: [50, 500]}
 rca_clues:
   cloud-dns-resolver:
-    dns.rrsig_status: {choice: [EXPIRED, EXPIRING]}
+    dns.rrsig_status: VALID
     dns.ds_record_stale: true
   vpc-network-manager:
     vpc.dns_resolution_failures: {randint: [50, 300]}
@@ -55,9 +55,9 @@ rca_clues:
     ni.dnssec_chain_broken: true
 business_impact:
   - kpi: business.api_success_rate_pct
-    factor: {uniform: [0.55, 0.80]}
+    factor: {uniform: [0.55, 0.8]}
   - kpi: business.requests_per_min
-    factor: {uniform: [0.50, 0.75]}
+    value: {uniform: [1692600.0, 1947400.0]}
   - kpi: business.uptime_pct
     factor: {uniform: [0.85, 0.95]}
   - kpi: business.customer_sla_breach_count

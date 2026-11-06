@@ -11,7 +11,7 @@ cascade_services:
 - pharmacy-system
 description: Master Patient Index fails to resolve patient identity, risking duplicate records
 investigation_notes: |-
-  Root Cause: EMPI probabilistic matching scores fall below threshold when patient demographics contain discrepancies (name spelling variants, transposed DOB digits, SSN mismatches). The matching algorithm (Jaro-Winkler + probabilistic weighting) requires tuning when registration workflows change.
+  Root Cause: EMPI probabilistic matching scores fall below threshold when patient demographics contain discrepancies (name spelling variants, transposed DOB digits, SSN mismatches). The matching algorithm (Jaro-Winkler + probabilistic weighting) requires tuning when registration workflows change. A top candidate whose last name, first name, DOB and SSN-last4 all agree but still scores below the 85% threshold rules out demographic discrepancies and points to mis-tuned matching weights.
   Remediation: 1) Review the EMPI candidate match table for near-matches and manually adjudicate: `empi-admin review-queue --mrn {mrn}`. 2) Check if the matching algorithm weights need adjustment: `empi-admin config --show-weights`. 3) Run a patient index reconciliation report: `empi-admin reconcile --facility FACILITY-01 --threshold 40`. 4) For confirmed duplicates, merge records via HIM worklist: `empi-admin merge --source MRN-DUPLICATE --target MRN-PRIMARY --reason 'duplicate_registration'`. 5) Notify HIM (Health Information Management) department to review and finalize identity resolution. 6) Audit downstream systems (lab, pharmacy, billing) for orders linked to the duplicate MRN.
 remediation_action: reconcile_patient_index
 error_message: '[EHR] EMPI-MATCH-FAIL: mrn={mrn} encounter={encounter_id} score={match_score}% threshold={match_threshold}%
@@ -46,6 +46,8 @@ rca_clues:
   ehr-system:
     empi.matching_algorithm: jaro_winkler
     empi.threshold_pct: 85
+    empi.top_candidate_field_mismatches: 0
+    empi.best_match_score_pct: {uniform: [45.0, 78.0], round: 1}
   patient-monitor:
     vitals.patient_id_confidence: low
     vitals.dual_band_mismatch: true
@@ -61,6 +63,6 @@ business_impact:
   - kpi: business.patient_safety_events_per_min
     factor: {uniform: [2.0, 4.0]}
   - kpi: business.admits_per_min
-    factor: {uniform: [0.25, 0.55]}
+    value: {uniform: [0.48, 0.56], round: 2}
   - kpi: business.readmission_risk_index_0_100
     factor: {uniform: [1.5, 2.8]}

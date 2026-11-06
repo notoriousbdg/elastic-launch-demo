@@ -50,7 +50,7 @@ Choose from 6 industry verticals — space launch, sports streaming, financial s
 - **Web-based scenario selector** — choose an industry vertical, connect to Elastic, deploy with one click
 - **Python deployer** — automatically provisions agent, tools, workflows, alert rules, dashboards, KB docs, and significant events in Elastic
 - **Chaos controller UI** for triggering and resolving faults during demos
-- **Background telemetry generators** — host metrics, Kubernetes metrics, Nginx metrics, VPC flow logs, MySQL logs, distributed traces
+- **Background telemetry generators** — host metrics, Kubernetes metrics, Nginx metrics, VPC flow logs, MySQL logs, distributed traces, plus one generator per Elastic OTel integration package (AWS, Azure and GCP services, databases, queues, proxies, Temporal, collector internal telemetry, profiling, browser RUM and Android/iOS)
 - **Elastic integration** — significant event detection with ES|QL rules, AI agent investigation, automated remediation workflows
 - **Auto-remediation** — alert fires, workflow runs AI agent for RCA, agent calls remediation API, user gets email notification
 - **Multi-tenancy** — multiple scenarios can run simultaneously with independent deployment tracking
@@ -69,9 +69,12 @@ Choose from 6 industry verticals — space launch, sports streaming, financial s
 | banking | Retail Banking Platform | Retail Banking | banking |
 | ecommerce | Global Commerce Platform | E-Commerce | ecommerce |
 | manufacturing | Manufacturing Operations Platform | Manufacturing / OT | mfg |
+| telecom | Meridian Telecom 5G Platform | Telecommunications | meridian |
 | gcp | Google Cloud Network Operations | GCP / Networking | gcpnet |
+| aws | AWS Orders Platform | E-Commerce / AWS | awsorders |
+| azure | Azure GenAI Assistant | GenAI / Azure | azureai |
 
-Each scenario provides its own services, fault channels, UI theme, terminology, and configuration. The scenario framework (`scenarios/base.py`) defines the interface; each scenario directory implements it.
+Each scenario provides its own services, fault channels, UI theme, terminology, and configuration. The scenario framework (`scenario_engine/base.py`) defines the interface; each scenario directory supplies YAML that implements it.
 
 ---
 
@@ -119,10 +122,10 @@ Navigate to `http://<your-host>/` — this opens the scenario selector where you
 # Trigger Channel 2
 curl -X POST http://<host>/api/chaos/trigger \
   -H 'Content-Type: application/json' \
-  -d '{"channel": 2}'
+  -d '{"channel": 2, "deployment_id": "<scenario-id>"}'
 
 # Resolve
-curl -X POST http://<host>/api/remediate/2
+curl -X POST 'http://<host>/api/remediate/2?deployment_id=<scenario-id>'
 ```
 
 ---
@@ -160,6 +163,13 @@ See [docs/CHANNEL_REFERENCE.md](docs/CHANNEL_REFERENCE.md) for full details. Oth
 
 ## API Reference
 
+Routes that act on one deployment (chaos, status, remediate, daily-update, scenario, detect,
+teardown) take a `deployment_id`, which is the scenario id (for example `banking`): a
+`?deployment_id=` query parameter on GET/remediate routes, or a `deployment_id` field in POST
+bodies. If you omit it and exactly one deployment is running, that deployment is used. With
+more than one running, the route returns `400` with the list of running deployment ids. Every
+scoped response carries an `X-Deployment-Id` header naming the deployment that answered.
+
 ### Health & Status
 
 ```
@@ -186,7 +196,6 @@ GET  /api/setup/progress            # Deployment progress (SSE)
 GET  /api/setup/detect              # Auto-detect Elastic credentials
 GET  /api/setup/env-creds           # Check if env creds are pre-configured
 GET  /api/setup/active-deploys      # List in-progress deployments
-GET  /api/setup/auto-deploy         # Auto-deploy status (in_progress, deployment_id)
 POST /api/setup/teardown            # Tear down Elastic resources
 POST /api/setup/stop-and-teardown   # Stop telemetry and tear down
 GET  /api/setup/teardown-progress   # Teardown progress
@@ -235,23 +244,21 @@ elastic-launch-demo/
 │   ├── registry.py                  # InstanceRegistry (multi-tenancy)
 │   ├── store.py                     # DeploymentStore (SQLite persistence)
 │   ├── op_queue.py                  # Remediation operation queue
-│   ├── services/                    # 9 simulated microservices
+│   ├── services/                    # Simulated microservices
 │   │   ├── base_service.py          # Abstract base with telemetry helpers
 │   │   ├── manager.py               # Service lifecycle manager
-│   │   └── *.py                     # Individual service implementations
+│   │   ├── telemetry_dsl.py         # YAML telemetry interpreter (YamlService)
+│   │   └── expr.py                  # Restricted expression evaluator
 │   ├── chaos/                       # Chaos injection system
 │   │   ├── controller.py            # Channel state management
-│   │   ├── channels.py              # Channel definitions helper
-│   │   └── remediation_poller.py    # Polls op_queue and calls controller.resolve()
+│   │   ├── protocol.py              # ChaosSource interface
+│   │   └── remediation_poller.py    # Polls remediation docs and calls controller.resolve()
 │   ├── selector/static/             # Scenario selector UI (front page)
 │   ├── chaos_ui/static/             # Chaos controller UI
 │   └── notify/                      # Notification handlers
-│       ├── email_handler.py         # Elastic Cloud SMTP
-│       ├── twilio_handler.py        # SMS + voice via Twilio
-│       └── slack_handler.py         # Slack webhooks
-├── scenarios/
-│   ├── base.py                      # BaseScenario ABC
-│   ├── __init__.py                  # ScenarioRegistry — discovers scenarios/*/scenario.yaml
+│       └── email_handler.py         # Elastic Cloud SMTP
+├── scenario_engine/                 # BaseScenario ABC, YAML loader, fault DSL
+├── scenarios/                       # One folder per vertical (YAML only)
 │   ├── space/                       # NOVA-7 Space Mission
 │   │   ├── scenario.yaml            # identity, infra, agent, KPIs, trace attrs
 │   │   ├── channels/                # 20 fault channel YAML files
@@ -263,18 +270,25 @@ elastic-launch-demo/
 │   ├── banking/                     # Retail Banking Platform
 │   ├── ecommerce/                   # Global Commerce Platform
 │   ├── manufacturing/               # Manufacturing Operations Platform
-│   └── gcp/                         # Google Cloud Network Operations
-├── log_generators/
-│   ├── host_metrics_generator.py    # system.* host metrics (3 hosts)
-│   ├── k8s_metrics_generator.py     # Kubernetes node/pod/container metrics
-│   ├── nginx_metrics_generator.py   # Nginx receiver metrics
-│   ├── nginx_log_generator.py       # Nginx access/error logs
-│   ├── mysql_log_generator.py       # MySQL query logs
-│   ├── vpc_flow_generator.py        # VPC flow logs
-│   ├── jvm_metrics_generator.py     # JVM metrics for Java services
-│   ├── raw_access_log_generator.py  # Raw HTTP access logs
-│   ├── infra_topology.py            # Infrastructure topology helpers
-│   └── trace_generator.py           # Distributed traces
+│   ├── telecom/                     # Meridian Telecom 5G Platform
+│   ├── gcp/                         # Google Cloud Network Operations (GCP only)
+│   ├── aws/                         # AWS Orders Platform (AWS only, all AWS generators)
+│   └── azure/                       # Azure GenAI Assistant (Azure only, all Azure generators)
+├── generators/                      # 71 telemetry generator plugin packages (PVC-mounted at /app/generators)
+│   └── <generator_id>/              # e.g. traces/, raw_access/, host_metrics/, kubernetes_otel/, mysql_otel/
+│       ├── __init__.py              # SPEC: GeneratorSpec — signals, datasets, chaos impact_keys (imports generator_engine.spec only)
+│       ├── generator.py             # run(client, stop_event, *, scenario_data, chaos_controller)
+│       └── test_generator.py        # technology-specific unit tests
+├── generator_engine/                # Image-immutable engine that drives generators/ (never edited via import/export)
+│   ├── registry.py                  # Discovers generators/*/SPEC; enabled_specs() / load_entrypoint(); CLI --list/--describe
+│   ├── spec.py                      # GeneratorSpec dataclass — the plugin contract
+│   ├── schema_version.py            # SPEC schema versioning + compatibility status
+│   ├── infra_topology.py            # Shared host/k8s/pod topology — deterministic IDs across all signals
+│   ├── db_common.py                 # Shared DB/infra helpers + resolve_active_chaos(); stable OTLP counter start_ns
+│   ├── tick.py                      # Shared run_tick_loop used by every generator
+│   ├── es_doc_common.py             # Shared ES bulk document builders
+│   ├── azure_common.py              # Shared Azure resource/metric helpers
+│   └── logs_otel_error_heal.py      # OTel log error/heal cycle helper
 ├── elastic_config/
 │   ├── deployer.py                  # Orchestrates all deploy/teardown steps
 │   ├── deployer_base.py             # Shared mixin base
@@ -333,10 +347,10 @@ elastic-launch-demo/
 |-----------|-----------|
 | Application | Python 3.11, FastAPI, uvicorn |
 | Telemetry Protocol | OpenTelemetry (OTLP JSON over HTTP, direct to Elastic) |
-| HTTP Client | httpx with HTTP/2 |
+| HTTP Client | httpx (HTTP/1.1 connection pool) |
 | Observability Platform | Elastic Cloud (Elasticsearch, Kibana) |
 | AI Agent | Elastic Agent Builder (tools, KB, system prompt) |
 | Workflows | Elastic Workflows (alert → search → AI agent → remediate → email) |
 | Persistence | SQLite (deployment state) |
 | Deployment | EC2 (uvicorn on port 8080) |
-| Notifications | Elastic Cloud SMTP, Twilio (SMS + voice), Slack Webhooks |
+| Notifications | Elastic Cloud SMTP |

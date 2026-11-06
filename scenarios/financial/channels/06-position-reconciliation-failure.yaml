@@ -12,7 +12,7 @@ description: Position records diverge between real-time and end-of-day systems
 investigation_notes: |-
   1. Check risk-calculator logs for RISK-POSITION-RECON — note instrument, account_id, and position_delta between realtime and EOD systems.
   2. Query FROM logs.otel.financial.* | WHERE body.text LIKE "*RISK-POSITION-RECON*" | STATS sum(position_delta) BY instrument to find largest breaks.
-  3. Inspect settlement-processor for missing_fills and late_cancels — these are the most common root causes of reconciliation breaks.
+  3. Inspect settlement-processor for missing_fills and late_cancels — these are the most common root causes of reconciliation breaks (more than 3 missing fills with zero late cancels points at missing fills).
   4. Check audit-logger for amendment records around the last_match timestamps to identify any unbooked cancel-replace pairs.
   5. If break is MATERIAL (delta > 1000 shares or $500K notional), block settlement for the account and escalate to operations for manual resolution.
 remediation_action: block_settlement_and_escalate_ops
@@ -26,30 +26,31 @@ stack_trace: |-
   eod_system      {eod_qty}     $244.50     $11,918,550
   DELTA           {position_delta}                 $511,550
   --- BREAK ANALYSIS ---
-    missing_fills=7  late_cancels=2  amendment_lag=3
+    missing_fills={missing_fills}  late_cancels=0  amendment_lag=0
     last_match_rt=14:32:07.112  last_match_eod=14:31:54.890
     rt_source=OMS-REALTIME  eod_source=DTCC-NSCC-CNS
   recon_status=BREAK  severity=MATERIAL  auto_resolve=false
   ACTION: escalate_ops=true  block_settlement=true  alert=RISK-POSITION-RECON
 correlation_attr: {}
 fault_params:
-  instrument: {choice: [US.AAPL, US.GOOGL, US.MSFT, US.AMZN, US.TSLA, FX.EURUSD, FX.GBPUSD, FUT.ES, FUT.NQ, OPT.SPX]}
-  realtime_qty: {randint: [1000, 100000]}
-  eod_qty: {randint: [1000, 100000]}
-  position_delta: {randint: [1, 5000]}
+  instrument: {choice: [US.AAPL, US.GOOGL, US.MSFT, US.AMZN, US.TSLA, US.NVDA, US.META, US.JPM, US.BAC, US.XOM]}
+  realtime_qty: 50834
+  eod_qty: 48746
+  position_delta: 2088
+  missing_fills: {randint: [5, 20]}
   account_id:
     format: "ACC-{n}"
     n: {randint: [10000, 99999]}
 rca_clues:
   risk-calculator:
-    risk.recon_break_delta_shares: {randint: [1, 5000]}
-    risk.missing_fills_count: {randint: [1, 20]}
+    risk.recon_break_delta_shares: 2088
+    risk.missing_fills_count: {randint: [5, 20]}
   settlement-processor:
     settlement.blocked_on_recon_break: true
-    settlement.late_cancel_count: {randint: [1, 10]}
+    settlement.late_cancel_count: 0
   audit-logger:
-    audit.amendment_lag_count: {randint: [1, 15]}
-    audit.unbooked_cancel_replace: {randint: [0, 10]}
+    audit.amendment_lag_count: 0
+    audit.unbooked_cancel_replace: 0
 business_impact:
   - kpi: business.reconciliation_breaks
     factor: {uniform: [3.0, 7.0]}

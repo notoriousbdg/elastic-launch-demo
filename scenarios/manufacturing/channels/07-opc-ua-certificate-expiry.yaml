@@ -9,10 +9,10 @@ cascade_services:
 - mes-controller
 - ot-historian
 - shopfloor-portal
-description: TLS certificate between the OPC-UA gateway and aggregation server expired; secure channel rejected
+description: OPC-UA application instance certificate between the gateway and aggregation server expired; secure channel rejected
 investigation_notes: |-
-  Root Cause: OPC-UA app instance certificates have a hard expiry; once the `notAfter` date passes, the secure channel handshake is rejected by the server with status 0x80120000 (BadCertificateInvalid) or 0x80130000 (BadCertificateTimeInvalid). Auto-renewal jobs that depend on the cert still being valid for handshake will not renew themselves.
-  Remediation: 1) Check expiry: `openssl x509 -in /etc/scada/certs/app-instance.crt -noout -dates`. 2) Issue a fresh certificate via the OT PKI: `pki-cli issue --profile opcua-app-instance --cn scada-gateway-{plc_id}`. 3) Push the new cert to the gateway and trust list: `scada-admin install-cert --cert /tmp/new.crt`. 4) Also push to PLC trust list (out-of-band, via the engineering workstation). 5) Renegotiate channels: `scada-admin reconnect --all`. 6) Add a 30-day expiry alert via Elastic Watcher.
+  Root Cause: OPC-UA app instance certificates have a hard expiry; once the `notAfter` date passes, the secure channel handshake is rejected by the server with status 0x80120000 (BadCertificateInvalid) or 0x80140000 (BadCertificateTimeInvalid). Auto-renewal jobs that depend on the cert still being valid for handshake will not renew themselves.
+  Remediation: 1) Check expiry: `openssl x509 -in /etc/scada/certs/app-instance.crt -noout -dates`. 2) Issue a fresh certificate via the OT PKI: `pki-cli issue --profile opcua-app-instance --cn scada-gateway-prod`. 3) Push the new cert to the gateway and trust list: `scada-admin install-cert --cert /tmp/new.crt`. 4) Also push to PLC trust list (out-of-band, via the engineering workstation). 5) Renegotiate channels: `scada-admin reconnect --all`. 6) Add an expiry alert at 7 days remaining (these certs only live 30 days) via Elastic Watcher.
 remediation_action: renew_opcua_cert
 error_message: '[SCADA] OPC-UA-CERT-EXPIRY: subject={cert_subject} expired_days_ago={cert_expired_days} thumbprint={cert_thumbprint}
   affected_plcs={affected_plcs}'
@@ -20,11 +20,11 @@ stack_trace: |-
   === OPC-UA CERTIFICATE STATUS ===
   Subject:      {cert_subject}
   Issuer:       CN=Manufacturing OT Root CA
-  NotBefore:    2024-08-15 00:00:00 UTC
+  NotBefore:    2026-03-13 00:00:00 UTC
   NotAfter:     {cert_expiry_date} (expired {cert_expired_days} days ago)
   Thumbprint:   {cert_thumbprint}
   ------------------------------------------------------------------------
-  Handshake:    REJECTED — status 0x80130000 (BadCertificateTimeInvalid)
+  Handshake:    REJECTED — status 0x80140000 (BadCertificateTimeInvalid)
   Affected:     {affected_plcs}
   OPC-UA-CERT-EXPIRY: secure channel cannot be established
 correlation_attr:
@@ -32,7 +32,7 @@ correlation_attr:
   value: ot-pki-shortlived-30d
 fault_params:
   cert_subject: "CN=scada-gateway-prod, O=Manufacturing OT"
-  cert_expired_days: {randint: [1, 14]}
+  cert_expired_days: 9
   cert_thumbprint:
     format: "{a:016x}{b:016x}{c:08x}"
     a: {randint: [0, 9223372036854775807]}
@@ -43,7 +43,7 @@ fault_params:
 rca_clues:
   scada-gateway:
     opcua.cert_status: expired
-    opcua.cert_expired_days: {randint: [1, 14]}
+    opcua.cert_expired_days: 9
   mes-controller:
     mes.scada_link_status: down
   ot-historian:

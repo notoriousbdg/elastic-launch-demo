@@ -76,7 +76,7 @@ Pick channels with simple, universally relatable failures — fuel pressure, com
    ```bash
    curl -X POST http://<host>/api/chaos/trigger \
      -H 'Content-Type: application/json' \
-     -d '{"channel": 2}'
+     -d '{"channel": 2, "deployment_id": "<scenario-id>"}'
    ```
 3. **Watch the dashboard** — services go CRITICAL/WARNING with cascade effects
 4. **Switch to Kibana** — show error logs with structured attributes in Discover
@@ -91,7 +91,7 @@ Pick channels with simple, universally relatable failures — fuel pressure, com
 
 **Option B — curl:**
 ```bash
-curl -X POST http://<host>/api/remediate/2
+curl -X POST 'http://<host>/api/remediate/2?deployment_id=<scenario-id>'
 ```
 
 **Option C — Let Elastic Do It:** If the full workflow pipeline is configured, the AI agent calls the remediation API automatically after completing its investigation.
@@ -109,7 +109,7 @@ For longer demos, trigger a second fault from a different subsystem while the fi
 | Dashboard is blank | Hard refresh (Ctrl+Shift+R). Check browser console for errors. |
 | No data in Kibana | Verify credentials in the scenario selector. Check the deployment progress for errors. |
 | Deployment failed | Check the progress panel for the specific step that failed. Common: invalid API key or missing permissions. |
-| Fault trigger has no effect | Check channel status: `curl http://<host>/api/chaos/status/2`. Channel may already be active. |
+| Fault trigger has no effect | Check channel status: `curl 'http://<host>/api/chaos/status/2?deployment_id=<scenario-id>'`. Channel may already be active. |
 | App is not responding | Check if the process is running: `ps aux | grep uvicorn`. Restart if needed. |
 
 For more details, see [TROUBLESHOOTING.md](TROUBLESHOOTING.md).

@@ -1,0 +1,37 @@
+name: "GT influxdb_otel: cache_write_errors"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-INFLUXDB-CACHE-WRITE-ERRORS
+sensor_type: impact_key_probe
+affected_services:
+  - gt-influxdb-aws-svc-1
+cascade_services:
+  - gt-influxdb-aws-svc-2
+description: "Tests impact_key cache_write_errors on generator influxdb_otel."
+investigation_notes: |-
+  1. Verify influxdb_otel is active and reporting metrics.
+  2. Check that the cache_write_errors metric has reached the trigger value (50.0).
+  3. Confirm generator_impact for influxdb_otel.cache_write_errors is set to 50.0.
+  4. Look for correlated changes in service gt-influxdb-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_cache_write_errors_baseline
+error_message: "GT-PROBE: gen=influxdb_otel key=cache_write_errors value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=influxdb_otel
+  impact_key: cache_write_errors
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 50.0
+  svc_name: gt-influxdb-aws-svc-1
+rca_clues:
+  gt-influxdb-aws-svc-1:
+    probe.generator: influxdb_otel
+    probe.impact_key: cache_write_errors
+    probe.trigger_value: 50.0
+  gt-influxdb-aws-svc-2:
+    probe.upstream_generator: influxdb_otel
+    probe.upstream_key: cache_write_errors
+generator_impact:
+  influxdb_otel:
+    cache_write_errors: 50.0

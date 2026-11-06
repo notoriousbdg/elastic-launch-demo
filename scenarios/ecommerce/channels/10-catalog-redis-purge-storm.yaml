@@ -1,0 +1,68 @@
+name: Catalog Redis Purge Storm
+subsystem: storefront
+vehicle_section: catalog_cache
+error_type: REDIS-PURGE-STORM
+sensor_type: redis_eviction_rate
+affected_services:
+- storefront-gateway
+- product-catalog
+cascade_services:
+- analytics-pipeline
+description: Bulk catalog key purge, then the refill of price-versioned keys, pushes Redis to maxmemory and floods the storefront with cold-cache origin traffic
+investigation_notes: |-
+  1. Check Redis memory and eviction metrics. A purge alone frees memory, but the catalog service refills new price-versioned keys while the purged keys are still being freed in the background (UNLINK lazy-free), so used_memory crosses ~90% of maxmemory (memory_approaching_maxmemory) and evictions spike (high_eviction_rate), pushing hot keys out and deepening the cold cache.
+  2. Identify the purge trigger: a bulk price update, product image refresh, or catalog deploy can DEL/UNLINK thousands of catalog keys simultaneously (catalog.purge_trigger names which one fired; no page-view spike rules out organic traffic).
+  3. If purged_keys={invalidation_keys} landed in one burst, this is a thundering herd — stagger FLUSH/DEL batches and enable request coalescing on the catalog service.
+  4. Review origin/catalog CPU — if origin_cpu_pct={origin_cpu_pct}%, backends are overwhelmed by cache-bypass reads. Serve stale keys with a short TTL while Redis recovers.
+  5. Raise maxmemory or reduce catalog key cardinality; rate-limit admin purge APIs to {max_invalidations_per_min}/min — a purge rate above that limit marks the storm.
+remediation_action: throttle_redis_purge
+error_message: '[StorefrontGateway] REDIS-PURGE-STORM: cache_hit_rate={cache_hit_rate_pct}% (normal >{normal_hit_rate_pct}%)
+  origin_rps={origin_rps} purged_keys={invalidation_keys} origin_cpu={origin_cpu_pct}%'
+stack_trace: |-
+  Traceback (most recent call last):
+    File "/app/storefront/product.py", line 64, in serve_product
+      page = self.catalog_cache.get_or_fetch(request.path)
+    File "/app/storefront/catalog_cache.py", line 219, in get_or_fetch
+      raise CachePurgeStorm("REDIS-PURGE-STORM")
+  storefront.cache.CachePurgeStorm: REDIS-PURGE-STORM
+  Request path:      {request_path}
+  Cache hit rate:    {cache_hit_rate_pct}% (normal: {normal_hit_rate_pct}%)
+  Origin RPS:        {origin_rps}
+  Purged keys:       {invalidation_keys}
+  Origin CPU:        {origin_cpu_pct}%
+  CDN edges:         {cdn_edge_count}
+correlation_attr:
+  key: storefront.redis_cache_cold
+  value: true
+fault_params:
+  cache_hit_rate_pct: {uniform: [5, 25], round: 1}
+  normal_hit_rate_pct: 92
+  origin_rps: {randint: [5000, 50000]}
+  invalidation_keys: {randint: [10000, 500000]}
+  origin_cpu_pct: {randint: [70, 98]}
+  max_invalidations_per_min: 1000
+  request_path: {choice: ["/p/12345", "/category/electronics", "/search?q=laptop", "/home"]}
+  cdn_edge_count: {randint: [3, 12]}
+rca_clues:
+  storefront-gateway:
+    storefront.redis_hit_rate_pct: {uniform: [5, 25], round: 1}
+    storefront.origin_rps_spike: {randint: [5000, 50000]}
+  product-catalog:
+    catalog.origin_requests_spike: {randint: [2000, 20000]}
+    catalog.request_coalescing_failures: {randint: [100, 2000]}
+    catalog.purge_trigger: bulk_price_update
+    catalog.admin_purge_rate_per_min: {randint: [5000, 50000]}
+  analytics-pipeline:
+    analytics.page_view_spike_detected: false
+    analytics.ingest_backpressure: true
+business_impact:
+  - kpi: business.sessions_per_min
+    value: {uniform: [446.4, 513.6]}
+  - kpi: business.page_views_per_min
+    value: {uniform: [3162.0, 3638.0]}
+  - kpi: business.conversion_rate_pct
+    value: {uniform: [1.15, 1.32], round: 2}
+generator_impact:
+  redis_otel:
+    high_eviction_rate: 350.0
+    memory_approaching_maxmemory: 95.0

@@ -23,11 +23,14 @@ stack_trace: |-
   TIMESTAMP: MET+00:04:14.005 | FRAME: 0x4A32 | SEQ: 18445
   ---------------------------------------------------------------
   SV_ID   EL    AZ     SNR    MULTIPATH   USED
-  G04     45    127    42.1   YES         NO
-  G07     62    203    38.7   YES         NO
+  G04     12    127    42.1   YES         NO
+  G07     18    203    38.7   YES         NO
   G09     28    315    44.2   NO          YES
   G12     71    089    46.0   NO          YES
-  G15     33    241    31.4   YES         NO
+  G15     9     241    31.4   YES         NO
+  G18     52    158    45.3   NO          YES
+  G21     39    022    43.8   NO          YES
+  G24     24    276    41.9   NO          YES
   ---------------------------------------------------------------
   AFFECTED SVs: {num_satellites} | PDOP: 8.7 (threshold 6.0)
   POSITION UNCERTAINTY: {uncertainty}m | SOLUTION: DEGRADED
@@ -37,15 +40,15 @@ correlation_attr:
   key: network.dns_resolver
   value: coredns-v1.11.4-patch2
 fault_params:
-  num_satellites: {randint: [3, 8]}
+  num_satellites: 3
   uncertainty: {uniform: [5.0, 50.0], round: 1}
 rca_clues:
   navigation:
-    gnc.sv_masked_count: {randint: [2, 5]}
+    gnc.sv_masked_count: 3
     gnc.pdop: {uniform: [6.5, 12.0], round: 1}
   sensor-validator:
     validation.gps_solution_quality: degraded
-    validation.multipath_svs: {choice: ["G04,G07,G15", "G07,G15"]}
+    validation.multipath_svs: "G04,G07,G15"
   mission-control:
     upstream.degraded_subsystem: guidance
     telemetry.nav_accuracy: reduced

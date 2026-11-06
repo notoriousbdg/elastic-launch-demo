@@ -1,0 +1,57 @@
+name: Retrieval Cache Stale
+subsystem: caching
+vehicle_section: caching_pipeline
+error_type: RAG-CACHE-STALE
+sensor_type: health_check
+affected_services: [retrieval-service]
+cascade_services: [chat-orchestrator]
+
+description: The retrieval-service result cache keeps serving grounding passages past their TTL after an AI Search index refresh.
+
+investigation_notes: |
+  1. Search body.text for *RAG-CACHE-STALE* and read stale_hit_pct={stale_hit_pct}% of cache hits for index {index_name}.
+  2. Compare cache_entry_age_s={cache_entry_age_s} to ttl_s={ttl_s}; entries older than the TTL are still being served, so the TTL is not a hard expiry (a sliding expiration renewed on every hit keeps hot entries alive indefinitely) and nothing evicts them when the index refreshes.
+  3. Check the last index refresh time ({index_refreshed_min_ago} min ago) and confirm the cache was not invalidated by it.
+  4. Look at chat-orchestrator grounding quality signals; answers cite outdated passages but nothing is corrupted at the source.
+  5. Flush the retrieval cache so entries repopulate from the refreshed AI Search index; this is safe and only adds brief latency.
+  6. Verify stale_hit_pct falls to zero and check the cache invalidation hook on index refresh.
+
+remediation_action: flush_retrieval_cache
+
+error_message: |
+  RAG-CACHE-STALE: index={index_name} stale_hit_pct={stale_hit_pct}% entry_age={cache_entry_age_s}s ttl={ttl_s}s index_refreshed={index_refreshed_min_ago}min_ago
+
+stack_trace: |
+  StaleCacheWarning: RAG-CACHE-STALE
+    at RetrievalService.get_passages(index={index_name})
+    at ResultCache.lookup(ttl={ttl_s})
+  Entry age:        {cache_entry_age_s}s
+  TTL:              {ttl_s}s
+  Stale hit rate:   {stale_hit_pct}%
+  Index refreshed:  {index_refreshed_min_ago} min ago
+
+correlation_attr:
+  key: retrieval.cache_config
+  value: result-cache-v2-ttl900s-no-index-invalidation
+
+fault_params:
+  index_name: {choice: [kb-articles-v4, product-docs-v7]}
+  stale_hit_pct: {uniform: [30.0, 85.0], round: 1}
+  cache_entry_age_s: {randint: [1800, 14400]}
+  ttl_s: 900
+  index_refreshed_min_ago: {randint: [10, 25]}
+
+rca_clues:
+  retrieval-service:
+    cache.stale_entries: {randint: [500, 9000]}
+    cache.max_entry_age_s: {randint: [1800, 14400]}
+    cache.invalidation_events_since_refresh: 0
+  chat-orchestrator:
+    grounding.outdated_citation_pct: {uniform: [20.0, 70.0], round: 1}
+    grounding.user_thumbs_down: {randint: [10, 120]}
+
+business_impact:
+  - kpi: business.error_rate_pct
+    factor: {uniform: [1.5, 3.0]}
+  - kpi: business.availability_pct
+    factor: {uniform: [0.92, 0.98]}

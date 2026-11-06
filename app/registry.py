@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import logging
 import threading
-from typing import Any
 
 from app.instance import ScenarioInstance
 
@@ -49,13 +48,6 @@ class InstanceRegistry:
         with self._lock:
             return dict(self._instances)
 
-    def first(self) -> ScenarioInstance | None:
-        """Return the first registered instance, or None."""
-        with self._lock:
-            if self._instances:
-                return next(iter(self._instances.values()))
-            return None
-
     def stop_all(self) -> None:
         """Stop all registered instances."""
         with self._lock:
@@ -66,11 +58,3 @@ class InstanceRegistry:
                 except Exception:
                     logger.exception("Error stopping instance %s", dep_id)
             self._instances.clear()
-
-    def __len__(self) -> int:
-        with self._lock:
-            return len(self._instances)
-
-    def __contains__(self, deployment_id: str) -> bool:
-        with self._lock:
-            return deployment_id in self._instances

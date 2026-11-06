@@ -1,0 +1,37 @@
+name: "GT supabase_otel: replication_lag_is_high"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-SUPABASE-REPLICATION-LAG-IS-HIGH
+sensor_type: impact_key_probe
+affected_services:
+  - gt-supabase-b-aws-svc-1
+cascade_services:
+  - gt-supabase-b-aws-svc-2
+description: "Tests impact_key replication_lag_is_high on generator supabase_otel."
+investigation_notes: |-
+  1. Verify supabase_otel is active and reporting metrics.
+  2. Check that the replication_lag_is_high metric has reached the trigger value (600.0).
+  3. Confirm generator_impact for supabase_otel.replication_lag_is_high is set to 600.0.
+  4. Look for correlated changes in service gt-supabase-b-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_replication_lag_is_high_baseline
+error_message: "GT-PROBE: gen=supabase_otel key=replication_lag_is_high value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=supabase_otel
+  impact_key: replication_lag_is_high
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 600.0
+  svc_name: gt-supabase-b-aws-svc-1
+rca_clues:
+  gt-supabase-b-aws-svc-1:
+    probe.generator: supabase_otel
+    probe.impact_key: replication_lag_is_high
+    probe.trigger_value: 600.0
+  gt-supabase-b-aws-svc-2:
+    probe.upstream_generator: supabase_otel
+    probe.upstream_key: replication_lag_is_high
+generator_impact:
+  supabase_otel:
+    replication_lag_is_high: 600.0

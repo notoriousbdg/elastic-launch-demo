@@ -1,0 +1,37 @@
+name: "GT traefik_otel: high_5xx_error_rate_by_service"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-TRAEFIK-HIGH-5XX-ERROR-RATE-BY-SERV
+sensor_type: impact_key_probe
+affected_services:
+  - gt-traefik-aws-svc-1
+cascade_services:
+  - gt-traefik-aws-svc-2
+description: "Tests impact_key high_5xx_error_rate_by_service on generator traefik_otel."
+investigation_notes: |-
+  1. Verify traefik_otel is active and reporting metrics.
+  2. Check that the high_5xx_error_rate_by_service metric has reached the trigger value (750.0).
+  3. Confirm generator_impact for traefik_otel.high_5xx_error_rate_by_service is set to 750.0.
+  4. Look for correlated changes in service gt-traefik-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_high_5xx_error_rate_by_service_baseline
+error_message: "GT-PROBE: gen=traefik_otel key=high_5xx_error_rate_by_service value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=traefik_otel
+  impact_key: high_5xx_error_rate_by_service
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 750.0
+  svc_name: gt-traefik-aws-svc-1
+rca_clues:
+  gt-traefik-aws-svc-1:
+    probe.generator: traefik_otel
+    probe.impact_key: high_5xx_error_rate_by_service
+    probe.trigger_value: 750.0
+  gt-traefik-aws-svc-2:
+    probe.upstream_generator: traefik_otel
+    probe.upstream_key: high_5xx_error_rate_by_service
+generator_impact:
+  traefik_otel:
+    high_5xx_error_rate_by_service: 750.0

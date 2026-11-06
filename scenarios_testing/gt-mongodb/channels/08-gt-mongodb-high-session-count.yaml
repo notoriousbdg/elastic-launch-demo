@@ -1,0 +1,37 @@
+name: "GT mongodb_otel: high_session_count"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-MONGODB-HIGH-SESSION-COUNT
+sensor_type: impact_key_probe
+affected_services:
+  - gt-mongodb-aws-svc-1
+cascade_services:
+  - gt-mongodb-aws-svc-2
+description: "Tests impact_key high_session_count on generator mongodb_otel."
+investigation_notes: |-
+  1. Verify mongodb_otel is active and reporting metrics.
+  2. Check that the high_session_count metric has reached the trigger value (3750.0).
+  3. Confirm generator_impact for mongodb_otel.high_session_count is set to 3750.0.
+  4. Look for correlated changes in service gt-mongodb-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_high_session_count_baseline
+error_message: "GT-PROBE: gen=mongodb_otel key=high_session_count value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=mongodb_otel
+  impact_key: high_session_count
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 3750.0
+  svc_name: gt-mongodb-aws-svc-1
+rca_clues:
+  gt-mongodb-aws-svc-1:
+    probe.generator: mongodb_otel
+    probe.impact_key: high_session_count
+    probe.trigger_value: 3750.0
+  gt-mongodb-aws-svc-2:
+    probe.upstream_generator: mongodb_otel
+    probe.upstream_key: high_session_count
+generator_impact:
+  mongodb_otel:
+    high_session_count: 3750.0

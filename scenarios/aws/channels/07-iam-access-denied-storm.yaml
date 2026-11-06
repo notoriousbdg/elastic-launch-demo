@@ -1,0 +1,89 @@
+name: Iam Access Denied Storm
+subsystem: inventory
+vehicle_section: inventory_pipeline
+error_type: INV-IAM-ACCESS-DENIED
+sensor_type: health_check
+affected_services: [inventory-service]
+cascade_services: [orders-service]
+
+description: >
+  An IAM policy change removes DynamoDB and SQS permissions from the inventory-service task role, producing a storm of AccessDenied errors in CloudTrail and failed stock reservations.
+
+investigation_notes: |
+  1. Search body.text for *INV-IAM-ACCESS-DENIED* and note the denied action ({denied_action}) and principal ({role_name}).
+  2. In CloudTrail, filter errorCode=AccessDenied for the assumed-role session of {role_name}; the error share is {error_pct}% of {denied_calls} calls in the window, against a baseline near zero.
+  3. Look for PutRolePolicy, DetachRolePolicy or CreatePolicyVersion on {role_name} just before the first denial (policy version {policy_version}).
+  4. Use the IAM policy simulator or Access Analyzer to confirm {denied_action} on {resource_arn} is now implicitly denied.
+  5. Check orders-service: stock reservation calls to inventory-service return 500 and the retry rate climbs.
+  6. Immediate action: restore the previous managed policy version on {role_name} (set the default version back to v{previous_policy_version}) and watch AccessDenied counts fall within a few minutes.
+
+remediation_action: restore_iam_role_policy
+
+error_message: |
+  INV-IAM-ACCESS-DENIED: AccessDenied role={role_name} action={denied_action} resource={resource_arn} denied_calls={denied_calls}
+
+stack_trace: |
+  === CLOUDTRAIL ACCESS DENIED REPORT ===
+  principal=assumed-role/{role_name}  account=781386958653  region=us-west-2
+  --- DENIED CALL ---
+    event_source={event_source}  event_name={denied_action}
+    errorCode=AccessDenied  resource={resource_arn}
+    message=User: arn:aws:sts::781386958653:assumed-role/{role_name}/inventory-task is not authorized to perform: {denied_action} on resource: {resource_arn} because no identity-based policy allows the {denied_action} action
+  --- POLICY CHANGE ---
+    change_event=CreatePolicyVersion  policy_version={policy_version}
+    previous_version=v{previous_policy_version}  removed_actions=dynamodb:*Item,sqs:SendMessage
+  --- IMPACT ---
+    denied_calls={denied_calls}  error_pct={error_pct}
+    stock_reservations_failed={failed_reservations}
+  ACTION: restore_policy_version=v{previous_policy_version}  alert=INV-IAM-ACCESS-DENIED
+
+infrastructure_events:
+  - body: '[CloudTrail] CreatePolicyVersion: policy=inventory-service-task-policy new_version=v7 set_as_default=true removed_actions=dynamodb:GetItem,dynamodb:UpdateItem,sqs:SendMessage region=us-west-2 event_source=iam.amazonaws.com'
+    severity: WARN
+    event_name: aws.cloudtrail.CreatePolicyVersion
+    service: inventory-service
+    attributes:
+      cloud.provider: aws
+      cloud.service: iam
+      aws.cloudtrail.event_name: CreatePolicyVersion
+      aws.iam.role: inventory-service-task-role
+      aws.iam.policy_version: v7
+      infrastructure.source: CloudTrail
+
+correlation_attr:
+  key: infra.iam_policy_version
+  value: inventory-service-task-policy-v7
+
+fault_params:
+  role_name: inventory-service-task-role
+  denied_action: dynamodb:UpdateItem
+  event_source: dynamodb.amazonaws.com
+  resource_arn: arn:aws:dynamodb:us-west-2:781386958653:table/inventory-stock
+  policy_version: v7
+  previous_policy_version: 6
+  denied_calls: {randint: [300, 1800]}
+  error_pct: {randint: [55, 70]}
+  failed_reservations: {randint: [80, 600]}
+
+rca_clues:
+  inventory-service:
+    iam.role: inventory-service-task-role
+    iam.policy_version_changed: true
+    iam.denied_action: dynamodb:UpdateItem
+    cloudtrail.access_denied_count: {randint: [300, 1800]}
+  orders-service:
+    upstream.inventory_reserve_failures: {randint: [80, 600]}
+    upstream.inventory_http_status: 500
+
+business_impact:
+  - kpi: business.orders_per_min
+    factor: {uniform: [0.35, 0.60]}
+  - kpi: business.error_rate_pct
+    factor: {uniform: [4.0, 8.0]}
+  - kpi: business.availability_pct
+    factor: {uniform: [0.90, 0.96]}
+
+generator_impact:
+  aws_cloudtrail_otel:
+    error_rate: 0.6
+    records_per_cycle: 60

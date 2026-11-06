@@ -10,8 +10,8 @@ cascade_services:
 - oee-analytics
 description: Vision system camera or inference pipeline failure; defects flowing through unchecked
 investigation_notes: |-
-  Root Cause: Vision pipeline failures fall into three buckets: (1) hardware (camera trigger lost, lighting drifting, lens fouled), (2) inference (model returns low confidence on every frame), (3) network (frames arrive late or out of order). The first sign is usually a confidence-score histogram skewing low for an entire shift.
-  Remediation: 1) Visual inspection of camera, lens, lighting at station {station_id}. 2) Run the calibration target: `vision-cli calibrate --station {station_id}`. 3) Check inference container health: `kubectl describe pod -n vision vision-inference-*`. 4) Reload the model: `vision-cli reload-model --station {station_id} --model {model_version}`. 5) If the issue persists, fall back to manual inspection and tag the lot for review per quality plan.
+  Root Cause: Vision pipeline failures fall into three buckets: (1) hardware (camera trigger lost, lighting drifting, lens fouled), (2) inference (model returns low confidence on every frame), (3) network (frames arrive late or out of order). The first sign is usually a confidence-score histogram skewing low for an entire shift. An average confidence below 0.80 with the camera trigger at full rate, under 20 dropped frames per 5 min and a passing calibration target puts the fault in inference (the model), not hardware or network.
+  Remediation: 1) Visual inspection of camera, lens, lighting at station {station_id}. 2) Run the calibration target: `vision-cli calibrate --station {station_id}`. 3) Check inference container health: `kubectl describe pods -n vision vision-inference`. 4) Reload the model: `vision-cli reload-model --station {station_id} --model {model_version}`. 5) If the issue persists, fall back to manual inspection and tag the lot for review per quality plan.
 remediation_action: reload_vision_model
 error_message: '[QC] VISION-INSPECT-FAIL: station={station_id} model={model_version} confidence_avg={confidence_avg} frames_dropped={frames_dropped}'
 stack_trace: |-
@@ -21,7 +21,7 @@ stack_trace: |-
   STAGE             | STATUS    | METRIC
   ------------------------------------------------------------------------
   camera_trigger     | OK        | 220 fps
-  frame_capture      | DEGRADED  | {frames_dropped} dropped
+  frame_capture      | OK        | {frames_dropped} dropped
   preprocess         | OK        | mean 8ms
   inference          | DEGRADED  | confidence_avg={confidence_avg}
   postprocess        | OK        | mean 3ms
@@ -31,14 +31,16 @@ correlation_attr:
   key: deployment.vision_model_version
   value: yolo-v8-mfg-v3.4-beta
 fault_params:
-  station_id: {choice: [VIS-01, VIS-02, VIS-03, CMM-01]}
-  model_version: {choice: [yolo-v8-mfg-v3.4-beta, yolo-v8-mfg-v3.3]}
+  station_id: {choice: [VIS-01, VIS-02, VIS-03, VIS-04]}
+  model_version: yolo-v8-mfg-v3.4-beta
   confidence_avg: {uniform: [0.55, 0.78], round: 3}
-  frames_dropped: {randint: [50, 800]}
+  frames_dropped: {randint: [0, 5]}
 rca_clues:
   quality-inspector:
     vision.confidence_avg: {uniform: [0.55, 0.78], round: 3}
-    vision.frames_dropped: {randint: [50, 800]}
+    vision.frames_dropped: {randint: [0, 5]}
+    vision.model_version: yolo-v8-mfg-v3.4-beta
+    vision.calibration_status: PASS
   mes-controller:
     mes.unverified_parts_count: {randint: [20, 300]}
   oee-analytics:

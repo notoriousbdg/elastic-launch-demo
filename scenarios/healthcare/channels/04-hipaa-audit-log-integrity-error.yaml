@@ -11,8 +11,8 @@ cascade_services:
 - billing-processor
 description: HIPAA-mandated audit log chain integrity check fails, indicating possible tampering or data loss
 investigation_notes: |-
-  Root Cause: HIPAA audit chain integrity failures (SHA-256 hash mismatches) indicate either log record tampering, storage corruption, or an out-of-order write during high-volume PHI access logging. Per 45 CFR 164.312(b), audit controls must maintain an unbroken chain of custody for all PHI access events.
-  Remediation: 1) Identify the break point: `audit-admin chain-verify --chain {chain_id} --from-sequence {sequence_number} --range 100`. 2) Recover audit records from the write-ahead log: `audit-admin recover-wal --chain {chain_id} --sequence {sequence_number}`. 3) Rebuild the hash chain from the last valid entry: `audit-admin rebuild-chain --chain {chain_id} --from-last-valid`. 4) Check for storage I/O errors: `audit-admin storage-health --volume audit-vol-01`. 5) Close the compliance gap: generate an incident report for the Privacy Officer per HIPAA breach notification procedures (45 CFR 164.408). 6) Enable write verification: `audit-admin set-write-verify --chain {chain_id} --mode synchronous`.
+  Root Cause: HIPAA audit chain integrity failures (SHA-256 hash mismatches) indicate either log record tampering, storage corruption, or an out-of-order write during high-volume PHI access logging. Out-of-order sequence writes above zero with zero storage I/O errors and the preceding entries still VALID point to a write-ordering race, not storage corruption or tampering. Per 45 CFR 164.312(b), audit controls must maintain an unbroken chain of custody for all PHI access events.
+  Remediation: 1) Identify the break point: `audit-admin chain-verify --chain {chain_id} --from-sequence {sequence_number} --range 100`. 2) Recover audit records from the write-ahead log: `audit-admin recover-wal --chain {chain_id} --sequence {sequence_number}`. 3) Rebuild the hash chain from the last valid entry: `audit-admin rebuild-chain --chain {chain_id} --from-last-valid`. 4) Check for storage I/O errors: `audit-admin storage-health --volume audit-vol-01`. 5) Close the compliance gap: open a security incident per the security incident procedures (45 CFR 164.308(a)(6)) and let the Privacy Officer assess whether breach notification (45 CFR 164.404/164.408) applies. 6) Enable write verification: `audit-admin set-write-verify --chain {chain_id} --mode synchronous`.
 remediation_action: rebuild_audit_chain
 error_message: '[DW] HIPAA-AUDIT-FAIL: chain={chain_id} sequence={sequence_number} expected_hash={expected_hash} actual_hash={actual_hash}'
 stack_trace: |-
@@ -29,7 +29,7 @@ stack_trace: |-
   Next entry: CANNOT VERIFY (chain broken)
   ------------------------------------------------------------------------
   HIPAA-AUDIT-FAIL: Chain {chain_id} integrity broken at sequence {sequence_number}
-  Hash mismatch indicates possible record tampering or data corruption
+  Hash mismatch follows an out-of-order write: entry committed before its predecessor's hash was sealed
   Compliance officer notification triggered — investigation required per 45 CFR 164.312(b)
 correlation_attr:
   key: deployment.audit_chain_version
@@ -40,17 +40,23 @@ fault_params:
     n: {randint: [1000, 9999]}
   sequence_number: {randint: [1, 100000]}
   expected_hash:
-    format: "sha256:{a:016x}{b:016x}"
+    format: "sha256:{a:016x}{b:016x}{c:016x}{d:016x}"
     a: {randint: [0, 9007199254740991]}
     b: {randint: [0, 9007199254740991]}
+    c: {randint: [0, 9007199254740991]}
+    d: {randint: [0, 9007199254740991]}
   actual_hash:
-    format: "sha256:{a:016x}{b:016x}"
+    format: "sha256:{a:016x}{b:016x}{c:016x}{d:016x}"
     a: {randint: [0, 9007199254740991]}
     b: {randint: [0, 9007199254740991]}
+    c: {randint: [0, 9007199254740991]}
+    d: {randint: [0, 9007199254740991]}
 rca_clues:
   data-warehouse:
     audit.chain_break_detected: true
-    audit.wal_recovery_available: {choice: [true, false]}
+    audit.wal_recovery_available: true
+    audit.out_of_order_writes: {randint: [3, 40]}
+    audit.storage_io_errors: 0
   ehr-system:
     ehr.phi_access_logging: degraded
     ehr.unaudited_access_count: {randint: [10, 100]}
@@ -59,13 +65,13 @@ rca_clues:
     alerts.breach_notification_pending: true
   billing-processor:
     billing.audit_gap_in_claims: true
-    billing.cms_reporting_risk: {choice: [low, medium, high]}
+    billing.cms_reporting_risk: high
 business_impact:
   - kpi: business.staff_compliance_rate_pct
-    factor: {uniform: [0.20, 0.50]}
+    factor: {uniform: [0.2, 0.5]}
   - kpi: business.clean_claim_rate_pct
-    factor: {uniform: [0.30, 0.60]}
+    factor: {uniform: [0.3, 0.6]}
   - kpi: business.collections_usd_per_min
-    factor: {uniform: [0.25, 0.55]}
+    value: {uniform: [10881.0, 12519.0], round: 1}
   - kpi: business.denials_per_min
     factor: {uniform: [2.0, 4.5]}

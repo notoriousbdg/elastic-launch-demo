@@ -1,0 +1,37 @@
+name: "GT kubernetes_otel: deployment_unavailable_replicas"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-KUBERNETES-DEPLOYMENT-UNAVAILABLE-R
+sensor_type: impact_key_probe
+affected_services:
+  - gt-kubernetes-a-aws-svc-1
+cascade_services:
+  - gt-kubernetes-a-aws-svc-2
+description: "Tests impact_key deployment_unavailable_replicas on generator kubernetes_otel."
+investigation_notes: |-
+  1. Verify kubernetes_otel is active and reporting metrics.
+  2. Check that the deployment_unavailable_replicas metric has reached the trigger value (50.0).
+  3. Confirm generator_impact for kubernetes_otel.deployment_unavailable_replicas is set to 50.0.
+  4. Look for correlated changes in service gt-kubernetes-a-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_deployment_unavailable_replicas_baseline
+error_message: "GT-PROBE: gen=kubernetes_otel key=deployment_unavailable_replicas value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=kubernetes_otel
+  impact_key: deployment_unavailable_replicas
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 50.0
+  svc_name: gt-kubernetes-a-aws-svc-1
+rca_clues:
+  gt-kubernetes-a-aws-svc-1:
+    probe.generator: kubernetes_otel
+    probe.impact_key: deployment_unavailable_replicas
+    probe.trigger_value: 50.0
+  gt-kubernetes-a-aws-svc-2:
+    probe.upstream_generator: kubernetes_otel
+    probe.upstream_key: deployment_unavailable_replicas
+generator_impact:
+  kubernetes_otel:
+    deployment_unavailable_replicas: 50.0

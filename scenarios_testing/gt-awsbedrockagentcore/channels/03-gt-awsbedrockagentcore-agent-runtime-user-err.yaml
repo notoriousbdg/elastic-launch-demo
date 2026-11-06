@@ -1,0 +1,37 @@
+name: "GT aws_bedrock_agentcore: agent_runtime_user_errors"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-AWSBEDROCKAG-AGENT-RUNTIME-USER--03
+sensor_type: impact_key_probe
+affected_services:
+  - gt-awsbedrockagentcore-aws-svc-1
+cascade_services:
+  - gt-awsbedrockagentcore-aws-svc-2
+description: "Tests impact_key agent_runtime_user_errors on generator aws_bedrock_agentcore."
+investigation_notes: |-
+  1. Verify aws_bedrock_agentcore is active and reporting metrics.
+  2. Check that the agent_runtime_user_errors metric has reached the trigger value (50.0).
+  3. Confirm generator_impact for aws_bedrock_agentcore.agent_runtime_user_errors is set to 50.0.
+  4. Look for correlated changes in service gt-awsbedrockagentcore-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_agent_runtime_user_errors_baseline
+error_message: "GT-PROBE: gen=aws_bedrock_agentcore key=agent_runtime_user_errors value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=aws_bedrock_agentcore
+  impact_key: agent_runtime_user_errors
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 50.0
+  svc_name: gt-awsbedrockagentcore-aws-svc-1
+rca_clues:
+  gt-awsbedrockagentcore-aws-svc-1:
+    probe.generator: aws_bedrock_agentcore
+    probe.impact_key: agent_runtime_user_errors
+    probe.trigger_value: 50.0
+  gt-awsbedrockagentcore-aws-svc-2:
+    probe.upstream_generator: aws_bedrock_agentcore
+    probe.upstream_key: agent_runtime_user_errors
+generator_impact:
+  aws_bedrock_agentcore:
+    agent_runtime_user_errors: 50.0

@@ -10,12 +10,12 @@ cascade_services:
 - mission-control
 description: Payload bay temperature outside safe operating range
 investigation_notes: 'Root cause: coolant loop flow restriction or heater control circuit stuck-on condition. Coolant flow
-  at 2.4L/min is below nominal 3.2L/min — check pump outlet pressure and look for air bubbles in the coolant loop (cavitation
+  below nominal 3.2L/min (for example 2.4L/min) points to a loop restriction — check pump outlet pressure and look for air bubbles in the coolant loop (cavitation
   from improper ground fill). Verify MLI (multi-layer insulation) blanket integrity — a torn or displaced blanket on the sun-facing
   side causes rapid thermal excursion. Cross-reference with payload bay zones B/C/D — if only one zone affected, suspect local
   heater controller failure rather than loop-wide issue. Remediation: increase coolant pump speed (PLD_COOLANT_FLOW 4.0),
   disable zone heater if stuck-on (PLD_HEATER zone OFF), and monitor temperature convergence over 5-minute window. If MLI
-  damage confirmed, notify payload integration team for EVA inspection.'
+  damage confirmed, notify payload integration team for a fairing access-door inspection.'
 remediation_action: reset_payload_thermal
 error_message: '[PLD] PLD-THERMAL-EXCURSION: zone={zone} temp={temp}C safe_max={safe_max}C delta=+{deviation}C'
 stack_trace: |-
@@ -28,25 +28,25 @@ stack_trace: |-
   C       19.8C    -10.0C     45.0C      NOMINAL
   D       24.3C    -10.0C     45.0C      NOMINAL
   ---------------------------------------------------------------
-  COOLANT_FLOW: 2.4L/min | HEATER_STATE: OFF | MLI_STATUS: INTACT
+  COOLANT_FLOW: 3.2L/min | HEATER_STATE: STUCK_ON | MLI_STATUS: INTACT
   PLD-THERMAL-EXCURSION: Zone {zone} temperature {temp}C exceeds safe max {safe_max}C
   ACTION: Increase coolant flow rate, verify MLI blanket integrity
 correlation_attr:
-  key: runtime.jvm_flags
-  value: -XX:+UseZGC -Xmx2g
+  key: runtime.python_version
+  value: cpython-3.13.0-free-threaded
 fault_params:
-  zone: {choice: [A, B, C, D]}
-  temp: {uniform: [55.0, 85.0], round: 1}
+  zone: A
+  temp: 53.4
   safe_min: -10.0
   safe_max: 45.0
-  deviation: {uniform: [3.0, 12.0], round: 1}
+  deviation: 8.4
 rca_clues:
   payload-monitor:
-    payload.coolant_flow_lpm: {uniform: [1.8, 2.6], round: 1}
-    payload.heater_state: {choice: [OFF, STUCK_ON]}
+    payload.coolant_flow_lpm: {uniform: [3.1, 3.3], round: 1}
+    payload.heater_state: STUCK_ON
   sensor-validator:
-    validation.thermal_zone_affected: {choice: [A, B]}
-    validation.mli_status: {choice: [INTACT, SUSPECT]}
+    validation.thermal_zone_affected: A
+    validation.mli_status: INTACT
   mission-control:
     upstream.degraded_subsystem: payload
 business_impact:

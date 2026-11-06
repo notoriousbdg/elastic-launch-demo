@@ -9,7 +9,7 @@ schema_version: "1.2"
 nominal_label: NORMAL
 hosts:
 - host.name: fanatics-aws-host-01
-  host.id: i-0f2a3b4c5d6e78901
+  host.id: i-08dcffdc5558c1531
   host.arch: amd64
   host.type: m5.xlarge
   host.image.id: ami-0fedcba987654321
@@ -31,13 +31,13 @@ hosts:
   cloud.platform: aws_ec2
   cloud.region: us-east-1
   cloud.availability_zone: us-east-1a
-  cloud.account.id: '987654321012'
-  cloud.instance.id: i-0f2a3b4c5d6e78901
+  cloud.account.id: '512420770413'
+  cloud.instance.id: i-08dcffdc5558c1531
   cpu_count: 4
   memory_total_bytes: 17179869184
   disk_total_bytes: 214748364800
 - host.name: fanatics-gcp-host-01
-  host.id: '7823456789012345678'
+  host.id: '6246577675631445'
   host.arch: amd64
   host.type: e2-standard-4
   host.image.id: projects/debian-cloud/global/images/debian-12-bookworm-v20250115
@@ -59,13 +59,13 @@ hosts:
   cloud.platform: gcp_compute_engine
   cloud.region: us-central1
   cloud.availability_zone: us-central1-a
-  cloud.account.id: fanatics-infra-prod
-  cloud.instance.id: '7823456789012345678'
+  cloud.account.id: fanatics-project
+  cloud.instance.id: '6246577675631445'
   cpu_count: 4
   memory_total_bytes: 17179869184
   disk_total_bytes: 107374182400
 - host.name: fanatics-azure-host-01
-  host.id: /subscriptions/fab-012/resourceGroups/fanatics-rg/providers/Microsoft.Compute/virtualMachines/fanatics-vm-01
+  host.id: /subscriptions/c133c2a7-f4e0-5167-bed2-fc462f5ba45f/resourceGroups/fanatics-rg/providers/Microsoft.Compute/virtualMachines/fanatics-vm-01
   host.arch: amd64
   host.type: Standard_D4s_v3
   host.image.id: Canonical:0001-com-ubuntu-server-jammy:22_04-lts-gen2:latest
@@ -87,7 +87,7 @@ hosts:
   cloud.platform: azure_vm
   cloud.region: eastus
   cloud.availability_zone: eastus-1
-  cloud.account.id: fab-012-345-678
+  cloud.account.id: c133c2a7-f4e0-5167-bed2-fc462f5ba45f
   cloud.instance.id: fanatics-vm-01
   cpu_count: 4
   memory_total_bytes: 17179869184
@@ -234,12 +234,15 @@ executive_trend_charts:
   y_label: USD/min
 executive_kpi_emissions:
 - name: business.ad_revenue_usd_per_min
+  better: higher
   value: {uniform: [85000.0, 520000.0], round: 1}
   unit: USD/min
 - name: business.programmatic_fill_rate_pct
+  better: higher
   value: {uniform: [82.0, 98.4], round: 2}
   unit: '%'
 - name: business.betting_handle_usd_per_min
+  better: higher
   value: {uniform: [180000.0, 2200000.0], round: 1}
   unit: USD/min
 - name: business.betting_hold_pct
@@ -249,18 +252,22 @@ executive_kpi_emissions:
   value: {uniform: [12000.0, 210000.0], round: 1}
   unit: USD/min
 - name: business.subscription_mrr_usd_per_min
+  better: higher
   value: {uniform: [18000.0, 185000.0], round: 1}
   unit: USD/min
 - name: business.live_concurrent_viewers
+  better: higher
   value: {randint: [78000, 520000]}
   unit: viewers
 - name: business.video_minutes_engaged_per_min
   value: {uniform: [120000.0, 980000.0], round: 1}
   unit: min/min
 - name: business.page_views_per_min
+  better: higher
   value: {randint: [180000, 2400000]}
   unit: views/min
 - name: business.app_sessions_per_min
+  better: higher
   value: {randint: [900, 12000]}
   unit: sessions/min
 - name: business.content_completion_rate_pct
@@ -270,18 +277,22 @@ executive_kpi_emissions:
   value: {randint: [9000, 220000]}
   unit: entries
 - name: business.merch_gmv_usd_per_min
+  better: higher
   value: {uniform: [28000.0, 310000.0], round: 1}
   unit: USD/min
 - name: business.live_event_ticketing_usd_per_min
+  better: higher
   value: {uniform: [4500.0, 98000.0], round: 1}
   unit: USD/min
 - name: business.partner_sponsorship_usd_per_min
   value: {uniform: [15000.0, 195000.0], round: 1}
   unit: USD/min
 - name: business.api_data_partner_revenue_usd_per_min
+  better: higher
   value: {uniform: [6000.0, 72000.0], round: 1}
   unit: USD/min
 - name: business.sponsored_inventory_seconds_per_min
+  better: higher
   value: {randint: [400, 12000]}
   unit: s/min
 - name: business.premium_tier_arpu_usd
@@ -294,15 +305,18 @@ executive_kpi_emissions:
   value: {uniform: [16.0, 38.0], round: 2}
   unit: '%'
 - name: business.loyalty_points_redeemed_per_min
+  better: higher
   value: {randint: [25000, 380000]}
   unit: pts/min
 - name: business.social_clip_shares_per_min
   value: {randint: [3000, 95000]}
   unit: shares/min
 - name: business.churn_risk_index_0_100
+  better: lower
   value: {uniform: [11.0, 52.0], round: 1}
   unit: index
 - name: business.net_satisfaction_proxy_nps
+  better: higher
   value: {uniform: [-8.0, 68.0], round: 1}
   unit: score
 raw_log_profile:
@@ -389,3 +403,7 @@ trace_attributes:
       dns.zone: {choice: [fanatics.internal, warehouse.local, collectibles.prod]}
       dhcp.scope_utilization_pct: {uniform: [40.0, 98.0], round: 1}
       dhcp.lease_duration_s: {choice: [3600, 7200, 14400, 28800, 86400]}
+
+generators:
+  redis_otel: true
+  kafka_otel: true

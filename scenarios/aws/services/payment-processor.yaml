@@ -1,0 +1,254 @@
+service: payment-processor
+sort_order: 5
+cloud_provider: aws
+cloud_region: us-west-2
+cloud_platform: aws_ec2
+cloud_availability_zone: us-west-2a
+subsystem: payments
+language: python
+
+# Topology: [downstream-service, endpoint, METHOD]
+topology: []
+
+entry_endpoints:
+- - /api/v1/payments/charge
+  - POST
+- - /api/v1/payments/refund
+  - POST
+- - /api/v1/payments/status
+  - GET
+
+db_operations:
+- - INSERT
+  - payments
+  - INSERT INTO payments (order_id, idempotency_key, amount_cents, currency, status, created_at) VALUES ($1, $2, $3, $4, 'AUTHORIZED', now()) ON CONFLICT (idempotency_key) DO NOTHING
+- - UPDATE
+  - payments
+  - UPDATE payments SET status = 'CAPTURED', captured_at = now() WHERE order_id = $1 AND status = 'AUTHORIZED'
+
+emit_fault_logs: true
+kpi_emitter: false
+
+constants:
+  CARD_NETWORKS:
+  - visa
+  - mastercard
+  - amex
+  - discover
+  DECLINE_REASONS:
+  - insufficient_funds
+  - card_expired
+  - do_not_honor
+  - avs_mismatch
+  FUNCTION_NAME: awsorders-payment-charge
+
+state:
+  _invocations: {init: 0}
+
+steps:
+- sample:
+    invocations_per_min:
+      uniform:
+      - 120.0
+      - 520.0
+      round: 0
+    duration_ms:
+      if_active:
+        uniform:
+        - 2500.0
+        - 9500.0
+        round: 1
+      else:
+        uniform:
+        - 85.0
+        - 320.0
+        round: 1
+    error_rate_pct:
+      if_active:
+        uniform:
+        - 12.0
+        - 45.0
+        round: 2
+      else:
+        uniform:
+        - 0.05
+        - 0.8
+        round: 2
+    throttles:
+      if_active:
+        randint:
+        - 5
+        - 60
+      else: 0
+    concurrent_executions:
+      if_active:
+        randint:
+        - 180
+        - 250
+      else:
+        randint:
+        - 12
+        - 70
+- counter:
+    state_key: _invocations
+    by: 1
+- metric:
+    name: aws.lambda.invocations_per_min
+    value:
+      var: invocations_per_min
+    unit: invocations/min
+- metric:
+    name: aws.lambda.duration_ms
+    value:
+      var: duration_ms
+    unit: ms
+- metric:
+    name: aws.lambda.error_rate_pct
+    value:
+      var: error_rate_pct
+    unit: '%'
+- metric:
+    name: aws.lambda.throttles
+    value:
+      var: throttles
+    unit: count
+- metric:
+    name: aws.lambda.concurrent_executions
+    value:
+      var: concurrent_executions
+    unit: executions
+- log:
+    level: INFO
+    message: 'lambda[awsorders-payment-charge]: health invocations_per_min={invocations_per_min} avg_duration_ms={duration_ms} error_rate={error_rate_pct}% throttles={throttles} concurrent={concurrent_executions}'
+    attrs:
+      operation: lambda_health
+      faas.name: awsorders-payment-charge
+      faas.invocations_per_min:
+        var: invocations_per_min
+      faas.duration_ms:
+        var: duration_ms
+      faas.error_rate_pct:
+        var: error_rate_pct
+      faas.throttles:
+        var: throttles
+- sample:
+    cold_start:
+      if_active:
+        choice:
+        - true
+        - true
+        - false
+      else:
+        choice:
+        - false
+        - false
+        - false
+        - false
+        - false
+        - false
+        - false
+        - false
+        - false
+        - true
+    init_duration_ms:
+      if_active:
+        uniform:
+        - 1800.0
+        - 4200.0
+        round: 1
+      else:
+        uniform:
+        - 220.0
+        - 520.0
+        round: 1
+    network:
+      choice: CARD_NETWORKS
+    amount_usd:
+      uniform:
+      - 8.0
+      - 640.0
+      round: 2
+    auth_ms:
+      if_active:
+        uniform:
+        - 1500.0
+        - 8000.0
+        round: 1
+      else:
+        uniform:
+        - 70.0
+        - 280.0
+        round: 1
+    request_id:
+      format: 'req-{n}'
+      n:
+        randint:
+        - 100000
+        - 999999
+- metric:
+    name: aws.lambda.init_duration_ms
+    value:
+      var: init_duration_ms
+    unit: ms
+- metric:
+    name: payments.authorization_ms
+    value:
+      var: auth_ms
+    unit: ms
+- log:
+    level: INFO
+    message: 'lambda[awsorders-payment-charge]: charge authorized request_id={request_id} network={network} amount_usd={amount_usd} auth_ms={auth_ms} cold_start={cold_start} init_ms={init_duration_ms}'
+    attrs:
+      operation: charge_authorize
+      faas.coldstart:
+        var: cold_start
+      faas.init_duration_ms:
+        var: init_duration_ms
+      payment.card_network:
+        var: network
+      payment.amount_usd:
+        var: amount_usd
+      payment.authorization_ms:
+        var: auth_ms
+      aws.request_id:
+        var: request_id
+- sample:
+    capture_success_pct:
+      if_active:
+        uniform:
+        - 55.0
+        - 88.0
+        round: 2
+      else:
+        uniform:
+        - 98.5
+        - 99.9
+        round: 2
+    decline_rate_pct:
+      uniform:
+      - 2.0
+      - 6.0
+      round: 2
+    decline_reason:
+      choice: DECLINE_REASONS
+- metric:
+    name: payments.capture_success_pct
+    value:
+      var: capture_success_pct
+    unit: '%'
+- metric:
+    name: payments.decline_rate_pct
+    value:
+      var: decline_rate_pct
+    unit: '%'
+- log:
+    level: INFO
+    message: 'lambda[awsorders-payment-charge]: capture_summary capture_success={capture_success_pct}% decline_rate={decline_rate_pct}% top_decline_reason={decline_reason}'
+    attrs:
+      operation: capture_summary
+      payment.capture_success_pct:
+        var: capture_success_pct
+      payment.decline_rate_pct:
+        var: decline_rate_pct
+      payment.top_decline_reason:
+        var: decline_reason

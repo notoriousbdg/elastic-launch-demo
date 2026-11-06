@@ -1,0 +1,67 @@
+name: Model Router Bad Canary
+subsystem: ml_inference
+vehicle_section: ml_inference_pipeline
+error_type: ROUTER-BAD-CANARY
+sensor_type: health_check
+affected_services: [model-router, assistant-web]
+cascade_services: []
+
+description: >
+  model-router sends a canary share of traffic to a new model deployment that returns malformed or empty completions, degrading assistant-web answers.
+
+investigation_notes: |
+  1. Search body.text for *ROUTER-BAD-CANARY* and confirm canary_share_pct={canary_share_pct}% of requests are routed to deployment {canary_deployment}.
+  2. Compare empty_completion_pct={empty_completion_pct}% and malformed_pct={malformed_pct}% on the canary against the stable deployment {stable_deployment}, which stays near zero.
+  3. Check the finish_reason distribution on canary responses; {finish_reason} dominates, which points to a bad model version or prompt template mismatch rather than quota; finish_reason=stop with near-zero completion_tokens (the model ends the turn immediately), an unchanged prompt template and no 429s means the canary model version is bad.
+  4. On assistant-web, look for blank or truncated answers and rising thumbs-down feedback tied to the routing_decision attribute.
+  5. Review the model-router routing config history (and the Microsoft Foundry deployment history for when {canary_deployment} was created) to find who widened the canary and when.
+  6. Approve rolling back the canary to 0% and keep traffic on {stable_deployment}, then re-test the canary with a small shadow load before retrying.
+
+remediation_action: roll_back_model_canary
+
+error_message: |
+  [ModelRouter] ROUTER-BAD-CANARY: canary={canary_deployment} share={canary_share_pct}% empty_completions={empty_completion_pct}% malformed={malformed_pct}% finish_reason={finish_reason} stable={stable_deployment}
+
+stack_trace: |
+  InvalidCompletionError: ROUTER-BAD-CANARY
+    at ModelRouter.validate_completion(deployment={canary_deployment})
+    at ModelRouter.route(policy=canary_weighted)
+  Canary deployment:   {canary_deployment}
+  Stable deployment:   {stable_deployment}
+  Canary traffic:      {canary_share_pct}%
+  Empty completions:   {empty_completion_pct}%
+  Malformed output:    {malformed_pct}%
+  Finish reason:       {finish_reason}
+
+correlation_attr:
+  key: router.canary_deployment_version
+  value: gpt-4o-mini-2024-07-18-canary-r3
+
+fault_params:
+  canary_deployment: foundry-chat-canary-r3
+  stable_deployment: chat-gpt4o-stable
+  canary_share_pct: 25
+  empty_completion_pct: {uniform: [30.0, 75.0], round: 1}
+  malformed_pct: {uniform: [10.0, 40.0], round: 1}
+  finish_reason: stop
+
+rca_clues:
+  model-router:
+    router.canary_share_pct: 25
+    router.canary_empty_completion_pct: {uniform: [30.0, 75.0], round: 1}
+    router.canary_widened_min_ago: {randint: [10, 120]}
+    router.canary_finish_reason: stop
+    router.canary_completion_tokens_p50: 1
+    router.stable_empty_completion_pct: {uniform: [0.0, 0.5], round: 1}
+    router.prompt_template_changed: false
+  assistant-web:
+    web.blank_answer_rate_pct: {uniform: [5.0, 20.0], round: 1}
+    web.thumbs_down_spike: true
+
+business_impact:
+  - kpi: business.conversations_per_min
+    value: {uniform: [120.9, 139.1], round: 0}
+  - kpi: business.error_rate_pct
+    factor: {uniform: [1.8, 3.5]}
+  - kpi: business.availability_pct
+    factor: {uniform: [0.96, 0.99]}

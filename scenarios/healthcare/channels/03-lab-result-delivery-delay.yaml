@@ -9,17 +9,17 @@ affected_services:
 cascade_services:
 - pharmacy-system
 - clinical-alerts
-description: Laboratory result delivery exceeds critical TAT threshold, delaying clinical decisions
+description: Laboratory result delivery exceeds critical TAT threshold as results stop arriving over the analyzer instrument interface, delaying clinical decisions
 investigation_notes: |-
-  Root Cause: TAT breaches stem from either LIS instrument interface backlogs, specimen processing delays, or the HL7 ORU^R01 result delivery queue being stalled. STAT orders should have a 30-minute TAT for critical tests (Troponin, BNP, Lactate) but queue congestion delays the OBX result segments.
+  Root Cause: TAT breaches stem from either LIS instrument interface backlogs, specimen processing delays, or the HL7 ORU^R01 result delivery queue being stalled. STAT orders should have a 30-minute TAT for critical tests (Troponin, BNP, Lactate) but queue congestion delays the OBX result segments. An LIS outbound queue under 50 messages with the ORU^R01 channel connected and analyzer QC passing, while no ASTM R (result) records arrive, means results are not arriving over the ASTM/LIS2-A2 instrument interface: the stall is at the instrument interface, not the outbound queue or specimen processing.
   Remediation: 1) Check the LIS outbound queue depth: `lis-admin queue-status --interface EHR-RESULTS`. 2) Verify the ASTM/LIS2-A2 instrument interface is connected: `netstat -an | grep 5562`. 3) For stuck results, force requeue: `lis-admin requeue --order {lab_order_id} --priority STAT`. 4) Review the analyzer worklist for instrument flags (QC lockout, reagent expiry). 5) If the HL7 result channel is down, restart: `systemctl restart lis-hl7-outbound`. 6) Notify lab supervisor and clinical staff of delayed critical results per CAP notification protocol.
 remediation_action: restart_lis_interface
 error_message: '[LIS] LIS-RESULT-DELAY: order={lab_order_id} test={test_code} tat={tat_minutes}min sla={max_tat}min patient={patient_id}'
 stack_trace: |-
   H|\^&|||LIS-CORE^Lab Integration|||||LIS2-A2||P|1|20260217143052
   P|1||{patient_id}||DOE^JANE||19650315|F
-  OBR|1|{lab_order_id}||{test_code}|||20260217143052||||||||SERUM
-  OBX|1|NM|{test_code}^Result^^LIS||--PENDING--|mg/dL|3.5-5.0|N|||F
+  O|1|{lab_order_id}||^^^{test_code}|S|20260217143052|20260217143052||||||||SERUM
+  (no R result record received from analyzer for ^^^{test_code})
   --- TAT BREACH ---
   Order: {lab_order_id} | Test: {test_code} | Collected: 20260217143052
   TAT Elapsed: {tat_minutes} min | SLA Target: {max_tat} min | Status: BREACHED
@@ -41,11 +41,13 @@ fault_params:
     n: {randint: [100000, 999999]}
 rca_clues:
   lab-integration:
-    lis.outbound_queue_depth: {randint: [500, 2000]}
     lis.instrument_interface: stalled
+    lis.astm_results_received_per_min: 0
+    lis.outbound_queue_depth: {randint: [0, 20]}
+    lis.analyzer_qc_status: PASS
   ehr-system:
     ehr.pending_results_count: {randint: [50, 200]}
-    ehr.oru_channel_status: backlogged
+    ehr.oru_channel_status: connected
   pharmacy-system:
     pharmacy.awaiting_lab_results: {randint: [10, 50]}
     pharmacy.dosing_hold: true

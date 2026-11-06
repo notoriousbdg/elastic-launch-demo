@@ -36,7 +36,7 @@ POST /api/agent_builder/tools
 **Gotchas:**
 - `index_search` requires `configuration.pattern`, NOT `configuration.index` — returns 400 otherwise
 - `esql` requires `configuration.params: {}` even when empty — returns 400 otherwise
-- `workflow` requires `configuration.workflow_id` — discover via `GET /api/workflows` (fallback to `POST /api/workflows/search` on 404/405)
+- `workflow` requires `configuration.workflow_id` — discover via `GET /api/workflows`
 - No `name` field on tools — use `id` and `description` only
 
 ### Parameterized ES|QL Tools
@@ -397,42 +397,27 @@ Required metrics (must be enabled explicitly on upstream Collector):
 
 ## Kibana Workflows API
 
-### Route Migration (9.4.0+)
+### Routes (9.4.0+)
 
-The Workflows API paths changed in 9.4.0. The deployer (`elastic_config/deployer.py`) uses
-helper methods `_wf_create`, `_wf_search`, and `_wf_delete` that try the new path first and
-fall back to the old path on 404/405, supporting both versions simultaneously.
+Only the 9.4+ paths are supported; there is no fallback to the pre-9.4 routes. The deployer
+helpers `_wf_create`, `_wf_search` and `_wf_delete` (`elastic_config/deployer_workflows.py`), the
+SLO refresh, and `/api/daily-update` in `app/main.py` all call these directly.
 
-| Operation | Old path (pre-9.4) | New path (9.4+) |
-| --------- | ------------------ | --------------- |
-| Create single | `POST /api/workflows` body `{"yaml":"..."}` | `POST /api/workflows/workflow` |
-| Bulk create | `POST /api/workflows/_bulk_create` | `POST /api/workflows` body `{"workflows":[...]}` |
-| Search/list | `POST /api/workflows/search` body `{"page":1,"size":100}` | `GET /api/workflows` |
-| Get by ID | `GET /api/workflows/{id}` | `GET /api/workflows/workflow/{id}` |
-| Update | `PUT /api/workflows/{id}` | `PUT /api/workflows/workflow/{id}` |
-| Delete | `DELETE /api/workflows/{id}` | `DELETE /api/workflows/workflow/{id}` |
-| Run | `POST /api/workflows/{id}/run` | `POST /api/workflows/workflow/{id}/run` |
+| Operation | Path |
+| --------- | ---- |
+| Create single | `POST /api/workflows/workflow` body `{"yaml":"..."}` |
+| Bulk create | `POST /api/workflows` body `{"workflows":[...]}` |
+| Search/list | `GET /api/workflows` |
+| Get by ID | `GET /api/workflows/workflow/{id}` |
+| Update | `PUT /api/workflows/workflow/{id}` |
+| Delete | `DELETE /api/workflows/workflow/{id}` |
+| Run | `POST /api/workflows/workflow/{id}/run` |
+| Execution status | `GET /api/workflows/executions/{id}` |
 
-**CRITICAL (`/api/daily-update`):** The `Send Daily Update` button in the Chaos UI calls `POST /api/daily-update` in `app/main.py`. This endpoint must use the same fallback pattern as the deployer's `_wf_search` and `_wf_create` helpers — try the new path first, fall back to old on 404/405. Using only the old path (`POST /api/workflows/search`) returns 404 on 9.4+ and shows "Workflow search failed: 404" in the UI. The run step similarly must try `POST /api/workflows/workflow/{id}/run` before falling back to `POST /api/workflows/{id}/run`.
-| Execution status | `GET /api/workflowExecutions/{id}` | `GET /api/workflows/executions/{id}` |
-
-**CRITICAL (9.4.0 breaking change):** `POST /api/workflows` is now the **bulk create** endpoint
-expecting `{"workflows": [...]}`. Sending `{"yaml": "..."}` to this path returns:
+**CRITICAL:** `POST /api/workflows` is the **bulk create** endpoint expecting
+`{"workflows": [...]}`. Sending `{"yaml": "..."}` to it returns:
 `{"statusCode":400,"error":"Bad Request","message":"[{\"expected\":\"array\",\"path\":[\"workflows\"]}]"}`
-Use `POST /api/workflows/workflow` for single workflow creation on 9.4+.
-
-### Endpoints (legacy reference)
-
-```
-POST /api/workflows/workflow     — Create single (9.4+)
-POST /api/workflows              — Create single (pre-9.4) / Bulk create (9.4+)
-POST /api/workflows/search       — List/search (pre-9.4)
-GET  /api/workflows              — List/search (9.4+)
-DELETE /api/workflows/workflow/{id} — Delete (9.4+)
-DELETE /api/workflows/{id}       — Delete (pre-9.4)
-POST /api/workflows/workflow/{id}/run — Run (9.4+)
-GET  /api/workflowExecutions/{id} — Execution status (pre-9.4)
-```
+Use `POST /api/workflows/workflow` for single workflow creation.
 
 ### CRITICAL: Required Header
 All workflow endpoints require `x-elastic-internal-origin: kibana` header.
@@ -804,6 +789,12 @@ Terms columns should include `missingBucket` and `otherBucket` params:
 ### Panel Attributes — Avoid null Fields
 The working OTel panels do NOT include `"description": null` or `"savedObjectId": null`. Omit these entirely rather than setting to null.
 
+### Generator packages are pinned to the generator's version
+
+Step 20 installs each integration package at the version its generator cites in `SOURCE_INTEGRATION` (`generator_engine.registry.package_versions`), not the newest release, so the installed dashboards, alerts, SLOs and ML jobs are always the ones the generator was built and tested against. A pin Fleet cannot install falls back to the latest version and is called out in the step detail ("NOT at the generator's version"). Fleet installs with `force`, so a newer version already on the cluster is moved back to the pin.
+
+Upgrading a package is a generator change: preview with `python3 scripts/audit_package_coverage.py <generator_id> --latest`, bump the citation, fix what the audit reports (it checks the cited version), and refresh `scripts/snapshot_alert_identity.py <id>` and `scripts/snapshot_package_templates.py <id>`. `tests/test_package_pins.py` fails on a missing or conflicting citation, or on fixtures from another version.
+
 ### Generator Script
 Use `elastic_config/dashboards/generate_exec_dashboard.py` to regenerate the NDJSON — it produces correct Kibana 9.4+/9.5 format with random UUIDs for layer/column IDs.
 
@@ -889,6 +880,8 @@ POST /api/data_views/data_view
 {"data_view": {"id": "logs.otel.gaming", "title": "logs.otel.gaming,logs.otel.gaming.*,logs-*", "name": "Gaming Logs", "timeFieldName": "@timestamp"}, "override": true}
 ```
 
+**ES|QL control data views (Kibana 9.6):** package dashboards whose pinned `options_list_control` uses `values_source: esql` (the GCP OTel packs) look up an ad-hoc data view with id `sha256("esql-<FROM pattern>-@timestamp")` that Kibana never saves, so each control shows "Could not locate that data view (id: …), click here to re-create it". The integrations step (`_ensure_esql_control_data_views` in `deployer_integrations.py`) exports each installed package's dashboards and saves a data view with that id, title = the pattern, time field `@timestamp`. Package dashboards are not edited.
+
 **CRITICAL: Dashboard panel references must match the deployed data view ID.** Lens panels embed `{"id": "<data_view_id>", "type": "index-pattern"}` references in their `embeddableConfig.attributes.references` array. If the data view ID used by the dashboard generator (`DATA_VIEW_ID_LOGS` in `generate_exec_dashboard.py`) does not exactly match the ID of the data view created by `deployer_views.py`, Kibana silently fails to resolve those panels — the dashboard imports with no error but affected panels are blank/missing. Always keep both in sync. In `generate_exec_dashboard.py`, the local variable `DATA_VIEW_ID_LOGS = f"logs.otel.{namespace}"` at the top of `_build_dashboard_ndjson()` shadows the module-level constant to ensure the generated references match the deployed data view ID.
 
 ---
@@ -967,7 +960,7 @@ tags[2] = remediation_action (all channels, e.g. "reset_safety_system")
 tags[3] = channel number     (all channels, e.g. "20")
 ```
 
-HITL channels (1–15) carry the same tags as auto-remediate channels (16–20); the HITL workflow asks the agent to call `remediation_action` with `approval_mode: required`, and `waitForInput` pauses for operator approval inside the Agent Builder conversation.
+HITL channels (1–15) carry the same tags as auto-remediate channels (16–20); the HITL workflow asks the agent to call `remediation_action` with `approval_mode: required`, and `waitForInput` pauses for operator approval inside the Agent Builder conversation. There is no separate chat Yes/No step — `waitForInput`, relayed by the agent, is the single approval gate.
 
 **Alert rule naming:**
 
@@ -996,13 +989,56 @@ When falling back to `_wf_search`, distinguish by presence/absence of "Auto-Reme
 
 **HITL steps** (after `attach_alert_to_case`):
 
-1. `request_remediation` — `kibana.request` to `/api/agent_builder/converse` with `conversation_id`; asks the agent to call the `{ns}_remediation_action` workflow tool with `approval_mode: required`. The workflow's `waitForInput` step pauses at `WAITING_FOR_INPUT`; Agent Builder surfaces the approval prompt. On approve, remediation is queued and the case closes; on deny, a denial comment is posted and the case stays open. Timeout is 30m.
+1. `request_remediation` — `kibana.request` to `/api/agent_builder/converse` with `conversation_id`; asks the agent to call the `{ns}_remediation_action` workflow tool with `approval_mode: required`. The workflow's `waitForInput` step pauses at `WAITING_FOR_INPUT`; the agent relays the approval request and resumes the execution (`platform.core.resume_workflow_execution`) with the operator's reply. Agent Builder has no native UI form for `waitForInput`, so that resume tool must stay on the agent; the prompt tells it to relay the request and end its turn rather than answer for the operator. On approve, remediation is queued and the case closes; on deny, a denial comment is posted and the case stays open. Timeout is 30m.
 
 **Auto-remediate steps** (after `attach_alert_to_case`):
 
 1. `request_remediation` — `kibana.request` to `/api/agent_builder/converse` with `conversation_id`; asks the agent to call the `{ns}_remediation_action` workflow tool with `approval_mode: skip`, `dry_run: false`, plus `action_type`, `channel`, `error_type`, and `case_id`. `approval_mode: skip` bypasses `waitForInput`. The tool queues remediation for `RemediationPoller`, comments the case, and closes it.
 
 The `RemediationPoller` (`app/chaos/remediation_poller.py`) picks up pending queue entries and calls `chaos_controller.resolve(channel, force=True)` — no changes needed there.
+
+### Universal Alerting (v2) — serverless chaos rules
+
+On serverless (`_stack_generation() == "serverless"`) the 20 chaos-channel rules are Universal alert rules, not classic `.es-query` rules. ECH 9.5/9.6 keep the classic path described above, unchanged. Code: `universal_rule_body` / `universal_policy_bodies` and `_deploy_universal_rules` in `deployer_alerting.py`; tests in `tests/test_universal_alerting.py`.
+
+**Shape.** `PUT /api/alerting/v2/rules/{ns}-chNN` (`kind: alert`, ES|QL `query.base` + `query.breach.segment`, `recovery`/`no_data` required) and `PUT /api/alerting/v2/action_policies/{id}`. A v2 rule holds no action: an **action policy** matches the rule's `metadata.routing_tags` (+ an optional KQL `matcher.expression`) and runs a workflow. Fixed ids make redeploys and teardown idempotent. Same headers as the classic API.
+
+**Four policies**, all `grouping.mode: per_alert`, `throttle.strategy: on_status_change`:
+
+| Policy id | Matches | Runs |
+| --------- | ------- | ---- |
+| `{ns}-rca-hitl` | tag `{ns}-hitl` (ch 1-15), `alert_status: active` | `significant_event_notification` |
+| `{ns}-rca-auto` | tag `{ns}-auto` (ch 16-20), `alert_status: active` | `significant_event_notification_auto_remediate` |
+| `{ns}-case-close` | both tags, `alert_status: inactive` | `significant_event_case_close` |
+| `{ns}-nightshift` | both tags, `alert_status: active` | the Nightshift automation's own workflow (below) |
+
+**What the workflow receives** is `inputs.payload`, not `event.*`: `alerts[0].{rule_id, alert_id, alert_status, severity, alert_url, last_event_timestamp, data}` and `rules.<rule_id>.name`. **Rule tags are not in the payload**, so every per-channel value (`error_type`, `remediation_action`, `channel`, `subsystem`, `severity`, `rule_name`) is an `EVAL` column of the rule's query and arrives in `alerts[0].data`. `data` is `{}` on the `recovering` and `inactive` dispatches. A `severity` column also sets the alert's native severity.
+
+**Lifecycle.** A fault goes `pending` -> `active` (~1 min later) -> `recovering` -> `inactive`, and `on_status_change` dispatches each change. `alert_id` is stable across the four and is a new id for each new fault (episode). The `*_serverless.yaml` workflows therefore start from the `active` status only, and a workflow started by an action policy works with only a `manual` trigger.
+
+**Duplicate dispatch.** The dispatcher notifies the same alert status twice, ~5 s apart (`.alert-actions` shows two `notified` records for one `last_series_event_timestamp`). Seen with one policy per alert and with several, with slow and fast workflows, so it is not caused by our policy layout. The RCA workflows would open two cases per fault, so their first step (`claim_alert`) indexes `claim-{alert_id}` into `{ns}-significant-events-audit` and every later step is gated on `steps.claim_alert.output.result == 'created'`; the duplicate gets `updated` and skips. Ids are indexed atomically, so exactly one run wins. The case-close workflow is idempotent on its own (it only closes cases still open).
+
+**Cases.** `POST /api/cases/{id}/comments` with `type: alert`, `alertId: <alert_id>`, `index: ".rule-events"` attaches a v2 alert (`totalAlerts: 1`). `GET /api/cases/alerts/{alert_id}` returns the cases an alert is attached to, which is how `significant_event_case_close_serverless.yaml` finds the case to close. Rule events live in the hidden data stream `.rule-events`.
+
+**Workflow variants.** `elastic_config/workflows/<name>_serverless.yaml` replaces `<name>.yaml` on serverless and is ignored elsewhere (`_generate_workflow_yamls`); the workflow keys in `_workflow_ids` are unchanged. `significant_event_case_close.yaml` (a scheduled poller of the classic rules API) is **not** deployed on serverless: with no classic rule to find, it would treat every alert as recovered and close every open case each minute. `tests/test_universal_alerting.py` checks each serverless notification workflow against its classic file, so edit both together.
+
+**Gotchas.**
+- Recreating a rule with the same id while its alert is still `active` resumes that alert series, so the next dispatch is suppressed ("suppressed by throttled policy") until it goes `inactive`. Resolve the channel and wait for `inactive` before re-testing.
+- Never delete v2 rules by name-contains: the scenario's Nightshift signal rules (`kind: signal`) share the scenario-name prefix.
+- Serverless creates no per-channel significant-event queries (step 12 is skipped); the Universal rules are the only per-channel rules. The Nightshift source still holds the knowledge indicators.
+
+### Nightshift automation (serverless)
+
+The deployer creates **one Nightshift automation per scenario** (`"{scenario_name} Investigation"`, enabled, `reasoningMode: investigate`, daily limit 20, trigger row `ruleNamePattern: "{scenario_name} CH"`) that covers all 20 chaos channels. Code: `nightshift_automation_body`, `nightshift_workflow_yaml`, `_deploy_nightshift_automation` in `deployer_alerting.py`. It is best-effort: if Nightshift is unavailable the step still succeeds and its detail says the automation was not created. Teardown/redeploy delete the automation whose name matches exactly (its backing workflow goes with it); other scenarios' automations and hand-built ones are never touched.
+
+**Why the backing workflow is rewritten.** `POST /internal/nightshift/automations` (`isEnabled` defaults to false; the server binds a service account as `settings.run_as` and creates the backing workflow) generates a workflow with only the classic `alerting.v1.alertStatusChanged` trigger. Measured on serverless (Nov 2026): a Kibana trigger `alerting.alertStatusChanged` exists for universal alerts, but a workflow with it received **no runs** through a full pending -> active -> recovering -> inactive cycle, while policy-started workflows fired normally (events are only published once an integration opts in, and Nightshift's opt-in is not live on that build). So the deployer replaces the generated YAML (`PUT /api/workflows/workflow/{id}`, keeping the generated `run_as`) with a `manual`-trigger version that reads `inputs.payload`, and the `{ns}-nightshift` policy runs it. `nightshift.triggerInvestigation` only works from the automation's *own* workflow ("The automation does not belong to this workflow" otherwise), which is why the policy targets the backing workflow and not a separate one.
+
+**Duplicates.** The dispatcher's duplicate dispatch is absorbed by the workflow's `concurrency` key (`<automation_id>-<alert_id>`, `strategy: drop`): one run succeeds with an `investigationId`, the other shows as `skipped` and does not count toward the daily limit. `GET /internal/nightshift/automations/{id}/runs` lists both (`usedToday`).
+
+**Gotchas.**
+- Don't edit the automation in the Nightshift UI after a deploy: an update regenerates the backing workflow from the row config and puts back the classic-only trigger. Redeploy to restore it.
+- To re-check whether a newer build delivers universal alert events to workflows: create a throwaway workflow with `triggers: [{type: alerting.alertStatusChanged}]`, fire a chaos channel, and look for executions. If it works, the policy and YAML rewrite can go and the plain automation is enough.
+- `nightshift.followUpRecoveredAlert` on that build requires `rule_type_id`; the rewritten workflow doesn't use it.
 
 ### Webhook Connector (Legacy)
 ```
@@ -1044,7 +1080,7 @@ Reload updates the selector and the next **Launch** / deploy path (`get_scenario
 12. **`ai.agent` context window overflow** — The workflow engine passes ALL accumulated step outputs as context to `ai.agent` steps. OTLP log documents are large (passthrough attributes in `_source`). If `elasticsearch.search` steps return full docs, the combined context can exceed the model's max input length: `"Input is too long for requested model"` (error from inference entity `.rainbow-sprinkles-elastic`). **Fix:** Always use `_source` filtering and small `size` in search steps that precede `ai.agent` steps
 13. **`ai.agent` agent-id placement** — The `agent-id` for `ai.agent` steps MUST be at the **step level** (like `connector-id`), NOT inside `with`. If placed inside `with` (as `agent_id` or `agentId`), the workflow engine silently strips it
 14. **Workflow `data.set` variable access** — Variables set by `data.set` inside an `if` step's nested branches are NOT accessible via the parent step name. `{{ steps.parent_if_step.output.var }}` resolves to empty. Use `{{ inputs.field }}` directly or `{{ steps.nested_set_step.output.var }}` instead
-15. **Workflow execution API** — `GET /api/workflowExecutions?workflowId={id}` lists executions. `GET /api/workflowExecutions/{executionId}` gets details (status, error, startedAt, finishedAt). The `history` field on the workflow object only shows completed runs
+15. **Workflow execution API** — `GET /api/workflows/executions/{executionId}` gets details (status, error, startedAt, finishedAt). The `history` field on the workflow object only shows completed runs
 16. **OTel CPU state names** — Use `wait` not `iowait` for I/O wait CPU state. The OTel standard CPU states are: `user`, `system`, `idle`, `wait`, `nice`, `interrupt`, `softirq`, `steal`. Elastic Infrastructure UI dashboards filter by these exact names
 17. **Passthrough mapping on `logs` stream** — OTLP `attributes.*` and most `resource.attributes.*` use passthrough mapping (stored in `_source` but NOT indexed). Only `body.text`, `severity_text`, `service.name`, `resource.attributes.service.name`, `host.name`, `@timestamp` are indexed. Use `body.text LIKE "*ErrorType*"` for ES|QL, `body.text: "ErrorType"` for KQL, and `match`/`match_phrase` on `body.text` for query DSL
 18. **AI agent body vs body.text bug** — The AI agent (LLM) will construct ES|QL queries using `body` instead of `body.text`, causing `verification_exception: Unknown column [body]`. To prevent this: (a) add a prominent `## CRITICAL: Field Names` warning block in the agent system prompt, (b) add `body.text (NOT body)` warnings to every ES|QL tool description, (c) add validation in `validate.sh` to check deployed agent instructions and tool descriptions contain `body.text` warnings. This is a recurring issue because `body` seems natural but the OTLP mapping creates `body.text` as the actual indexed text field
@@ -1058,7 +1094,7 @@ Reload updates the selector and the next **Launch** / deploy path (`get_scenario
 26. **Case teardown uses namespace tag, not title** — `_cleanup_cases` in `deployer.py` deletes cases by querying `tags: ns` (the namespace tag e.g. `"nova7"`), not by matching the case title. Case title changes (e.g. removing the `RCA:` prefix) do not affect teardown correctness as long as the `"__NS__"` tag is still included in the workflow's `create_case` step
 27. **Workflow `if` conditions use KQL dot paths, NOT `{{ }}` templates** — The `condition` field in workflow steps uses KQL syntax with literal dot paths as field names. **CORRECT:** `condition: "inputs.severity : critical"`. **WRONG:** `condition: "{{ inputs.severity }} : critical"` (template substitution replaces the value, then KQL interprets the value as a field name → always false). For array access in conditions, use `.0.` instead of `[0]`: `condition: "steps.set_data.output.var.0.email : *@*"`
 28. **`elasticsearch.search` schema — `aggs`, `_source`, `sort`, `exists`, `match_phrase` all NOT allowed** — The workflow schema for `elasticsearch.search` steps only allows `index`, `size`, and `query` with basic query types (`match`, `term`, `range`, `bool`). Including `sort` → `Valid: false`. Including `match_phrase` → `Valid: false` (shows as "Untitled workflow"). Including `aggs` → validation warnings. Including `_source` → rejected. Including `exists` query → `Valid: false`. **Preferred workaround:** Use `elasticsearch.esql.query` with `KQL()` function instead — e.g. `FROM logs,logs.* | WHERE KQL("body.text: \"ErrorType\" AND severity_text: \"ERROR\"") | KEEP event_name`. For counts: `| STATS total = COUNT(*)`. Output format: `{columns: [...], values: [[...]]}` — access via `steps.X.output.values[row][col]`
-29. **Email connector id differs between ECH and serverless** — Do **not** hardcode `connector-id: elastic-cloud-email` in workflow YAML. ECH uses the preconfigured id `elastic-cloud-email`; serverless uses a different id (e.g. `Elastic-Cloud-SMTP`). Workflow templates use `connector-id: __EMAIL_CONNECTOR_ID__`; `_resolve_email_connector_id` in `deployer_workflows.py` prefers `elastic-cloud-email` when it exists, then falls back to the first connector whose id/name contains `smtp` or `email`. Hardcoding either id breaks the other deployment type.
+29. **`elastic-cloud-email` system email connector** — Pre-configured email connector on Elastic Cloud serverless. Use `connector-id: elastic-cloud-email` in email steps. Sends from `noreply@alerts.elastic.co`. Returns `{accepted: [...], rejected: [...], response: "250 2.0.0 Ok: queued"}`. Note: `Elastic-Cloud-SMTP` is a hosted-deployment connector name and does not exist on serverless — using it fails with "Email connector UUID ... not found"
 30. **Extracting callback_url from log `event_name`** — `event_name` is a top-level indexed `keyword` field (NOT a passthrough attribute). It contains a JSON string like `{"callback_url": "http://...", "user_email": "user@example.com"}`. Extract using ES|QL: `FROM logs,logs.* | WHERE KQL("body.text: \"ErrorType\"...") | KEEP event_name` → then `data.set` with `json_parse`: `${{ steps.search.output.values[1][0] | json_parse }}`. Access parsed fields via `steps.set_step.output.var[0].event_meta.callback_url`
 31. **Parameterized ES|QL tools — `?param` syntax** — Agent Builder `esql` tools support named parameters using ES|QL's native `?param_name` (for values) and `??param_name` (for identifiers/field names). Define params in `configuration.params` with `{description, type, optional}`. The Agent Builder auto-generates a JSON Schema from params for the LLM. **CRITICAL:** `CONCAT("*", ?param, "*")` does NOT pass validation — use `LIKE ?param` and instruct the LLM in the param description to include wildcards (e.g., `"Wrap in asterisks: *FuelPressureException*"`). `== ?param` works for exact string matching. Refs: https://www.elastic.co/docs/reference/query-languages/esql/esql-rest#esql-rest-params , https://github.com/elastic/elasticsearch/pull/122459
 32. **Prefer parameterized esql tools over `index_search` for logs** — `index_search` lets the LLM auto-generate ES|QL queries, which consistently fails: uses `message` instead of `body.text`, `FROM logs` instead of `FROM logs,logs.*`, `resource.attributes.service.name` instead of `service.name`, `MATCH()` instead of `LIKE`. Parameterized `esql` tools bake in correct field names and query patterns — the LLM only provides parameter values, eliminating 3-4 wasted tool calls per investigation
@@ -1068,11 +1104,11 @@ Reload updates the selector and the next **Launch** / deploy path (`get_scenario
 
 36. **Agent Builder conversations can be deleted via API; filter by `agent_id` for teardown** — `GET /api/agent_builder/conversations?agent_id={agent_id}` returns all conversations for a specific agent. `DELETE /api/agent_builder/conversations/{conversation_id}` deletes one (requires `kbn-xsrf: true`; returns `{"success": true}`). Filtering by `agent_id` is more reliable than title matching — it captures all conversations regardless of title without false positives. `_cleanup_agent` in `deployer_agent.py` calls `_cleanup_conversations` first (before deleting the agent) and returns the count for the teardown progress step detail.
 
-37. **Kibana Advanced Settings — use `/api/kibana/settings`, not `/internal/kibana/settings`** — Settings visible in Stack Management > Advanced Settings (e.g. `observability:streamsEnableSignificantEvents`, `aiAssistant:preferredChatExperience`) must be set via `POST /api/kibana/settings` with `{"changes": {"setting_key": value}}`. The `/internal/kibana/settings` endpoint exists but silently does not apply these user-facing settings — the change appears to succeed (HTTP 200) but the UI setting remains unchanged. Always use the public endpoint for Advanced Settings.
+37. **Kibana Advanced Settings — use `/api/kibana/settings`, not `/internal/kibana/settings`** — Settings visible in Stack Management > Advanced Settings (e.g. `agentBuilder:experimentalFeatures`, `aiAssistant:preferredChatExperience`) must be set via `POST /api/kibana/settings` with `{"changes": {"setting_key": value}}`. The `/internal/kibana/settings` endpoint exists but silently does not apply these user-facing settings — the change appears to succeed (HTTP 200) but the UI setting remains unchanged. Always use the public endpoint for Advanced Settings. Note: `observability:streamsEnableSignificantEvents` was an Advanced Setting but was removed in Kibana 9.6 — the gate became `feature_flags.overrides.streams.significantEventsAvailable`, and as of kibana#292333 (merged 2026-09-22) it is now `feature_flags.overrides.nightshift.enabled`. Keep both keys set during the transition so the demo works on builds from before and after the PR. Both are set dynamically via `PUT /internal/core/_settings` (requires `coreApp.allowDynamicConfigOverrides: true`). **Stack-generation split:** this is why the deployer branches on `_stack_generation()` (`deployer.py`: `"9.5"`, `"9.6"` or `"serverless"`). Version-specific code lives in `*_95` / `*_96` / `*_serverless` methods behind a dispatcher (`_enable_stack_gates` in `deployer_platform.py`, `_deploy_significant_events` in `deployer_streams.py`) and in the `_PLAN_LINES_{COMMON,95,96}` constants. On 9.5 both gates are uiSettings set via `/api/kibana/settings` and significant events use `queries/_bulk`; on 9.6 they are feature flags plus query streams (`PUT /api/streams/{child}/_query`, `FROM $.{stream}`). Serverless can't set the flags, so it only tries the query-streams uiSetting and uses the 9.6 creation path. `grep -n "\[9.5\]"` lists everything to delete when 9.5 support is dropped.
 
 38. **`ai.agent` step-level `conversation-id` field is ignored — but the `with.conversation_id` input works** — Placing `conversation-id` at the **step level** on an `ai.agent` step is NOT honored; the workflow engine silently strips it and spawns a brand-new conversation. The correct way to continue a conversation from an `ai.agent` step is `conversation_id` **inside `with:`** — this was previously (incorrectly) documented here as unsupported. Starting a new conversation still uses top-level `create-conversation: true`.
 
-39. **`run_rca` uses `ai.agent`, not the `kibana.request` escape hatch** — Both notification workflows now start the RCA with a typed `ai.agent` step (agent-id at step level, `create-conversation: true`, prompt in `with.message`), because `kibana.request` to `/api/agent_builder/converse` returns an untyped HTTP body that the Workflows editor cannot validate (`steps.run_rca.output.*` always shows "type is unknown"). Output fields on `ai.agent` are `output.message` and `output.conversation_id` (NOT `output.response.message` — that path only existed on the raw `/converse` response). **Do not nest `ai.agent` (or `data.set` + `json_parse`) under a `type: if` step** — the editor still reports those nested outputs as unknown. Gate with a step-level `if: "${{ event.alerts[0].kibana.alert.action_group != 'recovered' }}"` so the step stays top-level. Extract `user_email` with ES|QL `GROK` on `event_name` rather than `data.set`/`json_parse`. Pin `connector-id` on `run_rca` to Sonnet (`__SONNET_CONNECTOR_ID__`, resolved at deploy) and on `create_case_title` to Haiku (`__HAIKU_CONNECTOR_ID__`). `run_rca` timeout is 15m with 2 retries; the title step is 2m with exponential retry.
+39. **`run_rca` uses `ai.agent`, not the `kibana.request` escape hatch** — Both notification workflows now start the RCA with a typed `ai.agent` step (agent-id at step level, `create-conversation: true`, prompt in `with.message`), because `kibana.request` to `/api/agent_builder/converse` returns an untyped HTTP body that the Workflows editor cannot validate (`steps.run_rca.output.*` always shows "type is unknown"). Output fields on `ai.agent` are `output.message` and `output.conversation_id` (NOT `output.response.message` — that path only existed on the raw `/converse` response). **Do not nest `ai.agent` (or `data.set` + `json_parse`) under a `type: if` step** — the editor still reports those nested outputs as unknown. Gate with a step-level `if: "${{ event.alerts[0].kibana.alert.action_group != 'recovered' }}"` so the step stays top-level. Extract `user_email` with ES|QL `GROK` on `event_name` rather than `data.set`/`json_parse`. The YAML templates use `__SONNET_CONNECTOR_ID__` and `__HAIKU_CONNECTOR_ID__` placeholders on their `ai.agent` steps. At deploy time `_resolve_llm_connector_ids` in `deployer_workflows.py` queries `GET /api/actions/connectors` and substitutes the id of a matching Claude connector (exact id/name match first, then substring match on `claude`+`sonnet`/`haiku`). **When no matching connector exists** (e.g. on-prem stacks without a Cloud-preconfigured Claude connector) the deployer removes the `connector-id:` line entirely so the step runs on whatever default LLM connector the deployment has configured, rather than pinning a non-existent connector. This means you should never hard-code the connector ids in the YAML templates — keep the placeholders so the deployer can handle both cases. `run_rca` timeout is 15m with 2 retries; the title step is 2m with exponential retry.
 
     ```yaml
     - name: run_rca
@@ -1116,7 +1152,7 @@ Reload updates the selector and the next **Launch** / deploy path (`get_scenario
 
 45. **All scenario-specific data belongs in the scenario's own folder** — Every property that varies by scenario (display text, KPI fields, service names, thresholds, etc.) lives in `scenarios/<id>/scenario.yaml`, `channels/*.yaml`, and `services/*.yaml`. No Python files live inside a scenario folder. The deployer and agent code reach scenario data through `scenario.<property>` — never branch on `scenario.scenario_id` in shared code. This keeps all scenario content co-located and ensures adding a new scenario requires changes only in `scenarios/<new_id>/`.
 
-46. **Three deployer mixins at steps 16, 18, and 20** — `deployer_backfill.py` (step 16 / `StepIdx.ECS_LOG_BACKFILL`) backfills ECS-formatted logs into `logs.ecs.{ns}`. `deployer_aiops.py` (step 18 / `StepIdx.LOGS_ML_JOBS`) creates ML jobs for log rate analysis and message categorization on `logs.otel.{ns}`. `deployer_integrations.py` (step 20 / `StepIdx.INTEGRATIONS`, last) installs OTel content packages from the Fleet registry after the rest of the stack is up (Fleet can take minutes on Serverless).
+46. **Three deployer mixins at steps 16, 18, and 20–21** — `deployer_backfill.py` (step 16) backfills ECS-formatted logs into `logs.ecs.{ns}`. `deployer_aiops.py` (step 18) creates ML jobs for log rate analysis and message categorization on `logs.otel.{ns}`. `deployer_integrations.py` (steps 20–21, last) installs OTel content packages from the Fleet registry after the rest of the stack is up (Fleet can take minutes on Serverless).
 
 47. **Create workflow audit/queue indices at deploy, before posting YAML** — The Workflows editor treats a missing `elasticsearch.index` target as an error ("No indices, aliases, or data streams currently match `{ns}-…`") even though the step would auto-create the index at runtime. `_ensure_workflow_indices` in `deployer_workflows.py` PUTs `{ns}-significant-events-audit`, `{ns}-remediation-audit`, `{ns}-escalation-audit`, `{ns}-remediation-queue`, and `{ns}-daily-report-audit` during workflow deploy. Teardown already deletes the same list (`WORKFLOW_INDEX_SUFFIXES` in `deployer_base.py`).
 
@@ -1143,38 +1179,43 @@ Both skills enforce the same guardrails: scope is limited to `scenarios/<id>/`, 
 
 ### Mixin Pattern and Step Indexing
 
-The deployer is composed of mixins (`SloMixin`, `AlertingMixin`, `DashboardMixin`, etc.), each contributing one or more numbered steps to `DeployProgress`. Steps are referenced via `self._step(StepIdx.<NAME>)` (`StepIdx` in `deployer_base.py`). Adding a new step requires inserting a `DeployStep` in `deploy_all()`, adding a matching `StepIdx` member, and using that member in the mixin — do not hard-code numeric indices.
+The deployer is composed of mixins (`SloMixin`, `AlertingMixin`, `DashboardMixin`, etc.), each contributing one or more numbered steps to `DeployProgress`. Steps are referenced by index via `self._step(n)`. Adding a new step at any index requires bumping all `_step()` calls in every file with a higher index.
 
-**Current step index assignments (`StepIdx`):**
-| Index | StepIdx | Step | File |
-|-------|---------|------|------|
-| 0 | CONNECTIVITY_CHECK | Connectivity check | `deployer.py` |
-| 1 | ES_URL | Derive Elasticsearch URL | `deployer.py` |
-| 2 | OTLP_ENDPOINT | Derive OTLP endpoint | `deployer_otlp.py` |
-| 3 | CLEANUP | Clean up old artifacts | `deployer.py` |
-| 4 | PLATFORM_SETTINGS | Configure platform settings | `deployer_platform.py` |
-| 5 | APM_ROLLUP | Generate APM rollup data | `deployer_apm.py` |
-| 6 | WORKFLOWS | Deploy workflows | `deployer_workflows.py` |
-| 7 | KNOWLEDGE_BASE | Index knowledge base | `deployer_kb.py` |
-| 8 | AI_TOOLS | Deploy AI agent tools + skills | `deployer_agent.py` + `deployer_skills.py` |
-| 9 | AI_AGENT | Create AI agent | `deployer_agent.py` |
-| 10 | STREAM_CREATE | Create scenario stream | `deployer_streams.py` |
-| 11 | KNOWLEDGE_INDICATORS | Generate knowledge indicators | `deployer_streams.py` |
-| 12 | SIGNIFICANT_EVENTS | Create significant events | `deployer_streams.py` |
-| 13 | DATA_VIEWS | Create data views | `deployer_views.py` |
-| 14 | DASHBOARDS | Import Kibana dashboards | `deployer_dashboard.py` |
-| 15 | ALERT_RULES | Create alert rules | `deployer_alerting.py` |
-| 16 | ECS_LOG_BACKFILL | ECS log backfill | `deployer_backfill.py` |
-| 17 | APM_ANOMALY | Enable APM anomaly detection | `deployer_apm.py` |
-| 18 | LOGS_ML_JOBS | Create logs ML jobs (rate + categorization) | `deployer_aiops.py` |
-| 19 | SLOS | Create SLOs | `deployer_slos.py` |
-| 20 | INTEGRATIONS | Install OTel integrations | `deployer_integrations.py` |
+**Step index assignments** (source of truth: `StepIdx` in `elastic_config/deployer_base.py`):
+| Index | Step | File |
+|-------|------|------|
+| 0 | Connectivity check | `deployer.py` |
+| 1 | Derive Elasticsearch URL | `deployer.py` |
+| 2 | Derive OTLP endpoint | `deployer_otlp.py` |
+| 3 | Clean up old artifacts | `deployer.py` |
+| 4 | Configure platform settings (serverless: also the `launch-next-nightshift-es` External Elasticsearch sandbox connector, assigned to the `nightshift.investigation` agent so the sandbox can query through it) | `deployer_platform.py` |
+| 5 | Generate APM rollup data | `deployer_apm.py` |
+| 6 | Deploy workflows | `deployer_workflows.py` |
+| 7 | Index knowledge base (serverless: also one Nightshift Cortex runbook per channel and a `[launch-next:<ns>]` Nightshift custom context snippet) | `deployer_kb.py` |
+| 8 | Deploy AI agent tools + skills | `deployer_agent.py` + `deployer_skills.py` |
+| 9 | Create AI agent | `deployer_agent.py` |
+| 10 | Create scenario stream | `deployer_streams.py` |
+| 11 | Knowledge indicators | `deployer_streams.py` |
+| 12 | Create significant events (serverless: skipped, the Universal alert rules replace them) | `deployer_streams.py` |
+| 13 | Create data views | `deployer_views.py` |
+| 14 | Import executive dashboard | `deployer_dashboard.py` |
+| 15 | Create alert rules (serverless: Universal rules + 4 action policies + the scenario's Nightshift automation) | `deployer_alerting.py` |
+| 16 | ECS log backfill | `deployer_backfill.py` |
+| 17 | APM anomaly detection (start, then wait for catch-up) | `deployer_apm.py` |
+| 18 | Create logs ML jobs (rate + categorization) | `deployer_aiops.py` |
+| 19 | Create SLOs | `deployer_slos.py` |
+| 20 | Install OTel integrations | `deployer_integrations.py` |
+| 21 | OOTB package templates (alert rules, SLOs, ML jobs) | `deployer_integrations.py` + `deployer_package_templates.py` |
 
-**OTel integrations run last (step 20)** — Fleet readiness can take several minutes on Serverless; running after SLOs lets the rest of the stack deploy without blocking on Fleet/EPM. The step can still fail or skip without aborting prior work.
+**OTel integrations run last (steps 20–21)** — Fleet readiness can take several minutes on Serverless; running after SLOs lets the rest of the stack deploy without blocking on Fleet/EPM. The step can still fail or skip without aborting prior work.
+
+**Package templates are cluster-shared (step 21)** — `_create_ootb_package_templates` turns every installed package's `alerting_rule_template`, `slo_template` and `ml_module` assets into alert rules, SLOs and anomaly detection jobs. Their ids come from the template (SLO ids are sanitized by `slo_id_for_template`; ML jobs keep the shipped ids), they carry no scenario namespace, every deploy upserts them, and teardown never deletes them. Packages the active scenario does not install are switched off instead: rules and SLOs are disabled, datafeeds stopped. SLOs are found by the `ootb-template` + `ootb-package:<pkg>` tags, ML jobs by `custom_settings.ootb_package`. ML modules are set up through Kibana's `POST /internal/ml/modules/setup/{id}` (`elastic-api-version: 1`), falling back to the ES ML API when Kibana does not know the module. A module whose `defaultIndexPattern` matches none of its package's `discovery.datasets` is pointed at those datasets instead (`ml_index_pattern`; aws_elb_metrics_otel 0.12.x reads `metrics-aws.applicationelb.otel-*` while the package writes `aws.elb.otel`). Generator coverage of these templates is tested in `tests/test_slo_template_emit.py` and `tests/test_ml_module_emit.py` against `tests/fixtures/{slo_templates,ml_modules}.json` (`scripts/snapshot_package_templates.py`); see `.claude/skills/add-telemetry-generator/TEMPLATES.md`.
+
+**Library investigation workflows (steps 6 and 21)** — `deployer_workflow_templates.py` deploys each vendored Template Library workflow (`elastic_config/workflows/library/`, refreshed with `scripts/snapshot_workflow_templates.py`) whose required ES|QL steps all read datasets an enabled generator writes, e.g. the four AWS `*-investigation-otel` workflows when the AWS generators run. They are cluster-shared like the OOTB rules: found by template name, upserted with `enabled: true` (a library template has no `enabled` field and would come up disabled), tagged `ootb-workflow`, never deleted on teardown. Step 21 then gives each OOTB package rule that reads the evidence step's data, groups by its `kibana.alert.grouping.<Dim>` and reads one of its metrics a `.workflows` action (`summaryMode: false`), e.g. only "[AWS RDS OTel] Database connections high" starts the RDS investigation. The scenario's chaos-channel rules and their RCA workflows are untouched, so one fault can run both. Resource-id inputs come from generators' `workflow_input_values`; a scenario adds `workflow_template_inputs` (`elastic_config/workflow_templates.py`).
 
 **Skills deploy as part of step 8** — `_deploy_tools()` calls `_deploy_skills()` after deploying all tools; `step.items_total` is set to `len(tools) + len(skill_defs)`. No step index bump required.
 
-**Gotcha:** When inserting a step, add a `StepIdx` member and a `DeployStep` in `deploy_all()`, then use `self._step(StepIdx.<NAME>)` in the mixin. Never hard-code the integer.
+**Gotcha:** When inserting a step, update `_step(n)` calls in every mixin file that uses a higher index. There are typically 9+ files involved.
 
 ### Elasticsearch URL Derivation (Three-Strategy Hierarchy)
 
@@ -1301,6 +1342,7 @@ or a corporate load balancer), the public URL differs from the real Kibana endpo
 | Chaos UI active channel cards (ALERTS, CASES buttons) | `KIBANA_URL_PLACEHOLDER` → `_inject_theme()` → `window.KIBANA_URL` in JS |
 | Notification workflow email (significant event alert) | `__KIBANA_URL__` template var in YAML |
 | AI agent system prompt (`## Mission Context`) | `self.kibana_display_url` in `_generate_system_prompt()` |
+| Claude Code links in code-server chat | `KIBANA_PROXY` documented in generated `/app/CLAUDE.md` via `entrypoint.sh` |
 
 **Implementation:**
 
@@ -1310,20 +1352,20 @@ or a corporate load balancer), the public URL differs from the real Kibana endpo
 - `elastic_config/deployer_workflows.py` — adds `yaml_content.replace("__KIBANA_URL__", self.kibana_display_url)` alongside other template substitutions
 - Workflow YAML template `significant_event_notification.yaml` — uses `__KIBANA_URL__` in the email body
 - `elastic_config/deployer_agent.py` — includes `self.kibana_display_url` in `**Kibana URL**` line of agent system prompt
+- `docker/elastic-launch-demo/entrypoint.sh` — the `node -e` block that generates `/app/CLAUDE.md` now includes `KIBANA_PROXY` in the connection-details table and a "Kibana Links You Give the User" section with the explicit rule: display links use `$KIBANA_PROXY`, API calls use `$KIBANA_URL`
 
 **Gotcha:** `KIBANA_PROXY` affects only user-visible links. It is never used for any HTTP request the
 app makes to Kibana. Do not set it as a replacement for `KIBANA_URL` — both must be set when using a proxy.
 
-**Protocol normalization:** `KIBANA_PROXY` can be set with or without `https://`. `app/config.py` normalizes it at load time — if the value has no `http://` or `https://` prefix, `https://` is prepended automatically. Without this, a bare hostname like `o11y-launch-demo.kb.us-west2.gcp.elastic-cloud.com` produces relative URLs in the browser (navigating to localhost instead of Kibana).
+**Protocol normalization:** `KIBANA_PROXY` can be set with or without `https://`. `app/config.py` normalizes it at load time — if the value has no `http://` or `https://` prefix, `https://` is prepended automatically. Without this, a bare hostname like `o11y-launch-next.kb.us-west2.gcp.elastic-cloud.com` produces relative URLs in the browser (navigating to localhost instead of Kibana).
 
 **Selector UI (`/api/deployments`):** The `/api/deployments` endpoint now includes a `kibana_display_url` field (= `KIBANA_PROXY or kibana_url`) alongside `kibana_url`. JavaScript in `app/selector/static/index.html` uses `d.kibana_display_url` for the Executive Dashboard link so it respects the proxy.
 
 **Progress visibility:**
 
 - Each deployer step is logged at INFO level: `[auto-deploy:{scenario}] {step} — {status}`
-- The selector UI (`/`) detects an in-progress auto-deploy via `GET /api/setup/auto-deploy`
+- The selector UI (`/`) detects an in-progress auto-deploy via `GET /api/setup/active-deploys`
   and automatically shows the progress panel without requiring the user to click Launch
-- The `/api/setup/auto-deploy` endpoint returns `{"in_progress": bool, "deployment_id": str|null}`
 
 **start.sh:** Uses `command -v python3` to resolve the active venv's Python rather than
 `/usr/bin/python3`. Do not use `sudo` — it resets PATH and loses the venv. If root is needed
@@ -1390,7 +1432,7 @@ Active fault channels auto-resolve after `MAX_FAULT_DURATION` seconds. The timeo
 
 ## Tool Naming Convention
 
-All Agent Builder tool IDs are **namespace-prefixed** using `scenario.prefixed_tool_id(base_id)` (defined in `scenarios/base.py`). This allows multiple scenarios to coexist in the same Agent Builder instance without ID collisions.
+All Agent Builder tool IDs are **namespace-prefixed** using `scenario.prefixed_tool_id(base_id)` (defined in `scenario_engine/base.py`). This allows multiple scenarios to coexist in the same Agent Builder instance without ID collisions.
 
 ```python
 def prefixed_tool_id(self, base_id: str) -> str:
@@ -1416,6 +1458,7 @@ def prefixed_tool_id(self, base_id: str) -> str:
 3. **Scenario teardown** (`_teardown_scenario` → `_cleanup_agent`) — uses `prefixed_tool_id()` for each tool name; do NOT use a flat hardcoded set
 4. **Agent system prompt** — Tool Selection Guide and Remediation instructions must reference prefixed IDs so the LLM calls the correct tool name
 5. **Knowledge base documents** — Investigation Procedure and Remediation sections reference tool names; use `self.scenario.prefixed_tool_id(...)` inside the f-string
+   - On serverless, `_generate_cortex_runbook` writes the same facts to Nightshift Cortex (`runbook` pages, slug `{ns}-chNN-<error_type>`). It must not name Agent Builder tools or skills. When you add a field to `_generate_kb_doc`, add it there too
 
 **The `platform.core.cases` tool is a built-in — it is NOT prefixed and should never be passed through `prefixed_tool_id()`.**
 
@@ -1441,13 +1484,16 @@ Teardown must delete **only** resources created for the scenario. The scenario's
 
 | Resource | Mechanism | Risk |
 | -------- | --------- | ---- |
-| Alert rules | Name contains `scenario_name` — deletes ALL rules whose name includes the scenario name | Moderate — user-created rules named to match will be deleted |
+| Alert rules | Name contains `scenario_name` — deletes ALL rules whose name includes the scenario name. Serverless also deletes the Universal rules by fixed id (`{ns}-chNN`) and `"{scenario_name} CH"` name prefix on `kind: alert` rules, plus the 4 action policies (`{ns}-rca-hitl`, `{ns}-rca-auto`, `{ns}-case-close`, `{ns}-nightshift`) and the scenario's Nightshift automation (exact name `"{scenario_name} Investigation"`, so other scenarios' automations are never matched) | Moderate — user-created rules named to match will be deleted |
 | Cases | Tag parameter: `{"tags": ns}` — deletes ALL cases with that tag | Moderate — same risk |
 | Workflows | Name contains `scenario_name` OR name starts with `{ns}-` | Moderate — workflows manually named to match will be deleted |
 
+### Deleted despite not being scenario-scoped
+
+- **APM rollup data streams** (`metrics-transaction.1m.otel-*`, `metrics-service_destination.1m.otel-*`, `metrics-service_summary.1m.otel-*`) — `_cleanup_apm_rollup` removes them on teardown so the next deploy's ML job trains on a clean baseline instead of history that includes prior live fault periods
+
 ### Do NOT delete
 
-- **APM rollup data streams** (`metrics-transaction.1m.otel-*`, `metrics-service_destination.1m.otel-*`, `metrics-service_summary.1m.otel-*`) — not scenario-specific; shared across environments
 - **Generic data views** (`logs-*`, `metrics-hostmetricsreceiver.otel-*`) — no scenario name in their name; used by OTel dashboards generally
 
 ### Scenario-named data views
@@ -1476,12 +1522,12 @@ Use `urllib.parse.quote(view_id, safe="")` in Python. The Logs data view ID (`lo
 | 0 | Stop generators |
 | 1 | Delete workflows |
 | 2 | Delete alert rules |
-| 3 | Delete service stream |
+| 3 | Delete APM ML jobs |
 | 4 | Delete AI agent, tools, skills, and conversations |
 | 5 | Delete knowledge base |
 | 6 | Delete audit indices |
 | 7 | Delete dashboard |
-| 8 | Delete APM ML jobs |
+| 8 | Delete service stream |
 | 9 | Delete SLOs |
 | 10 | Delete cases |
 | 11 | Delete data views |

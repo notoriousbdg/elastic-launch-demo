@@ -1,0 +1,70 @@
+name: Route53 Private Zone Resolution
+subsystem: edge_api
+vehicle_section: edge_pipeline
+error_type: NET-R53-RESOLUTION-FAILURE
+sensor_type: health_check
+affected_services: [orders-gateway]
+cascade_services: [fulfillment-worker]
+
+description: >
+  A Route 53 private hosted zone was disassociated from the VPC, so orders-gateway cannot resolve internal service names and fulfillment-worker cannot resolve its SQS interface endpoint.
+
+investigation_notes: |
+  1. Search body.text for *NET-R53-RESOLUTION-FAILURE* and group by dns.question.name to see which names fail, such as {failed_hostname}.
+  2. In CloudTrail, look for DisassociateVPCFromHostedZone on zone {hosted_zone_id} ({zone_name}) at {disassociation_time} and identify the principal that made the change.
+  3. Check Route 53 Resolver query logs: queries for {zone_name} from vpc {vpc_id} return NXDOMAIN or SERVFAIL since the change, with {nxdomain_count} failures in the window.
+  4. Confirm the impact on orders-gateway: upstream connect errors to internal names rise while direct IP calls still work, which rules out ALB or target health.
+  5. Check fulfillment-worker: its SQS client uses endpoint override {sqs_endpoint}, a CNAME in the same private zone that points at the us-west-2 SQS interface endpoint. The same change disassociated the zone from the us-west-2 VPC, so the name returns NXDOMAIN, ReceiveMessage fails, and the SQS fulfillment queue backlog and oldest message age grow.
+  6. After approval, reassociate the private hosted zone with the VPC (AssociateVPCWithHostedZone), flush resolver caches by restarting tasks if needed, and verify NXDOMAIN rate returns to 0.
+
+remediation_action: reassociate_private_hosted_zone
+
+error_message: |
+  NET-R53-RESOLUTION-FAILURE: zone={zone_name} hosted_zone_id={hosted_zone_id} vpc={vpc_id} host={failed_hostname} rcode=NXDOMAIN failures={nxdomain_count}
+
+stack_trace: |
+  dial tcp: lookup {failed_hostname} on 10.1.0.2:53: no such host
+  goroutine 1873 [running]:
+  orders-gateway/proxy.(*Upstream).Dial(...)
+  	/src/proxy/upstream.go:134
+  orders-gateway/proxy.(*Router).Forward(...)
+  	/src/proxy/router.go:96
+    resolver=10.1.0.2  vpc={vpc_id}  hosted_zone_id={hosted_zone_id}  zone_name={zone_name}
+    disassociated_at={disassociation_time}  nxdomain_count={nxdomain_count}
+    fulfillment-worker: lookup {sqs_endpoint}: no such host (SQS interface endpoint)
+
+correlation_attr:
+  key: infra.route53_zone_association
+  value: Z0ORDERSINTERNAL-vpc-disassociated
+
+fault_params:
+  zone_name: orders.internal
+  hosted_zone_id: Z0ORDERSINTERNAL
+  vpc_id: vpc-0a1b2c3d4e5f6a7b8
+  failed_hostname: {choice: [orders-service.orders.internal, inventory.orders.internal, payments.orders.internal]}
+  sqs_endpoint: sqs.orders.internal
+  disassociation_time: 2026-10-21T09:41:00Z
+  nxdomain_count: {randint: [300, 9000]}
+
+rca_clues:
+  orders-gateway:
+    dns.nxdomain_rate_per_min: {randint: [120, 900]}
+    upstream.connect_errors: {randint: [200, 2500]}
+    dns.public_names_resolving: true
+  fulfillment-worker:
+    sqs.endpoint_resolution_failed: true
+    sqs.receive_errors: {randint: [50, 700]}
+    queue.messages_visible: {randint: [500, 8000]}
+
+business_impact:
+  - kpi: business.throughput_rpm
+    factor: {uniform: [0.20, 0.50]}
+  - kpi: business.error_rate_pct
+    factor: {uniform: [4.0, 8.0]}
+  - kpi: business.availability_pct
+    factor: {uniform: [0.92, 0.97]}
+
+generator_impact:
+  aws_sqs_otel:
+    high_backlog: 3000.0
+    oldest_message_age_high: 600.0

@@ -8,7 +8,6 @@ Elastic cluster with different scenario configurations.
 from __future__ import annotations
 
 import logging
-import threading
 from typing import TYPE_CHECKING
 
 from app.chaos.controller import ChaosController
@@ -35,6 +34,7 @@ class ScenarioInstance:
         self.otlp = OTLPClient(
             endpoint=ctx.otlp_endpoint or None,
             api_key=ctx.otlp_api_key or None,
+            elastic_url=ctx.elastic_url or None,
         )
 
         # Per-instance chaos controller with this scenario's channel registry.
@@ -69,7 +69,7 @@ class ScenarioInstance:
                 elastic_api_key=ctx.elastic_api_key,
                 namespace=ctx.namespace,
                 chaos_controller=self.chaos_controller,
-                stop_event=self.service_manager._stop_event,
+                stop_event=self.service_manager.stop_event,
             )
 
         self._running = False
@@ -100,3 +100,118 @@ class ScenarioInstance:
         self.service_manager.stop_all()
         self._running = False
         logger.info("Instance %s stopped", self.scenario_id)
+
+    def reconfigure_otlp(self, endpoint: str, api_key: str) -> None:
+        if endpoint:
+            self.otlp.reconfigure(endpoint, api_key)
+
+    @property
+    def scenario(self):
+        return self.ctx.scenario
+
+    @property
+    def namespace(self) -> str:
+        return self.ctx.namespace
+
+    @property
+    def mission_id(self) -> str:
+        return self.ctx.mission_id
+
+    @property
+    def scenario_name(self) -> str:
+        return self.ctx.scenario.scenario_name
+
+    @property
+    def kibana_url(self) -> str:
+        return self.ctx.kibana_url
+
+    @property
+    def elastic_url(self) -> str:
+        return self.ctx.elastic_url
+
+    @property
+    def elastic_api_key(self) -> str:
+        return self.ctx.elastic_api_key
+
+    def elastic_connection(self):
+        """Credentials a deployer needs: url, kibana, api key, scenario."""
+        return (
+            self.ctx.elastic_url,
+            self.ctx.kibana_url,
+            self.ctx.elastic_api_key,
+            self.ctx.scenario,
+        )
+
+    def trigger_channel(self, channel: int, **kwargs):
+        return self.chaos_controller.trigger(channel, **kwargs)
+
+    def resolve_channel(self, channel: int, **kwargs):
+        return self.chaos_controller.resolve(channel, **kwargs)
+
+    def set_infra_spikes(self, spikes: dict) -> None:
+        self.chaos_controller.set_infra_spikes(spikes)
+
+    def infra_spikes(self) -> dict:
+        return self.chaos_controller.get_infra_spikes()
+
+    def chaos_status(self) -> dict:
+        return self.chaos_controller.get_status()
+
+    def channel_status(self, channel: int) -> dict:
+        return self.chaos_controller.get_channel_status(channel)
+
+    def validate_session(self, session_id: str, user_email: str = "") -> list:
+        return self.chaos_controller.validate_session(session_id, user_email=user_email)
+
+    def runtime_status(self) -> dict:
+        return {
+            "scenario": self.scenario_id,
+            "mission_id": self.mission_id,
+            "mission_name": self.scenario_name,
+            "namespace": self.namespace,
+            "services": self.service_manager.get_all_status(),
+            "generators": self.service_manager.get_generator_status(),
+            "chaos": self.chaos_status(),
+        }
+
+
+def start_deployment(
+    scenario,
+    *,
+    deployment_id: str,
+    registry,
+    store,
+    chaos_store,
+    otlp_endpoint: str = "",
+    otlp_api_key: str = "",
+    elastic_url: str = "",
+    elastic_api_key: str = "",
+    kibana_url: str = "",
+    cloud_api_key: str = "",
+    persist: bool = True,
+) -> ScenarioInstance:
+    """Build, start, register, and optionally persist one deployment."""
+    ctx = ScenarioContext.from_scenario(
+        scenario,
+        otlp_endpoint=otlp_endpoint,
+        otlp_api_key=otlp_api_key,
+        elastic_url=elastic_url,
+        elastic_api_key=elastic_api_key,
+        kibana_url=kibana_url,
+    )
+    instance = ScenarioInstance(ctx, chaos_store=chaos_store)
+    instance.reconfigure_otlp(otlp_endpoint, otlp_api_key)
+    instance.start()
+    registry.register(deployment_id, instance)
+    if persist:
+        store.upsert(
+            deployment_id=deployment_id,
+            scenario_id=scenario.scenario_id,
+            otlp_endpoint=otlp_endpoint,
+            otlp_api_key=otlp_api_key,
+            elastic_url=elastic_url,
+            elastic_api_key=elastic_api_key,
+            kibana_url=kibana_url,
+            cloud_api_key=cloud_api_key,
+        )
+    return instance

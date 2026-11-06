@@ -1,0 +1,37 @@
+name: "GT cockroachdb_otel: storage_capacity_usage_high"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-COCKROACHDB-STORAGE-CAPACITY-USAGE-
+sensor_type: impact_key_probe
+affected_services:
+  - gt-cockroachdb-aws-svc-1
+cascade_services:
+  - gt-cockroachdb-aws-svc-2
+description: "Tests impact_key storage_capacity_usage_high on generator cockroachdb_otel."
+investigation_notes: |-
+  1. Verify cockroachdb_otel is active and reporting metrics.
+  2. Check that the storage_capacity_usage_high metric has reached the trigger value (85.0).
+  3. Confirm generator_impact for cockroachdb_otel.storage_capacity_usage_high is set to 85.0.
+  4. Look for correlated changes in service gt-cockroachdb-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_storage_capacity_usage_high_baseline
+error_message: "GT-PROBE: gen=cockroachdb_otel key=storage_capacity_usage_high value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=cockroachdb_otel
+  impact_key: storage_capacity_usage_high
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 85.0
+  svc_name: gt-cockroachdb-aws-svc-1
+rca_clues:
+  gt-cockroachdb-aws-svc-1:
+    probe.generator: cockroachdb_otel
+    probe.impact_key: storage_capacity_usage_high
+    probe.trigger_value: 85.0
+  gt-cockroachdb-aws-svc-2:
+    probe.upstream_generator: cockroachdb_otel
+    probe.upstream_key: storage_capacity_usage_high
+generator_impact:
+  cockroachdb_otel:
+    storage_capacity_usage_high: 85.0

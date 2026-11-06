@@ -36,10 +36,14 @@ subsystem: payments                # short functional area
 language: java                     # python | java | go | dotnet | rust | cpp
 generates_traces: true             # optional; false for infra-only services (no trace spans)
 # ── Topology ───────────────────────────────────────────────────────────────
-topology:                          # outbound calls this service makes
+topology:                          # outbound calls this service makes. Every callee MUST be a defined
+                                   # service (services/<callee>.yaml) - never an external system like a card
+                                   # network; model those as db_operations or log attrs (Check 10b)
   - [fraud-detector, /api/v1/fraud/check, POST]
   - [settlement-processor, /api/v1/settle, POST]
-entry_endpoints:                   # inbound API endpoints (seeds root trace spans)
+entry_endpoints:                   # inbound API endpoints (seeds root trace spans). Give EVERY traced
+                                   # (non-database) service these: a fault channel's affected_services must
+                                   # include an entry service or the ops dashboard never reacts (Check 31)
   - [/api/v1/payment/charge, POST]
   - [/api/v1/payment/status, GET]
 db_operations:                     # DB calls (seeds DB trace spans)
@@ -167,8 +171,13 @@ steps:
 
 ### `incr_key` step
 
+The state key **must be a dict** — initialise it with `{init: {}}` or `init_per_key`. `{init: 0}` (a scalar, as
+used by `counter`) crashes the service loop on every tick with `AttributeError: 'int' object has no attribute 'get'`
+(Check 33).
+
 ```yaml
 state:
+  _refunds: {init: {}}                      # per-key counter that starts empty
   _seq: {init_per_key: {keys_from: STREAMS, spec: {randint: [1000000, 5000000]}}}
 
 steps:

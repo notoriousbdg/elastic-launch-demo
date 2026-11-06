@@ -9,7 +9,7 @@ schema_version: "1.2"
 nominal_label: NORMAL
 hosts:
 - host.name: gaming-aws-host-01
-  host.id: i-0g4m1ng5e7v8r9012
+  host.id: i-708ddd8dce2866ed9
   host.arch: amd64
   host.type: c5.2xlarge
   host.image.id: ami-0gaming1234567890
@@ -31,13 +31,13 @@ hosts:
   cloud.platform: aws_ec2
   cloud.region: us-east-1
   cloud.availability_zone: us-east-1a
-  cloud.account.id: '234567890123'
-  cloud.instance.id: i-0g4m1ng5e7v8r9012
+  cloud.account.id: '940706850806'
+  cloud.instance.id: i-708ddd8dce2866ed9
   cpu_count: 8
   memory_total_bytes: 17179869184
   disk_total_bytes: 536870912000
 - host.name: gaming-gcp-host-01
-  host.id: '7891234567890123456'
+  host.id: '9044512759578335'
   host.arch: amd64
   host.type: c2-standard-8
   host.image.id: projects/debian-cloud/global/images/debian-12-bookworm-v20250115
@@ -59,13 +59,13 @@ hosts:
   cloud.platform: gcp_compute_engine
   cloud.region: us-central1
   cloud.availability_zone: us-central1-a
-  cloud.account.id: gaming-platform-prod
-  cloud.instance.id: '7891234567890123456'
+  cloud.account.id: gaming-project
+  cloud.instance.id: '9044512759578335'
   cpu_count: 8
   memory_total_bytes: 34359738368
   disk_total_bytes: 214748364800
 - host.name: gaming-azure-host-01
-  host.id: /subscriptions/ghi-jkl/resourceGroups/gaming-rg/providers/Microsoft.Compute/virtualMachines/gaming-vm-01
+  host.id: /subscriptions/535e3446-0585-5ce8-afdd-cb2bb70e5e16/resourceGroups/gaming-rg/providers/Microsoft.Compute/virtualMachines/gaming-vm-01
   host.arch: amd64
   host.type: Standard_F8s_v2
   host.image.id: Canonical:0001-com-ubuntu-server-jammy:22_04-lts-gen2:latest
@@ -87,7 +87,7 @@ hosts:
   cloud.platform: azure_vm
   cloud.region: eastus
   cloud.availability_zone: eastus-1
-  cloud.account.id: ghi-jkl-mno-pqr
+  cloud.account.id: 535e3446-0585-5ce8-afdd-cb2bb70e5e16
   cloud.instance.id: gaming-vm-01
   cpu_count: 8
   memory_total_bytes: 17179869184
@@ -143,7 +143,7 @@ agent_config:
     chat/voice (WebRTC, Opus), leaderboard systems (Redis sorted sets), OAuth2 token management, in-app purchase processing
     (Apple IAP, Google Play), event analytics pipelines, and content moderation (NLP classifiers). When investigating incidents,
     search for these system identifiers in logs: Game Engine faults (NET-STATE-DESYNC, PHYS-OVERFLOW, ENGINE-TICKRATE-DEGRAD),
-    Matchmaking faults (MM-QUEUE-OVERFLOW, MM-SKILL-RATING-DIVERGE, MM-MIGRATION-FAIL), CDN faults (CDN-CACHE-MISS-STORM,
+    Matchmaking faults (MM-QUEUE-OVERFLOW, MM-SKILL-RATING-DIVERGE, MM-MIGRATION-FAIL), CDN and edge cache faults (MEMCACHED-MISS-STORM,
     CDN-ASSET-CORRUPT), Social faults (CHAT-FLOOD-DETECT, VOICE-CHANNEL-OVERLOAD), Progression faults (LB-DATA-CORRUPT, SEASON-PASS-SYNC-FAIL),
     Identity faults (AUTH-TOKEN-STORM, AUTH-TAKEOVER-DETECT), Monetization faults (IAP-PURCHASE-FAIL, IAP-LEDGER-INCONSIST),
     Analytics faults (ANALYTICS-INGEST-LAG, ANALYTICS-TELEMETRY-OVERFLOW), and Trust & Safety faults (MOD-FALSE-POS-STORM,
@@ -234,48 +234,59 @@ executive_trend_charts:
   y_label: viewers
 executive_kpi_emissions:
   - name: business.daily_active_users
+    better: higher
     value: {randint: [45000, 680000]}
     unit: users
   - name: business.sessions_per_min
+    better: higher
     value: {randint: [1800, 28000]}
     unit: sessions/min
   - name: business.avg_session_duration_min
     value: {uniform: [18.0, 95.0], round: 1}
     unit: min
   - name: business.matches_played_per_min
+    better: higher
     value: {randint: [380, 8500]}
     unit: matches/min
   - name: business.quests_completed_per_min
+    better: higher
     value: {randint: [850, 18000]}
     unit: quests/min
   - name: business.daily_retention_rate_pct
+    better: higher
     value: {uniform: [28.0, 68.0], round: 2}
     unit: "%"
   - name: business.revenue_usd_per_min
+    better: higher
     value: {uniform: [12000.0, 185000.0], round: 1}
     unit: USD/min
   - name: business.in_app_purchases_per_min
+    better: higher
     value: {randint: [85, 1800]}
     unit: purchases/min
   - name: business.battle_pass_conversions_per_min
+    better: higher
     value: {randint: [12, 380]}
     unit: conversions/min
   - name: business.avg_revenue_per_user_usd
     value: {uniform: [2.8, 28.4], round: 2}
     unit: USD
   - name: business.loot_opens_per_min
+    better: higher
     value: {randint: [280, 5800]}
     unit: opens/min
   - name: business.cosmetic_sales_usd_per_min
     value: {uniform: [4500.0, 72000.0], round: 1}
     unit: USD/min
   - name: business.chat_messages_per_min
+    better: higher
     value: {randint: [8500, 180000]}
     unit: messages/min
   - name: business.social_clip_shares_per_min
     value: {randint: [120, 4800]}
     unit: shares/min
   - name: business.toxic_report_rate_pct
+    better: lower
     value: {uniform: [0.8, 4.2], round: 2}
     unit: "%"
   - name: business.creator_uploads_per_min
@@ -285,24 +296,31 @@ executive_kpi_emissions:
     value: {randint: [4500, 85000]}
     unit: viewers
   - name: business.new_registrations_per_min
+    better: higher
     value: {randint: [12, 380]}
     unit: registrations/min
   - name: business.server_tick_lag_ms
+    better: lower
     value: {uniform: [12.0, 85.0], round: 1}
     unit: ms
   - name: business.crash_rate_pct
+    better: lower
     value: {uniform: [0.01, 0.38], round: 3}
     unit: "%"
   - name: business.player_bug_reports_per_min
+    better: lower
     value: {uniform: [0.2, 8.5], round: 2}
     unit: reports/min
   - name: business.churn_risk_index_0_100
+    better: lower
     value: {uniform: [18.0, 52.0], round: 1}
     unit: index
   - name: business.net_satisfaction_proxy_nps
+    better: higher
     value: {uniform: [25.0, 72.0], round: 1}
     unit: score
   - name: business.content_moderation_queue_size
+    better: lower
     value: {randint: [0, 285]}
     unit: items
 raw_log_profile:
@@ -391,3 +409,8 @@ trace_attributes:
       moderation.model_version: {choice: [automod-v3.1, automod-v3.2, automod-v4.0-beta]}
       moderation.content_type: {choice: [chat, username, screenshot, video_clip]}
       moderation.action_taken: {choice: [none, warn, mute_1h, mute_24h, ban]}
+
+generators:
+  memcached_otel: true
+  redis_otel: true
+  kafka_otel: true

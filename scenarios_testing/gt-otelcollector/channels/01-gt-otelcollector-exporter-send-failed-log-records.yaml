@@ -1,0 +1,37 @@
+name: "GT otel_collector_internal_telemetry: exporter_send_failed_log_records"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-OTELCOLLECTOR-EXPORTER-SEND-FAILED-LOG-RECORDS
+sensor_type: impact_key_probe
+affected_services:
+  - gt-otelcollector-aws-svc-1
+cascade_services:
+  - gt-otelcollector-aws-svc-2
+description: "Tests impact_key exporter_send_failed_log_records on generator otel_collector_internal_telemetry."
+investigation_notes: |-
+  1. Verify otel_collector_internal_telemetry is active and reporting metrics.
+  2. Check that the exporter_send_failed_log_records metric has reached the trigger value (50.0).
+  3. Confirm generator_impact for otel_collector_internal_telemetry.exporter_send_failed_log_records is set to 50.0.
+  4. Look for correlated changes in service gt-otelcollector-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_exporter_send_failed_log_records_baseline
+error_message: "GT-PROBE: gen=otel_collector_internal_telemetry key=exporter_send_failed_log_records value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=otel_collector_internal_telemetry
+  impact_key: exporter_send_failed_log_records
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 50.0
+  svc_name: gt-otelcollector-aws-svc-1
+rca_clues:
+  gt-otelcollector-aws-svc-1:
+    probe.generator: otel_collector_internal_telemetry
+    probe.impact_key: exporter_send_failed_log_records
+    probe.trigger_value: 50.0
+  gt-otelcollector-aws-svc-2:
+    probe.upstream_generator: otel_collector_internal_telemetry
+    probe.upstream_key: exporter_send_failed_log_records
+generator_impact:
+  otel_collector_internal_telemetry:
+    exporter_send_failed_log_records: 50.0

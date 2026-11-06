@@ -15,9 +15,9 @@ investigation_notes: |-
     gcloud compute security-policies describe <policy> --format=json
     gcloud compute security-policies rules list <policy>
   Review Adaptive Protection events in Console > Network Security > Cloud Armor > Events tab.
-  Remediation: Enable Adaptive Protection auto-deploy if not active:
+  Remediation: Enable Adaptive Protection if not active (auto-deploy is set separately with the --layer7-ddos-defense-auto-deploy-* thresholds):
     gcloud compute security-policies update <policy> --enable-layer7-ddos-defense
-  Add rate-limiting rules targeting source regions: gcloud compute security-policies rules create <priority> --security-policy=<policy> --expression='origin.region_code=="CN"' --action=throttle --rate-limit-threshold-count=100 --rate-limit-threshold-interval-sec=60. Escalate to Google Cloud Support for L3/L4 scrubbing if volume exceeds 100Gbps.
+  Add rate-limiting rules targeting source regions: gcloud compute security-policies rules create <priority> --security-policy=<policy> --expression='origin.region_code=="CN"' --action=throttle --rate-limit-threshold-count=100 --rate-limit-threshold-interval-sec=60 --conform-action=allow --exceed-action=deny-429 --enforce-on-key=IP. If the L7 flood is not contained, engage Cloud Armor Enterprise DDoS response support (L3/L4 floods are already absorbed by Google's always-on edge protection).
 remediation_action: reset_security_policy
 error_message: '[CloudArmor] ARMOR-DDOS-ALERT policy={armor_policy} attack_type={ddos_attack_type} volume={ddos_volume_gbps}Gbps
   source_regions={ddos_source_regions} mitigated={ddos_mitigated_pct}% backend={armor_backend} rule={armor_rule_name}'
@@ -39,14 +39,14 @@ correlation_attr:
 fault_params:
   armor_policy: {choice: [gcpnet-waf-policy, gcpnet-ddos-policy, gcpnet-edge-policy]}
   armor_backend: {choice: [backend-lb-central1, backend-lb-east1, backend-lb-europe1]}
-  armor_rule_name: {choice: [rate-limit-global, geo-block-sanctioned, sqli-detection, xss-prevention]}
-  ddos_attack_type: {choice: [SYN_FLOOD, UDP_AMPLIFICATION, HTTP_FLOOD, DNS_AMPLIFICATION]}
-  ddos_volume_gbps: {uniform: [5.0, 120.0], round: 1}
-  ddos_source_regions: {choice: ["CN,RU,BR", "RU,UA,KZ", "multiple (>20 countries)"]}
+  armor_rule_name: rate-limit-global
+  ddos_attack_type: HTTP_FLOOD
+  ddos_volume_gbps: {uniform: [20.0, 90.0], round: 1}
+  ddos_source_regions: "CN,RU,BR"
   ddos_mitigated_pct: {uniform: [92.0, 99.9], round: 1}
 rca_clues:
   cloud-armor-waf:
-    armor.attack_vector: {choice: [SYN_FLOOD, HTTP_FLOOD]}
+    armor.attack_vector: HTTP_FLOOD
     armor.adaptive_protection_mode: engaged
   cloud-load-balancer:
     lb.request_spike_pct: {uniform: [400, 2000], round: 0}
@@ -60,8 +60,8 @@ business_impact:
   - kpi: business.cloud_armor_blocks_per_min
     factor: {uniform: [5.0, 20.0]}
   - kpi: business.requests_per_min
-    factor: {uniform: [0.30, 0.65]}
+    value: {uniform: [1041600.0, 1198400.0]}
   - kpi: business.cdn_cache_hit_rate_pct
     factor: {uniform: [0.45, 0.72]}
   - kpi: business.load_balancer_rps
-    factor: {uniform: [0.35, 0.70]}
+    value: {uniform: [16926.0, 19474.0]}

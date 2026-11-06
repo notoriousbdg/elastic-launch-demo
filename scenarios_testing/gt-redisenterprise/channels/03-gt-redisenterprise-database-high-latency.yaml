@@ -1,0 +1,37 @@
+name: "GT redisenterprise_otel: database_high_latency"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-REDISENTERPRISE-DATABASE-HIGH-LATEN
+sensor_type: impact_key_probe
+affected_services:
+  - gt-redisenterprise-aws-svc-1
+cascade_services:
+  - gt-redisenterprise-aws-svc-2
+description: "Tests impact_key database_high_latency on generator redisenterprise_otel."
+investigation_notes: |-
+  1. Verify redisenterprise_otel is active and reporting metrics.
+  2. Check that the database_high_latency metric has reached the trigger value (75.0).
+  3. Confirm generator_impact for redisenterprise_otel.database_high_latency is set to 75.0.
+  4. Look for correlated changes in service gt-redisenterprise-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_database_high_latency_baseline
+error_message: "GT-PROBE: gen=redisenterprise_otel key=database_high_latency value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=redisenterprise_otel
+  impact_key: database_high_latency
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 75.0
+  svc_name: gt-redisenterprise-aws-svc-1
+rca_clues:
+  gt-redisenterprise-aws-svc-1:
+    probe.generator: redisenterprise_otel
+    probe.impact_key: database_high_latency
+    probe.trigger_value: 75.0
+  gt-redisenterprise-aws-svc-2:
+    probe.upstream_generator: redisenterprise_otel
+    probe.upstream_key: database_high_latency
+generator_impact:
+  redisenterprise_otel:
+    database_high_latency: 75.0

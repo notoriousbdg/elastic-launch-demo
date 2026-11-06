@@ -8,11 +8,11 @@ affected_services:
 - subscriber-db
 cascade_services:
 - notification-service
-description: Call Detail Record mediation pipeline backlogged causing delayed billing and usage reporting
+description: Call Detail Record mediation pipeline backlogged on the CDR Kafka topic causing delayed billing and usage reporting
 investigation_notes: |
   1. Check CDR ingestion vs processing rate — ingestion at high rate with processing bottlenecked creates a growing deficit. Backlog grows each minute the deficit persists.
   2. CDR mediation involves: raw CDR ingestion → format normalization → rating → account posting → invoice generation. Identify which stage is the bottleneck.
-  3. Rating engine performance — complex tariff plans (Enterprise multi-APN, MVNO wholesale) take 10x longer to rate than Consumer plans. Check rating engine CPU utilization.
+  3. Rating engine performance — complex tariff plans (Enterprise multi-APN, MVNO wholesale) take 10x longer to rate than Consumer plans. Check rating engine CPU utilization (above 90% confirms the rating engine is the bottleneck).
   4. Subscriber-db writes for balance updates are queuing — CDR processing writes real-time usage data to subscriber profiles. Large backlog causes stale usage data visible to customers.
   5. Enterprise SLA reporting depends on timely CDR processing — delays beyond 30min breach reporting SLAs. Notify enterprise account managers if backlog exceeds 15min.
 remediation_action: scale_cdr_workers
@@ -33,7 +33,7 @@ stack_trace: |
     enterprise_reporting=DELAYED  mvno_wholesale=DELAYED
   ACTION: scale_rating_workers=true  notify_enterprise=true  alert=BSS-CDR-BACKLOG
 infrastructure_events:
-- body: '[AzureMonitor] CDRProcessingBacklog: queue_depth=50000 processing_rate=200/min normal_rate=5000/min mediation_pipeline=STALLED region=westeurope'
+- body: '[AzureMonitor] CDRProcessingBacklog: queue_depth=50000 processing_rate=900/min ingestion_rate=3500/min mediation_pipeline=BACKLOGGED region=westeurope'
   severity: ERROR
   event_name: azure.monitor.CDRProcessingBacklog
   service: bss-billing
@@ -50,12 +50,14 @@ fault_params:
   cdr_ingestion_rate: {randint: [2000, 5000]}
   cdr_processing_rate: {randint: [500, 1500]}
   cdr_oldest_min: {randint: [15, 120]}
-  cdr_backlog_gb: {uniform: [2.0, 20.0], round: 1}
+  cdr_backlog_gb: {uniform: [0.1, 0.4], round: 2}
   cdr_deficit: {randint: [500, 3500]}
 rca_clues:
   bss-billing:
     billing.cdr_queue_depth: {randint: [50000, 200000]}
-    billing.rating_engine_cpu_pct: {randint: [90, 99]}
+    billing.rating_engine_cpu_pct: {randint: [92, 99]}
+    billing.cdr_ingestion_rate_per_min: {randint: [2000, 5000]}
+    billing.cdr_processing_rate_per_min: {randint: [500, 1500]}
   subscriber-db:
     db.balance_update_queue: {randint: [5000, 20000]}
     db.stale_usage_data: true
@@ -71,3 +73,6 @@ business_impact:
     factor: {uniform: [2.5, 5.0]}
   - kpi: business.enterprise_arpu_usd
     factor: {uniform: [0.25, 0.55]}
+generator_impact:
+  kafka_otel:
+    high_consumer_lag_by_topic: 150000.0

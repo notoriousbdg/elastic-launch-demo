@@ -25,11 +25,13 @@ from elastic_config.deployer_base import (
 from elastic_config.deployer_otlp import OtlpMixin
 from elastic_config.deployer_platform import PlatformMixin
 from elastic_config.deployer_integrations import IntegrationsMixin
+from elastic_config.deployer_package_templates import PackageTemplatesMixin
 from elastic_config.deployer_apm import ApmMixin
 from elastic_config.deployer_aiops import AiopsMixin
 from elastic_config.deployer_backfill import BackfillMixin
 from elastic_config.deployer_slos import SloMixin
 from elastic_config.deployer_workflows import WorkflowsMixin
+from elastic_config.deployer_workflow_templates import WorkflowTemplatesMixin
 from elastic_config.deployer_kb import KbMixin
 from elastic_config.deployer_agent import AgentMixin
 from elastic_config.deployer_skills import SkillsMixin
@@ -42,10 +44,12 @@ logger = logging.getLogger("deployer")
 
 
 def _dashboard_objects_to_delete(namespace: str) -> list[dict[str, str]]:
-    """Saved-object specs for dashboards created by the deployer for this namespace."""
+    """Saved-object specs for the dashboards and their tag created for this namespace."""
     return [
         {"type": "dashboard", "id": f"{namespace}-exec-dashboard"},
         {"type": "dashboard", "id": f"{namespace}-business-exec-dashboard"},
+        # Created by generate_exec_dashboard._tag_saved_object
+        {"type": "tag", "id": f"tag-{namespace}"},
     ]
 
 
@@ -55,11 +59,13 @@ class ScenarioDeployer(
     OtlpMixin,
     PlatformMixin,
     IntegrationsMixin,
+    PackageTemplatesMixin,
     ApmMixin,
     BackfillMixin,
     AiopsMixin,
     SloMixin,
     WorkflowsMixin,
+    WorkflowTemplatesMixin,
     KbMixin,
     AgentMixin,
     SkillsMixin,
@@ -130,6 +136,23 @@ class ScenarioDeployer(
         except (ValueError, IndexError):
             return False
 
+    def _stack_generation(self) -> str:
+        """Which Kibana generation the version-specific deploy code should target.
+
+        "serverless" — serverless project (always current Kibana; flags are managed
+                       by Elastic, so no runtime/plan gates can be set from here)
+        "9.6"        — Kibana >= 9.6 (Nightshift feature flags, query streams)
+        "9.5"        — anything older, and the default when the version is unknown
+                       (o11y-launch-demo's proven path)
+
+        Version-specific code is split into ``*_95`` / ``*_96`` / ``*_serverless``
+        methods behind a dispatcher that calls this.  Grep ``[9.5]`` to find what
+        can be deleted once 9.5 support is dropped.
+        """
+        if self._is_serverless():
+            return "serverless"
+        return "9.6" if self._kibana_version_ge(9, 6) else "9.5"
+
     # ── Public API ─────────────────────────────────────────────────────
 
     def deploy_all(self, callback: ProgressCallback | None = None, on_otlp_ready=None) -> DeployProgress:
@@ -153,9 +176,10 @@ class ScenarioDeployer(
             DeployStep("Create alert rules", items_total=20),  # 15
             DeployStep("Backfill raw ECS access logs"), # 16
             DeployStep("Enable APM anomaly detection"), # 17
-            DeployStep("Enable logs ML jobs (rate + categorization)"), # 18
+            DeployStep("Enable logs + metrics ML jobs"), # 18
             DeployStep("Create SLOs", items_total=3),  # 19
             DeployStep("Install OTel integrations", items_total=5),  # 20
+            DeployStep("Create OOTB alerts, SLOs and ML jobs"),  # 21
         ])
         _notify = callback or (lambda p: None)
         _notify(self.progress)
@@ -199,6 +223,7 @@ class ScenarioDeployer(
                 self._deploy_logs_ml_jobs(client, _notify)
                 self._deploy_slos(client, _notify)
                 self._install_integrations(client, _notify)
+                self._create_ootb_package_templates(client, _notify)
                 # Block on APM datafeed catch-up now; should be near-instant
                 # since ES has been training throughout the steps above.
                 self._finalize_apm_anomaly_detection(client, _notify)
@@ -213,21 +238,6 @@ class ScenarioDeployer(
         self.progress.finished = True
         _notify(self.progress)
         return self.progress
-
-    def check_connection(self) -> dict[str, Any]:
-        """Quick connectivity test — returns {ok, cluster_name, error}."""
-        try:
-            with httpx.Client(timeout=15.0, verify=True) as client:
-                resp = client.get(
-                    f"{self.elastic_url}/",
-                    headers=_es_headers(self.api_key),
-                )
-                if resp.status_code < 300:
-                    data = resp.json()
-                    return {"ok": True, "cluster_name": data.get("cluster_name", "unknown")}
-                return {"ok": False, "error": f"HTTP {resp.status_code}"}
-        except Exception as exc:
-            return {"ok": False, "error": str(exc)}
 
     def detect_existing(self) -> dict[str, Any]:
         """Check if this scenario is already deployed."""
@@ -260,6 +270,21 @@ class ScenarioDeployer(
                     found["alert_rules"] = data.get("total", 0)
                 else:
                     found["alert_rules"] = 0
+
+                if self._stack_generation() == "serverless":
+                    # [serverless] the chaos rules are Universal (v2) rules
+                    name = self.scenario.scenario_name
+                    resp = client.get(
+                        f"{self.kibana_url}/api/alerting/v2/rules",
+                        params={"per_page": 100, "search": name},
+                        headers=_kibana_headers(self.api_key),
+                    )
+                    if resp.status_code < 300:
+                        found["alert_rules"] += sum(
+                            1 for r in resp.json().get("items", [])
+                            if r.get("kind") == "alert"
+                            and r.get("metadata", {}).get("name", "").startswith(f"{name} CH")
+                        )
         except Exception as exc:
             found["error"] = str(exc)
 
@@ -280,6 +305,9 @@ class ScenarioDeployer(
             headers=_es_headers(self.api_key),
         )
         results["knowledge_base"] = resp.status_code < 300
+        if self._is_serverless():
+            results["cortex_runbooks_deleted"] = self._cleanup_cortex_runbooks(client)
+            results["nightshift_context_removed"] = self._set_nightshift_context(client, None)
 
         # Delete audit indices and remediation queue
         for suffix in WORKFLOW_INDEX_SUFFIXES:
@@ -352,12 +380,12 @@ class ScenarioDeployer(
             DeployStep("Stop generators"),              # 0
             DeployStep("Delete workflows"),             # 1
             DeployStep("Delete alert rules"),           # 2
-            DeployStep("Delete service stream"),         # 3
+            DeployStep("Delete APM ML jobs"),           # 3
             DeployStep("Delete AI agent, tools & conversations"),  # 4
             DeployStep("Delete knowledge base"),        # 5
             DeployStep("Delete audit indices"),         # 6
             DeployStep("Delete dashboard"),             # 7
-            DeployStep("Delete APM ML jobs"),           # 8
+            DeployStep("Delete service stream"),         # 8
             DeployStep("Delete SLOs"),                  # 9
             DeployStep("Delete cases"),                 # 10
             DeployStep("Delete data views"),            # 11
@@ -402,24 +430,17 @@ class ScenarioDeployer(
                     step.detail = str(exc)
                 _notify(progress)
 
-                # Step 3: Delete service streams (OTel + raw ECS)
+                # Step 3: Delete APM + AIOps ML jobs — before the streams, so datafeeds
+                # don't error on missing indices (same order as _teardown_scenario)
                 step = progress.steps[3]
                 step.status = "running"
                 _notify(progress)
                 try:
-                    otel_ok = self._delete_stream(client)
-                    ecs_ok = self._delete_ecs_stream(client)
-                    leftovers = []
-                    if not otel_ok:
-                        leftovers.append(f"logs.otel.{self.ns}")
-                    if not ecs_ok:
-                        leftovers.append(f"logs.ecs.{self.ns}")
-                    if leftovers:
-                        step.status = "failed"
-                        step.detail = f"Streams still present after retries: {', '.join(leftovers)}"
-                    else:
-                        step.status = "ok"
-                        step.detail = f"Streams logs.otel.{self.ns} and logs.ecs.{self.ns} deleted"
+                    self._cleanup_apm_ml(client)
+                    self._cleanup_apm_rollup(client)
+                    self._cleanup_aiops_ml(client)
+                    step.status = "ok"
+                    step.detail = "APM and AIOps ML jobs, datafeeds, and rollup data removed"
                 except Exception as exc:
                     step.status = "failed"
                     step.detail = str(exc)
@@ -449,6 +470,11 @@ class ScenarioDeployer(
                     )
                     step.status = "ok"
                     step.detail = "KB index deleted" if resp.status_code < 300 else "KB index not found"
+                    if self._is_serverless():
+                        deleted_pages = self._cleanup_cortex_runbooks(client)
+                        step.detail += f"; {deleted_pages} Cortex runbook(s) deleted"
+                        if self._set_nightshift_context(client, None):
+                            step.detail += "; Nightshift context removed"
                 except Exception as exc:
                     step.status = "failed"
                     step.detail = str(exc)
@@ -491,16 +517,24 @@ class ScenarioDeployer(
                     step.detail = str(exc)
                 _notify(progress)
 
-                # Step 8: Delete APM + AIOps ML jobs
+                # Step 8: Delete service streams (OTel + raw ECS)
                 step = progress.steps[8]
                 step.status = "running"
                 _notify(progress)
                 try:
-                    self._cleanup_apm_ml(client)
-                    self._cleanup_apm_rollup(client)
-                    self._cleanup_aiops_ml(client)
-                    step.status = "ok"
-                    step.detail = "APM and AIOps ML jobs, datafeeds, and rollup data removed"
+                    otel_ok = self._delete_stream(client)
+                    ecs_ok = self._delete_ecs_stream(client)
+                    leftovers = []
+                    if not otel_ok:
+                        leftovers.append(f"logs.otel.{self.ns}")
+                    if not ecs_ok:
+                        leftovers.append(f"logs.ecs.{self.ns}")
+                    if leftovers:
+                        step.status = "failed"
+                        step.detail = f"Streams still present after retries: {', '.join(leftovers)}"
+                    else:
+                        step.status = "ok"
+                        step.detail = f"Streams logs.otel.{self.ns} and logs.ecs.{self.ns} deleted"
                 except Exception as exc:
                     step.status = "failed"
                     step.detail = str(exc)

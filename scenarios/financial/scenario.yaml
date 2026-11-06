@@ -9,7 +9,7 @@ schema_version: "1.2"
 nominal_label: NORMAL
 hosts:
 - host.name: finserv-aws-host-01
-  host.id: i-0f1a2b3c4d5e67890
+  host.id: i-9dd84c8e8bc643002
   host.arch: amd64
   host.type: c5.2xlarge
   host.image.id: ami-0fedcba9876543210
@@ -31,13 +31,13 @@ hosts:
   cloud.platform: aws_ec2
   cloud.region: us-east-1
   cloud.availability_zone: us-east-1a
-  cloud.account.id: '987654321098'
-  cloud.instance.id: i-0f1a2b3c4d5e67890
+  cloud.account.id: '672370486972'
+  cloud.instance.id: i-9dd84c8e8bc643002
   cpu_count: 8
   memory_total_bytes: 17179869184
   disk_total_bytes: 536870912000
 - host.name: finserv-gcp-host-01
-  host.id: '7823456789012345678'
+  host.id: '7049635645512423'
   host.arch: amd64
   host.type: c2-standard-8
   host.image.id: projects/debian-cloud/global/images/debian-12-bookworm-v20250115
@@ -59,13 +59,13 @@ hosts:
   cloud.platform: gcp_compute_engine
   cloud.region: us-central1
   cloud.availability_zone: us-central1-a
-  cloud.account.id: finserv-trading-prod
-  cloud.instance.id: '7823456789012345678'
+  cloud.account.id: finserv-project
+  cloud.instance.id: '7049635645512423'
   cpu_count: 8
   memory_total_bytes: 34359738368
   disk_total_bytes: 214748364800
 - host.name: finserv-azure-host-01
-  host.id: /subscriptions/def-456/resourceGroups/finserv-rg/providers/Microsoft.Compute/virtualMachines/finserv-vm-01
+  host.id: /subscriptions/b7538542-1ded-5d0a-9d5c-9defa34cf87a/resourceGroups/finserv-rg/providers/Microsoft.Compute/virtualMachines/finserv-vm-01
   host.arch: amd64
   host.type: Standard_F8s_v2
   host.image.id: Canonical:0001-com-ubuntu-server-jammy:22_04-lts-gen2:latest
@@ -87,7 +87,7 @@ hosts:
   cloud.platform: azure_vm
   cloud.region: eastus
   cloud.availability_zone: eastus-1
-  cloud.account.id: def-456-ghi-789
+  cloud.account.id: b7538542-1ded-5d0a-9d5c-9defa34cf87a
   cloud.instance.id: finserv-vm-01
   cpu_count: 8
   memory_total_bytes: 17179869184
@@ -139,11 +139,11 @@ agent_config:
   system_prompt: 'You are the Trading Operations Analyst, an expert AI assistant for financial trading platform operations.
     You help trading desk operators investigate incidents, analyze order flow, and provide root cause analysis for fault conditions
     across 9 trading infrastructure services spanning AWS, GCP, and Azure. You have deep expertise in FIX 4.4 protocol, order
-    management systems, matching engine internals, risk limit frameworks (VaR, margin), T+2 settlement, DTCC/NSCC clearing,
+    management systems, matching engine internals, risk limit frameworks (VaR, margin), T+1 settlement, DTCC/NSCC clearing,
     regulatory reporting (EMIR, MiFID II, CAT), AML/KYC screening, and cross-region audit replication. When investigating
     incidents, search for these system identifiers in logs: Order Management faults (OMS-BOOK-IMBALANCE, FIX-PARSE-REJECT),
     Matching Engine faults (ME-LATENCY-SLA, ME-DARKPOOL-REJECT), Market Data faults (MDF-PRICE-GAP, MDF-STALE-QUOTE), Risk
-    faults (RISK-LIMIT-BREACH, RISK-MARGIN-CALL, RISK-POSITION-RECON), Settlement faults (SETTLE-T2-TIMEOUT, SETTLE-FAIL,
+    faults (RISK-LIMIT-BREACH, RISK-MARGIN-CALL, RISK-POSITION-RECON), Settlement faults (SETTLE-T1-TIMEOUT, SETTLE-FAIL,
     SETTLE-NETTING-CALC), Compliance faults (COMPL-FRAUD-FP-STORM, COMPL-REG-REPORT-FAIL, COMPL-AML-SCREENING), Portal faults
     (PORTAL-SESSION-TIMEOUT, PORTAL-VALUATION-LAG, PORTAL-CONFIRM-DELAY), and Audit faults (AUDIT-SEQ-GAP, AUDIT-REPLICATION-LAG).
     Log messages are in body.text — NEVER search the body field alone.'
@@ -233,75 +233,98 @@ executive_trend_charts:
   y_label: '%'
 executive_kpi_emissions:
 - name: business.order_flow_per_min
+  better: higher
   value: {randint: [850, 28000]}
   unit: orders/min
 - name: business.fill_rate_pct
+  better: higher
   value: {uniform: [89.0, 99.6], round: 2}
   unit: '%'
 - name: business.notional_value_usd_per_min
+  better: higher
   value: {uniform: [2800000.0, 48000000.0], round: 1}
   unit: USD/min
 - name: business.executed_trades_per_min
+  better: higher
   value: {randint: [620, 18000]}
   unit: trades/min
 - name: business.rejected_orders_per_min
+  better: lower
   value: {randint: [2, 85]}
   unit: orders/min
 - name: business.cancel_replace_rate_pct
+  better: lower
   value: {uniform: [3.2, 18.4], round: 2}
   unit: '%'
 - name: business.portfolio_var_usd
+  better: lower
   value: {uniform: [180000.0, 2400000.0], round: 1}
   unit: USD
 - name: business.margin_utilization_pct
+  better: lower
   value: {uniform: [42.0, 88.0], round: 2}
   unit: '%'
 - name: business.position_limit_breaches
+  better: lower
   value: {randint: [0, 8]}
   unit: count
 - name: business.delta_exposure_usd
   value: {uniform: [-850000.0, 2100000.0], round: 1}
   unit: USD
 - name: business.counterparty_credit_risk_usd
+  better: lower
   value: {uniform: [280000.0, 4800000.0], round: 1}
   unit: USD
 - name: business.mark_to_market_pnl_usd_per_min
+  better: higher
   value: {uniform: [-120000.0, 380000.0], round: 1}
   unit: USD/min
 - name: business.avg_spread_bps
+  better: lower
   value: {uniform: [0.8, 12.4], round: 2}
   unit: bps
 - name: business.market_impact_bps
+  better: lower
   value: {uniform: [0.2, 4.8], round: 2}
   unit: bps
 - name: business.slippage_cost_usd_per_min
+  better: lower
   value: {uniform: [850.0, 12000.0], round: 1}
   unit: USD/min
 - name: business.latency_sla_breach_rate_pct
+  better: lower
   value: {uniform: [0.01, 0.85], round: 3}
   unit: '%'
 - name: business.best_execution_pct
+  better: higher
   value: {uniform: [92.0, 99.8], round: 2}
   unit: '%'
 - name: business.venue_fill_quality_pct
+  better: higher
   value: {uniform: [88.0, 98.4], round: 2}
   unit: '%'
 - name: business.settlement_success_rate_pct
+  better: higher
   value: {uniform: [97.2, 99.98], round: 3}
   unit: '%'
 - name: business.settlement_fails_in_queue
+  better: lower
   value: {randint: [0, 28]}
   unit: count
 - name: business.reconciliation_breaks
+  better: lower
   value: {randint: [0, 12]}
   unit: count
 - name: business.ops_alerts_per_min
+  better: lower
   value: {uniform: [0.2, 4.8], round: 2}
   unit: alerts/min
 - name: business.system_availability_pct
+  better: higher
   value: {uniform: [99.2, 99.99], round: 3}
   unit: '%'
 - name: business.reporting_latency_sec
+  better: lower
   value: {uniform: [0.8, 12.4], round: 2}
   unit: s
 raw_log_profile:
@@ -396,3 +419,7 @@ trace_attributes:
       portal.view: {choice: [portfolio, order_blotter, risk_summary, positions, market_data]}
       svc.version: {choice: [8.2.0, 8.2.1, 8.3.0]}
       svc.environment: {choice: [prod, prod, staging]}
+
+generators:
+  redis_otel: true
+  kafka_otel: true

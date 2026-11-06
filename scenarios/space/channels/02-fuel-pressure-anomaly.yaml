@@ -11,7 +11,7 @@ cascade_services:
 - range-safety
 description: Fuel tank pressure readings outside nominal range
 investigation_notes: 'Root cause: helium pressurization regulator malfunction or cryogenic propellant boil-off exceeding bleed
-  valve capacity. Check He supply bottle pressure (nominal 2840PSI) and regulator outlet (nominal 42PSI). If both LOX and
+  valve capacity. Check He supply bottle pressure (nominal 2840PSI) and regulator outlet (nominal 280PSI). If both LOX and
   RP-1 tanks are affected, suspect common-mode regulator failure; if single tank, check individual fill/drain valve seat integrity.
   Review CCTV for visible frost patterns indicating external leak. Remediation: switch to backup pressurization regulator
   (REG-B), verify tank pressure stabilizes within 60s, then safe the primary regulator for post-flight inspection.'
@@ -27,24 +27,25 @@ stack_trace: |-
   RP1-1     248.7PSI   200PSI     310PSI     NOMINAL
   RP1-2     251.2PSI   200PSI     310PSI     NOMINAL
   ---------------------------------------------------------------
-  PRESSURIZATION SYSTEM: He supply=2840PSI | reg_outlet=42PSI
+  PRESSURIZATION SYSTEM: He supply=2840PSI | reg_outlet=280PSI
   PMS-PRESS-ANOMALY: Tank {tank_id} reading {pressure}PSI outside bounds
   ACTION: Verify pressurization regulator and check for leak indications
 correlation_attr:
   key: infra.firmware_rev
   value: fw-4.2.0-rc1
 fault_params:
-  tank_id: {choice: [LOX-1, LOX-2, RP1-1, RP1-2]}
-  pressure: {uniform: [180, 350], round: 1}
+  tank_id: LOX-1
+  pressure: {uniform: [150, 195], round: 1}
   expected_min: 200
   expected_max: 310
 rca_clues:
   fuel-system:
     propulsion.regulator_mode: REG-A-PRIMARY
-    propulsion.he_supply_psi: {uniform: [2700, 2840], round: 0}
+    propulsion.he_supply_psi: {uniform: [2830, 2850], round: 0}
+    propulsion.reg_outlet_psi: {uniform: [278.0, 282.0], round: 1}
   sensor-validator:
     validation.pressure_outlier: true
-    validation.tank_id: {choice: [LOX-1, RP1-1]}
+    validation.tank_id: LOX-1
   mission-control:
     upstream.degraded_subsystem: propulsion
     telemetry.alert_class: pressure
@@ -54,8 +55,8 @@ business_impact:
   - kpi: business.mission_success_probability_pct
     factor: {uniform: [0.65, 0.85]}
   - kpi: business.launch_readiness_index_0_100
-    factor: {uniform: [0.50, 0.75]}
+    factor: {uniform: [0.5, 0.75]}
   - kpi: business.station_keeping_fuel_remaining_pct
-    factor: {uniform: [0.70, 0.90]}
+    value: {uniform: [18.04, 20.76], round: 2}
   - kpi: business.fault_events_per_min
     factor: {uniform: [3.0, 6.0]}

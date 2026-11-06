@@ -1,0 +1,34 @@
+service: gt-traefik-aws-svc-2
+sort_order: 2
+cloud_provider: aws
+cloud_region: us-east-1
+cloud_platform: aws_ec2
+cloud_availability_zone: us-east-1a
+subsystem: platform
+language: go
+
+# Topology: [downstream-service, endpoint, METHOD]
+topology: []
+
+db_operations: []
+
+emit_fault_logs: true
+kpi_emitter: true
+
+constants: {}
+
+steps:
+  - sample:
+      latency_ms:
+        if_active: {uniform: [500.0, 3000.0], round: 1}
+        else: {uniform: [20.0, 150.0], round: 1}
+  - metric:
+      name: gt_traefik_aws_svc_2.latency_ms
+      value: {var: latency_ms}
+      unit: ms
+  - log:
+      level: INFO
+      message: '[gt_traefik_aws_svc_2] health_check latency={latency_ms}ms status=OK'
+      attrs:
+        operation: health_check
+        svc.latency_ms: {var: latency_ms}

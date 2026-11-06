@@ -1,0 +1,37 @@
+name: "GT supabase_otel: pgbouncer_clients_queueing_for_connections"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-SUPABASE-PGBOUNCER-CLIENTS-QUEUEING-FOR-CONNECTIONS
+sensor_type: impact_key_probe
+affected_services:
+  - gt-supabase-aws-svc-1
+cascade_services:
+  - gt-supabase-aws-svc-2
+description: "Tests impact_key pgbouncer_clients_queueing_for_connections on generator supabase_otel."
+investigation_notes: |-
+  1. Verify supabase_otel is active and reporting metrics.
+  2. Check that the pgbouncer_clients_queueing_for_connections metric has reached the trigger value (20.0).
+  3. Confirm generator_impact for supabase_otel.pgbouncer_clients_queueing_for_connections is set to 20.0.
+  4. Look for correlated changes in service gt-supabase-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_pgbouncer_clients_queueing_for_connections_baseline
+error_message: "GT-PROBE: gen=supabase_otel key=pgbouncer_clients_queueing_for_connections value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=supabase_otel
+  impact_key: pgbouncer_clients_queueing_for_connections
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 20.0
+  svc_name: gt-supabase-aws-svc-1
+rca_clues:
+  gt-supabase-aws-svc-1:
+    probe.generator: supabase_otel
+    probe.impact_key: pgbouncer_clients_queueing_for_connections
+    probe.trigger_value: 20.0
+  gt-supabase-aws-svc-2:
+    probe.upstream_generator: supabase_otel
+    probe.upstream_key: pgbouncer_clients_queueing_for_connections
+generator_impact:
+  supabase_otel:
+    pgbouncer_clients_queueing_for_connections: 20.0

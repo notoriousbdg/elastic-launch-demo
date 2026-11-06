@@ -11,7 +11,7 @@ cascade_services:
 - scheduling-api
 description: Telehealth video session quality degrades below clinical acceptability threshold
 investigation_notes: |-
-  Root Cause: WebRTC session quality degradation is caused by network congestion (packet loss >2%), insufficient bandwidth (<750kbps for clinical-grade video), or TURN server overload. Clinical telehealth requires higher QoS than standard video conferencing — remote physical examinations need >24fps at 720p minimum.
+  Root Cause: WebRTC session quality degradation is caused by network congestion (packet loss >2%), insufficient bandwidth (<750kbps for clinical-grade video), or TURN server overload. Clinical telehealth requires higher QoS than standard video conferencing — remote physical examinations need >24fps at 720p minimum. Patient-side available bandwidth well above 750kbps, with the TURN relay CPU above 90%, points to TURN server overload rather than the patient's network.
   Remediation: 1) Check the TURN/STUN server status: `telehealth-admin server-status --session {session_id}`. 2) Reset the media relay for the session: `telehealth-admin reset-relay --session {session_id}`. 3) Switch to a lower-latency TURN region: `telehealth-admin switch-region --session {session_id} --region closest`. 4) If bandwidth is insufficient, downgrade to audio-only with screen share: `telehealth-admin set-mode --session {session_id} --mode audio-plus-share`. 5) Check the patient's network quality: `telehealth-admin client-diagnostics --session {session_id}`. 6) If persistent, reschedule as in-person visit: `sched-admin convert-to-inperson --session {session_id}`.
 remediation_action: reset_telehealth_relay
 error_message: '[MONITOR] TELEHEALTH-QOS-DEGRAD: session={session_id} patient={patient_id} bitrate={bitrate_kbps}kbps loss={packet_loss_pct}%
@@ -44,14 +44,15 @@ fault_params:
     n: {randint: [100000, 999999]}
   bitrate_kbps: {randint: [128, 512]}
   packet_loss_pct: {uniform: [5.0, 25.0], round: 1}
-  latency_ms: {randint: [200, 2000]}
+  latency_ms: {randint: [350, 2000]}
 rca_clues:
   patient-monitor:
     telehealth.turn_server_overloaded: true
-    telehealth.bandwidth_kbps: {randint: [128, 512]}
+    telehealth.turn_relay_cpu_pct: {uniform: [95, 100], round: 0}
+    telehealth.client_available_bandwidth_kbps: {randint: [2500, 8000]}
   clinical-alerts:
     alerts.session_quality_breach_count: {randint: [3, 15]}
-    alerts.provider_notified: {choice: [true, false]}
+    alerts.provider_notified: true
   ehr-system:
     ehr.visit_documentation_incomplete: true
     ehr.telehealth_encounter_held: {randint: [1, 5]}
@@ -60,10 +61,10 @@ rca_clues:
     sched.rebooking_queue: {randint: [2, 10]}
 business_impact:
   - kpi: business.patient_satisfaction_nps
-    factor: {uniform: [0.20, 0.50]}
+    value: {uniform: [6.7, 7.7], round: 1}
   - kpi: business.appointment_no_show_rate_pct
     factor: {uniform: [1.8, 3.5]}
   - kpi: business.hcahps_proxy_score
     factor: {uniform: [0.25, 0.55]}
   - kpi: business.admits_per_min
-    factor: {uniform: [0.25, 0.55]}
+    value: {uniform: [0.48, 0.56], round: 2}

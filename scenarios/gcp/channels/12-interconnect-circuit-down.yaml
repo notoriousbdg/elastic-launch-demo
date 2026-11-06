@@ -15,8 +15,8 @@ investigation_notes: |-
     gcloud compute interconnects describe <interconnect> --format='value(state,operationalStatus,circuitInfos)'
     gcloud compute interconnects attachments describe <attachment> --region=<region>
     Console > Hybrid Connectivity > Interconnect > <name> > Diagnostics tab
-  Remediation: If failover is ACTIVE_ON_BACKUP, traffic is flowing via the secondary path. Contact the colocation provider to inspect the cross-connect and verify optic light levels. Check for maintenance notifications: gcloud compute interconnects get-macsec-config <name>. If NO_BACKUP, immediately engage VPN as emergency backup:
-    gcloud compute vpn-tunnels create emergency-tunnel --region=<region> --peer-address=<peer> --shared-secret=<secret> --router=<router>
+  Remediation: If failover is ACTIVE_ON_BACKUP, traffic is flowing via the secondary path. Contact the colocation provider to inspect the cross-connect and verify optic light levels (receive light below -14 dBm on a 100G LR4 optic indicates optics degradation; a fiber cut reads no light, about -40 dBm). Pull per-link light levels and LACP state with: gcloud compute interconnects get-diagnostics <name>. Check the Interconnect maintenance notifications for planned work at the location. If NO_BACKUP, immediately engage VPN as emergency backup:
+    gcloud compute vpn-tunnels create emergency-tunnel --region=<region> --vpn-gateway=<ha-vpn-gateway> --interface=0 --peer-external-gateway=<peer-gateway> --peer-external-gateway-interface=0 --ike-version=2 --shared-secret=<secret> --router=<router>  (then add a BGP peer for the tunnel on the router)
 remediation_action: reset_interconnect_attachment
 error_message: '[Interconnect] INTERCONNECT-CIRCUIT-DOWN attachment={interconnect_name} circuit_id={circuit_id} location={interconnect_location}
   link_status=DOWN since {circuit_down_sec}s bandwidth={interconnect_bw_gbps}Gbps failover={failover_status}'
@@ -36,16 +36,16 @@ correlation_attr:
   key: infra.interconnect_optic
   value: lr4-100g-batch-2024q3
 fault_params:
-  interconnect_name: {choice: [gcpnet-interconnect-primary, gcpnet-interconnect-secondary]}
+  interconnect_name: gcpnet-interconnect-primary
   circuit_id: {format: "CIR-{n}", n: {randint: [100000, 999999]}}
   interconnect_location: {choice: [iad-zone1-1, dfw-zone1-1, ams-zone1-1]}
   circuit_down_sec: {randint: [10, 300]}
-  interconnect_bw_gbps: {choice: [10, 100]}
-  failover_status: {choice: [ACTIVE_ON_BACKUP, FAILOVER_IN_PROGRESS, NO_BACKUP]}
+  interconnect_bw_gbps: 100
+  failover_status: FAILOVER_IN_PROGRESS
 rca_clues:
   cloud-interconnect:
     interconnect.lacp_state: DETACHED
-    interconnect.light_level_dbm: {uniform: [-30, -20], round: 1}
+    interconnect.light_level_dbm: {uniform: [-22.0, -16.0], round: 1}
   vpc-network-manager:
     vpc.onprem_route_withdrawn: true
     vpc.bgp_routes_lost: {randint: [10, 50]}
@@ -57,9 +57,9 @@ rca_clues:
     ni.failover_status: IN_PROGRESS
 business_impact:
   - kpi: business.interconnect_utilization_pct
-    factor: {uniform: [0.10, 0.35]}
+    value: {uniform: [8.18, 9.42], round: 2}
   - kpi: business.bytes_egress_gib_per_min
-    factor: {uniform: [0.25, 0.55]}
+    value: {uniform: [10881.0, 12519.0], round: 1}
   - kpi: business.network_sla_compliance_pct
     factor: {uniform: [0.45, 0.72]}
   - kpi: business.customer_sla_breach_count

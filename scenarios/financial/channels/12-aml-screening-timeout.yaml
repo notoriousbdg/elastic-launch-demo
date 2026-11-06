@@ -14,7 +14,7 @@ investigation_notes: |-
   1. Check compliance-monitor logs for COMPL-AML-SCREENING — note transaction_id, jurisdiction, screening_ms, and which watchlist check timed out.
   2. Query FROM logs.otel.financial.* | WHERE body.text LIKE "*COMPL-AML-SCREENING*" | STATS avg(screening_ms) BY jurisdiction to determine if a specific jurisdiction's provider is slow.
   3. Inspect the PEP_DATABASE check elapsed time — PEP hits with pep_hit_score > 0.7 require MLRO escalation regardless of timeout; do not auto-clear.
-  4. Check fraud-detector for correlated alerts on the same transaction_id — overlapping fraud and AML signals may indicate a sanctioned-entity order attempt.
+  4. Check fraud-detector for correlated alerts on the same transaction_id — overlapping fraud and AML signals may indicate a sanctioned-entity order attempt (a sanction match score below 0.5 with no correlated flags rules it out).
   5. Hold the transaction and escalate to MLRO; if ADVERSE_MEDIA check timed out, run it synchronously before releasing the hold.
 remediation_action: hold_transaction_and_escalate_mlro
 error_message: '[COMPL] COMPL-AML-SCREENING: transaction={transaction_id} screening_ms={screening_ms} sla_ms={aml_sla_ms}
@@ -29,23 +29,25 @@ stack_trace: |-
     PEP_DATABASE     checked=true   hits=1   elapsed=8,400ms  <<< SLOW
     ADVERSE_MEDIA    checked=false  hits=--  elapsed=TIMEOUT
   total_screening_ms={screening_ms}  sla_ms={aml_sla_ms}  breach=true
-  pep_hit_score=0.72  pep_name_match='partial'  disposition=PENDING_REVIEW
+  pep_hit_score={pep_hit_score}  pep_name_match='partial'  disposition=PENDING_REVIEW
   ACTION: hold_transaction=true  escalate_mlro=true  alert=COMPL-AML-SCREENING
 correlation_attr: {}
 fault_params:
   transaction_id:
     format: "TXN-{n}"
     n: {randint: [100000, 999999]}
-  screening_ms: {randint: [5000, 30000]}
+  screening_ms: {randint: [12700, 30000]}
   aml_sla_ms: 3000
-  jurisdiction: {choice: [US-SEC, US-CFTC, UK-FCA, EU-ESMA, SG-MAS, JP-FSA]}
+  jurisdiction: EU
+  pep_hit_score: {uniform: [0.71, 0.99], round: 2}
 rca_clues:
   compliance-monitor:
-    compliance.aml_screening_timeout_ms: {randint: [5000, 30000]}
-    compliance.pep_hit_score: {uniform: [0.50, 0.99], round: 2}
+    compliance.aml_screening_timeout_ms: {randint: [12700, 30000]}
+    compliance.pep_hit_score: {uniform: [0.71, 0.99], round: 2}
+    compliance.timed_out_check: ADVERSE_MEDIA
   fraud-detector:
-    fraud.correlated_aml_flags: {randint: [0, 5]}
-    fraud.sanction_entity_match_score: {uniform: [0.0, 0.95], round: 2}
+    fraud.correlated_aml_flags: 0
+    fraud.sanction_entity_match_score: {uniform: [0.0, 0.2], round: 2}
   order-gateway:
     oms.aml_hold_queue_depth: {randint: [1, 50]}
     oms.transactions_pending_aml: {randint: [1, 100]}
@@ -54,10 +56,10 @@ rca_clues:
     portal.account_aml_restricted: true
 business_impact:
   - kpi: business.order_flow_per_min
-    factor: {uniform: [0.25, 0.55]}
+    value: {uniform: [316.2, 363.8]}
   - kpi: business.rejected_orders_per_min
     factor: {uniform: [2.0, 5.0]}
   - kpi: business.notional_value_usd_per_min
-    factor: {uniform: [0.30, 0.60]}
+    value: {uniform: [1692600.0, 1947400.0], round: 1}
   - kpi: business.reporting_latency_sec
     factor: {uniform: [2.5, 6.0]}

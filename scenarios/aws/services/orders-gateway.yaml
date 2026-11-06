@@ -1,0 +1,89 @@
+service: orders-gateway
+sort_order: 2
+cloud_provider: aws
+cloud_region: us-east-1
+cloud_platform: aws_ec2
+cloud_availability_zone: us-east-1b
+subsystem: edge_api
+language: go
+
+topology:
+  - [orders-service, /api/v1/orders, POST]
+
+entry_endpoints:
+  - [/api/v1/orders, POST]
+  - [/api/v1/orders/status, GET]
+
+db_operations: []
+
+emit_fault_logs: true
+kpi_emitter: false
+
+constants:
+  ECS_TASKS: [orders-gateway-7c4f9d, orders-gateway-b21e68, orders-gateway-e90a35]
+  ROUTES: ["POST /api/v1/orders", "GET /api/v1/orders/status"]
+
+state:
+  _requests: {init: 0}
+  _last_summary: {init: now}
+
+steps:
+  - sample:
+      task: {choice: ECS_TASKS}
+      route: {choice: ROUTES}
+      upstream_ms:
+        if_active: {uniform: [1200.0, 9000.0], round: 1}
+        else: {uniform: [25.0, 140.0], round: 1}
+      requests_per_min: {randint: [900, 3600]}
+      healthy_targets:
+        if_active: {randint: [0, 1]}
+        else: {randint: [3, 3]}
+      http_5xx_pct:
+        if_active: {uniform: [6.0, 38.0], round: 2}
+        else: {uniform: [0.0, 0.3], round: 2}
+      http_4xx_pct: {uniform: [0.5, 2.5], round: 2}
+      request_id: {format: "req-{n}", n: {randint: [100000, 999999]}}
+  - counter:
+      state_key: _requests
+      by: 1
+  - metric:
+      name: orders_gateway.upstream_latency_ms
+      value: {var: upstream_ms}
+      unit: ms
+  - metric:
+      name: orders_gateway.requests_per_min
+      value: {var: requests_per_min}
+      unit: '{requests}/min'
+  - metric:
+      name: orders_gateway.http_5xx_pct
+      value: {var: http_5xx_pct}
+      unit: '%'
+  - metric:
+      name: orders_gateway.http_4xx_pct
+      value: {var: http_4xx_pct}
+      unit: '%'
+  - metric:
+      name: orders_gateway.alb_healthy_targets
+      value: {var: healthy_targets}
+      unit: '{targets}'
+  - log:
+      level: INFO
+      message: "[gateway] access route=\"{route}\" upstream=orders-service upstream_ms={upstream_ms} ecs_task={task} request_id={request_id}"
+      attrs:
+        operation: access_log
+        gateway.route: {var: route}
+        gateway.upstream_ms: {var: upstream_ms}
+        aws.ecs.task: {var: task}
+        http.request_id: {var: request_id}
+  - every:
+      seconds: 30
+      state_key: _last_summary
+      steps:
+        - log:
+            level: INFO
+            message: "[gateway] summary requests={_requests} requests_per_min={requests_per_min} http_5xx_pct={http_5xx_pct}% alb_healthy_targets={healthy_targets}/3"
+            attrs:
+              operation: summary
+              gateway.requests: {var: _requests}
+              gateway.http_5xx_pct: {var: http_5xx_pct}
+              aws.elb.healthy_targets: {var: healthy_targets}

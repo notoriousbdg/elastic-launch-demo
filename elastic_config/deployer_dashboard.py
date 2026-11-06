@@ -6,7 +6,7 @@ import logging
 
 import httpx
 
-from elastic_config.deployer_base import ProgressCallback, StepIdx
+from elastic_config.deployer_base import ProgressCallback, StepIdx, _kibana_headers
 
 logger = logging.getLogger("deployer")
 
@@ -26,10 +26,7 @@ class DashboardMixin:
 
             resp = client.post(
                 f"{self.kibana_url}/api/saved_objects/_import?overwrite=true",
-                headers={
-                    "kbn-xsrf": "true",
-                    "Authorization": f"ApiKey {self.api_key}",
-                },
+                headers=_kibana_headers(self.api_key, content_type=None),
                 files={"file": ("dashboard.ndjson", ndjson_str.encode(), "application/x-ndjson")},
             )
             if resp.status_code < 300:

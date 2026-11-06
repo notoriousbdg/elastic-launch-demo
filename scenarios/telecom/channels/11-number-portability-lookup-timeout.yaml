@@ -31,7 +31,7 @@ stack_trace: |
     ported_activations_affected=15%  new_msisdn_unaffected=true
   ACTION: enable_cache_fallback=true  contact_crdb_ops=true  alert=PROV-NP-TIMEOUT
 infrastructure_events:
-- body: '[GCP-Monitoring] NumberPortabilityTimeout: npdb_endpoint=npdb.meridian.eu response_time_ms=12000 threshold_ms=3000 region=europe-west3'
+- body: '[GCP-Monitoring] NumberPortabilityTimeout: npdb_endpoint=crdb.telecom-regulator.eu response_time_ms=12000 threshold_ms=5000 region=europe-west3'
   severity: WARN
   event_name: gcp.monitoring.NumberPortabilityTimeout
   service: provisioning-service
@@ -45,14 +45,14 @@ correlation_attr:
   value: crdb-client-v1.8.0-rc3
 fault_params:
   msisdn: {choice: ['+4915110000000', '+4916010000000', '+4917010000000']}
-  donor_operator: {choice: [Vodafone DE, Deutsche Telekom, 1&1, Drillisch]}
+  donor_operator: {choice: [Vodafone DE, Deutsche Telekom, 1&1, Telefonica DE]}
   crdb_timeout_ms: {randint: [5000, 15000]}
-  mnp_cache_hit: {choice: [true, false]}
-  port_type: {choice: [port_in, port_out, internal_transfer]}
+  mnp_cache_hit: false
+  port_type: port_in
 rca_clues:
   provisioning-service:
     provisioning.crdb_timeout_ms: {randint: [5000, 15000]}
-    provisioning.mnp_cache_hit: {choice: [true, false]}
+    provisioning.mnp_cache_hit: false
   activation-service:
     activation.ported_number_blocked: true
     activation.new_msisdn_ok: true

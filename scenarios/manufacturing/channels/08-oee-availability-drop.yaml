@@ -10,7 +10,7 @@ cascade_services:
 - shopfloor-portal
 description: Calculated OEE for a critical line falls below 75%; production guidance at risk
 investigation_notes: |-
-  Root Cause: An OEE availability drop is the *symptom* — the underlying cause is upstream (unplanned downtime, micro-stops, slow cycles). Always correlate the drop window with maintenance events, MES equipment-state transitions, and SCADA tag-quality changes for the same line.
+  Root Cause: An OEE availability drop is the *symptom* — the underlying cause is upstream (unplanned downtime, micro-stops, slow cycles). Always correlate the drop window with maintenance events, MES equipment-state transitions, and SCADA tag-quality changes for the same line. Availability only counts stop time: unplanned downtime above 10 min is availability loss, while micro-stops (under 5 min in total) and slow cycles (cycle-time delta within ±3%) are performance losses, so they cannot explain an availability drop unless the calc engine misclassifies them.
   Remediation: 1) Pull the equipment-state timeline: `oee-admin timeline --line {line_id} --window 60m`. 2) Cross-reference with MES work-order status: `mes-admin status --line {line_id}`. 3) Check for active maintenance: `cmms-admin active-mwo --line {line_id}`. 4) Recompute OEE with corrected planned-downtime exclusions: `oee-admin recompute --line {line_id} --exclude-planned`. 5) Engage the line lead and shift supervisor before reporting upward — the metric needs human context.
 remediation_action: recompute_oee
 error_message: '[OEE] OEE-AVAILABILITY-DROP: line={line_id} availability={availability_pct}% threshold=75% downtime_min={downtime_minutes}
@@ -19,12 +19,12 @@ stack_trace: |-
   === OEE AVAILABILITY DROP — {line_id} ===
   Window: 60 minutes | Calculated: {availability_pct}% | Threshold: 75%
   ------------------------------------------------------------------------
-  INTERVAL    | STATE       | DURATION (s)  | NOTES
+  SEGMENT     | STATE       | DURATION      | NOTES
   ------------------------------------------------------------------------
-  00:00–02:14 | RUNNING     | 134           | nominal
-  02:14–08:30 | UNPLANNED   | {downtime_minutes}m         | trigger event
-  08:30–18:00 | RUNNING     | 570           | recovered
-  18:00–22:45 | MICROSTOP   | 285           | <2min stops
+  1           | RUNNING     | 14m           | nominal
+  2           | UNPLANNED   | {downtime_minutes}m           | trigger event
+  3           | RUNNING     | remainder     | recovered
+  4           | MICROSTOP   | 4m total      | <2min stops (performance loss)
   ------------------------------------------------------------------------
   OEE-AVAILABILITY-DROP: target {target_oee}%, actual {availability_pct}% — investigation required
 correlation_attr:
@@ -33,14 +33,16 @@ correlation_attr:
 fault_params:
   line_id: {choice: [LINE-01, LINE-02, LINE-03, LINE-04, LINE-05]}
   availability_pct: {uniform: [45.0, 74.0], round: 1}
-  downtime_minutes: {randint: [8, 45]}
+  downtime_minutes: {randint: [16, 33]}
   target_oee: 85.0
 rca_clues:
   oee-analytics:
     oee.availability_pct: {uniform: [45.0, 74.0], round: 1}
     oee.target_pct: 85.0
+    oee.microstop_min: {uniform: [3.0, 5.0], round: 1}
+    oee.cycle_time_delta_pct: {uniform: [-2.0, 2.0], round: 1}
   mes-controller:
-    mes.unplanned_downtime_min: {randint: [8, 45]}
+    mes.unplanned_downtime_min: {randint: [16, 33]}
   shopfloor-portal:
     portal.line_alert_displayed: true
 business_impact:

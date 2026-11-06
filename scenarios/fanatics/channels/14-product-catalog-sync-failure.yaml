@@ -10,9 +10,9 @@ cascade_services:
 - auction-engine
 description: Product catalog replication between marketplace and printing system failing
 investigation_notes: |-
-  1. Check the catalog_replicator logs for the specific error detail — 'schema version mismatch' means a migration ran on one side but not the other.
+  1. Check the catalog_replicator logs for the specific error detail — 'schema version mismatch' means a migration ran on one side but not the other — if a migration (for example schema v5.3.0) is still pending on the source, that is the cause.
   2. For 'primary key conflict on sku column', identify the duplicate SKUs: `SELECT sku, COUNT(*) FROM products GROUP BY sku HAVING COUNT(*) > 1`.
-  3. 'Connection reset by peer' during sync indicates a network interruption — check if the VPN tunnel between AWS (printing) and marketplace DB is stable.
+  3. 'Connection reset by peer' during sync indicates a network interruption — check network stability between the printing system and the marketplace DB inside the EKS VPC.
   4. 'Timeout waiting for lock on products table' means a long-running transaction is holding a row lock — find it with `SELECT * FROM information_schema.innodb_trx`.
   5. If sync has been broken for hours, do not attempt a full resync during business hours — schedule it for the maintenance window to avoid locking the catalog.
   6. As a workaround, enable the read-only cache mode on the marketplace so users see stale-but-consistent data while the sync recovers.
@@ -37,19 +37,18 @@ correlation_attr:
 fault_params:
   catalog_sync_failed: {randint: [50, 500]}
   catalog_sync_total: {randint: [1000, 5000]}
-  catalog_source: {choice: [card-printing-system, product-master]}
+  catalog_source: card-printing-system
   catalog_destination: {choice: [digital-marketplace, auction-engine]}
   catalog_last_sync_min: {randint: [30, 360]}
   catalog_error_detail:
     choice:
-    - "connection reset by peer"
     - "schema version mismatch"
-    - "primary key conflict on sku column"
-    - "timeout waiting for lock on products table"
 rca_clues:
   digital-marketplace:
     marketplace.catalog_staleness_min: {randint: [30, 360]}
     marketplace.sku_mismatch_count: {randint: [20, 500]}
+    marketplace.sync_connection_resets: 0
+    marketplace.products_lock_wait_ms: {randint: [1, 15]}
   card-printing-system:
     print.catalog_version:
       format: "v{a}.{b}.{c}"
@@ -62,10 +61,10 @@ rca_clues:
     auction.phantom_listings: {randint: [2, 30]}
 business_impact:
   - kpi: business.page_views_per_min
-    factor: {uniform: [0.30, 0.60]}
+    value: {uniform: [66960.0, 77040.0]}
   - kpi: business.merch_gmv_usd_per_min
-    factor: {uniform: [0.25, 0.55]}
+    value: {uniform: [16926.0, 19474.0], round: 1}
   - kpi: business.app_sessions_per_min
-    factor: {uniform: [0.30, 0.60]}
+    factor: {uniform: [0.3, 0.6]}
   - kpi: business.churn_risk_index_0_100
     factor: {uniform: [1.5, 3.5]}

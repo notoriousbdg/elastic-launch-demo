@@ -1,0 +1,37 @@
+name: "GT otel_rum_dashboards: web_vital_degradation"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-OTELRUM-WEB-VITAL-DEGRADATION
+sensor_type: impact_key_probe
+affected_services:
+  - gt-otelrum-azure-svc-1
+cascade_services:
+  - gt-otelrum-azure-svc-2
+description: "Tests impact_key web_vital_degradation on generator otel_rum_dashboards."
+investigation_notes: |-
+  1. Verify otel_rum_dashboards is active and reporting metrics.
+  2. Check that the web_vital_degradation metric has reached the trigger value (3.5).
+  3. Confirm generator_impact for otel_rum_dashboards.web_vital_degradation is set to 3.5.
+  4. Look for correlated changes in service gt-otelrum-azure-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_web_vital_degradation_baseline
+error_message: "GT-PROBE: gen=otel_rum_dashboards key=web_vital_degradation value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=otel_rum_dashboards
+  impact_key: web_vital_degradation
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 3.5
+  svc_name: gt-otelrum-azure-svc-1
+rca_clues:
+  gt-otelrum-azure-svc-1:
+    probe.generator: otel_rum_dashboards
+    probe.impact_key: web_vital_degradation
+    probe.trigger_value: 3.5
+  gt-otelrum-azure-svc-2:
+    probe.upstream_generator: otel_rum_dashboards
+    probe.upstream_key: web_vital_degradation
+generator_impact:
+  otel_rum_dashboards:
+    web_vital_degradation: 3.5

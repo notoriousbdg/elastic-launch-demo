@@ -1,0 +1,68 @@
+name: Cost Budget Misconfiguration
+subsystem: cost_control
+vehicle_section: cost_control_pipeline
+error_type: COST-BUDGET-MISCONFIG
+sensor_type: health_check
+affected_services: [cost-guard, chat-orchestrator]
+cascade_services: [model-router]
+
+description: Cost-guard budget thresholds were set in the wrong currency and unit, so model-router never throttles expensive deployments.
+
+investigation_notes: |
+  1. Search body.text LIKE *COST-BUDGET-MISCONFIG* and read configured_budget={configured_budget} {configured_unit} against the intended {intended_budget} {intended_unit}.
+  2. Compare spend_to_date={spend_to_date} {intended_unit} with the threshold; threshold_pct_used={threshold_pct_used}% means the throttle trigger can never fire.
+  3. Check the budget config revision budget.config_revision={config_revision} in the Activity Log or config repo to find who changed the unit or currency and when.
+  4. Verify model-router behavior: throttle_decisions={throttle_decisions} stays at zero while premium deployment "{premium_deployment}" keeps taking {premium_share_pct}% of traffic.
+  5. Cross-check Cost Management for the actual daily spend; if it exceeds the intended budget while cost-guard reports headroom, the misconfiguration is confirmed.
+  6. Get approval, then correct the thresholds to the intended currency and unit and confirm model-router starts throttling.
+
+remediation_action: correct_budget_thresholds
+
+error_message: |
+  [CostGuard] COST-BUDGET-MISCONFIG: budget={budget_name} configured="{configured_budget} {configured_unit}" intended="{intended_budget} {intended_unit}" spend_to_date={spend_to_date} threshold_used={threshold_pct_used}%
+
+stack_trace: |
+  BudgetConfigurationException: COST-BUDGET-MISCONFIG
+    at BudgetEvaluator.evaluate(budget={budget_name})
+    at CostGuard.checkThrottle(deployment={premium_deployment})
+  Configured budget:   {configured_budget} {configured_unit}
+  Intended budget:     {intended_budget} {intended_unit}
+  Spend to date:       {spend_to_date} {intended_unit}
+  Threshold used:      {threshold_pct_used}%
+  Config revision:     {config_revision}
+  Throttle decisions:  {throttle_decisions}
+  Premium traffic:     {premium_share_pct}%
+
+correlation_attr:
+  key: budget.config_revision
+  value: budget-rev-2026-10-17-unit-eur-cents
+
+fault_params:
+  budget_name: {choice: [monthly-genai-prod, daily-premium-models, team-assistant-budget]}
+  configured_budget: 750000
+  configured_unit: EUR-cents
+  intended_budget: 7500
+  intended_unit: USD
+  spend_to_date: {randint: [8300, 19500]}
+  threshold_pct_used: {uniform: [1.1, 2.6], round: 1}
+  config_revision: "budget-rev-2026-10-17"
+  premium_deployment: {choice: [gpt-4o-premium-eus2, foundry-reasoning-large-eus2]}
+  premium_share_pct: {randint: [70, 95]}
+  throttle_decisions: 0
+
+rca_clues:
+  cost-guard:
+    cost.configured_budget_unit_mismatch: true
+    cost.threshold_pct_used: {uniform: [1.1, 2.6], round: 1}
+    cost.actual_spend_over_intended_pct: {randint: [110, 260]}
+  model-router:
+    router.throttle_decisions_last_hour: 0
+    router.premium_traffic_share_pct: {randint: [70, 95]}
+
+business_impact:
+  - kpi: business.conversations_per_min
+    value: {uniform: [120.9, 139.1], round: 0}
+  - kpi: business.resolution_rate_pct
+    value: {uniform: [46.5, 53.5], round: 1}
+  - kpi: business.model_availability_pct
+    value: {uniform: [73.73, 84.83], round: 2}

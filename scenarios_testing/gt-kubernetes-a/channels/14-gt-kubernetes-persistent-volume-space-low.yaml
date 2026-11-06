@@ -1,0 +1,37 @@
+name: "GT kubernetes_otel: persistent_volume_space_low"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-KUBERNETES-PERSISTENT-VOLUME-SPACE-
+sensor_type: impact_key_probe
+affected_services:
+  - gt-kubernetes-a-aws-svc-1
+cascade_services:
+  - gt-kubernetes-a-aws-svc-2
+description: "Tests impact_key persistent_volume_space_low on generator kubernetes_otel."
+investigation_notes: |-
+  1. Verify kubernetes_otel is active and reporting metrics.
+  2. Check that the persistent_volume_space_low metric has reached the trigger value (20.0).
+  3. Confirm generator_impact for kubernetes_otel.persistent_volume_space_low is set to 20.0.
+  4. Look for correlated changes in service gt-kubernetes-a-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_persistent_volume_space_low_baseline
+error_message: "GT-PROBE: gen=kubernetes_otel key=persistent_volume_space_low value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=kubernetes_otel
+  impact_key: persistent_volume_space_low
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 20.0
+  svc_name: gt-kubernetes-a-aws-svc-1
+rca_clues:
+  gt-kubernetes-a-aws-svc-1:
+    probe.generator: kubernetes_otel
+    probe.impact_key: persistent_volume_space_low
+    probe.trigger_value: 20.0
+  gt-kubernetes-a-aws-svc-2:
+    probe.upstream_generator: kubernetes_otel
+    probe.upstream_key: persistent_volume_space_low
+generator_impact:
+  kubernetes_otel:
+    persistent_volume_space_low: 20.0

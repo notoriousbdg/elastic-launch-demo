@@ -10,15 +10,16 @@ cascade_services:
 - cloud-armor-waf
 description: Google-managed SSL certificate approaching or past expiration
 investigation_notes: |-
-  Root cause: Google-managed SSL certificate renewal has failed. The managed status FAILED_NOT_VISIBLE means Google's CA cannot reach the domain for DCV (Domain Control Validation), FAILED_CAA_CHECKING means CAA DNS records do not permit Google's CA (pki.goog), and PROVISIONING means the cert is still being issued but may be stuck. Check status:
+  Root cause: Google-managed SSL certificate renewal has failed. Managed status RENEWAL_FAILED with domain status FAILED_NOT_VISIBLE means Google's CA cannot reach the domain for DCV (Domain Control Validation), FAILED_CAA_FORBIDDEN means CAA DNS records do not permit Google's CA (pki.goog), FAILED_CAA_CHECKING means the CAA lookup itself failed, and PROVISIONING means the cert is still being issued but may be stuck. Check status:
     gcloud compute ssl-certificates describe <cert> --format='value(managed.status,managed.domainStatus)'
     gcloud compute ssl-certificates list --filter='type:MANAGED AND managed.status!=ACTIVE'
   Remediation: Verify DNS A/AAAA record points to the LB's external IP:
     dig <domain> +short (must resolve to the forwarding rule IP)
-  Add or fix CAA record to allow Google's CA: add DNS CAA record 'pki.goog' for the domain. If stuck in PROVISIONING > 24h, delete and recreate the certificate:
+  Add or fix CAA record to allow Google's CA: add DNS CAA record 'pki.goog' for the domain. If stuck in PROVISIONING > 24h, create a replacement certificate, attach it next to the old one, and remove the old one once the new one is ACTIVE:
+    gcloud compute ssl-certificates create <new-cert> --domains=<domain> --global
+    gcloud compute target-https-proxies update <proxy> --ssl-certificates=<new-cert>,<cert>
+    gcloud compute target-https-proxies update <proxy> --ssl-certificates=<new-cert>
     gcloud compute ssl-certificates delete <cert>
-    gcloud compute ssl-certificates create <cert> --domains=<domain> --global
-  Attach the new cert to the target HTTPS proxy immediately.
 remediation_action: reset_backend_service
 error_message: '[CloudLB] LB-SSL-CERT-EXPIRY certificate={ssl_cert_name} domain={ssl_domain} expires_in={ssl_days_remaining}d
   managed_status={ssl_managed_status} forwarding_rules={ssl_affected_rules}'
@@ -30,24 +31,27 @@ stack_trace: |-
   Days Remaining:   {ssl_days_remaining}
   Managed Status:   {ssl_managed_status}
   Forwarding Rules: {ssl_affected_rules}
-  Provisioning:     FAILED_NOT_VISIBLE
+  Domain Status:    FAILED_NOT_VISIBLE
   Action: Verify DNS authorization and domain ownership
 correlation_attr:
   key: deployment.cert_manager
   value: google-managed-v2-beta
 fault_params:
   ssl_cert_name: {choice: [gcpnet-managed-cert-01, gcpnet-managed-cert-02]}
-  ssl_domain: {choice: [api.gcpnet.example.com, cdn.gcpnet.example.com, "*.gcpnet.example.com"]}
+  ssl_domain: api.gcpnet.example.com
   ssl_days_remaining: {randint: [-5, 3]}
-  ssl_managed_status: {choice: [FAILED_NOT_VISIBLE, FAILED_CAA_CHECKING, PROVISIONING]}
+  ssl_managed_status: RENEWAL_FAILED
   ssl_affected_rules: {randint: [2, 8]}
 rca_clues:
   cloud-load-balancer:
-    lb.managed_cert_status: {choice: [FAILED_NOT_VISIBLE, FAILED_CAA_CHECKING]}
+    lb.managed_cert_status: RENEWAL_FAILED
+    lb.managed_cert_domain_status: FAILED_NOT_VISIBLE
+    lb.dns_resolves_to_lb_ip: false
+    lb.caa_allows_pki_goog: true
     lb.cert_domain: api.gcpnet.example.com
   cloud-cdn-service:
     cdn.https_serving_degraded: true
-    cdn.fallback_to_http: {choice: [true, false]}
+    cdn.fallback_to_http: true
   cloud-armor-waf:
     armor.ssl_policy_affected: true
 business_impact:

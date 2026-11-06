@@ -1,0 +1,118 @@
+service: inventory-service
+sort_order: 7
+cloud_provider: aws
+cloud_region: us-west-2
+cloud_platform: aws_ec2
+cloud_availability_zone: us-west-2c
+subsystem: inventory
+language: dotnet
+
+# Topology: [downstream-service, endpoint, METHOD]
+# Stock lives in DynamoDB (not a relational store), so there are no downstream
+# service calls and no SQL db_operations.
+topology: []
+
+entry_endpoints:
+  - [/api/v1/inventory/reserve, POST]
+  - [/api/v1/inventory/availability, GET]
+
+db_operations: []
+
+emit_fault_logs: true
+kpi_emitter: false
+
+constants:
+  TABLES: [inventory-stock, inventory-reservations]
+  WAREHOUSES: [pdx-01, sea-02, sjc-03, phx-04]
+  SKUS: [SKU-48213, SKU-77120, SKU-30955, SKU-61804, SKU-90277, SKU-12469]
+
+state:
+  _reservations: {init: 0}
+  _last_summary: {init: now}
+
+steps:
+  - sample:
+      table: {choice: TABLES}
+      warehouse: {choice: WAREHOUSES}
+      sku: {choice: SKUS}
+      qty: {randint: [1, 4]}
+      read_latency_ms:
+        if_active: {uniform: [180.0, 1400.0], round: 1}
+        else: {uniform: [2.0, 9.0], round: 1}
+      write_latency_ms:
+        if_active: {uniform: [350.0, 2600.0], round: 1}
+        else: {uniform: [4.0, 18.0], round: 1}
+      consumed_rcu:
+        if_active: {uniform: [900.0, 1000.0], round: 1}
+        else: {uniform: [120.0, 640.0], round: 1}
+      consumed_wcu:
+        if_active: {uniform: [880.0, 1000.0], round: 1}
+        else: {uniform: [60.0, 420.0], round: 1}
+      throttled_requests:
+        if_active: {randint: [25, 220]}
+        else: {randint: [0, 1]}
+      reservation_success_rate_pct:
+        if_active: {uniform: [71.0, 92.0], round: 2}
+        else: {uniform: [98.8, 99.95], round: 2}
+      available_qty: {randint: [12, 2400]}
+  - counter:
+      state_key: _reservations
+      by: 1
+  - metric:
+      name: inventory.dynamodb.read_latency_ms
+      value: {var: read_latency_ms}
+      unit: ms
+  - metric:
+      name: inventory.dynamodb.write_latency_ms
+      value: {var: write_latency_ms}
+      unit: ms
+  - metric:
+      name: inventory.dynamodb.consumed_read_capacity_units
+      value: {var: consumed_rcu}
+      unit: '{unit}'
+  - metric:
+      name: inventory.dynamodb.consumed_write_capacity_units
+      value: {var: consumed_wcu}
+      unit: '{unit}'
+  - metric:
+      name: inventory.dynamodb.throttled_requests
+      value: {var: throttled_requests}
+      unit: '{request}'
+  - metric:
+      name: inventory.reservation_success_rate_pct
+      value: {var: reservation_success_rate_pct}
+      unit: '%'
+  - log:
+      level: INFO
+      message: 'inventory.reserve sku={sku} qty={qty} warehouse={warehouse} table={table} write_latency={write_latency_ms}ms wcu={consumed_wcu} status=RESERVED'
+      attrs:
+        operation: reserve_stock
+        inventory.sku: {var: sku}
+        inventory.qty: {var: qty}
+        inventory.warehouse_id: {var: warehouse}
+        aws.dynamodb.table_name: {var: table}
+        aws.dynamodb.write_latency_ms: {var: write_latency_ms}
+        aws.dynamodb.consumed_write_capacity: {var: consumed_wcu}
+  - log:
+      level: INFO
+      message: 'inventory.availability sku={sku} warehouse={warehouse} available_qty={available_qty} read_latency={read_latency_ms}ms rcu={consumed_rcu} throttled={throttled_requests}'
+      attrs:
+        operation: check_availability
+        inventory.sku: {var: sku}
+        inventory.warehouse_id: {var: warehouse}
+        inventory.available_qty: {var: available_qty}
+        aws.dynamodb.read_latency_ms: {var: read_latency_ms}
+        aws.dynamodb.consumed_read_capacity: {var: consumed_rcu}
+        aws.dynamodb.throttled_requests: {var: throttled_requests}
+  - every:
+      seconds: 30
+      state_key: _last_summary
+      steps:
+        - log:
+            level: INFO
+            message: 'inventory.summary reservations={_reservations} success_rate={reservation_success_rate_pct}% throttled={throttled_requests} status=NOMINAL'
+            attrs:
+              operation: inventory_summary
+              inventory.total_reservations: {var: _reservations}
+              inventory.reservation_success_rate_pct: {var: reservation_success_rate_pct}
+              aws.dynamodb.throttled_requests: {var: throttled_requests}

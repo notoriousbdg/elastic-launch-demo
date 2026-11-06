@@ -1,0 +1,76 @@
+name: Orchestrator Tool Loop
+subsystem: orchestration
+vehicle_section: orchestration_pipeline
+error_type: AGENT-TOOL-LOOP
+sensor_type: health_check
+affected_services: [chat-orchestrator]
+cascade_services: [cost-guard, model-router]
+
+description: The chat-orchestrator agent enters a tool-call loop with repeated retrieval calls and no termination, inflating latency and token spend.
+
+investigation_notes: |
+  1. Search body.text LIKE *AGENT-TOOL-LOOP* and group by session_id to find the loops; iterations={iteration_count} against the expected limit of {normal_max_iterations}.
+  2. Inspect the repeated tool call: tool={tool_name} with near-identical arguments (args_hash={args_hash}) and no new information between iterations.
+  3. Check token usage per turn: tokens_per_turn={tokens_per_turn} versus a normal {normal_tokens_per_turn}; spend rises linearly with each loop iteration.
+  4. Follow the cascade: cost-guard shows spend_rate_per_min={spend_rate} and model-router sees {router_calls_per_turn} model calls per user turn, pushing the Microsoft Foundry deployment provisioned utilization and response latency up.
+  5. Look for a recent agent prompt or tool-schema change in agent.config_version={agent_config} that removed the stop condition or changed the tool result format; a missing stop condition with an unchanged tool result schema confirms the removed stop condition.
+  6. Get approval, then cap agent tool iterations at {normal_max_iterations} and confirm tokens_per_turn returns to baseline.
+
+remediation_action: cap_agent_tool_iterations
+
+error_message: |
+  [ChatOrchestrator] AGENT-TOOL-LOOP: session={session_id} tool={tool_name} iterations={iteration_count} (limit {normal_max_iterations}) tokens_per_turn={tokens_per_turn}
+
+stack_trace: |
+  AgentLoopException: AGENT-TOOL-LOOP
+    at AgentRunner.executeToolCall(tool={tool_name}, args_hash={args_hash})
+    at ChatOrchestrator.runTurn(session={session_id})
+  Iterations:          {iteration_count} (limit: {normal_max_iterations})
+  Tokens per turn:     {tokens_per_turn} (normal: {normal_tokens_per_turn})
+  Model calls/turn:    {router_calls_per_turn}
+  Spend rate:          {spend_rate} USD/min
+  Agent config:        {agent_config}
+
+correlation_attr:
+  key: agent.config_version
+  value: agent-config-v42-no-stop-condition
+
+fault_params:
+  session_id: {choice: ["sess-4c81e0", "sess-9ab2d7", "sess-e03f56", "sess-71d9b3"]}
+  tool_name: search_knowledge_base
+  args_hash: {choice: ["a91f03", "3be7c2", "d6104e"]}
+  iteration_count: {randint: [25, 120]}
+  normal_max_iterations: 5
+  tokens_per_turn: {randint: [40000, 220000]}
+  normal_tokens_per_turn: 3500
+  router_calls_per_turn: {randint: [25, 120]}
+  spend_rate: {uniform: [12, 85], round: 1}
+  agent_config: "agent-config-v42"
+
+rca_clues:
+  chat-orchestrator:
+    agent.tool_iterations_per_turn: {randint: [25, 120]}
+    agent.repeated_tool_call_ratio: {uniform: [0.80, 0.99], round: 2}
+    agent.stop_condition_missing: true
+    agent.tool_result_schema_changed: false
+  cost-guard:
+    cost.spend_rate_usd_per_min: {uniform: [12, 85], round: 1}
+    cost.tokens_per_turn_p95: {randint: [40000, 220000]}
+  model-router:
+    router.calls_per_turn_p95: {randint: [25, 120]}
+    router.queue_wait_ms: {randint: [300, 3500]}
+
+business_impact:
+  - kpi: business.tokens_per_conversation
+    factor: {uniform: [4.0, 9.0]}
+  - kpi: business.latency_p99_ms
+    factor: {uniform: [2.5, 5.0]}
+  - kpi: business.throughput_rpm
+    value: {uniform: [604.5, 695.5], round: 0}
+  - kpi: business.conversations_per_min
+    factor: {uniform: [0.55, 0.8]}
+
+generator_impact:
+  azure_ai_foundry:
+    provisioned_utilization_above_threshold: 92.0
+    latency_high: 7000.0

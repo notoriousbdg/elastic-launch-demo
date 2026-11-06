@@ -1,0 +1,107 @@
+name: RDS Connection Leak
+subsystem: database
+vehicle_section: database_pipeline
+error_type: ORD-DB-CONNECTION-EXHAUSTION
+sensor_type: connection_pool
+affected_services: [orders-db, orders-service]
+cascade_services: [orders-gateway]
+
+description: >
+  A connection leak in orders-service exhausts the orders-db RDS Postgres connection ceiling, so Postgres refuses new sessions and the orders-gateway and ALB return 5xx.
+
+investigation_notes: |
+  1. Compare each orders-db CloudWatch metric to its own pre-incident baseline: DatabaseConnections is at {db_connections} against a baseline average under 1, and FreeableMemory, WriteLatency and DiskQueueDepth have moved about 3x while CPUUtilization and FreeStorageSpace are flat, so neither CPU nor storage is a competing bottleneck.
+  2. Search the orders-db Postgres log for body.text containing *ORD-DB-CONNECTION-EXHAUSTION* and "remaining connection slots are reserved": {refused_connections} refusals in the window, all against max_connections={max_connections}.
+  3. Follow the cascade into orders-service: the HikariCP pool for {db_pool} logs timeouts after {pool_timeout_ms}ms with {active_connections} active and {idle_connections} idle connections, which points at connections that are never returned.
+  4. Confirm the customer impact in the orders-gateway access log: about {gateway_5xx_pct}% of requests return 5xx, and the same window shows climbing HTTPCode_Target_5XX_Count on the ALB target group for orders-gateway.
+  5. Check pg_stat_activity on orders-db grouped by application_name and state: sessions from {leaking_client} sit in state 'idle in transaction' with state_change older than {idle_age_min} minutes, which identifies the leaking client.
+  6. Check the deployment history for correlation_attr infra.orders_service_release = orders-service-2026.10.3 (a new order-update code path does not close its connection when an exception is thrown, and leakDetectionThreshold was also removed, so the leak was never logged), then terminate the leaked backends with pg_terminate_backend and roll the pool configuration forward.
+
+remediation_action: terminate_leaked_connections
+
+error_message: |
+  ORD-DB-CONNECTION-EXHAUSTION: instance=orders-db connections={db_connections}/{max_connections} refused={refused_connections} client={leaking_client} pool={db_pool} pool_timeout_ms={pool_timeout_ms}
+
+stack_trace: |
+  === RDS CONNECTION EXHAUSTION REPORT ===
+  instance=orders-db  engine=PostgreSQL 15.4  max_connections={max_connections}
+  --- POSTGRES LOG (orders-db) ---
+    FATAL:  remaining connection slots are reserved for non-replication superuser and rds_superuser connections
+    occurrences={refused_connections}  client={leaking_client}
+  --- CLOUDWATCH ---
+    METRIC                BASELINE   CURRENT
+    DatabaseConnections   <1         {db_connections}
+    FreeableMemory        stable     falling
+    WriteLatency          1x         about 3x
+    DiskQueueDepth        1x         about 3x
+    CPUUtilization        flat       flat
+    FreeStorageSpace      flat       flat
+  --- ORDERS-SERVICE POOL ---
+    pool={db_pool}  active={active_connections}  idle={idle_connections}
+    java.sql.SQLTransientConnectionException: {db_pool} - Connection is not available, request timed out after {pool_timeout_ms}ms.
+  --- ORDERS-GATEWAY ---
+    upstream_5xx_pct={gateway_5xx_pct}  alb_target_5xx=rising
+  ACTION: terminate_leaked_connections=true  idle_in_transaction_age_min={idle_age_min}  alert=ORD-DB-CONNECTION-EXHAUSTION
+
+infrastructure_events:
+- body: '[CloudWatch] Alarm orders-db-DatabaseConnections-High in ALARM: DatabaseConnections above threshold for instance=orders-db region=us-east-1'
+  severity: WARN
+  event_name: aws.cloudwatch.AlarmStateChange
+  service: orders-db
+  attributes:
+    cloud.provider: aws
+    cloud.service: rds
+    aws.cloudwatch.alarm_name: orders-db-DatabaseConnections-High
+    aws.rds.instance: orders-db
+    infrastructure.source: CloudWatch
+
+correlation_attr:
+  key: infra.orders_service_release
+  value: orders-service-2026.10.3
+
+fault_params:
+  db_connections: 117
+  max_connections: 120
+  refused_connections: {randint: [2400, 3200]}
+  leaking_client: orders-service
+  db_pool: orders-hikari-pool
+  pool_timeout_ms: {choice: [30000, 20000]}
+  active_connections: {randint: [60, 100]}
+  idle_connections: {randint: [0, 2]}
+  gateway_5xx_pct: {randint: [30, 45]}
+  idle_age_min: {randint: [10, 45]}
+
+rca_clues:
+  orders-db:
+    db.connections_vs_baseline_ratio: {randint: [117, 234]}
+    db.idle_in_transaction_sessions: {randint: [55, 95]}
+    db.cpu_and_storage_flat: true
+  orders-service:
+    pool.active_connections: {randint: [60, 100]}
+    pool.wait_timeout_count: {randint: [200, 900]}
+    pool.leak_detection_enabled: false
+  orders-gateway:
+    gateway.upstream_5xx_pct: {randint: [30, 45]}
+    gateway.alb_target_5xx_rising: true
+
+business_impact:
+  - kpi: business.checkout_success_pct
+    factor: {uniform: [0.55, 0.75]}
+  - kpi: business.orders_per_min
+    value: {uniform: [120.9, 139.1], round: 0}
+  - kpi: business.throughput_rpm
+    factor: {uniform: [0.3, 0.55]}
+  - kpi: business.availability_pct
+    factor: {uniform: [0.6, 0.8]}
+generator_impact:
+  aws_rds_otel:
+    # Plateau at max_connections minus the rds_reserved slots (alert: avg > 100).
+    database_connections_high: 117.0
+    freeable_memory_low: 83886080.0
+  aws_cloudwatch_logs:
+    connection_refusals: 120
+    gateway_error_fraction: 0.4
+  aws_elb_otel:
+    error_fraction: 0.4
+  aws_elb_metrics_otel:
+    high_application_load_balancer_target_5xx_error_rate: 300.0

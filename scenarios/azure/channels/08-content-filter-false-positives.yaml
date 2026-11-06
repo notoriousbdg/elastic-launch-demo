@@ -1,0 +1,67 @@
+name: Content Filter False Positives
+subsystem: safety
+vehicle_section: safety_pipeline
+error_type: PROMPT-FILTER-FALSE-POSITIVE
+sensor_type: health_check
+affected_services: [prompt-guard, chat-orchestrator]
+cascade_services: [assistant-web]
+
+description: >
+  A content-safety policy threshold change makes prompt-guard block a large share of benign customer prompts, so users see refusals for ordinary questions.
+
+investigation_notes: |
+  1. Search body.text for *PROMPT-FILTER-FALSE-POSITIVE* and read blocked_pct={blocked_pct}% against the normal baseline of {baseline_blocked_pct}%.
+  2. Check the policy change: severity_threshold moved from {old_threshold} to {new_threshold} on content-safety policy {policy_name}.
+  3. Sample blocked prompts by category={filter_category}; benign topics such as billing or product questions score {sample_severity} against a block cutoff of {new_threshold}.
+  4. On chat-orchestrator, look for rising refusal responses and prompt_rejected counts; on assistant-web, check the spike in user retries and abandoned sessions.
+  5. Confirm no matching rise in prompt-injection signals (injection attempts stay under 5 per minute), which separates a misconfigured threshold from a real attack.
+  6. Approve restoring the previous threshold or a tuned value, then replay a labeled benign prompt set to verify block rate returns to baseline.
+
+remediation_action: tune_content_filter_threshold
+
+error_message: |
+  [PromptGuard] PROMPT-FILTER-FALSE-POSITIVE: policy={policy_name} category={filter_category} severity={sample_severity} threshold={new_threshold} blocked_pct={blocked_pct}% baseline={baseline_blocked_pct}%
+
+stack_trace: |
+  ContentSafetyBlockedError: PROMPT-FILTER-FALSE-POSITIVE
+    at PromptGuard.evaluate(policy={policy_name})
+    at PromptGuard.handleScreenRequest()
+  Policy:             {policy_name}
+  Category:           {filter_category}
+  Severity score:     {sample_severity}
+  Threshold:          {old_threshold} -> {new_threshold}
+  Blocked share:      {blocked_pct}% (baseline {baseline_blocked_pct}%)
+
+correlation_attr:
+  key: safety.policy_version
+  value: content-safety-policy-2026.10.2
+
+fault_params:
+  policy_name: {choice: [customer-chat-default, customer-chat-strict]}
+  filter_category: {choice: [violence, self_harm, hate, sexual]}
+  sample_severity: 2
+  old_threshold: 6
+  new_threshold: {choice: [1, 2]}
+  blocked_pct: {uniform: [18.0, 45.0], round: 1}
+  baseline_blocked_pct: 1.5
+
+rca_clues:
+  prompt-guard:
+    safety.blocked_prompt_ratio_pct: {uniform: [18.0, 45.0], round: 1}
+    safety.threshold_change_min_ago: {randint: [10, 120]}
+    safety.benign_sample_blocked_pct: {uniform: [70.0, 95.0], round: 1}
+    safety.injection_attempts_per_min: {randint: [0, 3]}
+  chat-orchestrator:
+    orchestrator.prompt_rejected_count: {randint: [200, 4000]}
+    orchestrator.refusal_response_rate_pct: {uniform: [15.0, 40.0], round: 1}
+  assistant-web:
+    web.user_retry_rate_pct: {uniform: [20.0, 55.0], round: 1}
+    web.session_abandon_spike: true
+
+business_impact:
+  - kpi: business.conversations_per_min
+    value: {uniform: [120.9, 139.1], round: 0}
+  - kpi: business.resolution_rate_pct
+    factor: {uniform: [0.5, 0.75]}
+  - kpi: business.error_rate_pct
+    factor: {uniform: [2.0, 4.5]}

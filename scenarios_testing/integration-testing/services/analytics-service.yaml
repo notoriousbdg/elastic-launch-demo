@@ -1,0 +1,64 @@
+service: analytics-service
+sort_order: 4
+cloud_provider: gcp
+cloud_region: us-central1
+cloud_platform: gcp_compute_engine
+cloud_availability_zone: us-central1-a
+subsystem: analytics
+language: java
+
+topology:
+  - [data-platform, /api/v1/orchestration/status, GET]
+
+db_operations:
+  - [SELECT, signal_rollups, "SELECT dataset, count FROM signal_rollups WHERE window = ?"]
+  - [INSERT, coverage_reports, "INSERT INTO coverage_reports (generator_id, dataset, emitted_at) VALUES (?, ?, NOW())"]
+
+emit_fault_logs: true
+kpi_emitter: false
+
+constants:
+  PIPELINES: [signal_rollup, coverage_report, generator_scorecard]
+
+state:
+  _writes_total: {init: 0}
+  _last_summary: {init: now}
+
+steps:
+  - sample:
+      pipeline: {choice: PIPELINES}
+      write_rejection_pct:
+        if_active: {uniform: [15.0, 60.0], round: 1}
+        else: {uniform: [0.0, 1.5], round: 1}
+      rollup_lag_s:
+        if_active: {uniform: [30.0, 400.0], round: 1}
+        else: {uniform: [1.0, 8.0], round: 1}
+  - counter:
+      state_key: _writes_total
+      by: 1
+  - log:
+      level: INFO
+      message: '[analytics-service] pipeline_cycle pipeline={pipeline} write_rejection={write_rejection_pct}% lag={rollup_lag_s}s total={_writes_total}'
+      attrs:
+        operation: pipeline_cycle
+        analytics.pipeline: {var: pipeline}
+        analytics.write_rejection_pct: {var: write_rejection_pct}
+        analytics.rollup_lag_s: {var: rollup_lag_s}
+  - metric:
+      name: analytics_service.write_rejection_pct
+      value: {var: write_rejection_pct}
+      unit: '%'
+  - metric:
+      name: analytics_service.rollup_lag_s
+      value: {var: rollup_lag_s}
+      unit: s
+  - every:
+      seconds: 15
+      state_key: _last_summary
+      steps:
+        - log:
+            level: INFO
+            message: '[analytics-service] summary total_writes={_writes_total} status=NOMINAL'
+            attrs:
+              operation: summary
+              analytics.total_writes: {var: _writes_total}

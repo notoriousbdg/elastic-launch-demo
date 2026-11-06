@@ -7,9 +7,9 @@ affected_services:
 - mes-controller
 cascade_services:
 - oee-analytics
-description: MES work-order queue backlog exceeded soft watermark; auto-scale workers eligible
+description: MES work-order Kafka topic consumer backlog exceeded soft watermark; auto-scale workers eligible
 investigation_notes: |-
-  Root Cause: Queue depth growing past the soft watermark indicates inbound rate has temporarily exceeded the worker pool's drain rate. This is normal during shift change and during morning release windows. Auto-scaling workers within the configured max is safe.
+  Root Cause: Queue depth growing past the soft watermark indicates inbound rate has temporarily exceeded the worker pool's drain rate. This is normal during shift change and during morning release windows. Queue depth counts work orders, while Kafka consumer lag counts messages (each work order fans out to about 15-30 operation/step events), so a depth of a few thousand shows as tens of thousands of messages of lag. Auto-scaling workers within the configured max is safe as long as the max does not exceed the topic's partition count; extra consumers beyond that sit idle.
   Remediation (auto-remediate eligible): 1) Scale workers: `mes-admin scale-workers --pool WORK-ORDER --count {target_workers}`. 2) Confirm queue depth recovers within 5 min. 3) If recurring, raise the steady-state pool size in the deployment config.
 remediation_action: scale_mes_workers
 error_message: '[MES] MES-QUEUE-OVERFLOW: queue=WORK-ORDER depth={queue_depth} soft_watermark=2000 hard_watermark=5000 workers={current_workers}'
@@ -46,3 +46,6 @@ business_impact:
     factor: {uniform: [1.5, 3.0]}
   - kpi: business.on_time_delivery_pct
     factor: {uniform: [0.40, 0.70]}
+generator_impact:
+  kafka_otel:
+    high_consumer_lag_by_topic: 70000.0

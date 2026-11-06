@@ -1,0 +1,57 @@
+name: App Gateway Waf Block Surge
+subsystem: api_gateway
+vehicle_section: api_gateway_pipeline
+error_type: AGW-WAF-BLOCK-SURGE
+sensor_type: health_check
+affected_services: [assistant-web]
+cascade_services: [chat-orchestrator]
+description: Application Gateway WAF (OWASP CRS) blocks a large share of legitimate chat requests to assistant-web because prompts containing code snippets trip SQLi and XSS rules.
+investigation_notes: |-
+  1. Search body.text for *AGW-WAF-BLOCK-SURGE* and check the WAF block ratio: blocked={blocked_pct}% of requests, far above the normal {normal_blocked_pct}%.
+  2. Group ApplicationGatewayFirewallLog by ruleId; rule {rule_id} ({rule_group}) is the top matched rule on POST /api/chat; under CRS 3.2 anomaly scoring the block itself is logged by rule 949110 (Inbound Anomaly Score Exceeded) for the same transaction IDs.
+  3. Inspect matched details: prompts with code fences, SQL keywords or HTML tags in the message body trigger the rule (sample_match={sample_match}); these are legitimate users.
+  4. Confirm WAF policy {waf_policy} CRS version {crs_version} was recently changed or upgraded, and that chat-orchestrator request volume dropped by the same share.
+  5. Add a targeted exclusion for the chat message body field on rule {rule_id} (or set that rule's action to Log; switching the whole policy to Detection mode is the broad fallback), then verify error_rate returns to baseline.
+remediation_action: set_waf_rule_to_detection
+error_message: '[AssistantWeb] AGW-WAF-BLOCK-SURGE: waf_policy={waf_policy} rule={rule_id} blocked={blocked_pct}% (normal {normal_blocked_pct}%) path={request_path} blocked_requests={blocked_requests}'
+stack_trace: |-
+  WafRequestBlockedException: AGW-WAF-BLOCK-SURGE
+    at ApplicationGateway.evaluateWafRules(policy={waf_policy})
+    at ApplicationGateway.rejectRequest(status=403, path={request_path})
+  Rule:             {rule_id} ({rule_group})
+  Blocked ratio:    {blocked_pct}% (normal: {normal_blocked_pct}%)
+  Blocked requests: {blocked_requests}
+  Sample match:     {sample_match}
+  CRS version:      {crs_version}
+correlation_attr:
+  key: azure.waf_policy_crs_version
+  value: OWASP_3.2-policy-azureai-agw-v14
+fault_params:
+  waf_policy: {choice: [waf-policy-azureai-eastus, waf-policy-azureai-prod]}
+  rule_id: "942100"
+  rule_group: REQUEST-942-APPLICATION-ATTACK-SQLI
+  blocked_pct: {uniform: [38.0, 62.0], round: 1}
+  normal_blocked_pct: 0.4
+  blocked_requests: {randint: [1500, 12000]}
+  request_path: /api/chat
+  sample_match: {choice: ["SELECT * FROM users WHERE", "DROP TABLE sessions; --"]}
+  crs_version: "3.2"
+rca_clues:
+  assistant-web:
+    web.waf_blocked_requests: {randint: [1500, 12000]}
+    web.http_403_ratio_pct: {uniform: [38.0, 62.0], round: 1}
+    web.top_blocked_rule: "942100"
+  chat-orchestrator:
+    orchestrator.inbound_requests_drop_pct: {uniform: [35.0, 60.0], round: 1}
+    orchestrator.code_snippet_prompts_seen: {randint: [200, 3000]}
+business_impact:
+  - kpi: business.throughput_rpm
+    factor: {uniform: [0.35, 0.60]}
+  - kpi: business.error_rate_pct
+    factor: {uniform: [5.0, 10.0]}
+  - kpi: business.availability_pct
+    factor: {uniform: [0.60, 0.85]}
+generator_impact:
+  azure_gateway_otel:
+    error_rate: 0.5
+    records_per_cycle: 80

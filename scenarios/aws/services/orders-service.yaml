@@ -1,0 +1,116 @@
+service: orders-service
+sort_order: 3
+cloud_provider: aws
+cloud_region: us-east-1
+cloud_platform: aws_ec2
+cloud_availability_zone: us-east-1c
+subsystem: order_management
+language: java
+
+topology:
+  - [payment-processor, /api/v1/payments/charge, POST]
+  - [inventory-service, /api/v1/inventory/reserve, POST]
+  - [fulfillment-worker, /api/v1/fulfillment/enqueue, POST]
+
+entry_endpoints:
+  - [/api/v1/orders, POST]
+  - [/api/v1/orders/status, GET]
+
+db_operations:
+  - [INSERT, orders, "INSERT INTO orders (customer_id, cart_id, total_usd, currency, status, created_at) VALUES (?, ?, ?, 'USD', 'PENDING', NOW())"]
+  - [INSERT, order_items, "INSERT INTO order_items (order_id, sku, quantity, unit_price_usd) VALUES (?, ?, ?, ?)"]
+  - [SELECT, orders, "SELECT order_id, status, total_usd, created_at FROM orders WHERE customer_id = ? ORDER BY created_at DESC LIMIT 20"]
+  - [SELECT, order_items, "SELECT oi.sku, oi.quantity, oi.unit_price_usd FROM order_items oi WHERE oi.order_id = ?"]
+  - [UPDATE, orders, "UPDATE orders SET status = ?, payment_id = ?, updated_at = NOW() WHERE order_id = ?"]
+
+emit_fault_logs: true
+kpi_emitter: true
+
+state:
+  _orders_total: {init: 0}
+  _last_summary: {init: now}
+
+steps:
+  - sample:
+      orders_per_min:
+        if_active: {uniform: [40.0, 160.0], round: 1}
+        else: {uniform: [180.0, 520.0], round: 1}
+      checkout_success_pct:
+        if_active: {uniform: [62.0, 88.0], round: 2}
+        else: {uniform: [97.0, 99.7], round: 2}
+      revenue_usd_per_min:
+        if_active: {uniform: [1800.0, 7500.0], round: 2}
+        else: {uniform: [9500.0, 41000.0], round: 2}
+      avg_order_value_usd: {uniform: [42.0, 168.0], round: 2}
+      fulfillment_backlog:
+        if_active: {randint: [400, 3200]}
+        else: {randint: [5, 90]}
+      order_latency_ms:
+        if_active: {uniform: [1400.0, 8500.0], round: 1}
+        else: {uniform: [60.0, 260.0], round: 1}
+      db_pool_active:
+        if_active: {randint: [92, 100]}
+        else: {randint: [14, 46]}
+      jvm_heap_used_pct:
+        if_active: {uniform: [88.0, 98.0], round: 1}
+        else: {uniform: [42.0, 66.0], round: 1}
+      order_id: {format: "ORD-{n}", n: {randint: [1000000, 9999999]}}
+      payment_status: {choice: [CAPTURED, CAPTURED, CAPTURED, CAPTURED, AUTHORIZED]}
+  - counter:
+      state_key: _orders_total
+      by: 1
+  - metric:
+      name: orders.per_minute
+      value: {var: orders_per_min}
+      unit: '{orders}/min'
+  - metric:
+      name: orders.checkout_success_pct
+      value: {var: checkout_success_pct}
+      unit: '%'
+  - metric:
+      name: orders.revenue_usd_per_min
+      value: {var: revenue_usd_per_min}
+      unit: USD/min
+  - metric:
+      name: orders.avg_order_value_usd
+      value: {var: avg_order_value_usd}
+      unit: USD
+  - metric:
+      name: orders.fulfillment_backlog
+      value: {var: fulfillment_backlog}
+      unit: '{orders}'
+  - metric:
+      name: orders.create_latency_ms
+      value: {var: order_latency_ms}
+      unit: ms
+  - metric:
+      name: orders.db_pool_active_connections
+      value: {var: db_pool_active}
+      unit: '{connections}'
+  - metric:
+      name: orders.jvm_heap_used_pct
+      value: {var: jvm_heap_used_pct}
+      unit: '%'
+  - log:
+      level: INFO
+      message: "[orders] order placed order_id={order_id} total_usd={avg_order_value_usd} payment_status={payment_status} latency={order_latency_ms}ms"
+      attrs:
+        operation: create_order
+        orders.order_id: {var: order_id}
+        orders.total_usd: {var: avg_order_value_usd}
+        orders.payment_status: {var: payment_status}
+        orders.latency_ms: {var: order_latency_ms}
+  - every:
+      seconds: 30
+      state_key: _last_summary
+      steps:
+        - log:
+            level: INFO
+            message: "[orders] kpi orders_per_min={orders_per_min} checkout_success={checkout_success_pct}% revenue_usd_per_min={revenue_usd_per_min} fulfillment_backlog={fulfillment_backlog} sqs_queue=fulfillment-orders db_pool_active={db_pool_active}/100"
+            attrs:
+              operation: kpi_summary
+              orders.total: {var: _orders_total}
+              orders.per_minute: {var: orders_per_min}
+              orders.checkout_success_pct: {var: checkout_success_pct}
+              orders.revenue_usd_per_min: {var: revenue_usd_per_min}
+              orders.fulfillment_backlog: {var: fulfillment_backlog}

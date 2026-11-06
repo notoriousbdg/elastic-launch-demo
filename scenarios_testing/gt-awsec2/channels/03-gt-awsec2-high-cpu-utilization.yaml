@@ -1,0 +1,37 @@
+name: "GT aws_ec2_otel: high_cpu_utilization"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-AWSEC2-HIGH-CPU-UTILIZATION
+sensor_type: impact_key_probe
+affected_services:
+  - gt-awsec2-aws-svc-1
+cascade_services:
+  - gt-awsec2-aws-svc-2
+description: "Tests impact_key high_cpu_utilization on generator aws_ec2_otel."
+investigation_notes: |-
+  1. Verify aws_ec2_otel is active and reporting metrics.
+  2. Check that the high_cpu_utilization metric has reached the trigger value (675.0).
+  3. Confirm generator_impact for aws_ec2_otel.high_cpu_utilization is set to 675.0.
+  4. Look for correlated changes in service gt-awsec2-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_high_cpu_utilization_baseline
+error_message: "GT-PROBE: gen=aws_ec2_otel key=high_cpu_utilization value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=aws_ec2_otel
+  impact_key: high_cpu_utilization
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 675.0
+  svc_name: gt-awsec2-aws-svc-1
+rca_clues:
+  gt-awsec2-aws-svc-1:
+    probe.generator: aws_ec2_otel
+    probe.impact_key: high_cpu_utilization
+    probe.trigger_value: 675.0
+  gt-awsec2-aws-svc-2:
+    probe.upstream_generator: aws_ec2_otel
+    probe.upstream_key: high_cpu_utilization
+generator_impact:
+  aws_ec2_otel:
+    high_cpu_utilization: 675.0

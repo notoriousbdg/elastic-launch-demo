@@ -11,9 +11,9 @@ cascade_services:
 - fraud-sentinel
 description: Push notification system sending duplicate or excessive alerts to members
 investigation_notes: |-
-  1. Check dedup cache status — OVERFLOW at 500K entries means the cache cannot prevent duplicate sends. Inspect Redis memory: redis-cli INFO memory | grep used_memory_human.
+  1. Check dedup cache status — OVERFLOW at 500K entries means the cache cannot prevent duplicate sends. Inspect the Redis dedup cache: redis-cli INFO memory | grep -E 'used_memory_human|maxmemory_human' shows used memory at maxmemory, and redis-cli INFO stats | grep evicted_keys shows evictions climbing as dedup entries are evicted.
   2. Identify the root_cause event_replay source — transaction_processor is re-emitting events that trigger notifications. Check transaction_processor logs for reprocessing or replay activity.
-  3. Monitor APNS throttling — Apple will rate-limit and eventually block the push certificate if abuse continues. Check APNS feedback service for unregistered device tokens.
+  3. Monitor APNs throttling — APNs returns 429 TooManyRequests when one device token gets too many pushes. Check the HTTP/2 responses for 410 Unregistered tokens (the legacy feedback service was retired in 2021).
   4. Review member complaint volume — 200+ complaints in a notification storm triggers regulatory attention. CFPB considers excessive notifications a UDAAP (unfair practices) concern.
   5. Flush and resize the dedup cache immediately, then identify which event types are replaying. Check: SELECT event_type, COUNT(*) FROM notification_events WHERE ts > NOW() - INTERVAL 5 MINUTE GROUP BY event_type.
 remediation_action: flush_notification_queue
@@ -41,11 +41,11 @@ fault_params:
   notif_rate: {randint: [500, 5000]}
   notif_max: 200
   notif_dupes: {randint: [100, 2000]}
-  notif_channel: {choice: [APNS, FCM, SMS_GATEWAY, EMAIL_RELAY]}
+  notif_channel: APNS
   notif_window_s: {randint: [60, 600]}
 rca_clues:
   mobile-gateway:
-    gateway.notification_rate_per_min: {randint: [8000, 15000]}
+    gateway.notification_rate_per_min: {randint: [1000, 5000]}
     gateway.dedup_cache_status: OVERFLOW
   auth-gateway:
     auth.notification_trigger_source: event_replay
@@ -58,10 +58,15 @@ rca_clues:
     fraud.alert_source: transaction_processor_replay
 business_impact:
   - kpi: business.active_digital_sessions
-    factor: {uniform: [0.55, 0.80]}
+    value: {uniform: [4464.0, 5136.0]}
   - kpi: business.app_session_duration_sec
-    factor: {uniform: [0.40, 0.65]}
+    value: {uniform: [58.71, 67.54], round: 1}
   - kpi: business.complaint_tickets_per_min
     factor: {uniform: [3.0, 6.0]}
   - kpi: business.churn_risk_index_0_100
     factor: {uniform: [1.5, 3.0]}
+
+generator_impact:
+  redis_otel:
+    memory_approaching_maxmemory: 95.0
+    high_eviction_rate: 150.0

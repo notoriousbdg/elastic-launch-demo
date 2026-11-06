@@ -10,12 +10,12 @@ cascade_services:
 - cloud-interconnect
 description: Cloud NAT unable to allocate external IP addresses for outbound traffic
 investigation_notes: |-
-  Root cause: Cloud NAT cannot allocate additional external IPs due to project quota limits or IP conflicts. The EXTERNAL_IP_ADDRESS quota per region defaults to a limited number. If another NAT gateway or resource holds the IP, allocation fails. Check quotas:
-    gcloud compute project-info describe --project=<project> --format='table(quotas.filter(metric=STATIC_ADDRESSES).limit,usage)'
+  Root cause: Cloud NAT cannot allocate additional external IPs due to project quota limits or IP conflicts. The regional STATIC_ADDRESSES quota (static external IPs per region) is limited; quota usage at 100% with no IP conflict means the quota is the blocker. If another NAT gateway or resource holds the IP, allocation fails. Check quotas:
+    gcloud compute regions describe <region> --project=<project> --flatten=quotas --format='table(quotas.metric,quotas.limit,quotas.usage)' | grep ADDRESSES
     gcloud compute addresses list --filter='region:<region> AND status:RESERVED'
   Remediation: Release unused static IPs:
     gcloud compute addresses delete <unused-ip> --region=<region>
-  Or request a quota increase via Console > IAM & Admin > Quotas > filter 'In-use IP addresses'. If IPs are held by other NAT gateways, consolidate NAT configurations. For immediate relief, switch to AUTO_ONLY allocation mode which uses GCP-managed ephemeral IPs (note: IPs will change on gateway restart, which may break IP-allowlisted external services).
+  Or request a quota increase via Console > IAM & Admin > Quotas > filter 'Static IP addresses'. If IPs are held by other NAT gateways, consolidate NAT configurations. For immediate relief, switch to AUTO_ONLY allocation mode which uses GCP-managed ephemeral IPs (note: IPs will change on gateway restart, which may break IP-allowlisted external services).
 remediation_action: reset_nat_gateway
 error_message: 'cloudnat: NAT-IP-ALLOCATION-ERROR gateway={nat_gateway_name} region={gcp_region} allocated_ips={nat_allocated_ips}/{nat_max_ips}
   pending_allocations={nat_pending_allocs} error="{nat_alloc_error}"'
@@ -27,28 +27,24 @@ stack_trace: |-
   Allocated:   {nat_allocated_ips}/{nat_max_ips}
   Pending:     {nat_pending_allocs}
   Error:       {nat_alloc_error}
-  Quota:       EXTERNAL_IP_ADDRESS — check project quota
+  Quota:       STATIC_ADDRESSES — check regional quota
   Action: Release unused IPs or request quota increase
 correlation_attr:
   key: infra.ip_allocation_pool
   value: static-pool-region-east1
 fault_params:
-  nat_gateway_name: {choice: [gcpnet-nat-central1, gcpnet-nat-east1, gcpnet-nat-europe1]}
-  gcp_region: {choice: [us-central1, us-east1, europe-west1]}
-  nat_allocated_ips: {randint: [8, 10]}
+  nat_gateway_name: gcpnet-nat-east1
+  gcp_region: us-east1
+  nat_allocated_ips: 10
   nat_max_ips: 10
   nat_pending_allocs: {randint: [2, 8]}
-  nat_alloc_error:
-    choice:
-      - "QUOTA_EXCEEDED: EXTERNAL_IP_ADDRESS"
-      - IP_ALREADY_IN_USE by another NAT
-      - REGION_QUOTA_EXCEEDED for static IPs
+  nat_alloc_error: "QUOTA_EXCEEDED: Quota 'STATIC_ADDRESSES' exceeded. Limit: 10.0 in region us-east1."
 rca_clues:
   cloud-nat-gateway:
-    nat.quota_name: EXTERNAL_IP_ADDRESS
-    nat.quota_usage_pct: {uniform: [95, 100], round: 1}
+    nat.quota_name: STATIC_ADDRESSES
+    nat.quota_usage_pct: 100.0
   vpc-network-manager:
-    vpc.nat_ip_conflict: true
+    vpc.nat_ip_conflict: false
     vpc.orphaned_static_ips: {randint: [2, 8]}
   cloud-interconnect:
     interconnect.nat_failover_path: unavailable

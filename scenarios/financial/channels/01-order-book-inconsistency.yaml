@@ -14,7 +14,7 @@ investigation_notes: |-
   1. Check order-gateway logs for OMS-BOOK-IMBALANCE — note book_id, instrument, and bid_ask_spread value.
   2. Query FROM logs.otel.financial.* | WHERE body.text LIKE "*OMS-BOOK-IMBALANCE*" | STATS count() BY service.name, instrument to identify recurrence.
   3. Inspect matching-engine replica sync lag — if replica_sync_lag_us > 50000 the book is stale and must be rebuilt from primary.
-  4. Verify market-data-feed is publishing fresh ticks for the affected instrument — a stale feed drives spread widening.
+  4. Verify market-data-feed is publishing fresh ticks for the affected instrument — a stale feed drives spread widening (tick age under 100ms is fresh and rules the feed out).
   5. If book_id shows repeated IMBALANCED state, trigger force_book_resync on matching-engine to rebuild from primary sequence.
 remediation_action: force_book_resync
 error_message: '[OMS] OMS-BOOK-IMBALANCE: instrument={instrument} bid_ask_spread={spread}ticks max_spread={max_spread}ticks
@@ -30,24 +30,27 @@ stack_trace: |-
     4       244.40    2800         4       245.10    4200
     5       244.35    1100         5       245.25    6700
   spread={spread}ticks  max_allowed={max_spread}ticks
-  replica_sync=STALE  last_sync_us=48230  primary_seq=8832014  replica_seq=8831997
+  replica_sync=STALE  last_sync_us={replica_lag_us}  primary_seq=8832014  replica_seq=8831997
   ACTION: halt_matching=true  alert=OMS-BOOK-IMBALANCE
 correlation_attr: {}
 fault_params:
-  instrument: {choice: [US.AAPL, US.GOOGL, US.MSFT, US.AMZN, US.TSLA, FX.EURUSD, FX.GBPUSD, FUT.ES, FUT.NQ, OPT.SPX]}
-  spread: {randint: [5, 50]}
+  instrument: {choice: [US.AAPL, US.GOOGL, US.MSFT, US.AMZN, US.TSLA, US.NVDA, US.META, US.JPM, US.BAC, US.XOM]}
+  spread: 35
   max_spread: 3
+  replica_lag_us: {randint: [55000, 200000]}
   book_id:
     format: "BOOK-{t}-{n:02d}"
     t: {choice: [EQ, FI, FX, DRV]}
     n: {randint: [1, 50]}
 rca_clues:
   order-gateway:
-    oms.book_spread_ticks: {randint: [5, 50]}
+    oms.book_spread_ticks: 35
     oms.order_reject_rate_pct: {uniform: [8.0, 45.0], round: 1}
   matching-engine:
-    engine.replica_sync_lag_us: {randint: [40000, 200000]}
+    engine.replica_sync_lag_us: {randint: [55000, 200000]}
     engine.book_imbalance_count: {randint: [1, 20]}
+  market-data-feed:
+    feed.tick_age_ms: {randint: [2, 40]}
   risk-calculator:
     risk.halted_instruments_count: {randint: [1, 10]}
     risk.stale_book_exposure_usd: {randint: [500000, 5000000]}
@@ -56,7 +59,7 @@ rca_clues:
     audit.imbalance_alert_count: {randint: [1, 50]}
 business_impact:
   - kpi: business.order_flow_per_min
-    factor: {uniform: [0.30, 0.60]}
+    value: {uniform: [513.83, 591.18]}
   - kpi: business.fill_rate_pct
     factor: {uniform: [0.25, 0.55]}
   - kpi: business.rejected_orders_per_min

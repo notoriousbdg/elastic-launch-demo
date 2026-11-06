@@ -1,0 +1,63 @@
+service: worker-pool
+sort_order: 2
+cloud_provider: aws
+cloud_region: us-east-1
+cloud_platform: aws_ec2
+cloud_availability_zone: us-east-1b
+subsystem: async_processing
+language: go
+
+topology:
+  - [analytics-service, /api/v1/analytics/write, POST]
+  - [ml-inference, /api/v1/models/score, POST]
+
+db_operations: []
+
+emit_fault_logs: true
+kpi_emitter: false
+
+constants:
+  JOB_TYPES: [fault_injection, generator_healthcheck, telemetry_replay, backfill]
+
+state:
+  _jobs_completed: {init: 0}
+  _last_summary: {init: now}
+
+steps:
+  - sample:
+      job_type: {choice: JOB_TYPES}
+      queue_depth:
+        if_active: {randint: [500, 5000]}
+        else: {randint: [0, 80]}
+      duration_ms:
+        if_active: {uniform: [1000.0, 8000.0], round: 1}
+        else: {uniform: [50.0, 400.0], round: 1}
+  - counter:
+      state_key: _jobs_completed
+      by: 1
+  - log:
+      level: INFO
+      message: '[worker-pool] job_processed type={job_type} duration={duration_ms}ms queue_depth={queue_depth} total={_jobs_completed}'
+      attrs:
+        operation: job_processed
+        worker.job_type: {var: job_type}
+        worker.duration_ms: {var: duration_ms}
+        worker.queue_depth: {var: queue_depth}
+  - metric:
+      name: worker_pool.queue_depth
+      value: {var: queue_depth}
+      unit: jobs
+  - metric:
+      name: worker_pool.jobs_per_sec
+      value: {uniform: [5.0, 90.0], round: 1}
+      unit: jobs/s
+  - every:
+      seconds: 15
+      state_key: _last_summary
+      steps:
+        - log:
+            level: INFO
+            message: '[worker-pool] summary jobs_completed={_jobs_completed} status=NOMINAL'
+            attrs:
+              operation: summary
+              worker.jobs_completed: {var: _jobs_completed}

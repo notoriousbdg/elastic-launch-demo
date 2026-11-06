@@ -1,0 +1,116 @@
+service: recommendation-service
+sort_order: 9
+cloud_provider: aws
+cloud_region: eu-west-1
+cloud_platform: aws_ec2
+cloud_availability_zone: eu-west-1b
+subsystem: personalization
+language: python
+
+# Topology: [downstream-service, endpoint, METHOD]
+# Model inference is a managed Amazon Bedrock call, not another service.
+topology: []
+
+entry_endpoints:
+  - [/api/v1/recommendations, GET]
+
+db_operations: []
+
+emit_fault_logs: true
+kpi_emitter: false
+
+constants:
+  PLACEMENTS: [home_carousel, cart_upsell, pdp_similar_items, post_purchase]
+  MODELS: [anthropic.claude-haiku, amazon.nova-lite]
+
+state:
+  _requests: {init: 0}
+  _last_summary: {init: now}
+
+steps:
+  - sample:
+      placement: {choice: PLACEMENTS}
+      model: {choice: MODELS}
+      shopper_id: {format: "shp-{n}", n: {randint: [100000, 999999]}}
+      invocation_latency_ms:
+        if_active: {uniform: [4500.0, 18000.0], round: 1}
+        else: {uniform: [220.0, 780.0], round: 1}
+      time_to_first_token_ms:
+        if_active: {uniform: [2200.0, 9000.0], round: 1}
+        else: {uniform: [90.0, 320.0], round: 1}
+      input_tokens: {randint: [380, 1500]}
+      output_tokens: {randint: [60, 340]}
+      throttled_invocations:
+        if_active: {randint: [18, 140]}
+        else: {randint: [0, 1]}
+      invocation_client_errors:
+        if_active: {randint: [10, 90]}
+        else: {randint: [0, 1]}
+      items_returned: {randint: [4, 12]}
+      personalization_hit_rate_pct:
+        if_active: {uniform: [31.0, 58.0], round: 2}
+        else: {uniform: [74.0, 93.0], round: 2}
+  - counter:
+      state_key: _requests
+      by: 1
+  - metric:
+      name: recommendations.bedrock.invocation_latency_ms
+      value: {var: invocation_latency_ms}
+      unit: ms
+  - metric:
+      name: recommendations.bedrock.time_to_first_token_ms
+      value: {var: time_to_first_token_ms}
+      unit: ms
+  - metric:
+      name: recommendations.bedrock.input_token_count
+      value: {var: input_tokens}
+      unit: '{token}'
+  - metric:
+      name: recommendations.bedrock.output_token_count
+      value: {var: output_tokens}
+      unit: '{token}'
+  - metric:
+      name: recommendations.bedrock.invocation_throttles
+      value: {var: throttled_invocations}
+      unit: '{invocation}'
+  - metric:
+      name: recommendations.bedrock.invocation_client_errors
+      value: {var: invocation_client_errors}
+      unit: '{error}'
+  - metric:
+      name: recommendations.personalization_hit_rate_pct
+      value: {var: personalization_hit_rate_pct}
+      unit: '%'
+  - log:
+      level: INFO
+      message: 'reco.invoke placement={placement} shopper={shopper_id} model={model} latency={invocation_latency_ms}ms ttft={time_to_first_token_ms}ms input_tokens={input_tokens} output_tokens={output_tokens} items={items_returned}'
+      attrs:
+        operation: bedrock_invoke
+        reco.placement: {var: placement}
+        reco.shopper_id: {var: shopper_id}
+        gen_ai.request.model: {var: model}
+        aws.bedrock.invocation_latency_ms: {var: invocation_latency_ms}
+        gen_ai.usage.input_tokens: {var: input_tokens}
+        gen_ai.usage.output_tokens: {var: output_tokens}
+        reco.items_returned: {var: items_returned}
+  - log:
+      level: INFO
+      message: 'reco.quota model={model} throttled_invocations={throttled_invocations} client_errors={invocation_client_errors} hit_rate={personalization_hit_rate_pct}%'
+      attrs:
+        operation: bedrock_quota_check
+        gen_ai.request.model: {var: model}
+        aws.bedrock.invocation_throttles: {var: throttled_invocations}
+        aws.bedrock.invocation_client_errors: {var: invocation_client_errors}
+        reco.hit_rate_pct: {var: personalization_hit_rate_pct}
+  - every:
+      seconds: 30
+      state_key: _last_summary
+      steps:
+        - log:
+            level: INFO
+            message: 'reco.summary requests={_requests} hit_rate={personalization_hit_rate_pct}% throttled={throttled_invocations} status=NOMINAL'
+            attrs:
+              operation: reco_summary
+              reco.total_requests: {var: _requests}
+              reco.hit_rate_pct: {var: personalization_hit_rate_pct}
+              aws.bedrock.invocation_throttles: {var: throttled_invocations}

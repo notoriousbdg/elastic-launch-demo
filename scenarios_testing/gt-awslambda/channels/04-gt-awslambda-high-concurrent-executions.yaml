@@ -1,0 +1,37 @@
+name: "GT aws_lambda_otel: high_concurrent_executions"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-AWSLAMBDA-HIGH-CONCURRENT-EXECUTION
+sensor_type: impact_key_probe
+affected_services:
+  - gt-awslambda-aws-svc-1
+cascade_services:
+  - gt-awslambda-aws-svc-2
+description: "Tests impact_key high_concurrent_executions on generator aws_lambda_otel."
+investigation_notes: |-
+  1. Verify aws_lambda_otel is active and reporting metrics.
+  2. Check that the high_concurrent_executions metric has reached the trigger value (6000.0).
+  3. Confirm generator_impact for aws_lambda_otel.high_concurrent_executions is set to 6000.0.
+  4. Look for correlated changes in service gt-awslambda-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_high_concurrent_executions_baseline
+error_message: "GT-PROBE: gen=aws_lambda_otel key=high_concurrent_executions value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=aws_lambda_otel
+  impact_key: high_concurrent_executions
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 6000.0
+  svc_name: gt-awslambda-aws-svc-1
+rca_clues:
+  gt-awslambda-aws-svc-1:
+    probe.generator: aws_lambda_otel
+    probe.impact_key: high_concurrent_executions
+    probe.trigger_value: 6000.0
+  gt-awslambda-aws-svc-2:
+    probe.upstream_generator: aws_lambda_otel
+    probe.upstream_key: high_concurrent_executions
+generator_impact:
+  aws_lambda_otel:
+    high_concurrent_executions: 6000.0

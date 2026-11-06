@@ -9,7 +9,7 @@ affected_services:
 cascade_services:
 - member-portal
 - fraud-sentinel
-description: Biometric authentication (Face ID, fingerprint) verification service experiencing high failure rate
+description: Server-side biometric verification (face match with liveness, voice print) experiencing high failure rate
 investigation_notes: |-
   1. Analyze failure distribution by method — voice_print at 32% fail rate is worst, likely due to background noise in military environments (flight line, motor pool, barracks). Consider increasing noise tolerance thresholds for voice authentication.
   2. Liveness check failures (42%) indicate potential issues with the anti-spoofing model, not member behavior. Check BioAuth-v3.1 model performance — last retrain was 2026-01-28, may need refresh.
@@ -25,7 +25,7 @@ stack_trace: |-
   method={bio_method}  window=5min
   --- VERIFICATION STATS ---
     METHOD           ATTEMPTS   SUCCESS    FAIL_RATE
-    face_id          {bio_attempts}      72%        28%
+    face_match       {bio_attempts}      72%        28%
     fingerprint      1,240      81%        19%
     voice_print      420        68%        32%  <<< WORST
   --- FAILURE ANALYSIS ---
@@ -41,7 +41,7 @@ correlation_attr:
   key: deployment.biometric_sdk
   value: bioauth-v3.1.2-rc1
 fault_params:
-  bio_method: {choice: [FACE_ID, FINGERPRINT, VOICE_PRINT]}
+  bio_method: FACE_ID
   bio_fail_rate: {uniform: [15.0, 45.0], round: 1}
   bio_threshold: 10.0
   bio_attempts: {randint: [500, 3000]}
@@ -50,8 +50,9 @@ rca_clues:
   auth-gateway:
     auth.biometric_fail_rate_pct: {uniform: [20, 40], round: 1}
     auth.liveness_check_status: DEGRADED
+    auth.liveness_fail_share_pct: {uniform: [38, 48], round: 0}
   mobile-gateway:
-    gateway.biometric_sdk_version: {choice: [BioAuth-v3.1, BioAuth-v3.0]}
+    gateway.biometric_sdk_version: BioAuth-v3.1
     gateway.fallback_pin_surge_pct: {randint: [200, 500]}
   member-portal:
     portal.auth_fallback_active: true
@@ -61,10 +62,10 @@ rca_clues:
     fraud.biometric_spoof_attempts: {randint: [0, 5]}
 business_impact:
   - kpi: business.mobile_logins_per_min
-    factor: {uniform: [0.25, 0.55]}
+    value: {uniform: [148.8, 171.2]}
   - kpi: business.active_digital_sessions
-    factor: {uniform: [0.35, 0.65]}
+    value: {uniform: [7254.0, 8346.0]}
   - kpi: business.failed_auth_attempts_per_min
     factor: {uniform: [2.5, 5.0]}
   - kpi: business.csat_score_0_5
-    factor: {uniform: [0.40, 0.65]}
+    factor: {uniform: [0.4, 0.65]}

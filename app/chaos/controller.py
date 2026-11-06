@@ -17,10 +17,30 @@ logger = logging.getLogger("nova7.chaos")
 # Channel states
 STANDBY = "STANDBY"
 ACTIVE = "ACTIVE"
-RESOLVING = "RESOLVING"
 
 # Maximum fault duration (seconds) — override via CHANNEL_TIMEOUT in .env
 MAX_FAULT_DURATION = CHANNEL_TIMEOUT
+
+# Infra spikes are controller-owned (Chaos UI sliders and a channel's infra_impact: block),
+# separate from the per-generator SPEC.impact_keys. These are the only valid keys.
+INFRA_SPIKE_DEFAULTS: dict[str, float] = {
+    "cpu_pct": 0,
+    "memory_pct": 0,
+    "k8s_oom_intensity": 0,
+    "k8s_pod_cpu_intensity": 0,
+    "k8s_pod_memory_intensity": 0,
+    "latency_multiplier": 1.0,
+    # Channel augmentations (kubernetes_otel / host_metrics / traces). Toggles are 0/1.
+    "node_disk_fill_pct": 0,
+    "k8s_node_not_ready": 0,
+    "k8s_pvc_fill_pct": 0,
+    "k8s_crashloop": 0,
+    "k8s_readiness_fail": 0,
+    "k8s_liveness_fail": 0,
+    "k8s_hpa_capped": 0,
+    "k8s_daemonset_misscheduled": 0,
+    "apm_error_rate": 0,
+}
 
 
 class ChaosController:
@@ -47,7 +67,6 @@ class ChaosController:
         for ch_id in self._channel_registry:
             self._channels[ch_id] = {
                 "state": STANDBY,
-                "mode": None,
                 "se_name": None,
                 "session_id": None,
                 "triggered_at": None,
@@ -55,12 +74,7 @@ class ChaosController:
                 "callback_url": "",
                 "user_email": "",
             }
-        self._infra_spikes: dict[str, float] = {
-            "cpu_pct": 0,
-            "memory_pct": 0,
-            "k8s_oom_intensity": 0,
-            "latency_multiplier": 1.0,
-        }
+        self._infra_spikes: dict[str, float] = dict(INFRA_SPIKE_DEFAULTS)
         # Restore persisted state from SQLite
         self._restore_from_store()
 
@@ -75,7 +89,6 @@ class ChaosController:
                 if ch_id not in self._channels:
                     continue
                 self._channels[ch_id]["state"] = row["state"]
-                self._channels[ch_id]["mode"] = row["mode"]
                 self._channels[ch_id]["se_name"] = row["se_name"]
                 self._channels[ch_id]["session_id"] = row["session_id"]
                 self._channels[ch_id]["triggered_at"] = row["triggered_at"]
@@ -111,7 +124,6 @@ class ChaosController:
     def trigger(
         self,
         channel: int,
-        mode: str = "calibration",
         se_name: str = "",
         callback_url: str = "",
         user_email: str = "",
@@ -126,7 +138,6 @@ class ChaosController:
                 return {"status": "already_active", "channel": channel}
 
             ch["state"] = ACTIVE
-            ch["mode"] = mode
             ch["se_name"] = se_name
             ch["session_id"] = session_id
             ch["triggered_at"] = time.time()
@@ -140,7 +151,6 @@ class ChaosController:
                 self._deployment_id,
                 channel,
                 state=ACTIVE,
-                mode=mode,
                 se_name=se_name,
                 session_id=session_id,
                 triggered_at=ch["triggered_at"],
@@ -159,17 +169,15 @@ class ChaosController:
                         self._infra_spikes[key] = max(self._infra_spikes[key], float(val))
 
         logger.info(
-            "CHAOS: Channel %d [%s] ACTIVATED (mode=%s, session=%s)",
+            "CHAOS: Channel %d [%s] ACTIVATED (session=%s)",
             channel,
             ch_def["name"],
-            mode,
             session_id[:8] if session_id else "none",
         )
         return {
             "status": "triggered",
             "channel": channel,
             "name": ch_def["name"],
-            "mode": mode,
         }
 
     def resolve(
@@ -195,7 +203,6 @@ class ChaosController:
                     return {"error": "session_mismatch", "channel": channel}
 
             ch["state"] = STANDBY
-            ch["mode"] = None
             ch["session_id"] = None
             ch["resolved_at"] = time.time()
             ch["callback_url"] = ""
@@ -238,7 +245,6 @@ class ChaosController:
                 continue
             if ch["triggered_at"] and (now - ch["triggered_at"]) >= MAX_FAULT_DURATION:
                 ch["state"] = STANDBY
-                ch["mode"] = None
                 ch["session_id"] = None
                 ch["resolved_at"] = now
                 ch["callback_url"] = ""
@@ -298,7 +304,6 @@ class ChaosController:
                     "name": ch_def["name"],
                     "subsystem": ch_def["subsystem"],
                     "state": ch_state["state"],
-                    "mode": ch_state["mode"],
                     "triggered_at": ch_state["triggered_at"],
                     "session_id": ch_state["session_id"],
                     "user_email": ch_state.get("user_email", ""),
@@ -318,7 +323,6 @@ class ChaosController:
                 "name": ch_def["name"],
                 "subsystem": ch_def["subsystem"],
                 "state": ch_state["state"],
-                "mode": ch_state["mode"],
                 "se_name": ch_state["se_name"],
                 "triggered_at": ch_state["triggered_at"],
                 "resolved_at": ch_state["resolved_at"],

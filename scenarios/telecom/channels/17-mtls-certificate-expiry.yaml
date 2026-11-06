@@ -8,29 +8,29 @@ affected_services:
 - auth-service
 cascade_services:
 - activation-service
-description: Mutual TLS certificate approaching expiry causing service-to-service authentication failures
+description: Mutual TLS certificate expired after a failed cert-manager renewal, causing service-to-service authentication failures and a spike of TLS handshake errors in the NGINX error log
 investigation_notes: |
-  1. Check certificate expiry time — certificates with <24h remaining trigger WARNING, <4h triggers CRITICAL. Expired certificates cause immediate TLS handshake failures on all mTLS connections.
-  2. cert-manager auto-renewal failed — check cert-manager logs: kubectl logs -n cert-manager deploy/cert-manager. Common failure: DNS-01 challenge timeout (Route53 API permission issue).
-  3. Impact: api-gateway ↔ auth-service mTLS connection will fail when cert expires. All authentication requests will fail, blocking all API traffic including activations.
+  1. Check certificate expiry time — certificates with <24h remaining trigger WARNING, <4h triggers CRITICAL. Expired certificates cause immediate TLS handshake failures on all mTLS connections, so handshake failures confirm the certificate is already past not_after.
+  2. cert-manager auto-renewal failed — check cert-manager logs: kubectl logs -n cert-manager deploy/cert-manager. Common failure: DNS-01 challenge timeout (Route53 API throttling or missing route53:ChangeResourceRecordSets permission).
+  3. Impact: api-gateway ↔ auth-service mTLS connections fail once the cert has expired. Authentication requests fail, blocking all API traffic including activations.
   4. Emergency cert issuance: use AWS ACM for api-gateway or Azure Key Vault for auth-service. Manual cert installation: kubectl create secret tls meridian-mtls --cert=cert.pem --key=key.pem.
-  5. Verify full certificate chain including intermediate CA. Self-signed intermediates must be trusted by both api-gateway and auth-service trust stores.
+  5. Verify full certificate chain including intermediate CA. Self-signed intermediates must be trusted by both api-gateway and auth-service trust stores (auth-service reporting a valid chain rules this out when cert-manager renewal is what failed).
 remediation_action: emergency_cert_renewal
-error_message: '[GW] GW-MTLS-EXPIRY: domain={cert_domain} expires_in={cert_hours_left}h serial={cert_serial} issuer={cert_issuer} services_affected={cert_svc_count}'
+error_message: '[GW] GW-MTLS-EXPIRY: domain={cert_domain} expired_hours_ago={cert_hours_expired}h serial={cert_serial} issuer={cert_issuer} services_affected={cert_svc_count}'
 stack_trace: |
   === CERTIFICATE STATUS REPORT ===
   domain={cert_domain}  issuer={cert_issuer}
   --- CERTIFICATE DETAILS ---
     serial={cert_serial}
     not_after=2026-03-09T23:59:59Z
-    remaining={cert_hours_left}h  <<< EXPIRING
+    expired={cert_hours_expired}h ago  <<< EXPIRED
     subject=CN={cert_domain}
     san={cert_domain},*.{cert_domain}
   --- SERVICE IMPACT ---
     services_affected={cert_svc_count}
     SERVICE              TLS_STATUS    HANDSHAKE
-    api-gateway          WARNING       last_success=2min_ago
-    auth-service         WARNING       last_success=2min_ago
+    api-gateway          FAILED        certificate_expired
+    auth-service         FAILED        peer_certificate_expired
     activation-service   DEGRADED      upstream_tls_risk
   --- AUTO-RENEWAL ---
     cert_manager=FAILED  last_attempt=2h_ago  error=DNS_CHALLENGE_TIMEOUT
@@ -51,18 +51,19 @@ correlation_attr:
   key: deployment.cert_manager_version
   value: cert-manager-v1.14.5-rc1
 fault_params:
-  cert_domain: {choice: [api.meridian-telecom.eu, auth.meridian-telecom.eu, portal.meridian-telecom.eu]}
-  cert_hours_left: {uniform: [0.5, 48.0], round: 1}
+  cert_domain: api.meridian-telecom.eu
+  cert_hours_expired: {uniform: [0.5, 6.0], round: 1}
   cert_serial: {format: "{n:08X}", n: {randint: [16777216, 4294967295]}}
-  cert_issuer: {choice: [DigiCert, AWS_ACM, "Let's_Encrypt"]}
+  cert_issuer: "letsencrypt-prod"
   cert_svc_count: {randint: [2, 5]}
 rca_clues:
   api-gateway:
-    gateway.cert_hours_remaining: {uniform: [0.5, 24.0], round: 1}
+    gateway.cert_hours_since_expiry: {uniform: [0.5, 6.0], round: 1}
+    gateway.cert_renewal_error: DNS_CHALLENGE_TIMEOUT
     gateway.tls_handshake_failures: {randint: [100, 5000]}
   auth-service:
-    auth.mtls_validation_status: WARNING
-    auth.cert_chain_valid: false
+    auth.mtls_validation_status: PEER_CERT_EXPIRED
+    auth.cert_chain_valid: true
   activation-service:
     activation.upstream_tls_errors: {randint: [50, 500]}
     activation.service_degraded: true
@@ -75,3 +76,6 @@ business_impact:
     factor: {uniform: [2.0, 4.5]}
   - kpi: business.support_tickets_per_min
     factor: {uniform: [2.5, 5.0]}
+generator_impact:
+  nginx_otel:
+    error_log_spike: 120.0

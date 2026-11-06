@@ -11,12 +11,12 @@ cascade_services:
 - auth-gateway
 description: Fraud detection model generating excessive false positives blocking legitimate member transactions
 investigation_notes: |-
-  1. Root cause is PCS_SEASON — Permanent Change of Station moves cause massive geographic velocity changes that the fraud model interprets as account takeover. This is a known seasonal pattern.
+  1. Check the drift trigger the model reports. PCS_SEASON (Permanent Change of Station moves) causes large geographic velocity changes that the fraud model can read as account takeover. This is a known seasonal pattern; confirm it with the feature drift in step 2.
   2. Feature drift analysis: geo_velocity_feature at 0.92 drift and ip_diversity at 0.87 drift confirm the model's geographic features are firing on legitimate PCS relocations.
   3. With 4,200 active PCS orders, the model needs a PCS whitelist — members with active PCS orders should have relaxed geo-velocity thresholds. Query: SELECT member_id FROM pcs_orders WHERE status='ACTIVE'.
-  4. Revenue impact at $892K/hr blocked is severe. Precision dropped to 3.2% means 97% of blocks are false positives. Immediately raise the fraud score threshold from current to 75/100 for PCS-flagged members.
+  4. Revenue impact at $892K/hr blocked is severe. Precision under 15% (8 true frauds among all blocks) means more than 85% of blocks are false positives. Immediately raise the fraud score threshold from current to 75/100 for PCS-flagged members.
   5. Initiate emergency model retrain with PCS-labeled training data. Include features: has_active_pcs, days_since_pcs_order, destination_matches_new_duty_station.
-  6. Short-term fix: whitelist all members with active PCS orders in the fraud rules table. INSERT INTO fraud_whitelist SELECT member_id FROM pcs_orders WHERE status='ACTIVE' AND effective_date > CURRENT_DATE - 90.
+  6. Short-term fix: exempt members with active PCS orders from the geo-velocity and IP-diversity rules only (other fraud rules stay on). INSERT INTO fraud_rule_exemption (member_id, rule) SELECT member_id, 'geo_velocity' FROM pcs_orders WHERE status='ACTIVE' AND effective_date > CURRENT_DATE - 90.
 remediation_action: recalibrate_fraud_model
 error_message: '[FRAUD] FRAUD-FP-SURGE: blocked={fraud_blocked} window={fraud_window_s}s fp_rate={fraud_fp_rate}% model={fraud_model}
   pattern={fraud_pattern}'
@@ -26,11 +26,11 @@ stack_trace: |-
   --- CLASSIFICATION MATRIX ---
                       PREDICTED_FRAUD   PREDICTED_LEGIT
     ACTUAL_FRAUD           8               1
-    ACTUAL_LEGIT          {fraud_blocked}              3,847
+    ACTUAL_LEGIT          {fraud_blocked}              (approved, not sampled)
   --- METRICS ---
     true_positive_rate    88.9%
     false_positive_rate   {fraud_fp_rate}%  <<< SURGE THRESHOLD
-    precision             3.2%
+    precision             8/(8+{fraud_blocked})  (TP / all blocked)
     blocked_txns          {fraud_blocked}
     member_impact         $892,000/hr revenue blocked
   --- DRIFT ANALYSIS ---
@@ -46,10 +46,11 @@ fault_params:
   fraud_window_s: {randint: [60, 600]}
   fraud_fp_rate: {uniform: [15.0, 65.0], round: 1}
   fraud_model: {choice: [FraudNet-v5.2, DeepFraud-v3.1, RiskScore-v4.0]}
-  fraud_pattern: {choice: [PCS_GEO_VELOCITY, NEW_DEVICE_BURST, CARD_NOT_PRESENT_SPIKE, ACH_RETURN_PATTERN, ACCOUNT_TAKEOVER_SIG]}
+  fraud_pattern: PCS_GEO_VELOCITY
 rca_clues:
   fraud-sentinel:
-    fraud.false_positive_rate_pct: {uniform: [8, 18], round: 1}
+    fraud.false_positive_rate_pct: {uniform: [15.0, 65.0], round: 1}
+    fraud.geo_velocity_feature_drift: {uniform: [0.85, 0.95], round: 2}
     fraud.trigger_pattern: PCS_SEASON
   payment-engine:
     payment.blocked_txn_revenue_per_hr: {randint: [500000, 1200000]}
@@ -62,9 +63,9 @@ rca_clues:
     auth.geo_velocity_alerts: {randint: [500, 2000]}
 business_impact:
   - kpi: business.fee_revenue_usd_per_min
-    factor: {uniform: [0.25, 0.55]}
+    value: {uniform: [4464.0, 5136.0], round: 1}
   - kpi: business.card_interchange_usd_per_min
-    factor: {uniform: [0.20, 0.50]}
+    value: {uniform: [4836.0, 5564.0], round: 1}
   - kpi: business.chargeback_rate_pct
     factor: {uniform: [1.8, 3.5]}
   - kpi: business.complaint_tickets_per_min

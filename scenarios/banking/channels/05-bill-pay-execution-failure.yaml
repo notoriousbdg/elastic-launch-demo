@@ -36,13 +36,13 @@ stack_trace: |-
   ACTION: notify_member=true  schedule_retry=true  alert=PAY-BILLPAY-FAIL
 correlation_attr:
   key: deployment.billpay_scheduler
-  value: quartz-v2.5.0-experimental
+  value: gocron-v2.5.0-experimental
 fault_params:
   billpay_id: {format: "BP-{n}", n: {randint: [100000, 999999]}}
   payee_name: {choice: [Auto Insurance Premium, Credit Union Transfer, "AT&T Wireless", GEICO, State Farm, Mortgage Company, Electric Utility, Water Authority, Comcast, Progressive Insurance]}
   billpay_amount: {uniform: [25.0, 3000.0], round: 2}
   member_id: {format: "{p}-{n}", p: {choice: [M, MBR, USR]}, n: {randint: [1000000, 9999999]}}
-  billpay_reason: {choice: [INSUFFICIENT_FUNDS, PAYEE_ACCOUNT_CLOSED, ROUTING_NUMBER_INVALID, DUPLICATE_PAYMENT, FEDACH_WINDOW_CLOSED]}
+  billpay_reason: FEDACH_WINDOW_CLOSED
   acct_last4: {randint: [1000, 9999]}
   available_balance: {uniform: [100.0, 25000.0], round: 2}
   routing_number: {randint: [100000000, 999999999]}
@@ -61,9 +61,9 @@ rca_clues:
     document.receipt_queue_depth: {randint: [200, 800]}
 business_impact:
   - kpi: business.fee_revenue_usd_per_min
-    factor: {uniform: [0.30, 0.60]}
+    value: {uniform: [7254.0, 8346.0], round: 1}
   - kpi: business.digital_transaction_pct
-    factor: {uniform: [0.45, 0.70]}
+    factor: {uniform: [0.45, 0.7]}
   - kpi: business.complaint_tickets_per_min
     factor: {uniform: [2.0, 4.5]}
   - kpi: business.churn_risk_index_0_100

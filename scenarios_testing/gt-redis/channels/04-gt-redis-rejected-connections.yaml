@@ -1,0 +1,37 @@
+name: "GT redis_otel: rejected_connections"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-REDIS-REJECTED-CONNECTIONS
+sensor_type: impact_key_probe
+affected_services:
+  - gt-redis-aws-svc-1
+cascade_services:
+  - gt-redis-aws-svc-2
+description: "Tests impact_key rejected_connections on generator redis_otel."
+investigation_notes: |-
+  1. Verify redis_otel is active and reporting metrics.
+  2. Check that the rejected_connections metric has reached the trigger value (50.0).
+  3. Confirm generator_impact for redis_otel.rejected_connections is set to 50.0.
+  4. Look for correlated changes in service gt-redis-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_rejected_connections_baseline
+error_message: "GT-PROBE: gen=redis_otel key=rejected_connections value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=redis_otel
+  impact_key: rejected_connections
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 50.0
+  svc_name: gt-redis-aws-svc-1
+rca_clues:
+  gt-redis-aws-svc-1:
+    probe.generator: redis_otel
+    probe.impact_key: rejected_connections
+    probe.trigger_value: 50.0
+  gt-redis-aws-svc-2:
+    probe.upstream_generator: redis_otel
+    probe.upstream_key: rejected_connections
+generator_impact:
+  redis_otel:
+    rejected_connections: 50.0

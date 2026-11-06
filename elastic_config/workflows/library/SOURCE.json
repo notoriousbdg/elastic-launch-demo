@@ -1,0 +1,32 @@
+{
+ "repo": "https://github.com/elastic/workflows",
+ "commit": "98d080f6536e7e6ddd8cfce9cccb34d38ada8662",
+ "fetched": "2026-10-23",
+ "workflows": [
+  "alert-notification-group-slack",
+  "aws-alb-5xx-investigation-otel",
+  "aws-lambda-errors-investigation-otel",
+  "aws-rds-connection-exhaustion-investigation-otel",
+  "aws-sqs-consumer-lag-investigation-otel",
+  "browser-extension-daily-reputation",
+  "create-slack-channel",
+  "disk-capacity-forecast-alert",
+  "elastic-security-labs-threat-hunt",
+  "hacker-news-threat-hunt",
+  "hash-threat-check",
+  "ip-reputation-check",
+  "mark-alert-as-acknowledged",
+  "remediate-behavior-windows-script-file",
+  "remediate-identity-suspected-phishing-kit-or-aitm-compromise",
+  "remediate-persistence-windows-run-key",
+  "remediate-persistence-windows-scheduled-task",
+  "remediate-persistence-windows-startup-folder",
+  "remediate-ransomware-smb-block-user",
+  "root-cause-analysis",
+  "semantic-knowledge-search",
+  "siem-rule-tuning",
+  "sync-rule-exceptions-across-spaces",
+  "web-search",
+  "windows-clickfix-investigation"
+ ]
+}

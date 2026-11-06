@@ -15,14 +15,14 @@ investigation_notes: 'Root cause: RS-422 serial communication link timeout betwe
   cable crushed by pad equipment). Verify station processor is running (LED status panel on station enclosure). If station
   is solar-powered, check battery voltage — overcast conditions can deplete backup batteries. Compare with other stations
   (WX-SOUTH, WX-EAST, WX-WEST) to rule out ground data system receiver failure. Remediation: dispatch field technician to
-  the affected station for physical inspection. Restart station processor via remote power cycle (GND_WX_RESET {station}).
-  If RS-422 link is down, switch to backup Ethernet path (GND_WX_LINK {station} ETH). Weather LCC waiver requires Range Safety
+  the affected station for physical inspection. Restart station processor via remote power cycle (GND_WX_RESET {station_id}).
+  If RS-422 link is down, switch to backup Ethernet path (GND_WX_LINK {station_id} ETH). Weather LCC waiver requires Range Safety
   Officer approval if gap exceeds 60s.'
 remediation_action: reset_ground_systems
 error_message: '[GND] GND-WEATHER-GAP: station={station_id} gap={gap_seconds}s max_allowed={max_gap}s link=TIMEOUT'
 stack_trace: |-
   == GROUND SYSTEM DIAGNOSTIC == WEATHER NETWORK ==
-  TIMESTAMP: MET+00:04:18.334 | FRAME: 0x4A3D | SEQ: 18456
+  TIMESTAMP: T-00:04:18.334 | FRAME: 0x4A3D | SEQ: 18456
   ---------------------------------------------------------------
   STATION     LAST_DATA   GAP_SEC   MAX_GAP   STATUS
   {station_id}   {gap_seconds}s ago    {gap_seconds}s       {max_gap}s       **DATA_GAP**
@@ -30,23 +30,24 @@ stack_trace: |-
   WX-EAST     1s ago      1s        15s       NOMINAL
   WX-WEST     3s ago      3s        15s       NOMINAL
   ---------------------------------------------------------------
-  NETWORK: 4 stations | PROTOCOL: METAR/SPECI | LINK: RS-422
+  NETWORK: 4 stations | PROTOCOL: ASCII-1Hz | LINK: RS-422
   GND-WEATHER-GAP: Station {station_id} no data for {gap_seconds}s, max allowed {max_gap}s
   ACTION: Check station comm link, dispatch field technician
 correlation_attr:
   key: deployment.wx_station_fw
   value: davis-v3.2.1-patched
 fault_params:
-  station_id: {choice: [WX-NORTH, WX-SOUTH, WX-EAST, WX-WEST]}
+  station_id: WX-NORTH
   gap_seconds: {randint: [30, 180]}
   max_gap: 15
 rca_clues:
   ground-systems:
     ground.wx_link_type: RS-422
-    ground.station_battery_pct: {uniform: [15.0, 45.0], round: 0}
+    ground.station_battery_pct: {uniform: [80.0, 98.0], round: 0}
+    ground.rs422_link_state: DOWN
   sensor-validator:
     validation.weather_data_gap_s: {randint: [20, 120]}
-    validation.station_affected: {choice: [WX-NORTH, WX-SOUTH]}
+    validation.station_affected: WX-NORTH
   mission-control:
     upstream.degraded_subsystem: ground
     telemetry.lcc_weather: violated
@@ -54,10 +55,10 @@ rca_clues:
     safety.weather_lcc_status: NO-GO
 business_impact:
   - kpi: business.launch_readiness_index_0_100
-    factor: {uniform: [0.45, 0.70]}
+    factor: {uniform: [0.45, 0.7]}
   - kpi: business.schedule_variance_days
-    factor: {uniform: [1.5, 4.0]}
+    value: {uniform: [32.46, 37.34], round: 1}
   - kpi: business.ground_station_availability_pct
     factor: {uniform: [0.65, 0.85]}
   - kpi: business.program_net_satisfaction_proxy_nps
-    factor: {uniform: [0.60, 0.82]}
+    value: {uniform: [21.13, 24.32], round: 1}

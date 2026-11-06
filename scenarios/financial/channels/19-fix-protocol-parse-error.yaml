@@ -13,9 +13,9 @@ description: FIX 4.4 message parsing failure due to malformed tags or checksum e
 investigation_notes: |-
   1. Check order-gateway logs for FIX-PARSE-REJECT — note fix_session, msg_type, bad_tag, and the checksum mismatch between expected and actual values.
   2. Query FROM logs.otel.financial.* | WHERE body.text LIKE "*FIX-PARSE-REJECT*" | STATS count() BY fix_session, bad_tag to find the session and field combination causing most rejections.
-  3. Inspect the raw FIX message dump for body_length vs computed_length mismatch — a length discrepancy indicates tag 9 is being set incorrectly by the counterparty's OMS.
+  3. Inspect the raw FIX message dump for body_length vs computed_length mismatch — a length discrepancy indicates tag 9 is being set incorrectly by the counterparty's OMS; here it comes from the same malformed tag {bad_tag}, which the OMS rewrites after computing tag 9.
   4. Check audit-logger for the parse_errors count trend on this session — if error rate is rising, the counterparty may have deployed a new OMS version with a protocol deviation.
-  5. Send a FIX Reject (35=3) back to the counterparty with a clear text explanation; coordinate with the counterparty's FIX connectivity team to fix the malformed tag before resuming the session.
+  5. The message fails BodyLength/CheckSum validation, so the engine discards it as garbled (no 35=3) and will issue a ResendRequest (35=2); notify the counterparty with the tag 44 detail; coordinate with the counterparty's FIX connectivity team to fix the malformed tag before resuming the session.
 remediation_action: send_fix_reject_and_notify_counterparty
 error_message: '[FIX] FIX-PARSE-REJECT: session={fix_session} msg_type={msg_type} tag={bad_tag} checksum_expected={expected_checksum}
   checksum_actual={actual_checksum}'
@@ -23,7 +23,7 @@ stack_trace: |-
   === RAW FIX MESSAGE DUMP ===
   8=FIX.4.4|9=176|35={msg_type}|49=SENDER|56=TARGET|34=12847|
   52=20260217-14:32:07.882|11=ORD-847291|55=AAPL|54=1|38=2500|
-  44=244.52|40=2|59=0|{bad_tag}=<<<MALFORMED>>>|
+  40=2|59=0|{bad_tag}=244,52<<<MALFORMED>>>|
   10={actual_checksum}|
   --- PARSE ANALYSIS ---
     session={fix_session}  msg_type={msg_type}  direction=INBOUND
@@ -33,28 +33,27 @@ stack_trace: |-
   --- SESSION STATS ---
     msgs_today=124,832  parse_errors=47  reject_rate=0.038%
     last_good_seq=12846  gap_detected=false
-  ACTION: send_reject(35=3)  increment_error_count=true  alert=FIX-PARSE-REJECT
+  ACTION: discard_garbled=true  resend_request(35=2)=queued  increment_error_count=true  alert=FIX-PARSE-REJECT
 correlation_attr: {}
 fault_params:
-  fix_session:
-    format: "FIX-{e}-{n:02d}"
-    e: {choice: [NYSE, NSDQ, CBOE, CME]}
-    n: {randint: [1, 20]}
-  msg_type: {choice: [D, G, F, "8", "9"]}
-  bad_tag: {choice: [35, 49, 56, 11, 55, 44, 38, 54, 40]}
+  fix_session: FIX-NSDQ-07
+  msg_type: D
+  bad_tag: 44
   expected_checksum:
     format: "{n:03d}"
-    n: {randint: [0, 255]}
+    n: {randint: [0, 127]}
   actual_checksum:
     format: "{n:03d}"
-    n: {randint: [0, 255]}
+    n: {randint: [128, 255]}
 rca_clues:
   order-gateway:
     oms.fix_parse_error_rate_pct: {uniform: [0.01, 5.0], round: 3}
     oms.fix_reject_msg_count: {randint: [1, 200]}
+    oms.fix_rejected_tag: 44
   audit-logger:
     audit.fix_session_error_events: {randint: [1, 100]}
     audit.bad_tag_frequency: {randint: [1, 50]}
+    audit.counterparty_oms_version_changed: true
   matching-engine:
     engine.orders_dropped_parse_error: {randint: [0, 100]}
     engine.fix_session_resets: {randint: [0, 10]}
@@ -63,10 +62,10 @@ rca_clues:
     compliance.session_audit_gaps_from_rejects: {randint: [0, 10]}
 business_impact:
   - kpi: business.order_flow_per_min
-    factor: {uniform: [0.25, 0.55]}
+    value: {uniform: [316.2, 363.8]}
   - kpi: business.rejected_orders_per_min
     factor: {uniform: [3.0, 7.0]}
   - kpi: business.executed_trades_per_min
-    factor: {uniform: [0.25, 0.55]}
+    value: {uniform: [374.79, 431.21]}
   - kpi: business.cancel_replace_rate_pct
     factor: {uniform: [2.0, 5.0]}

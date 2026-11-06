@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import logging
 import random
-import secrets
 import threading
 import time
 from abc import ABC, abstractmethod
 from typing import Any, Optional
 
+from app.chaos.protocol import ChaosSource
 from app.config import ACTIVE_SCENARIO, CHANNEL_REGISTRY, MISSION_ID, SERVICES
 from app.telemetry import OTLPClient
 from app.trace_context import _trace_context_store
@@ -26,7 +26,7 @@ def _scenario_topology(ctx) -> dict:
     """Return (cached) infra_topology for the given ScenarioContext."""
     topo = _topology_cache.get(ctx.scenario_id)
     if topo is None:
-        from log_generators.infra_topology import build_topology
+        from generator_engine.infra_topology import build_topology
 
         topo = build_topology(
             {
@@ -67,7 +67,7 @@ class BaseService(ABC):
         """Clear the class-level context after batch creation."""
         cls._context = None
 
-    def __init__(self, chaos_controller, otlp_client: OTLPClient):
+    def __init__(self, chaos_controller: ChaosSource, otlp_client: OTLPClient):
         self.chaos_controller = chaos_controller
         self.otlp = otlp_client
 
@@ -94,7 +94,7 @@ class BaseService(ABC):
         # resolve end-to-end without leaving any signal on a synthetic "{svc}-host".
         infra_attrs: dict | None = None
         if self._ctx:
-            from log_generators.infra_topology import get_resource_attrs
+            from generator_engine.infra_topology import get_resource_attrs
 
             topo = _scenario_topology(self._ctx)
             infra_attrs = dict(get_resource_attrs(topo, self.SERVICE_NAME))
@@ -205,9 +205,6 @@ class BaseService(ABC):
             "cascade_faults": cascade,
         }
 
-    def set_phase(self, phase: str) -> None:
-        self._phase = phase
-
     # ── Telemetry helpers ──────────────────────────────────────────────
 
     def _base_log_attrs(self) -> dict[str, Any]:
@@ -258,30 +255,6 @@ class BaseService(ABC):
         attrs = extra_attrs or {}
         metric = self.otlp.build_gauge(name, value, unit, attrs)
         self.otlp.send_metrics(self.resource, [metric])
-
-    def emit_trace(
-        self,
-        span_name: str,
-        duration_ms: int = 50,
-        extra_attrs: dict[str, Any] | None = None,
-        status_code: int = 1,
-        events: list[dict[str, Any]] | None = None,
-    ) -> None:
-        trace_id = secrets.token_hex(16)
-        span_id = secrets.token_hex(8)
-        attrs = self._base_log_attrs()
-        if extra_attrs:
-            attrs.update(extra_attrs)
-        span = self.otlp.build_span(
-            name=span_name,
-            trace_id=trace_id,
-            span_id=span_id,
-            duration_ms=duration_ms,
-            attributes=attrs,
-            status_code=status_code,
-            events=events,
-        )
-        self.otlp.send_traces(self.resource, [span])
 
     @staticmethod
     def _safe_format(template: str, params: dict) -> str:
@@ -407,56 +380,19 @@ class BaseService(ABC):
                 channel=channel,
             )
 
-    def reset_infrastructure_events(self) -> None:
-        """Clear tracked infrastructure events (call on channel resolve)."""
-        if hasattr(self, "_infra_events_emitted"):
-            self._infra_events_emitted.clear()
+    def reset_infrastructure_events(self, active: list[int] | None = None) -> None:
+        """Forget emitted infrastructure events so they fire again on re-trigger.
 
-    def emit_infrastructure_events(self, channel: int) -> None:
-        """Emit one-shot infrastructure/audit events when a channel fires.
-
-        Reads optional 'infrastructure_events' list from channel_registry entry.
-        Each event: {body, severity, event_name, attributes, service (optional)}.
-        Events are only emitted once per channel activation.
+        With *active*, only channels not in it are forgotten (call every cycle
+        with the currently active channels); with None, everything is cleared.
         """
-        if not hasattr(self, "_infra_events_emitted"):
-            self._infra_events_emitted: set[tuple[int, int]] = set()
-
-        ch = self._channel_registry.get(channel)
-        if not ch:
+        emitted = getattr(self, "_infra_events_emitted", None)
+        if not emitted:
             return
-        infra_events = ch.get("infrastructure_events", [])
-        if not infra_events:
-            return
-
-        for idx, evt in enumerate(infra_events):
-            # Only emit for this service (or if no service filter specified)
-            evt_service = evt.get("service")
-            if evt_service and evt_service != self.SERVICE_NAME:
-                continue
-
-            key = (channel, idx)
-            if key in self._infra_events_emitted:
-                continue
-            self._infra_events_emitted.add(key)
-
-            attrs = self._base_log_attrs()
-            if evt.get("attributes"):
-                attrs.update(evt["attributes"])
-            attrs["chaos.channel"] = channel
-            attrs["infrastructure.event"] = True
-
-            self.emit_log(
-                evt.get("severity", "WARN"),
-                evt["body"],
-                attrs,
-                event_name=evt.get("event_name"),
-            )
-
-    def reset_infrastructure_events(self) -> None:
-        """Clear tracked infrastructure events (call on channel resolve)."""
-        if hasattr(self, "_infra_events_emitted"):
-            self._infra_events_emitted.clear()
+        if active is None:
+            emitted.clear()
+        else:
+            self._infra_events_emitted = {k for k in emitted if k[0] in active}
 
     def _generate_fault_params(self, channel: int) -> dict[str, Any]:
         """Generate realistic random parameters for fault messages from scenario."""

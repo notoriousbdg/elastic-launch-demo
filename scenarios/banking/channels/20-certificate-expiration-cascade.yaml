@@ -12,9 +12,9 @@ cascade_services:
 description: TLS certificate expiration causing cascading authentication and API failures
 investigation_notes: |-
   1. Check ACME auto-renewal failure — DNS_CHALLENGE_TIMEOUT indicates the DNS TXT record for domain validation could not be created or propagated. Verify Route53/Cloud DNS API permissions.
-  2. Impact assessment: mobile-gateway and auth-gateway are FAILING (ERR_CERT_DATE_INVALID) — all mobile app and authentication traffic is affected. member-portal is DEGRADED using pinned cert fallback.
+  2. Impact assessment: mobile-gateway and auth-gateway are FAILING (ERR_CERT_DATE_INVALID) — all mobile app and authentication traffic is affected. member-portal is DEGRADED using pinned cert fallback. The nginx error log spikes with SSL handshake failures.
   3. Emergency certificate issuance: use AWS ACM for immediate cert provisioning if the domain is AWS-hosted. For cross-cloud domains, use DigiCert rapid SSL: openssl req -new -key server.key -out server.csr.
-  4. Check cert-manager pod health in Kubernetes: kubectl get pods -n cert-manager -o wide. If cert-manager is DEGRADED, manually install the cert: kubectl create secret tls {domain}-tls --cert=cert.pem --key=key.pem.
+  4. Check cert-manager pod health in Kubernetes: kubectl get pods -n cert-manager -o wide. If cert-manager is DEGRADED, manually install the cert: kubectl create secret tls {cert_domain}-tls --cert=cert.pem --key=key.pem.
   5. For mTLS-dependent services (payment-engine), the intermediate CA must also be valid. Check the full certificate chain: openssl s_client -connect api.retailbank.com:443 -showcerts.
   6. Post-incident: implement certificate expiration monitoring at 30/14/7/3/1 day thresholds. Add cert-monitor alert rule to prevent future expiration cascades.
 remediation_action: emergency_cert_renewal
@@ -25,9 +25,9 @@ stack_trace: |-
   domain={cert_domain}  issuer={cert_issuer}
   --- CERTIFICATE DETAILS ---
     serial={cert_serial}
-    not_before=2025-02-18T00:00:00Z
+    not_before=2025-11-20T00:00:00Z
     not_after=2026-02-18T23:59:59Z
-    remaining={cert_hours_left}h  <<< EXPIRING
+    remaining={cert_hours_left}h  <<< EXPIRED
     subject=CN={cert_domain}
     san={cert_domain},*.{cert_domain}
   --- IMPACT ANALYSIS ---
@@ -46,17 +46,17 @@ correlation_attr:
   value: cert-manager-v1.14.5-rc1
 fault_params:
   cert_domain: {choice: [mobile.retailbank.com, api.retailbank.com, auth.retailbank.com, portal.retailbank.com, claims.retailbank.com]}
-  cert_hours_left: {uniform: [0.5, 48.0], round: 1}
+  cert_hours_left: {uniform: [-6.0, -0.5], round: 1}
   cert_serial: {format: "{n:08X}", n: {randint: [10000000, 99999999]}}
-  cert_issuer: {choice: ["DigiCert", "AWS_ACM", "Let's_Encrypt"]}
+  cert_issuer: "Let's_Encrypt"
   cert_svc_count: {randint: [2, 6]}
 rca_clues:
   auth-gateway:
-    auth.tls_cert_remaining_hours: {uniform: [-2, 4], round: 1}
+    auth.tls_cert_remaining_hours: {uniform: [-6, -0.5], round: 1}
     auth.acme_renewal_status: DNS_CHALLENGE_TIMEOUT
   mobile-gateway:
     gateway.tls_handshake_failures: {randint: [5000, 20000]}
-    gateway.cert_pinning_fallback: {choice: [true, false]}
+    gateway.cert_pinning_fallback: false
   payment-engine:
     payment.mtls_validation_status: WARNING
     payment.cert_chain_valid: false
@@ -65,10 +65,14 @@ rca_clues:
     portal.pinned_cert_fallback_active: true
 business_impact:
   - kpi: business.active_digital_sessions
-    factor: {uniform: [0.10, 0.35]}
+    value: {uniform: [4464.0, 5136.0]}
   - kpi: business.mobile_logins_per_min
-    factor: {uniform: [0.10, 0.35]}
+    value: {uniform: [148.8, 171.2]}
   - kpi: business.api_calls_per_min
-    factor: {uniform: [0.10, 0.30]}
+    value: {uniform: [13299.0, 15301.0]}
   - kpi: business.digital_transaction_pct
-    factor: {uniform: [0.15, 0.40]}
+    factor: {uniform: [0.15, 0.4]}
+
+generator_impact:
+  nginx_otel:
+    error_log_spike: 150.0

@@ -1,0 +1,70 @@
+version: "1"
+name: __SCENARIO_NAME__ Case Auto-Close (Alert Recovered)
+enabled: true
+description: >
+  Serverless variant of the case auto-close workflow. Started by an action
+  policy that matches alert_status: inactive for the scenario's Universal (v2)
+  chaos rules, i.e. once per fault, after the alert has recovered and then
+  cleared. Looks up the cases the alert was attached to
+  (GET /api/cases/alerts/{alert_id}) and closes the ones still open.
+
+  The classic significant_event_case_close.yaml polls the classic rules API
+  for execution_status, which a v2 rule does not have, so it is not deployed on
+  serverless: with no classic rule to find it would treat every alert as
+  recovered and close every open case each minute.
+
+tags:
+  - "__NS__"
+
+triggers:
+  # Started by an action policy; the payload arrives under inputs.payload.
+  - type: manual
+
+steps:
+  - name: find_cases_for_alert
+    type: kibana.request
+    with:
+      method: GET
+      path: "/api/cases/alerts/{{ inputs.payload.alerts[0].alert_id }}"
+      headers:
+        kbn-xsrf: "true"
+
+  - name: loop_cases
+    type: foreach
+    foreach: "{{ steps.find_cases_for_alert.output }}"
+    on-failure:
+      continue: true
+    steps:
+      - name: close_if_open
+        type: if
+        condition: "foreach.item.status : open"
+        steps:
+          - name: add_recovery_comment
+            type: cases.addComment
+            on-failure:
+              continue: true
+            with:
+              case_id: "{{ foreach.item.id }}"
+              comment: |
+                ## Alert Recovered
+
+                The alert attached to this case has recovered and cleared — errors
+                have stopped and the underlying fault has gone. Closing this case.
+
+          - name: close_case
+            type: cases.closeCase
+            on-failure:
+              continue: true
+            with:
+              case_id: "{{ foreach.item.id }}"
+
+          - name: log_case_closed
+            type: console
+            with:
+              message: "Case {{ foreach.item.id }} closed — alert {{ inputs.payload.alerts[0].alert_id }} recovered."
+
+        else:
+          - name: log_already_closed
+            type: console
+            with:
+              message: "Case {{ foreach.item.id }} is already {{ foreach.item.status }} — nothing to close."

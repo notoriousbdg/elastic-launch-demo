@@ -28,11 +28,7 @@ class SloMixin:
         step.status = "running"
         notify(self.progress)
 
-        _slo_headers = {
-            "Content-Type": "application/json",
-            "kbn-xsrf": "true",
-            "Authorization": f"ApiKey {self.api_key}",
-        }
+        _slo_headers = _kibana_headers(self.api_key)
         _slo_index = "traces-apm*,traces-*.otel-*"
 
         scenario_name = self.scenario.scenario_name
@@ -121,11 +117,7 @@ class SloMixin:
 
     def _cleanup_slos(self, client: httpx.Client) -> int:
         """Delete SLOs belonging to this scenario (matched by namespace tag)."""
-        _headers = {
-            "Content-Type": "application/json",
-            "kbn-xsrf": "true",
-            "Authorization": f"ApiKey {self.api_key}",
-        }
+        _headers = _kibana_headers(self.api_key)
         deleted = 0
         try:
             resp = client.get(
@@ -254,12 +246,6 @@ class SloMixin:
                     f"{self.kibana_url}/api/workflows",
                     headers=_kibana_headers(self.api_key),
                 )
-                if search_resp.status_code in (404, 405):
-                    search_resp = client.post(
-                        f"{self.kibana_url}/api/workflows/search",
-                        headers=_kibana_headers(self.api_key),
-                        json={"page": 1, "size": 100},
-                    )
                 if search_resp.status_code < 300:
                     data = search_resp.json()
                     workflows = (
@@ -283,12 +269,6 @@ class SloMixin:
                 headers=_kibana_headers(self.api_key),
                 json={"inputs": {}},
             )
-            if run_resp.status_code in (404, 405):
-                run_resp = client.post(
-                    f"{self.kibana_url}/api/workflows/{wf_id}/run",
-                    headers=_kibana_headers(self.api_key),
-                    json={"inputs": {}},
-                )
             if run_resp.status_code < 300:
                 logger.info("SLO refresh: workflow run triggered (id=%s)", wf_id)
             else:

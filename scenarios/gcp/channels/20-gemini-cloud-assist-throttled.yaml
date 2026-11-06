@@ -1,0 +1,66 @@
+name: Gemini Cloud Assist Throttled
+subsystem: monitoring
+vehicle_section: network_intelligence
+error_type: NI-GEMINI-THROTTLED
+sensor_type: vertex_prediction
+affected_services:
+- network-intelligence
+- vpc-network-manager
+cascade_services:
+- cloud-vpn-gateway
+- cloud-interconnect
+description: Network Intelligence Center root-cause analysis calls to Vertex AI are throttled with 429s and respond slowly, delaying connectivity-test diagnosis
+investigation_notes: |-
+  Root cause: The network-intelligence service calls Gemini on Vertex AI to summarize Network Intelligence Center connectivity-test traces. gemini-2.5-pro runs on dynamic shared quota with no Provisioned Throughput behind it, and regional capacity contention means a large share of prediction requests return 429 RESOURCE_EXHAUSTED and the rest show elevated latency. Connectivity tests still run, but their AI-written root-cause summaries are missing or minutes late.
+  Diagnose with the Vertex AI prediction metrics (prediction count by response code, latency histogram) and check whether the project has Provisioned Throughput for the model (none means all traffic rides shared capacity):
+    Console > Vertex AI > Provisioned Throughput
+  The gcp_vertexai throttle_rate and latency_multiplier impacts drive the elevated 429 share and latency during the fault.
+  Remediation: Fail over the analysis traffic to a second region or a lighter Gemini model, then buy Provisioned Throughput for the primary region (dynamic shared quota cannot be raised with a quota request). Safe to automate: it only changes which endpoint serves the summarization calls.
+remediation_action: failover_vertex_endpoint
+error_message: '[NIC] NI-GEMINI-THROTTLED endpoint={vertex_endpoint} model={vertex_model} region={gcp_region} throttled={vertex_throttle_pct}%
+  p95_latency_ms={vertex_p95_ms} pending_analyses={ni_pending_analyses}'
+stack_trace: |-
+  Network Intelligence Vertex AI Analysis
+  ----------------------------------------
+  Endpoint:          {vertex_endpoint}
+  Model:             {vertex_model}
+  Region:            {gcp_region}
+  Throttled (429):   {vertex_throttle_pct}%
+  P95 Latency:       {vertex_p95_ms} ms
+  Pending Analyses:  {ni_pending_analyses}
+  Quota:             dynamic shared quota (no Provisioned Throughput) - 429 RESOURCE_EXHAUSTED
+  Action: Fail over to a secondary region or model and add Provisioned Throughput
+correlation_attr:
+  key: deployment.ni_model_version
+  value: gemini-2.5-pro-ni-summarizer-v2
+fault_params:
+  vertex_endpoint: gcpnet-ni-assist-central1
+  vertex_model: gemini-2.5-pro
+  gcp_region: us-central1
+  vertex_throttle_pct: {uniform: [35.0, 45.0], round: 1}
+  vertex_p95_ms: {randint: [4000, 15000]}
+  ni_pending_analyses: {randint: [20, 300]}
+rca_clues:
+  network-intelligence:
+    ni.vertex_quota_exhausted: true
+    ni.vertex_throttle_pct: {uniform: [35.0, 45.0], round: 1}
+    ni.summaries_delayed_min: {randint: [3, 20]}
+  vpc-network-manager:
+    vpc.topology_analysis_backlog: {randint: [5, 40]}
+  cloud-vpn-gateway:
+    vpn.diagnosis_delayed: true
+  cloud-interconnect:
+    interconnect.diagnosis_delayed: true
+business_impact:
+  - kpi: business.incident_mttd_min
+    factor: {uniform: [2.0, 4.5]}
+  - kpi: business.availability_index_0_100
+    value: {uniform: [62.79, 72.25], round: 2}
+  - kpi: business.network_sla_compliance_pct
+    factor: {uniform: [0.8, 0.92]}
+  - kpi: business.interconnect_utilization_pct
+    value: {uniform: [14.04, 16.16], round: 2}
+generator_impact:
+  gcp_vertexai:
+    throttle_rate: 0.4
+    latency_multiplier: 3.0

@@ -16,7 +16,7 @@ logger = logging.getLogger("deployer")
 class ApmMixin:
 
     def _deploy_apm_rollup(self, client: httpx.Client, notify: ProgressCallback):
-        """Step 4: Generate synthetic APM rollup data and deploy DB ingest pipeline."""
+        """Step 5: Generate synthetic APM rollup data and deploy DB ingest pipeline."""
         from elastic_config.apm_rollup import ApmRollupGenerator
 
         step = self._step(StepIdx.APM_ROLLUP)
@@ -25,7 +25,8 @@ class ApmMixin:
 
         try:
             gen = ApmRollupGenerator(self.scenario, self.elastic_url, self.api_key)
-            counts = gen.generate_all(hours=12)
+            # 24h covers the default APM Services time picker (now-24h).
+            counts = gen.generate_all(hours=24)
             total = sum(counts.values())
 
             self._deploy_db_ingest_pipeline(client)
@@ -134,7 +135,7 @@ class ApmMixin:
             logger.warning("metrics@custom look_back_time update failed (non-fatal): %s", exc)
 
     def _setup_apm_anomaly_detection(self, client: httpx.Client, notify: ProgressCallback):
-        """Step 15 (head): create the APM ML anomaly detection job and start its
+        """Step 17 (head): create the APM ML anomaly detection job and start its
         datafeed, but do NOT block on catch-up. Called early (right after the
         rollup data is generated) so ES processes the 12h backfill server-side
         during the intervening deploy steps; _finalize_apm_anomaly_detection
@@ -255,24 +256,15 @@ class ApmMixin:
                         "aggs": {
                             "@timestamp": {"max": {"field": "@timestamp"}},
                             "transaction_throughput": {"rate": {"unit": "minute"}},
-                            # Compute average transaction latency by summing
-                            # BOTH the parent aggregate_metric_double field
-                            # AND the flat .sum child field.
-                            #
-                            # Synthetic APM rollup backfill: writes the flat
-                            # .sum correctly but the parent .sum stays as
-                            # ~5.97e-315 (uninitialised double from the
-                            # mapping race fixed by _seed_data_streams, but
-                            # already-written docs stay broken).
-                            # Live OTel data: writes the parent correctly
-                            # but the flat .sum is 0 (OTel doesn't promote
-                            # it down).
-                            # Summing both works for either dataset: in any
-                            # given doc one of the two is the real value and
-                            # the other is ~0, so the sum equals the real
-                            # total. Synthetic's ~5.97e-315 is below any
-                            # realistic latency value and contributes
-                            # nothing meaningful even when accumulated.
+                            # Average latency for aggregate_metric_double (correct
+                            # mapping). Fall back to (parent+flat)/count for sticky
+                            # float children. NEVER divide by summary.value_count
+                            # alone when the parent is aggregate_metric_double —
+                            # that subfield sum is 0 and the script returns 0 for
+                            # every bucket (ALERTS #120), so latency anomalies never fire.
+                            "latency_avg": {
+                                "avg": {"field": "metrics.transaction.duration.summary"}
+                            },
                             "latency_sum_parent": {
                                 "sum": {"field": "metrics.transaction.duration.summary"}
                             },
@@ -285,15 +277,21 @@ class ApmMixin:
                             "transaction_latency": {
                                 "bucket_script": {
                                     "buckets_path": {
+                                        "avg_a": "latency_avg",
                                         "sum_p": "latency_sum_parent",
                                         "sum_f": "latency_sum_flat",
                                         "count": "latency_count",
+                                        "docs": "_count",
                                     },
                                     "script": (
+                                        "double avg = Double.isNaN(params.avg_a) ? 0 : params.avg_a; "
+                                        "if (avg > 0.0) { return avg; } "
                                         "double p = Double.isNaN(params.sum_p) ? 0 : params.sum_p; "
                                         "double f = Double.isNaN(params.sum_f) ? 0 : params.sum_f; "
-                                        "if (params.count == 0) { return 0; } "
-                                        "else { return (p + f) / params.count; }"
+                                        "double c = params.count; "
+                                        "if (c == 0) { c = params.docs; } "
+                                        "if (c == 0) { return 0; } "
+                                        "return (p + f) / c;"
                                     ),
                                 }
                             },
@@ -387,13 +385,12 @@ class ApmMixin:
                 raise RuntimeError(f"ML datafeed start failed: {resp.text}")
 
             # Register the environment with the Kibana APM ML integration so the
-            # Service Map UI picks up our job (matches Superdemo's flow). Without
-            # this Kibana-side registration, the raw ES-created job exists but
-            # the APM Service Map does not surface its anomaly scores as node
-            # colouring. Idempotent: returns 200 {"jobCreated": true} even when
-            # the environment is already registered to our existing job.
-            # Only needs the job to exist (not be caught up), so it runs here in
-            # the setup half rather than waiting for catch-up.
+            # Service Map UI picks up anomaly scores as node colouring (matches
+            # Superdemo's flow). This Kibana API also *creates* the managed
+            # module job `apm-production_<ns>-****-apm_tx_metrics` — it does
+            # not always leave that job open/started, so we explicitly open it
+            # after registration. Our custom `apm-{ns}-transaction-metrics`
+            # job (created above) remains the primary OTel trainer.
             try:
                 reg_resp = client.post(
                     f"{self.kibana_url}/internal/apm/settings/anomaly-detection/jobs",
@@ -405,6 +402,8 @@ class ApmMixin:
                         "Kibana APM ML environment registration returned HTTP %d (non-fatal): %s",
                         reg_resp.status_code, reg_resp.text[:200],
                     )
+                else:
+                    self._ensure_managed_apm_ml_job_running(client, env)
             except Exception as exc:
                 logger.warning("Kibana APM ML environment registration failed (non-fatal): %s", exc)
 
@@ -420,8 +419,82 @@ class ApmMixin:
             logger.warning("APM anomaly detection setup failed (non-fatal): %s", exc)
         notify(self.progress)
 
+    def _ensure_managed_apm_ml_job_running(
+        self, client: httpx.Client, environment: str
+    ) -> None:
+        """Open + start the Kibana-managed APM ML job for ``environment``.
+
+        ``POST /internal/apm/settings/anomaly-detection/jobs`` creates the
+        managed module job (``apm-production_<ns>-****-apm_tx_metrics``) but
+        frequently leaves it closed/stopped. Service Map colouring expects that
+        job to be running, so open it and start its datafeed from the rollup
+        baseline when needed.
+        """
+        try:
+            resp = client.get(
+                f"{self.kibana_url}/internal/apm/settings/anomaly-detection/jobs",
+                headers=_kibana_headers(self.api_key),
+            )
+            if resp.status_code >= 300:
+                logger.warning(
+                    "List APM ML jobs failed (HTTP %s): %s",
+                    resp.status_code, resp.text[:200],
+                )
+                return
+
+            jobs = resp.json().get("jobs") or []
+            managed = [
+                j for j in jobs
+                if j.get("environment") == environment
+                and str(j.get("jobId", "")).startswith("apm-production_")
+            ]
+            if not managed:
+                logger.info(
+                    "No managed APM ML job found yet for env %s", environment
+                )
+                return
+
+            start_body: dict[str, Any] = {}
+            rollup_start = self._get_apm_rollup_start(client)
+            if rollup_start:
+                start_body["start"] = rollup_start
+
+            for job in managed:
+                job_id = job["jobId"]
+                datafeed_id = job.get("datafeedId") or f"datafeed-{job_id}"
+                if job.get("jobState") != "opened":
+                    open_resp = client.post(
+                        f"{self.elastic_url}/_ml/anomaly_detectors/{job_id}/_open",
+                        headers=_es_headers(self.api_key),
+                    )
+                    if open_resp.status_code >= 300:
+                        logger.warning(
+                            "Open managed APM ML job %s failed (HTTP %s): %s",
+                            job_id, open_resp.status_code, open_resp.text[:200],
+                        )
+                        continue
+                if job.get("datafeedState") != "started":
+                    start_resp = client.post(
+                        f"{self.elastic_url}/_ml/datafeeds/{datafeed_id}/_start",
+                        headers=_es_headers(self.api_key),
+                        json=start_body,
+                    )
+                    if start_resp.status_code >= 300:
+                        logger.warning(
+                            "Start managed APM ML datafeed %s failed (HTTP %s): %s",
+                            datafeed_id, start_resp.status_code, start_resp.text[:200],
+                        )
+                        continue
+                logger.info(
+                    "Managed APM ML job %s is open with datafeed started", job_id
+                )
+        except Exception as exc:
+            logger.warning(
+                "Ensuring managed APM ML job running failed (non-fatal): %s", exc
+            )
+
     def _finalize_apm_anomaly_detection(self, client: httpx.Client, notify: ProgressCallback):
-        """Step 16 (tail): block until the APM datafeed catches up to real-time,
+        """Step 17 (tail): block until the APM datafeed catches up to real-time,
         then finalize the step status. The datafeed was started early in
         _setup_apm_anomaly_detection, so ES has been processing the 12h backfill
         during the intervening deploy steps — by now the catch-up poll is usually
@@ -485,17 +558,9 @@ class ApmMixin:
             pass
         return None
 
-    def _cleanup_apm_ml(self, client: httpx.Client, namespace: str | None = None) -> None:
-        """Delete APM ML jobs and datafeeds for the given namespace (or self.ns)."""
-        ns = namespace or self.ns
-        job_ids = [
-            f"apm-{ns}-transaction-metrics",
-            # Legacy job IDs — cleaned up in case of leftover state from prior deploys
-            f"apm-{ns}-latency",
-            f"apm-{ns}-throughput",
-            f"apm-{ns}-failure-rate",
-        ]
-        for job_id in job_ids:
+    def _cleanup_apm_ml(self, client: httpx.Client) -> None:
+        """Delete this scenario's APM ML job and datafeed."""
+        for job_id in (f"apm-{self.ns}-transaction-metrics",):
             try:
                 client.post(
                     f"{self.elastic_url}/_ml/datafeeds/datafeed-{job_id}/_stop",

@@ -3,19 +3,15 @@ subsystem: network_core
 vehicle_section: switching_fabric
 error_type: SW_MATM-4-MACFLAP_NOTIF
 sensor_type: mac_table
-affected_services:
-- network-controller
-- dns-dhcp-service
-cascade_services:
-- firewall-gateway
-- wifi-controller
+affected_services: [network-controller, dns-dhcp-service, cloud-inventory-scanner]
+cascade_services: [firewall-gateway, wifi-controller]
 description: MAC address table instability causing port flapping on the switching fabric
 investigation_notes: |-
   1. Run `show mac address-table notification mac-move` to identify the flapping MAC and involved ports.
-  2. Check for physical layer issues: `show interface status` on both source and destination ports for CRC errors, runts, or input errors.
-  3. Verify no switching loops exist: `show spanning-tree vlan <id> detail` — a flapping MAC often indicates an STP misconfiguration or a rogue switch.
-  4. Look for duplicate MAC from VM migration or HSRP/VRRP misconfiguration: `show mac address-table address <mac>`.
-  5. If caused by a NIC teaming misconfiguration on the host side, disable one NIC and confirm flapping stops.
+  2. Check for physical layer issues: `show interface status` on both source and destination ports for CRC errors, runts, or input errors (zero CRC/input errors on both ports rules out the physical layer).
+  3. Verify no switching loops exist: `show spanning-tree vlan <id> detail` — a flapping MAC often indicates an STP misconfiguration or a rogue switch; no topology changes on the VLAN rules out a loop here.
+  4. Look for duplicate MAC from VM migration or HSRP/VRRP misconfiguration: `show mac address-table address <mac>` (no ARP conflict or duplicate DHCP lease is seen, so it is not a duplicate MAC).
+  5. If both flapping ports ({interface_src} and {interface_dst}) connect to the same host and its NICs are teamed active-active without LACP, that teaming is the cause — disable one NIC and confirm flapping stops.
   6. As a short-term fix, apply `switchport port-security` to limit MAC addresses per port and contain the blast radius.
 remediation_action: clear_mac_table
 error_message: '%SW_MATM-4-MACFLAP_NOTIF: Host {mac_address} in vlan {vlan_id} is flapping between port {interface_src} and
@@ -37,7 +33,7 @@ correlation_attr:
   value: net-core-v2.8.1-canary
 fault_params:
   mac_address:
-    format: "{a:02x}:{b:02x}:{c:02x}:{d:02x}:{e:02x}:{f:02x}"
+    format: "{a:02x}{b:02x}.{c:02x}{d:02x}.{e:02x}{f:02x}"
     a: {randint: [0, 255]}
     b: {randint: [0, 255]}
     c: {randint: [0, 255]}
@@ -45,29 +41,32 @@ fault_params:
     e: {randint: [0, 255]}
     f: {randint: [0, 255]}
   vlan_id: {choice: [100, 200, 300, 400, 500, 1000]}
-  interface_src: {choice: [Gi0/0/1, Gi0/0/2, Gi0/0/3, Te1/0/1, Te1/0/2]}
-  interface_dst: {choice: [Gi0/0/4, Gi0/0/5, Te1/0/3, Te1/0/4]}
+  interface_src: Gi0/0/1
+  interface_dst: Gi0/0/4
   flap_count: {randint: [10, 50]}
   flap_window: {randint: [5, 30]}
 rca_clues:
   network-controller:
-    switching.flap_port: {choice: [Gi0/0/1, Gi0/0/3, Te1/0/2]}
-    switching.mac_table_util_pct: {uniform: [85, 98], round: 1}
+    switching.flap_port: Gi0/0/1
+    switching.flap_ports_same_host: true
+    switching.stp_topology_changes: 0
+    switching.port_crc_errors: 0
+    switching.mac_table_util_pct: {uniform: [35, 60], round: 1}
   dns-dhcp-service:
-    dhcp.arp_conflict_detected: true
-    dhcp.stale_lease_mac: "00:11:22:33:44:55"
+    dhcp.arp_conflict_detected: false
+    dhcp.duplicate_mac_leases: 0
   firewall-gateway:
-    firewall.arp_inspection_failures: {randint: [20, 200]}
+    firewall.arp_inspection_failures: {randint: [0, 2]}
     firewall.zone_affected: TRUST
   wifi-controller:
-    wifi.client_roam_storm: true
+    wifi.client_roam_storm: false
     wifi.affected_ssid: Fanatics-Warehouse
 business_impact:
   - kpi: business.app_sessions_per_min
-    factor: {uniform: [0.30, 0.60]}
+    value: {uniform: [334.8, 385.2]}
   - kpi: business.page_views_per_min
-    factor: {uniform: [0.35, 0.65]}
+    value: {uniform: [108810.0, 125190.0]}
   - kpi: business.churn_risk_index_0_100
     factor: {uniform: [1.5, 3.0]}
-  - kpi: business.net_satisfaction_proxy_nps
-    factor: {uniform: [0.30, 0.60]}
+  - kpi: business.sponsored_inventory_seconds_per_min
+    value: {uniform: [148.8, 171.2]}

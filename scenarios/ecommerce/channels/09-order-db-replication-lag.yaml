@@ -12,25 +12,28 @@ description: Order database replica lagging behind primary, causing stale reads 
   lookups
 investigation_notes: |-
   1. Check order-management logs for ORDER-DB-REPLICATION-LAG — replication_lag_ms={replication_lag_ms} vs max {max_replication_lag_ms}ms.
-  2. Run `SHOW SLAVE STATUS\G` on the replica — `Seconds_Behind_Master` and `Relay_Log_Space` are key indicators.
-  3. Check for long-running transactions on the primary: `SELECT * FROM information_schema.innodb_trx WHERE trx_started < NOW() - INTERVAL 30 SECOND` — these block replication.
-  4. Look at replica I/O thread vs SQL thread: if I/O thread is fast but SQL thread is slow, the replica is I/O-bound not network-bound — check disk throughput.
+  2. Run `SHOW REPLICA STATUS\G` on the replica (`SHOW SLAVE STATUS\G` before MySQL 8.0.22) — `Seconds_Behind_Source` (`Seconds_Behind_Master`) and `Relay_Log_Space` are key indicators.
+  3. Check for long-running transactions on the primary: `SELECT * FROM information_schema.innodb_trx WHERE trx_started < NOW() - INTERVAL 30 SECOND` — these block replication (a count of 0 rules them out).
+  4. Look at replica I/O thread vs SQL thread: if I/O thread is fast but SQL thread is slow, the replica is I/O-bound not network-bound — check disk throughput (replica disk utilization above 90% confirms an I/O-bound SQL thread).
   5. Route order-status reads to the primary temporarily to prevent customers from seeing stale state (order stuck in 'processing' when already shipped).
-  6. If lag exceeds {failover_threshold_ms}ms, promote the replica to primary and reconfigure clients to prevent prolonged stale-read exposure.
-remediation_action: force_db_failover
+  6. If lag exceeds {failover_threshold_ms}ms, take {replica_host} out of the read pool (route its reads to the primary or a healthy replica) and fix or replace its storage. Do not promote a lagging replica to primary: it is missing transactions the primary already committed.
+remediation_action: drain_lagging_replica
 error_message: '[OrderManagement] ORDER-DB-REPLICATION-LAG: replica={replica_host} lag={replication_lag_ms}ms (max {max_replication_lag_ms}ms)
   relay_log_space_mb={relay_log_space_mb} seconds_behind_master={seconds_behind_master}'
 stack_trace: |-
-  DBReplicationException: ORDER-DB-REPLICATION-LAG
-    at OrderRepository.readFromReplica(host={replica_host})
-    at OrderService.getOrderStatus(order_id={order_id})
-  Replica:              {replica_host}
-  Lag:                  {replication_lag_ms}ms
+  get order status order_id={order_id}: read from replica {replica_host}: ORDER-DB-REPLICATION-LAG: lag {replication_lag_ms}ms exceeds {max_replication_lag_ms}ms
+  goroutine 214 [running]:
+  runtime/debug.Stack()
+  	/usr/local/go/src/runtime/debug/stack.go:26 +0x5e
+  github.com/ecommerce/order-management/internal/store.(*OrderRepository).readFromReplica(0xc00021e0c0, {{0x1a9f3e0, 0xc0004b6000}})
+  	/app/internal/store/order_repository.go:203 +0x31c
+  github.com/ecommerce/order-management/internal/orders.(*OrderService).GetOrderStatus(0xc0001b4000, {{0x1a9f3e0, 0xc0004b6000}})
+  	/app/internal/orders/service.go:117 +0x1e9
   Relay log space:      {relay_log_space_mb}MB
-  Seconds behind master:{seconds_behind_master}s
+  Seconds behind source: {seconds_behind_master}s
   Failover threshold:   {failover_threshold_ms}ms
-  I/O thread:           Running
-  SQL thread:           Running (delayed)
+  Replica_IO_Running:   Yes
+  Replica_SQL_Running:  Yes (applying, behind source)
 correlation_attr:
   key: orders.db_replication_lagging
   value: true
@@ -38,17 +41,19 @@ fault_params:
   replica_host:
     format: "order-db-replica-{n}.us-east-1.internal"
     n: {randint: [1, 3]}
-  replication_lag_ms: {randint: [10000, 120000]}
+  replication_lag_ms: 78000
   max_replication_lag_ms: 1000
   relay_log_space_mb: {randint: [500, 5000]}
-  seconds_behind_master: {randint: [10, 120]}
+  seconds_behind_master: 78
   order_id: {format: "ORD-{n}", n: {randint: [100000, 999999]}}
   failover_threshold_ms: 30000
 rca_clues:
   order-management:
-    db.replica_lag_ms: {randint: [10000, 120000]}
+    db.replica_lag_ms: 78000
     db.stale_reads_detected: true
-    db.seconds_behind_master: {randint: [10, 120]}
+    db.seconds_behind_master: 78
+    db.replica_disk_util_pct: {uniform: [95, 100], round: 0}
+    db.primary_long_running_trx: 0
   payment-processor:
     payment.confirmation_stale_reads: {randint: [10, 100]}
     payment.duplicate_charge_risk: true
@@ -57,10 +62,10 @@ rca_clues:
     fulfillment.double_ship_risk_orders: {randint: [1, 20]}
 business_impact:
   - kpi: business.orders_placed_per_min
-    factor: {uniform: [0.25, 0.50]}
+    value: {uniform: [51.38, 59.12]}
   - kpi: business.conversion_rate_pct
-    factor: {uniform: [0.30, 0.55]}
+    factor: {uniform: [0.3, 0.55]}
   - kpi: business.cancel_rate_pct
     factor: {uniform: [2.0, 4.5]}
   - kpi: business.csat_score_0_5
-    factor: {uniform: [0.30, 0.55]}
+    factor: {uniform: [0.3, 0.55]}

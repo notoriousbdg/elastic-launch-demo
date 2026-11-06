@@ -13,20 +13,20 @@ investigation_notes: |-
   1. Check customer-portal logs for PORTAL-SESSION-TIMEOUT — note session_id, user_id, idle time, and the in-progress operation at the time of expiry.
   2. Query FROM logs.otel.financial.* | WHERE body.text LIKE "*PORTAL-SESSION-TIMEOUT*" | STATS count() BY operation to find which workflow triggers the most mid-session timeouts.
   3. Inspect order-gateway for orders cancelled on disconnect — confirm the cancel reason is logged as SESSION_EXPIRED for each pending_orders count.
-  4. Check audit-logger for the SSO/SAML heartbeat failures preceding the timeout — a missing heartbeat often indicates upstream IdP latency rather than idle user.
+  4. Check audit-logger for the SSO/SAML heartbeat failures preceding the timeout — a missing heartbeat often indicates upstream IdP latency rather than idle user (heartbeat failures above zero or IdP response above 1000ms would point at the IdP).
   5. Investigate whether session max-age (900s) is too short for the affected operation; if order_submit or position_close operations regularly exceed 900s, request a session extension policy review.
 remediation_action: extend_session_idle_timeout_for_trading_ops
 error_message: '[PORTAL] PORTAL-SESSION-TIMEOUT: session={session_id} user={user_id} idle={session_age_s}s max=900s operation={operation}'
 stack_trace: |-
   === SESSION DETAILS ===
   session={session_id}  user={user_id}
-    created=14:02:17Z  last_activity=14:17:42Z  idle={session_age_s}s  max=900s
-    ip=10.2.0.47  user_agent=Bloomberg-Terminal/2026.1
+    idle={session_age_s}s  max=900s
+    ip=10.2.0.47  user_agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/130.0
     auth_method=SSO/SAML  mfa=TOTP
   --- PENDING OPERATIONS ---
     operation={operation}  status=IN_PROGRESS
     pending_orders={pending_orders}
-    unsaved_changes=true  last_heartbeat=892s_ago
+    unsaved_changes=true  last_heartbeat=at_last_activity
   --- IMPACT ---
     orders_cancelled_on_disconnect={pending_orders}
     portfolio_lock_released=true
@@ -40,17 +40,18 @@ fault_params:
     format: "USR-{n}"
     n: {randint: [10000, 99999]}
   session_age_s: {randint: [1800, 7200]}
-  operation: {choice: [order_submit, portfolio_view, position_close, margin_check]}
+  operation: {choice: [order_submit, position_close]}
   pending_orders: {randint: [1, 10]}
 rca_clues:
   customer-portal:
-    portal.session_idle_age_s: {randint: [900, 7200]}
+    portal.session_idle_age_s: {randint: [1800, 7200]}
     portal.cancelled_on_disconnect: {randint: [1, 10]}
   order-gateway:
     oms.session_expire_cancels: {randint: [1, 50]}
     oms.in_progress_at_expiry: {randint: [1, 10]}
   audit-logger:
-    audit.sso_heartbeat_failures: {randint: [1, 20]}
+    audit.sso_heartbeat_failures: 0
+    audit.idp_response_ms: {randint: [80, 250]}
     audit.session_force_logout_events: {randint: [1, 50]}
 business_impact:
   - kpi: business.order_flow_per_min

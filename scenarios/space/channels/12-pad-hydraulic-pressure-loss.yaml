@@ -14,14 +14,14 @@ investigation_notes: 'Root cause: hydraulic pump wear or external leak causing s
   indicates clogged filter starving the pump). Fluid temperature 42.1C is within limits but elevated — could indicate pump
   working harder to compensate for internal leakage. Inspect hydraulic lines to the holddown clamps and umbilical retract
   mechanisms for visible leaks. Remediation: switch to backup hydraulic system (GND_HYD_SELECT HYD-B), isolate the affected
-  system (GND_HYD_ISOLATE {system}). Top off reservoir and replace filter element. If pump wear suspected, check pump discharge
+  system (GND_HYD_ISOLATE {system_id}). Top off reservoir and replace filter element. If pump wear suspected, check pump discharge
   pressure vs RPM curve. Pad operations cannot proceed with hydraulic pressure below 2800PSI — holddown clamp release requires
-  3000PSI minimum.'
+  2800PSI minimum.'
 remediation_action: reset_ground_systems
 error_message: '[GND] GND-HYDRAULIC-PRESS: system={system_id} pressure={pressure}PSI min_required={min_pressure}PSI status=LOW'
 stack_trace: |-
   == GROUND SYSTEM DIAGNOSTIC == HYDRAULIC SYSTEM ==
-  TIMESTAMP: MET+00:04:18.667 | FRAME: 0x4A3E | SEQ: 18457
+  TIMESTAMP: T-00:04:18.667 | FRAME: 0x4A3E | SEQ: 18457
   ---------------------------------------------------------------
   SYSTEM    PRESSURE   MIN_REQ    FLOW_RATE   STATUS
   {system_id}     {pressure}PSI  {min_pressure}PSI   12.4GPM     **LOW_PRESS**
@@ -34,23 +34,23 @@ correlation_attr:
   key: infra.hyd_pump_model
   value: parker-pvp48-rebuilt
 fault_params:
-  system_id: {choice: [HYD-A, HYD-B]}
-  pressure: {uniform: [180.0, 350.0], round: 1}
+  system_id: HYD-A
+  pressure: {uniform: [2400.0, 2750.0], round: 0}
   min_pressure: 2800
 rca_clues:
   ground-systems:
     ground.hyd_reservoir_pct: {uniform: [65.0, 82.0], round: 0}
-    ground.filter_dp_psi: {uniform: [10.0, 18.0], round: 1}
+    ground.filter_dp_psi: {uniform: [9.0, 12.0], round: 1}
   sensor-validator:
     validation.hydraulic_pressure_status: low
-    validation.system_affected: {choice: [HYD-A, HYD-B]}
+    validation.system_affected: HYD-A
   mission-control:
     upstream.degraded_subsystem: ground
 business_impact:
   - kpi: business.launch_readiness_index_0_100
-    factor: {uniform: [0.40, 0.65]}
+    factor: {uniform: [0.4, 0.65]}
   - kpi: business.schedule_variance_days
-    factor: {uniform: [2.0, 5.0]}
+    value: {uniform: [20.97, 24.13], round: 1}
   - kpi: business.contractor_sla_compliance_pct
     factor: {uniform: [0.65, 0.85]}
   - kpi: business.cost_variance_pct

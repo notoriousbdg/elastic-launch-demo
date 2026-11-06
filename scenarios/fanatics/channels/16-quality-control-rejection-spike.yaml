@@ -12,11 +12,11 @@ cascade_services:
 description: Automated quality inspection system rejecting cards above acceptable defect rate
 investigation_notes: |-
   1. Identify the primary defect type: `color_registration_shift` and `die_cut_misalignment` are mechanical issues; `foil_stamp_incomplete` is heat/pressure related.
-  2. Check the QC camera calibration: if the vision system is miscalibrated, it may be rejecting good cards — run `mes-qc calibrate --line <line>`.
+  2. Check the QC camera calibration: if the vision system is miscalibrated, it may be rejecting good cards — run `mes-qc calibrate --line <line>`. If more than 50% of rejects pass manual re-inspection after a vision model retrain, the model is the cause.
   3. For `centering_off` defects, inspect the sheet feeder alignment and gripper pressure on the affected print line.
   4. Review the defect rate trend: a gradual increase indicates wear (replace cutting dies or print heads); a sudden spike indicates a material batch problem.
-  5. Cross-reference the reject batch with the paper/cardstock lot number — a bad material lot will cause consistent defects across all printers.
-  6. If the defect rate exceeds 10%, halt the production line for mechanical inspection rather than wasting material on continued rejects.
+  5. Cross-reference the reject batch with the paper/cardstock lot number — a bad material lot will cause consistent defects across all printers (the current lot passed incoming QC, ruling it out).
+  6. If the defect rate exceeds 10% and manual re-inspection confirms real defects, halt the production line for mechanical inspection; if most rejects pass re-inspection, roll back the vision model instead.
 remediation_action: recalibrate_qc_sensors
 error_message: '[QCInspector] MES-QC-REJECT-THRESHOLD: batch={qc_batch_id} rejected={qc_reject_count}/{qc_inspected_count}
   ({qc_reject_pct}% defect rate, threshold {qc_threshold_pct}%) defect={qc_defect_type} line={qc_line_number}'
@@ -33,21 +33,17 @@ fault_params:
   qc_batch_id:
     format: "BATCH-{n}"
     n: {randint: [1000, 9999]}
-  qc_reject_count: {randint: [20, 150]}
-  qc_inspected_count: {randint: [500, 2000]}
+  qc_reject_count: {randint: [50, 250]}
+  qc_inspected_count: 1000
   qc_reject_pct: {uniform: [5.0, 25.0], round: 1}
   qc_threshold_pct: 2.0
-  qc_defect_type:
-    choice:
-    - color_registration_shift
-    - die_cut_misalignment
-    - foil_stamp_incomplete
-    - surface_scratch
-    - centering_off
+  qc_defect_type: color_registration_shift
   qc_line_number: {choice: [LINE-A, LINE-B, LINE-C]}
 rca_clues:
   card-printing-system:
-    print.defect_type: {choice: [color_registration_shift, die_cut_misalignment, foil_stamp_incomplete]}
+    print.defect_type: color_registration_shift
+    print.manual_reinspect_pass_pct: {uniform: [70, 95], round: 1}
+    print.material_lot_qc: ACCEPTED
     print.material_lot:
       format: "LOT-{n}"
       n: {randint: [2024001, 2024999]}
@@ -62,10 +58,10 @@ rca_clues:
     auction.buyer_dispute_count: {randint: [1, 10]}
 business_impact:
   - kpi: business.merch_gmv_usd_per_min
-    factor: {uniform: [0.25, 0.55]}
+    value: {uniform: [10416.0, 11984.0], round: 1}
   - kpi: business.loyalty_points_redeemed_per_min
-    factor: {uniform: [0.30, 0.60]}
+    value: {uniform: [15112.0, 17388.0]}
   - kpi: business.churn_risk_index_0_100
     factor: {uniform: [2.0, 4.0]}
-  - kpi: business.net_satisfaction_proxy_nps
-    factor: {uniform: [0.20, 0.50]}
+  - kpi: business.programmatic_fill_rate_pct
+    value: {uniform: [57.35, 65.98], round: 2}

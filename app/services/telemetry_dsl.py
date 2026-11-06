@@ -66,6 +66,7 @@ import random
 import time
 from typing import Any
 
+from app.chaos.protocol import ChaosSource
 from app.services.base_service import BaseService
 from app.services.expr import _SAFE_TIME, make_safe_rand, safe_eval
 from scenario_engine.fault_spec import resolve
@@ -88,7 +89,7 @@ class YamlService(BaseService):
     SERVICE_NAME: str = ""
     _telemetry_spec: dict = {}
 
-    def __init__(self, chaos_controller, otlp_client) -> None:
+    def __init__(self, chaos_controller: ChaosSource, otlp_client) -> None:
         super().__init__(chaos_controller, otlp_client)
         self._rng = random.Random()
         self._safe_rand = make_safe_rand(self._rng)
@@ -134,6 +135,7 @@ class YamlService(BaseService):
 
         active_channels = self.get_active_channels_for_service()
         cascade_channels = self.get_cascade_channels_for_service()
+        self.reset_infrastructure_events(active_channels)
 
         # Standard fault logs (all affected-service channels)
         if spec.get("emit_fault_logs", True):
@@ -173,7 +175,6 @@ class YamlService(BaseService):
             "active_channels": active_channels,
             "cascade_channels": cascade_channels,
             "cascade_count": len(cascade_channels),
-            # Service phase (set externally via set_phase())
             "_phase": self._phase,
         }
         # All constants (lists, dicts, sensor tables, phase message tables, …)
@@ -320,7 +321,11 @@ class YamlService(BaseService):
         state_key = str(spec["state_key"])
         key = self._resolve(spec["key"], env)
         by = self._resolve(spec.get("by", 1), env)
-        d = self._state.get(state_key, {})
+        d = self._state.get(state_key)
+        if not isinstance(d, dict):
+            # A scalar ``init`` (e.g. ``{init: 0}``) would crash every loop with
+            # AttributeError; per-key counters live in a dict, so start one.
+            d = {}
         d[key] = d.get(key, 0) + by
         self._state[state_key] = d
         env[state_key] = d

@@ -11,7 +11,7 @@ cascade_services:
 - range-safety
 description: Payload vibration levels exceed structural safety margins
 investigation_notes: 'Root cause: resonance coupling between the launch vehicle structure and payload isolation mounts at
-  the observed frequency. Spectrum peaks at the primary frequency with harmonics at 88.4Hz and 142.7Hz suggest a structural
+  the observed frequency. Spectrum peaks at the primary frequency with secondary peaks at 88.4Hz and 142.7Hz suggest a structural
   mode, not random vibration. Check isolation mount damper pressure (nominal 48.2PSI) — low pressure indicates a damper gas
   leak allowing resonance transmission. Verify no loose payload adapter bolts (torque spec 45 ft-lb). Remediation: activate
   vibration suppression mode (PLD_VIBRATION_DAMP ACTIVE), increase damper pressure via PLD_DAMPER_PRESS +10PSI. If structural
@@ -29,24 +29,25 @@ stack_trace: |-
   Z       31.8Hz     0.67g        1.5g     NOMINAL
   ---------------------------------------------------------------
   SPECTRUM_PEAKS: {frequency}Hz({amplitude}g), 88.4Hz(0.31g), 142.7Hz(0.18g)
-  ISOLATION_MOUNT: ACTIVE | DAMPER_PRESSURE: 48.2PSI
+  ISOLATION_MOUNT: DEGRADED | DAMPER_PRESSURE: {damper_psi}PSI (nominal 48.2PSI)
   PLD-VIBRATION-LIMIT: {axis}-axis {amplitude}g at {frequency}Hz exceeds {limit}g structural limit
   ACTION: Verify isolation mount dampers, check for resonance coupling
 correlation_attr:
   key: infra.mount_revision
   value: iso-bracket-rev-C
 fault_params:
-  axis: {choice: [X, Y, Z]}
+  axis: X
+  damper_psi: {uniform: [38.0, 44.0], round: 1}
   amplitude: {uniform: [2.0, 8.0], round: 2}
-  frequency: {uniform: [20.0, 200.0], round: 1}
+  frequency: {uniform: [20.0, 80.0], round: 1}
   limit: 1.5
 rca_clues:
   payload-monitor:
-    payload.damper_pressure_psi: {uniform: [38, 48], round: 1}
+    payload.damper_pressure_psi: {uniform: [38.0, 44.0], round: 1}
     payload.resonance_freq_hz: {uniform: [20, 80], round: 1}
   sensor-validator:
     validation.vibration_exceeded: true
-    validation.isolation_mount_status: {choice: [ACTIVE, DEGRADED]}
+    validation.isolation_mount_status: DEGRADED
   mission-control:
     upstream.degraded_subsystem: payload
   range-safety:
@@ -55,8 +56,8 @@ business_impact:
   - kpi: business.mission_success_probability_pct
     factor: {uniform: [0.55, 0.78]}
   - kpi: business.launch_readiness_index_0_100
-    factor: {uniform: [0.45, 0.70]}
+    factor: {uniform: [0.45, 0.7]}
   - kpi: business.spacecraft_health_index_0_100
-    factor: {uniform: [0.60, 0.82]}
+    factor: {uniform: [0.6, 0.82]}
   - kpi: business.schedule_variance_days
-    factor: {uniform: [1.5, 4.0]}
+    value: {uniform: [20.97, 24.13], round: 1}

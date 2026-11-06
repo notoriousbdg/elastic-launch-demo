@@ -8,15 +8,15 @@ affected_services:
 cascade_services:
 - mission-control
 - telemetry-relay
-description: Sensor validation pipeline stalled, readings not being validated
-investigation_notes: 'Root cause: JVM garbage collection pressure causing stop-the-world pauses that stall the validation
+description: Sensor validation pipeline stalled, V&V consumer group lagging on the sensor telemetry Kafka topic and readings not being validated
+investigation_notes: 'Root cause: .NET garbage collection pressure (blocking gen2 collections) causing stop-the-world pauses that stall the validation
   pipeline. Heap usage at 89% with GC pause of 120ms confirms the V&V processor is thrashing between GC cycles. All 8 worker
   threads are busy but throughput has collapsed because each thread blocks during GC pauses. Queue depth climbing rapidly
   indicates ingest rate exceeds processing capacity during GC storms. Check for memory leaks in the calibration correlation
   stage — retained object count should be <500K per checkpoint. Remediation: trigger manual GC compaction (VV_GC_COMPACT),
-  then increase JVM heap size (VV_HEAP_RESIZE 12G) to reduce GC frequency. If queue depth exceeds 5000, enable upstream backpressure
-  (VV_BACKPRESSURE ENABLE) to prevent data loss. For long-term fix, migrate to G1GC with -XX:MaxGCPauseMillis=20 to cap pause
-  times.'
+  then raise the GC heap limit (VV_HEAP_RESIZE 12G, DOTNET_GCHeapHardLimit) to reduce GC frequency. If queue depth exceeds 5000, enable upstream backpressure
+  (VV_BACKPRESSURE ENABLE) to prevent data loss. For long-term fix, fix the retention leak and enable Server GC with concurrent (background) GC (DOTNET_gcServer=1,
+  DOTNET_gcConcurrent=1) to shorten blocking pauses.'
 remediation_action: reset_validation_pipeline
 error_message: '[VV] VV-PIPELINE-HALT: stage=validation queue_depth={queue_depth} rate={rate}/s threshold={min_rate}/s'
 stack_trace: |-
@@ -34,7 +34,7 @@ stack_trace: |-
   ACTION: Scale worker pool, investigate upstream data burst
 correlation_attr:
   key: runtime.heap_config
-  value: jvm-12g-g1gc-experimental
+  value: dotnet8-servergc-12g-experimental
 fault_params:
   queue_depth: {randint: [500, 5000]}
   rate: {uniform: [1.0, 10.0], round: 1}
@@ -43,6 +43,7 @@ rca_clues:
   sensor-validator:
     validation.heap_usage_pct: {uniform: [85.0, 97.0], round: 0}
     validation.gc_pause_ms: {randint: [80, 250]}
+    validation.retained_objects: {randint: [650000, 1500000]}
   mission-control:
     upstream.degraded_subsystem: validation
     telemetry.validation_status: stalled
@@ -57,3 +58,6 @@ business_impact:
     factor: {uniform: [0.50, 0.75]}
   - kpi: business.fault_events_per_min
     factor: {uniform: [3.5, 7.0]}
+generator_impact:
+  kafka_otel:
+    high_consumer_lag_by_topic: 80000.0

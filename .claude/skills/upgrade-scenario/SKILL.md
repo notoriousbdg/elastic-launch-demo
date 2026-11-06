@@ -135,6 +135,8 @@ After all migrations are applied, run the verifier:
 python3 scripts/verify_yaml_scenarios.py <id>
 ```
 
+A scenario is only up to date when it has no Check 35 errors (unknown `{placeholder}` in `investigation_notes`) and no Check 36 warnings (healthy-looking `choice` clues, faulty units the `stack_trace` lists as healthy). Fix those per the evidence contract in `.claude/skills/add-fault-channel/CONTRACT.md`.
+
 Also run the auto-discovery check:
 
 ```bash

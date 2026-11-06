@@ -9,11 +9,11 @@ These rules are non-negotiable. Hold them for the entire session. They encode ha
 **Only create or modify files under `scenarios/<new-id>/`.**
 
 Never edit:
-- `log_generators/` — data generators are shared and scenario-agnostic
+- `generators/`, `generator_engine/` — telemetry generators are shared and scenario-agnostic; a new scenario only *selects* existing generators via the `generators:` block in its own `scenario.yaml` (see CONTRACT.md §Generators), never adds or edits generator code
 - `app/` — runtime wiring; scenarios plug in via the `BaseScenario` interface
 - `elastic_config/` — deployer; reads scenario properties via duck typing
-- `scenarios/base.py` — the contract; adding properties here affects all scenarios
-- `scenarios/__init__.py` — auto-discovery; no registration needed
+- `scenario_engine/base.py` — the contract; adding properties here affects all scenarios
+- `scenario_engine/__init__.py` — auto-discovery; no registration needed
 - Any other existing scenario folder
 
 If you believe a change outside `scenarios/<new-id>/` is necessary, **stop and ask the user** rather than proceeding. The default answer is no.
@@ -34,10 +34,10 @@ Why: AGENTS.MD rule #44. Adding scenario branches to shared code is the primary 
 
 ## 3. No new data generators without explicit user approval
 
-Do not create new files in `log_generators/`. The existing generators (trace, host_metrics, k8s_metrics, jvm_metrics, nginx, mysql, vpc_flow, raw_access_log) cover all current telemetry shapes.
+Do not create new files under `generators/`. Over 60 generators already exist across every common family (database, cache, queue, proxy, web, cloud_compute, cloud_audit, ai, platform) — run `python3 -m generator_engine.registry --list` to see the full catalog. A new scenario integrates telemetry by *selecting* existing generators via the `generators:` block in its `scenario.yaml` (Phase 3 Step A of SKILL.md), never by writing new generator code.
 
 If a new generator is genuinely needed, it must:
-- Be completely scenario-agnostic (parameterized via `scenario_data` only, no hardcoded scenario values)
+- Be completely scenario-agnostic (parameterized via `scenario_data`/`config_fields` only, no hardcoded scenario values)
 - Accept `chaos_controller=` for fault-awareness consistency
 - Be discussed and approved by the user before implementation
 
@@ -45,7 +45,7 @@ If a new generator is genuinely needed, it must:
 
 ## 4. Telemetry shapes are fixed
 
-The Elastic integrations installed by `elastic_config/deployer_integrations.py` are global (not per-scenario): `kubernetes_otel`, `aws_vpcflow_otel`, `gcp_vpcflow_otel`, `nginx_otel`, `mysql_otel`. New scenarios must re-use these data shapes. Do not invent new index patterns or data stream names.
+Only the 8 `core` generators (`traces`, `raw_access`, `host_metrics`, `kubernetes_otel`, `nginx_otel`, `aws_vpcflow_otel`, `gcp_vpcflow_otel`, `azure_vnetflow_otel`) are installed globally regardless of scenario. Every other generator in `generator_engine.registry.GENERATORS` is per-scenario opt-in — `elastic_config/deployer_integrations.py` installs a generator's Elastic package only when the scenario enables it via `generators:`. New scenarios must re-use existing generator data shapes (core or opted-in). Do not invent new index patterns or data stream names.
 
 ---
 
@@ -112,7 +112,7 @@ Language values in `services[<svc>]["language"]` must be one of:
 
 `python` | `java` | `go` | `dotnet` | `rust` | `cpp`
 
-These map to exception type tables in `log_generators/trace_generator.py`. Any other value will cause the trace generator to emit empty exception fields.
+These map to exception type tables in `generators/traces/generator.py`. Any other value will cause the trace generator to emit empty exception fields.
 
 ---
 
@@ -168,6 +168,29 @@ These files live outside any scenario subfolder and are not scenario-specific:
 
 ---
 
+## 12. `generator_engine/*.py` and `generators/<id>/` are shared infrastructure
+
+Every generator's spec (`generators/<id>/__init__.py`, `generator.py`) and the registry/spec code in `generator_engine/` (`registry.py`, `spec.py`, `db_common.py`, `schema_version.py`) are shared across all scenarios. **Never modify them for a new scenario** — a scenario only *selects* and configures existing generators via the `generators:` block in its own `scenario.yaml` (see `contract/scenario.md` §Generators).
+
+If you believe a change to these files is necessary, stop and ask the user. The default answer is no.
+
+---
+
+## 13. Every channel moves BOTH dashboards, in proportion to its scope
+
+- `business_impact`: dict-form entries (`{kpi, factor|value}`) whose `kpi` names exist in `executive_kpi_emissions`, enough of them to turn the tiles yellow/red for the channel's scope tier (minor ≥2 non-green incl. 1 red, moderate ≥3 incl. 2 red, major ≥4 incl. 3 red; scope = 2×affected + cascade). Each impacted KPI needs `better: lower|higher` on its emission entry. Use `value:` ranges inside the red/yellow band. Checks 30 + 32.
+- `affected_services` must include at least one trace **entry** service (not only a database) or the ops dashboard never turns red. Check 31.
+- `incr_key` state keys are initialised as `{init: {}}`, never `{init: 0}`. Check 33.
+- Full rules and the `space` reference: contract/channels.md §Dashboard visibility.
+
+---
+
 ## Subagent mirroring note
 
-Rules §5, §6, §8, §9, §10, plus the fault_params parity rule and the zero-TODO rule, are inlined verbatim into the subagent prompt templates in SKILL.md's Phase 5. If you update any of those rules here, also update the corresponding lines in the subagent prompts in SKILL.md so they stay in sync.
+Rules §5, §6, §8, §9, §10, plus the fault_params parity rule, the zero-TODO rule, the generator_impact validity rule, and the §13 business_impact rule, are inlined verbatim into the subagent prompt templates in SKILL.md's Phase 5. If you update any of those rules here, also update the corresponding lines in the subagent prompts in SKILL.md so they stay in sync.
+
+---
+
+## 11. Channel evidence must confirm one cause
+
+Investigations confirm a fault from its `rca_clues`. A clue range that straddles the threshold in `investigation_notes`, a `choice` that can emit a healthy value, or a frame dump that lists the faulty unit as nominal leaves the agent and Nightshift stuck at low confidence. Follow §Evidence contract in `contract/channels.md`; the verifier enforces placeholders (Check 35) and warns on healthy choices and unit collisions (Check 36).

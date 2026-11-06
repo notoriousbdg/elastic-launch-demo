@@ -1,0 +1,37 @@
+name: "GT aws_rds_otel: swap_usage_high"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-AWSRDS-SWAP-USAGE-HIGH
+sensor_type: impact_key_probe
+affected_services:
+  - gt-awsrds-aws-svc-1
+cascade_services:
+  - gt-awsrds-aws-svc-2
+description: "Tests impact_key swap_usage_high on generator aws_rds_otel."
+investigation_notes: |-
+  1. Verify aws_rds_otel is active and reporting metrics.
+  2. Check that the swap_usage_high metric has reached the trigger value (786432000.0).
+  3. Confirm generator_impact for aws_rds_otel.swap_usage_high is set to 786432000.0.
+  4. Look for correlated changes in service gt-awsrds-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_swap_usage_high_baseline
+error_message: "GT-PROBE: gen=aws_rds_otel key=swap_usage_high value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=aws_rds_otel
+  impact_key: swap_usage_high
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 786432000.0
+  svc_name: gt-awsrds-aws-svc-1
+rca_clues:
+  gt-awsrds-aws-svc-1:
+    probe.generator: aws_rds_otel
+    probe.impact_key: swap_usage_high
+    probe.trigger_value: 786432000.0
+  gt-awsrds-aws-svc-2:
+    probe.upstream_generator: aws_rds_otel
+    probe.upstream_key: swap_usage_high
+generator_impact:
+  aws_rds_otel:
+    swap_usage_high: 786432000.0

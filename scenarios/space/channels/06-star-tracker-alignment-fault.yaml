@@ -25,7 +25,7 @@ stack_trace: |-
   PARAMETER            VALUE        LIMIT      STATUS
   BORESIGHT_ERROR      {error_arcsec}arcsec   {limit_arcsec}arcsec  **FAULT**
   CATALOG_MATCHES      8/22         12 min     DEGRADED
-  CCD_TEMP             -28.4C       -30.0C     NOMINAL
+  CCD_TEMP             -28.4C       -25.0C     NOMINAL
   INTEGRATION_TIME     250ms        500ms      NOMINAL
   ---------------------------------------------------------------
   ATTITUDE_SOURCE: STAR_TRACKER_A | QUATERNION: [0.707, 0.0, 0.707, 0.0]
@@ -43,7 +43,7 @@ rca_clues:
     gnc.ccd_temp_c: {uniform: [-30, -25], round: 1}
   sensor-validator:
     validation.boresight_error_arcsec: {uniform: [8.0, 40.0], round: 1}
-    validation.optics_contamination: {choice: [true, false]}
+    validation.optics_contamination: true
   mission-control:
     upstream.degraded_subsystem: guidance
 business_impact:

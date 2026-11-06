@@ -1,0 +1,211 @@
+service: fulfillment-worker
+sort_order: 6
+cloud_provider: aws
+cloud_region: us-west-2
+cloud_platform: aws_ec2
+cloud_availability_zone: us-west-2b
+subsystem: fulfillment
+language: go
+
+# Topology: [downstream-service, endpoint, METHOD]
+topology: []
+
+entry_endpoints:
+- - /api/v1/fulfillment/enqueue
+  - POST
+- - /api/v1/fulfillment/status
+  - GET
+
+db_operations:
+- - UPDATE
+  - orders
+  - UPDATE orders SET status = 'FULFILLING', fulfillment_ref = $1, updated_at = now() WHERE order_id = $2
+- - INSERT
+  - shipments
+  - INSERT INTO shipments (order_id, warehouse_id, carrier, status, created_at) VALUES ($1, $2, $3, 'LABEL_PENDING', now())
+
+emit_fault_logs: true
+kpi_emitter: false
+
+constants:
+  WAREHOUSES:
+  - pdx-wh-02
+  - sea-wh-01
+  - slc-wh-03
+  CARRIERS:
+  - ground-standard
+  - ground-express
+  - air-priority
+  QUEUE_NAME: awsorders-fulfillment
+  DLQ_NAME: awsorders-fulfillment-dlq
+
+state:
+  _processed: {init: 0}
+
+steps:
+- sample:
+    messages_received:
+      if_active:
+        randint:
+        - 20
+        - 90
+      else:
+        randint:
+        - 60
+        - 240
+    messages_deleted:
+      if_active:
+        randint:
+        - 2
+        - 25
+      else:
+        randint:
+        - 58
+        - 238
+    visible_messages:
+      if_active:
+        randint:
+        - 4000
+        - 26000
+      else:
+        randint:
+        - 0
+        - 120
+    oldest_message_age_s:
+      if_active:
+        randint:
+        - 420
+        - 3600
+      else:
+        randint:
+        - 1
+        - 25
+- counter:
+    state_key: _processed
+    by: 1
+- metric:
+    name: aws.sqs.number_of_messages_received
+    value:
+      var: messages_received
+    unit: messages
+- metric:
+    name: aws.sqs.number_of_messages_deleted
+    value:
+      var: messages_deleted
+    unit: messages
+- metric:
+    name: aws.sqs.approximate_number_of_messages_visible
+    value:
+      var: visible_messages
+    unit: messages
+- metric:
+    name: aws.sqs.approximate_age_of_oldest_message_s
+    value:
+      var: oldest_message_age_s
+    unit: s
+- log:
+    level: INFO
+    message: 'sqs[awsorders-fulfillment]: poll received={messages_received} deleted={messages_deleted} visible={visible_messages} oldest_age_s={oldest_message_age_s}'
+    attrs:
+      operation: queue_poll
+      messaging.system: aws_sqs
+      messaging.destination.name: awsorders-fulfillment
+      messaging.received:
+        var: messages_received
+      messaging.deleted:
+        var: messages_deleted
+      messaging.queue_depth:
+        var: visible_messages
+      messaging.oldest_age_s:
+        var: oldest_message_age_s
+- sample:
+    warehouse:
+      choice: WAREHOUSES
+    carrier:
+      choice: CARRIERS
+    processing_ms:
+      if_active:
+        uniform:
+        - 4500.0
+        - 28000.0
+        round: 1
+      else:
+        uniform:
+        - 120.0
+        - 650.0
+        round: 1
+    batch_size:
+      randint:
+      - 1
+      - 10
+    order_ref:
+      format: 'ORD-{n}'
+      n:
+        randint:
+        - 100000
+        - 999999
+- metric:
+    name: fulfillment.processing_ms
+    value:
+      var: processing_ms
+    unit: ms
+- log:
+    level: INFO
+    message: 'worker: processed order={order_ref} warehouse={warehouse} carrier={carrier} batch={batch_size} processing_ms={processing_ms} action=delete_message'
+    attrs:
+      operation: process_message
+      fulfillment.order_ref:
+        var: order_ref
+      fulfillment.warehouse:
+        var: warehouse
+      fulfillment.carrier:
+        var: carrier
+      fulfillment.processing_ms:
+        var: processing_ms
+- sample:
+    dlq_moves:
+      if_active:
+        randint:
+        - 8
+        - 70
+      else:
+        randint:
+        - 0
+        - 1
+    receive_count_max:
+      if_active:
+        randint:
+        - 4
+        - 5
+      else: 1
+    in_flight_messages:
+      if_active:
+        randint:
+        - 90
+        - 120
+      else:
+        randint:
+        - 5
+        - 40
+    visibility_timeout_s: 60
+- metric:
+    name: fulfillment.dlq_moves
+    value:
+      var: dlq_moves
+    unit: messages
+- metric:
+    name: aws.sqs.approximate_number_of_messages_not_visible
+    value:
+      var: in_flight_messages
+    unit: messages
+- log:
+    level: INFO
+    message: 'sqs[awsorders-fulfillment-dlq]: dlq_summary moved={dlq_moves} max_receive_count_seen={receive_count_max} in_flight={in_flight_messages} visibility_timeout_s={visibility_timeout_s}'
+    attrs:
+      operation: dlq_summary
+      messaging.dlq_moves:
+        var: dlq_moves
+      messaging.max_receive_count:
+        var: receive_count_max
+      messaging.in_flight:
+        var: in_flight_messages

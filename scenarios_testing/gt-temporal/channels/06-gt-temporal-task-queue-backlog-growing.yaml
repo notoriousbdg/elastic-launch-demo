@@ -1,0 +1,37 @@
+name: "GT temporal_otel: task_queue_backlog_growing"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-TEMPORAL-TASK-QUEUE-BACKLOG-GROWING
+sensor_type: impact_key_probe
+affected_services:
+  - gt-temporal-aws-svc-1
+cascade_services:
+  - gt-temporal-aws-svc-2
+description: "Tests impact_key task_queue_backlog_growing on generator temporal_otel."
+investigation_notes: |-
+  1. Verify temporal_otel is active and reporting metrics.
+  2. Check that the task_queue_backlog_growing metric has reached the trigger value (2500.0).
+  3. Confirm generator_impact for temporal_otel.task_queue_backlog_growing is set to 2500.0.
+  4. Look for correlated changes in service gt-temporal-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_task_queue_backlog_growing_baseline
+error_message: "GT-PROBE: gen=temporal_otel key=task_queue_backlog_growing value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=temporal_otel
+  impact_key: task_queue_backlog_growing
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 2500.0
+  svc_name: gt-temporal-aws-svc-1
+rca_clues:
+  gt-temporal-aws-svc-1:
+    probe.generator: temporal_otel
+    probe.impact_key: task_queue_backlog_growing
+    probe.trigger_value: 2500.0
+  gt-temporal-aws-svc-2:
+    probe.upstream_generator: temporal_otel
+    probe.upstream_key: task_queue_backlog_growing
+generator_impact:
+  temporal_otel:
+    task_queue_backlog_growing: 2500.0

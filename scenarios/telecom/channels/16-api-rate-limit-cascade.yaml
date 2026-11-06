@@ -8,9 +8,9 @@ affected_services:
 cascade_services:
 - activation-service
 - auth-service
-description: API gateway rate limiter triggering cascade rejection due to retry storm from downstream failures
+description: API gateway rate limiter triggering cascade rejection due to retry storm from downstream failures, flooding the edge NGINX with 429 responses
 investigation_notes: |
-  1. Check rate limiter token bucket state — bucket at 0 tokens with refill rate 1000/min means all incoming requests are rejected with 429 Too Many Requests.
+  1. Check rate limiter token bucket state — bucket at 0 tokens with refill rate 1000/min means every request above the 1000/min refill rate is rejected with 429 Too Many Requests.
   2. Root cause is typically a downstream failure (DB, network, auth) causing clients to retry aggressively. The retry storm amplifies traffic 3-5x above baseline, exhausting rate limit budgets.
   3. Identify the retry source — check api-gateway access logs for client IP distribution. A small number of IPs generating >100 req/min indicates aggressive retry without backoff.
   4. Enable adaptive rate limiting: increase burst allowance to 2000/min while maintaining sustained rate at 1000/min. This absorbs retry bursts without permanently raising limits.
@@ -28,11 +28,11 @@ stack_trace: |
     retry_amplification {gw_burst_factor}x       ---         STORM
   --- SOURCE ANALYSIS ---
     source={gw_source}  unique_clients={gw_unique_clients}
-    top_client_rate=142/min  avg_client_rate=12/min
+    top_client_rate={gw_top_client_rate}/min  avg_client_rate=12/min
     retry_after_honored=23%  aggressive_retry=77%
   ACTION: adaptive_rate_limit=true  add_retry_after=true  alert=GW-RATE-LIMIT-CASCADE
 infrastructure_events:
-- body: '[CloudWatch] APIGatewayRateLimitExceeded: stage=production endpoint=/api/v1/* throttled_requests=2500 rate_limit=1000/min burst=50 region=eu-central-1'
+- body: '[CloudWatch] GatewayRateLimitExceeded: service=api-gateway endpoint=/api/v1/* http_429_count=2500 rate_limit=1000/min burst=200 region=eu-central-1'
   severity: WARN
   event_name: aws.cloudwatch.alarm.APIGatewayRateLimitExceeded
   service: api-gateway
@@ -49,13 +49,15 @@ fault_params:
   gw_current_rate: {randint: [2000, 8000]}
   gw_rate_limit: 1000
   gw_rejected_count: {randint: [500, 5000]}
-  gw_burst_factor: {uniform: [2.0, 5.0], round: 1}
-  gw_source: {choice: [mobile_app_retry, partner_api_retry, internal_retry, load_test_leak]}
+  gw_burst_factor: {uniform: [3.0, 5.0], round: 1}
+  gw_source: mobile_app_retry
   gw_unique_clients: {randint: [50, 500]}
+  gw_top_client_rate: {randint: [120, 180]}
 rca_clues:
   api-gateway:
     gateway.rate_limit_exhausted: true
-    gateway.retry_amplification: {uniform: [2.0, 5.0], round: 1}
+    gateway.retry_amplification: {uniform: [3.0, 5.0], round: 1}
+    gateway.top_client_rate_per_min: {randint: [120, 180]}
   activation-service:
     activation.429_responses: {randint: [500, 5000]}
     activation.client_retry_storm: true
@@ -71,3 +73,6 @@ business_impact:
     factor: {uniform: [2.0, 4.5]}
   - kpi: business.first_call_resolution_pct
     factor: {uniform: [0.30, 0.60]}
+generator_impact:
+  nginx_otel:
+    high_4xx_error_rate: 800.0

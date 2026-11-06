@@ -9,12 +9,12 @@ affected_services:
 cascade_services:
 - matchmaking-engine
 - chat-service
-description: Mass token refresh requests overwhelm the auth service when tokens expire simultaneously due to clock sync issues
+description: Mass token refresh requests overwhelm the auth service when tokens expire simultaneously due to clock sync issues, flooding the edge NGINX with 401/429 responses
 investigation_notes: |-
-  Root cause: token TTLs were issued with identical expiry timestamps because the auth service clock was NTP-synchronized during a bulk login wave (e.g., after maintenance). 61.4% of active tokens expire within 5 minutes, creating a thundering herd.
-  1. Check NTP sync: `chronyc tracking` on auth-gateway pods — a clock jump during token issuance would cause all tokens in that window to share the same expiry.
+  Root cause: the auth-gateway clock drifted behind on its fallback NTP source and chrony then stepped it forward by minutes; every token whose remaining lifetime was shorter than the step was instantly treated as expired, on top of a bulk login wave (e.g., after maintenance) that had issued most tokens close together. {expiring_pct}% of active tokens expire within 5 minutes (normally under 5%), creating a thundering herd.
+  1. Check NTP sync: `chronyc tracking` on auth-gateway pods — a forward clock step above 60s expires every token with less remaining lifetime than the step at once.
   2. Review provider breakdown: oauth-google and oauth-discord are OVERLOADED — verify their rate limits haven't been lowered; check provider status pages.
-  3. Inspect JWKS cache: `jwks_cache_age=312s` is stale — if the signing key rotated and the cache is stale, all validations will fail and trigger needless refreshes.
+  3. Inspect JWKS cache: a cache older than 300s after a signing key rotation would fail validations; here `jwks_cache_age={jwks_cache_age_s}s` and the key has not rotated, so JWKS is not the cause.
   4. Remediate: issue `stagger_token_refresh` to add random jitter (0-300s) to expiry times and `extend_token_ttl` to push current expirations out by 5 minutes.
   5. Implement token refresh jitter at issuance time: TTL = base_ttl + random(0, 300s) to prevent future synchronized expiration storms.
 remediation_action: stagger_token_refresh
@@ -31,9 +31,9 @@ stack_trace: |-
     avg_latency     = 4,821ms (target 50ms)
   ----------- token pool state --------
     active_tokens   = 142,301
-    expiring_5min   = 87,412  (61.4% — clock skew)
+    expiring_5min   = {expiring_pct}%  (clock skew)
     signing_key     = RS256-prod-2026-02
-    jwks_cache_age  = 312s
+    jwks_cache_age  = {jwks_cache_age_s}s
   ----------- provider breakdown ------
     oauth-google    : 3,201/s (OVERLOADED)
     oauth-discord   : 2,847/s (OVERLOADED)
@@ -50,10 +50,14 @@ fault_params:
   max_refresh_rate: 2000
   failed_refreshes: {randint: [100, 5000]}
   token_pool_id: {choice: [pool-primary, pool-secondary, pool-failover]}
+  expiring_pct: {uniform: [40.0, 75.0], round: 1}
+  jwks_cache_age_s: {randint: [30, 240]}
 rca_clues:
   auth-gateway:
     auth.expiring_tokens_5min_pct: {uniform: [40.0, 75.0], round: 1}
-    auth.jwks_cache_age_s: {randint: [200, 600]}
+    auth.jwks_cache_age_s: {randint: [30, 240]}
+    auth.ntp_clock_step_ms: {randint: [120000, 420000]}
+    auth.signing_key_rotated: false
   game-server:
     game.session_validation_failures: {randint: [500, 5000]}
     game.forced_relogin_count: {randint: [100, 1000]}
@@ -63,10 +67,13 @@ rca_clues:
     chat.disconnected_users: {randint: [500, 5000]}
 business_impact:
   - kpi: business.sessions_per_min
-    factor: {uniform: [0.15, 0.40]}
+    value: {uniform: [669.6, 770.4]}
   - kpi: business.daily_active_users
-    factor: {uniform: [0.25, 0.50]}
+    value: {uniform: [16740.0, 19260.0]}
   - kpi: business.new_registrations_per_min
-    factor: {uniform: [0.20, 0.45]}
+    value: {uniform: [7.25, 8.35]}
   - kpi: business.churn_risk_index_0_100
     factor: {uniform: [2.0, 4.0]}
+generator_impact:
+  nginx_otel:
+    high_4xx_error_rate: 600.0

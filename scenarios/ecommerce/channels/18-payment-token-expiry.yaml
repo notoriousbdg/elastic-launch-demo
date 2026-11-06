@@ -11,7 +11,7 @@ description: Stored payment tokens expiring for recurring subscribers — subscr
 investigation_notes: |-
   1. Check payment-processor logs for PAYMENT-TOKEN-EXPIRY — expired_tokens={expired_tokens} affecting {affected_subscriptions} subscriptions.
   2. Identify the token age distribution: tokens older than {token_max_age_days} days are at highest risk — batch renew before they expire.
-  3. Check if the card network issued a mass BIN (Bank Identification Number) change — this can invalidate thousands of tokens simultaneously.
+  3. Check whether an issuer ran a portfolio conversion (cards reissued on a new BIN/PAN) — this can invalidate thousands of stored credentials at once (a non-zero count of BIN-change-affected tokens indicates a conversion; 0 rules it out).
   4. Trigger Account Updater API calls to the card networks — Visa and Mastercard provide automatic card number updates for expiring credentials.
   5. For tokens that cannot be auto-renewed, send re-authorization emails to affected customers ({affected_subscriptions} contacts required).
   6. Review token refresh policy: tokens should be refreshed 30 days before expiry, not on expiry — adjust the refresh scheduler interval.
@@ -20,8 +20,10 @@ error_message: '[PaymentProcessor] PAYMENT-TOKEN-EXPIRY: expired_tokens={expired
   revenue_at_risk_usd={subscription_revenue_usd} token_age_days={token_max_age_days}'
 stack_trace: |-
   PaymentTokenException: PAYMENT-TOKEN-EXPIRY
-     at TokenVault.validateToken(token_id={token_id})
-     at PaymentProcessor.chargeSubscription(sub_id={subscription_id})
+     at Ecommerce.Payments.Tokens.TokenVault.ValidateToken(String tokenId) in /src/Payments/Tokens/TokenVault.cs:line 93
+     at Ecommerce.Payments.PaymentProcessor.ChargeSubscriptionAsync(String subscriptionId) in /src/Payments/PaymentProcessor.cs:line 341
+  Token:                {token_id}
+  Subscription:         {subscription_id}
   Expired tokens:       {expired_tokens}
   Affected subs:        {affected_subscriptions}
   Revenue at risk:      ${subscription_revenue_usd}
@@ -41,13 +43,15 @@ rca_clues:
   payment-processor:
     payment.expired_token_count: {randint: [100, 10000]}
     payment.subscription_failure_rate_pct: {uniform: [5, 40], round: 1}
+    payment.account_updater_status: NOT_CONFIGURED
+    payment.bin_change_affected_tokens: 0
   order-management:
     order.subscription_renewal_failures: {randint: [50, 5000]}
     order.churn_risk_count: {randint: [10, 1000]}
 business_impact:
   - kpi: business.subscription_mrr_usd_per_min
-    factor: {uniform: [0.20, 0.45]}
+    value: {uniform: [7254.0, 8346.0], round: 1}
   - kpi: business.churn_risk_index_0_100
     factor: {uniform: [2.0, 4.5]}
   - kpi: business.gmv_usd_per_min
-    factor: {uniform: [0.30, 0.55]}
+    factor: {uniform: [0.3, 0.55]}

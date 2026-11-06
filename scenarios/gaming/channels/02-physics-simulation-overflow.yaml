@@ -11,9 +11,9 @@ cascade_services:
 description: Physics simulation accumulates floating-point errors causing object positions to overflow into NaN territory
 investigation_notes: |-
   Root cause: the physics integrator uses single-precision floats for velocity accumulation, and repeated substep iterations without epsilon clamping allow energy injection from collision response to compound exponentially, pushing velocities past simulation limits.
-  1. Check the entity trace: look at `accel` values in the dump — acceleration >10000 indicates a collision solver feedback loop (two overlapping colliders pumping energy).
-  2. Inspect `penetration_max` — values >0.5m mean the broadphase AABB tree is stale; run `/debug physics rebuild_bvh` on the affected zone to force spatial index rebuild.
-  3. Review substep count: 4 substeps at high entity density causes frame budget overrun; reduce to 2 substeps and enable CCD (continuous collision detection) for fast movers.
+  1. Check the entity trace: look at `accel` values in the dump — acceleration >10000 indicates a collision solver feedback loop (two overlapping colliders pumping energy). This is the cause.
+  2. Inspect `penetration_max` — values >0.5m would mean the broadphase AABB tree is stale (here it stays below 0.4m, so the BVH is fine); run `/debug physics rebuild_bvh` on the affected zone to force spatial index rebuild.
+  3. Review substep count: 4 substeps at high entity density can overrun the frame budget (substep time above 16ms); here substep time stays under 12ms, so it is not the cause, but reduce to 2 substeps and enable CCD (continuous collision detection) for fast movers.
   4. Remediate: issue `reset_physics_engine` to zero all velocities, rebuild the collision world, and re-derive positions from the last valid snapshot.
   5. Long-term: migrate velocity accumulator to double-precision and add per-substep energy conservation checks to detect and break feedback loops before overflow.
 remediation_action: reset_physics_engine
@@ -25,34 +25,38 @@ stack_trace: |-
     pos       = (8421.7, 102.3, -3304.9)
     vel       = ({velocity}, 0.0, 0.0)  |v|={velocity}
     max_vel   = {max_velocity}
-    accel     = (12842.1, 0.0, -4201.3)
+    accel     = ({accel_x}, 0.0, -4201.3)
     mass      = 85.0 kg
     collider  = CAPSULE r=0.4 h=1.8
   ----------- collision candidates --------
     broadphase_pairs = 47
     narrowphase_hits = 3
-    penetration_max  = 0.82m (ENT-29481 <-> ENT-30012)
+    penetration_max  = {penetration_max}m (ENT-29481 <-> ENT-30012)
   ----------- action ----------------------
     CLAMP velocity to {max_velocity}  REWIND substep 3
   PHYS-OVERFLOW: entity {entity_id} velocity {velocity} exceeds simulation limit {max_velocity}
 correlation_attr:
-  key: infra.gpu_driver
-  value: nvidia-535.129.03-beta
+  key: deployment.physics_solver_build
+  value: physics-solver-v5.4.0-substep4-f32
 fault_params:
   entity_id:
     format: "ENT-{n}"
     n: {randint: [10000, 99999]}
   velocity: {uniform: [1000.0, 999999.0], round: 1}
   max_velocity: 500.0
+  accel_x: {uniform: [10500.0, 15000.0], round: 1}
+  penetration_max: {uniform: [0.08, 0.35], round: 2}
   zone_id: {choice: [ZONE-A1, ZONE-B2, ZONE-C3, ZONE-D4]}
   tick_number: {randint: [100000, 9999999]}
 rca_clues:
   game-server:
     physics.substep_count: 4
-    physics.penetration_max_m: {uniform: [0.5, 1.5], round: 2}
+    physics.penetration_max_m: {uniform: [0.08, 0.35], round: 2}
+    physics.accel_magnitude: {uniform: [10500.0, 15000.0], round: 1}
+    physics.substep_frame_ms: {uniform: [6.0, 12.0], round: 1}
   analytics-pipeline:
     analytics.physics_error_events: {randint: [100, 500]}
-    analytics.entity_density: critical
+    analytics.entity_density: normal
   matchmaking-engine:
     matchmaking.affected_matches: {randint: [5, 30]}
 business_impact:

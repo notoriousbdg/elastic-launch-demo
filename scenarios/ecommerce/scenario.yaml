@@ -9,7 +9,7 @@ schema_version: "1.2"
 nominal_label: NORMAL
 hosts:
 - host.name: ecommerce-aws-host-01
-  host.id: i-0a1b2c3d4e5f67890
+  host.id: i-f4cb884dfb1568093
   host.arch: amd64
   host.type: m6i.2xlarge
   host.image.id: ami-0123456789abcdef0
@@ -31,13 +31,13 @@ hosts:
   cloud.platform: aws_ec2
   cloud.region: us-east-1
   cloud.availability_zone: us-east-1a
-  cloud.account.id: '112233445566'
-  cloud.instance.id: i-0a1b2c3d4e5f67890
+  cloud.account.id: '628280131984'
+  cloud.instance.id: i-f4cb884dfb1568093
   cpu_count: 8
   memory_total_bytes: 34359738368
   disk_total_bytes: 536870912000
 - host.name: ecommerce-gcp-host-01
-  host.id: '4567890123456789012'
+  host.id: '3095485022161960'
   host.arch: amd64
   host.type: n2-standard-8
   host.image.id: projects/debian-cloud/global/images/debian-12-bookworm-v20250115
@@ -59,13 +59,13 @@ hosts:
   cloud.platform: gcp_compute_engine
   cloud.region: us-central1
   cloud.availability_zone: us-central1-a
-  cloud.account.id: ecommerce-prod-12345
-  cloud.instance.id: '4567890123456789012'
+  cloud.account.id: ecommerce-project
+  cloud.instance.id: '3095485022161960'
   cpu_count: 8
   memory_total_bytes: 34359738368
   disk_total_bytes: 536870912000
 - host.name: ecommerce-azure-host-01
-  host.id: /subscriptions/ec-prod-001/resourceGroups/ecommerce-rg/providers/Microsoft.Compute/virtualMachines/ecommerce-vm-01
+  host.id: /subscriptions/088ff508-b847-5a37-83f9-236d4753ced4/resourceGroups/ecommerce-rg/providers/Microsoft.Compute/virtualMachines/ecommerce-vm-01
   host.arch: amd64
   host.type: Standard_D8s_v5
   host.image.id: Canonical:0001-com-ubuntu-server-jammy:22_04-lts-gen2:latest
@@ -87,7 +87,7 @@ hosts:
   cloud.platform: azure_vm
   cloud.region: eastus
   cloud.availability_zone: eastus-1
-  cloud.account.id: ec-prod-001-234-567
+  cloud.account.id: 088ff508-b847-5a37-83f9-236d4753ced4
   cloud.instance.id: ecommerce-vm-01
   cpu_count: 8
   memory_total_bytes: 34359738368
@@ -145,7 +145,7 @@ agent_config:
     search for these error identifiers in logs (field: body.text): payment errors (PAYMENT-GATEWAY-TIMEOUT, FRAUD-FALSE-POSITIVE,
     PAYMENT-TOKEN-EXPIRY), ad platform errors (ADS-SERVING-FAILURE, ADS-CLICK-BACKLOG, ADS-BUDGET-CAP), catalog errors (CATALOG-INDEX-CORRUPT,
     CATALOG-PRICE-SYNC), personalization errors (RECO-ENGINE-OOM, RECO-MODEL-DRIFT, RECO-CACHE-EVICTION), storefront errors
-    (SESSION-STORM, CDN-CACHE-STORM, SSL-CERT-EXPIRY), order errors (ORDER-DB-REPLICATION-LAG, CART-ABANDON-SPIKE), inventory
+    (SESSION-STORM, REDIS-PURGE-STORM, SSL-CERT-EXPIRY), order errors (ORDER-DB-REPLICATION-LAG, CART-ABANDON-SPIKE), inventory
     errors (INVENTORY-SYNC-LAG), fulfillment errors (CARRIER-RATE-LIMIT, WAREHOUSE-CAPACITY-ALERT), analytics errors (ANALYTICS-PIPELINE-LAG).
     Log messages are in body.text — NEVER search the body field alone.'
 assessment_tool_config:
@@ -235,18 +235,23 @@ executive_trend_charts:
 executive_kpi_emissions:
   # Revenue
   - name: business.gmv_usd_per_min
+    better: higher
     value: {uniform: [85000.0, 680000.0], round: 1}
     unit: USD/min
   - name: business.conversion_rate_pct
+    better: higher
     value: {uniform: [1.8, 6.4], round: 2}
     unit: "%"
   - name: business.average_order_value_usd
+    better: higher
     value: {uniform: [42.0, 195.0], round: 2}
     unit: USD
   - name: business.ad_revenue_usd_per_min
+    better: higher
     value: {uniform: [28000.0, 185000.0], round: 1}
     unit: USD/min
   - name: business.subscription_mrr_usd_per_min
+    better: higher
     value: {uniform: [12000.0, 95000.0], round: 1}
     unit: USD/min
   - name: business.seller_fee_revenue_usd_per_min
@@ -254,15 +259,19 @@ executive_kpi_emissions:
     unit: USD/min
   # Traffic & engagement
   - name: business.sessions_per_min
+    better: higher
     value: {randint: [1200, 18000]}
     unit: sessions/min
   - name: business.page_views_per_min
+    better: higher
     value: {randint: [8500, 95000]}
     unit: views/min
   - name: business.cart_adds_per_min
+    better: higher
     value: {randint: [380, 4800]}
     unit: adds/min
   - name: business.search_queries_per_min
+    better: higher
     value: {randint: [620, 8200]}
     unit: queries/min
   - name: business.content_completion_rate_pct
@@ -273,31 +282,39 @@ executive_kpi_emissions:
     unit: "%"
   # Fulfillment
   - name: business.orders_placed_per_min
+    better: higher
     value: {randint: [85, 980]}
     unit: orders/min
   - name: business.fulfillment_sla_pct
+    better: higher
     value: {uniform: [91.0, 99.4], round: 2}
     unit: "%"
   - name: business.returns_per_min
+    better: lower
     value: {randint: [8, 120]}
     unit: returns/min
   - name: business.cancel_rate_pct
+    better: lower
     value: {uniform: [1.2, 5.8], round: 2}
     unit: "%"
   - name: business.same_day_eligible_pct
+    better: higher
     value: {uniform: [22.0, 68.0], round: 2}
     unit: "%"
   - name: business.inventory_turn_rate
+    better: higher
     value: {uniform: [4.2, 18.6], round: 2}
     unit: turns
   # Customer health
   - name: business.csat_score_0_5
+    better: higher
     value: {uniform: [3.4, 4.9], round: 2}
     unit: score
   - name: business.net_satisfaction_proxy_nps
     value: {uniform: [18.0, 72.0], round: 1}
     unit: score
   - name: business.churn_risk_index_0_100
+    better: lower
     value: {uniform: [12.0, 48.0], round: 1}
     unit: index
   - name: business.email_open_rate_pct
@@ -395,3 +412,7 @@ trace_attributes:
       analytics.pipeline_stage: {choice: [ingest, transform, aggregate, index]}
       analytics.consumer_group: {choice: [realtime-analytics, ad-attribution, inventory-analytics, fraud-signals]}
       analytics.partition: {randint: [0, 31]}
+
+generators:
+  redis_otel: true
+  kafka_otel: true

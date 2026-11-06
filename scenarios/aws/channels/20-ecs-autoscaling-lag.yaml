@@ -1,0 +1,84 @@
+name: Ecs Autoscaling Lag
+subsystem: edge_api
+vehicle_section: edge_api_pipeline
+error_type: ORD-ECS-SCALING-LAG
+sensor_type: health_check
+affected_services: [orders-gateway]
+cascade_services: [storefront-web]
+
+description: >
+  The orders-gateway ECS service scales out too slowly during a burst because target tracking lags the load, so requests queue at the ALB and checkout slows.
+
+investigation_notes: |
+  1. Search body.text LIKE *ORD-ECS-SCALING-LAG* and confirm running_tasks={running_tasks} is below needed_tasks={needed_tasks} while cpu_pct={cpu_pct}% is above the {target_cpu_pct}% target.
+  2. In CloudWatch compare ECS CPUUtilization with ALB TargetResponseTime and RequestCountPerTarget; response time near {response_ms}ms (alert above 2s average) with per-target requests rising shows capacity is behind demand.
+  3. Review ECS service events and Application Auto Scaling activity: the scale-out policy fires only after {lag_s}s of breaching datapoints, and new Fargate tasks need roughly 60s to pass health checks.
+  4. Confirm no task failures: stopped tasks are 0, health checks pass, and no deployment is in progress, so tasks are healthy but too few.
+  5. Check storefront-web rca_clues (storefront.checkout_queue_ms): checkout latency rises with the gateway queue and recovers when the task count catches up.
+  6. Remediation is bounded and safe: raise the ECS service minimum capacity to {target_min_tasks} tasks so the burst baseline is pre-provisioned; scale-in policies still reduce it later.
+remediation_action: raise_ecs_min_capacity
+
+error_message: |
+  ORD-ECS-SCALING-LAG: service=orders-gateway running_tasks={running_tasks} needed_tasks={needed_tasks} cpu_pct={cpu_pct} alb_response_ms={response_ms}
+
+stack_trace: |
+  === ECS AUTOSCALING LAG REPORT ===
+  cluster=awsorders-prod  service=orders-gateway  launch_type=FARGATE  region=us-east-1
+  --- SCALING STATE ---
+    running_tasks={running_tasks}  desired_tasks={running_tasks}  needed_tasks={needed_tasks}
+    policy=TargetTrackingScaling  target_cpu={target_cpu_pct}%  breach_to_scale_out={lag_s}s
+  --- CLOUDWATCH METRICS ---
+    CPUUtilization={cpu_pct}%  ALB TargetResponseTime_p99={response_ms}ms  (baseline ~120ms)
+    stopped_tasks=0  unhealthy_targets=0
+  --- ASSESSMENT ---
+    cause=target_tracking_lag  deployment_in_progress=false
+  ACTION: raise_min_capacity=true  target_min_tasks={target_min_tasks}  alert=ORD-ECS-SCALING-LAG
+
+infrastructure_events:
+- body: '[ECS] Service orders-gateway: Application Auto Scaling scale-out activity started, desired count 4 -> 8 after sustained CPU above target region=us-east-1'
+  severity: WARN
+  event_name: aws.ecs.ServiceScalingActivity
+  service: orders-gateway
+  attributes:
+    cloud.provider: aws
+    cloud.service: ecs
+    aws.ecs.cluster: awsorders-prod
+    aws.ecs.service: orders-gateway
+    aws.autoscaling.policy_type: TargetTrackingScaling
+    infrastructure.source: ECS
+
+correlation_attr:
+  key: aws.ecs.service_min_capacity
+  value: orders-gateway-min-capacity-4
+
+fault_params:
+  running_tasks: 4
+  needed_tasks: {randint: [9, 14]}
+  cpu_pct: {randint: [88, 99]}
+  target_cpu_pct: 60
+  response_ms: {randint: [3200, 4500]}
+  lag_s: 300
+  target_min_tasks: {choice: [8, 10, 12]}
+
+rca_clues:
+  orders-gateway:
+    ecs.running_vs_needed_tasks: {uniform: [0.28, 0.44], round: 2}
+    ecs.scale_out_lag_s: 300
+    alb.request_count_per_target: {randint: [900, 2500]}
+  storefront-web:
+    storefront.checkout_queue_ms: {randint: [1500, 4000]}
+    storefront.upstream_slow_requests: {randint: [100, 900]}
+
+business_impact:
+  - kpi: business.latency_p99_ms
+    factor: {uniform: [2.0, 4.0]}
+  - kpi: business.throughput_rpm
+    factor: {uniform: [0.7, 0.9]}
+  - kpi: business.availability_pct
+    factor: {uniform: [0.99, 0.998]}
+
+generator_impact:
+  aws_ecs_otel:
+    cpu_utilization_high: 92.0
+  aws_elb_metrics_otel:
+    high_application_load_balancer_target_response_time_average: 3.0

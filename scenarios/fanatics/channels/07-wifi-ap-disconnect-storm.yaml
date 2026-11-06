@@ -3,26 +3,22 @@ subsystem: network_access
 vehicle_section: wireless_lan
 error_type: AP_DISCONNECTED
 sensor_type: ap_status
-affected_services:
-- wifi-controller
-- network-controller
-cascade_services:
-- packaging-fulfillment
-- card-printing-system
+affected_services: [wifi-controller, network-controller, packaging-fulfillment]
+cascade_services: [card-printing-system]
 description: Multiple wireless access points simultaneously losing connectivity to the controller
 investigation_notes: |-
   1. Check the Mist dashboard for AP connectivity status and last-seen timestamps across the affected site.
-  2. Verify upstream switch port status: `show interface status | include AP` — a switch reboot or PoE budget exhaustion can take down multiple APs simultaneously.
-  3. Check PoE allocation: `show power inline` — if the switch PoE budget is exceeded, lower-priority APs will be shut down.
-  4. Verify CAPWAP/DTLS tunnel health between APs and the Mist cloud controller — firewall rules may be blocking UDP 2049.
+  2. Verify upstream switch port status: `show interface status | include AP` — a switch reboot or PoE budget exhaustion can take down multiple APs simultaneously. The switch did not reboot here.
+  3. Check PoE allocation: `show power inline` — if the switch PoE budget is exceeded (under 15W available), lower-priority APs will be shut down, and the PoE shortfall is the cause.
+  4. Verify AP-to-cloud connectivity: Mist APs reach the Mist cloud over TLS on TCP 443 (ep-terminator) — firewall rules may be blocking it (they are not here).
   5. If APs are on a shared VLAN, check for a broadcast storm or STP issue on that VLAN that could saturate AP management traffic.
-  6. As immediate remediation, power-cycle the affected switch stack or re-provision APs from the Mist cloud console.
+  6. As immediate remediation, raise `power inline priority` on AP ports, shed non-critical PoE loads or add PoE budget (second PSU), then confirm APs reconnect in the Mist console.
 remediation_action: restart_access_point
 error_message: 'AP_DISCONNECTED event_id=mist-evt-{ap_disconnect_count}: {ap_disconnect_count} APs lost connectivity in {ap_disconnect_window}s,
-  including {ap_name} (site {ap_site}), last CAPWAP heartbeat {ap_last_heartbeat}s ago'
+  including {ap_name} (site {ap_site}), last cloud heartbeat {ap_last_heartbeat}s ago'
 stack_trace: '{{"type": "AP_DISCONNECTED", "event_id": "mist-evt-{ap_disconnect_count}", "org_id": "fanatics-org-001", "site_id":
   "{ap_site}", "ap_name": "{ap_name}", "ap_mac": "5c:5b:35:a1:b2:c3", "timestamp": 1705329121, "duration": {ap_disconnect_window},
-  "count": {ap_disconnect_count}, "last_seen": {ap_last_heartbeat}, "reason": "CAPWAP heartbeat timeout", "firmware": "0.14.29313"}}'
+  "count": {ap_disconnect_count}, "last_seen": {ap_last_heartbeat}, "reason": "cloud connection heartbeat timeout", "firmware": "0.14.29313"}}'
 correlation_attr:
   key: deployment.ap_firmware
   value: mist-fw-0.14.29313-beta
@@ -42,10 +38,12 @@ fault_params:
 rca_clues:
   wifi-controller:
     wifi.capwap_tunnel_down: {randint: [5, 20]}
-    wifi.poe_budget_exceeded: {choice: [true, false]}
+    wifi.poe_budget_exceeded: true
+    wifi.capwap_udp_blocked: false
   network-controller:
     network.switch_port_down_count: {randint: [3, 15]}
-    network.poe_watts_available: {randint: [0, 50]}
+    network.poe_watts_available: {randint: [0, 10]}
+    network.switch_reboot_detected: false
   packaging-fulfillment:
     warehouse.scanner_offline_count: {randint: [2, 10]}
     warehouse.pick_rate_degraded: true
@@ -54,8 +52,10 @@ rca_clues:
     print.jobs_queued_offline: {randint: [10, 100]}
 business_impact:
   - kpi: business.app_sessions_per_min
-    factor: {uniform: [0.30, 0.60]}
+    value: {uniform: [334.8, 385.2]}
   - kpi: business.merch_gmv_usd_per_min
-    factor: {uniform: [0.30, 0.60]}
+    value: {uniform: [16926.0, 19474.0], round: 1}
   - kpi: business.churn_risk_index_0_100
     factor: {uniform: [1.5, 3.0]}
+  - kpi: business.loyalty_points_redeemed_per_min
+    value: {uniform: [9300.0, 10700.0]}

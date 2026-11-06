@@ -1,0 +1,62 @@
+service: ml-inference
+sort_order: 6
+cloud_provider: gcp
+cloud_region: us-central1
+cloud_platform: gcp_compute_engine
+cloud_availability_zone: us-central1-c
+subsystem: ml_platform
+language: cpp
+
+topology: []
+
+db_operations:
+  - [SELECT, feature_store, "SELECT feature_vector FROM feature_store WHERE entity_id = ?"]
+
+emit_fault_logs: true
+kpi_emitter: false
+
+constants:
+  MODELS: [anomaly-scorer-v2, fault-classifier-v1]
+
+state:
+  _inferences_total: {init: 0}
+  _last_summary: {init: now}
+
+steps:
+  - sample:
+      model: {choice: MODELS}
+      gpu_temp_c:
+        if_active: {uniform: [85.0, 105.0], round: 1}
+        else: {uniform: [45.0, 72.0], round: 1}
+      inference_latency_ms:
+        if_active: {uniform: [300.0, 4000.0], round: 1}
+        else: {uniform: [8.0, 60.0], round: 1}
+  - counter:
+      state_key: _inferences_total
+      by: 1
+  - log:
+      level: INFO
+      message: '[ml-inference] inference_cycle model={model} latency={inference_latency_ms}ms gpu_temp={gpu_temp_c}C total={_inferences_total}'
+      attrs:
+        operation: inference_cycle
+        ml.model_name: {var: model}
+        ml.inference_latency_ms: {var: inference_latency_ms}
+        ml.gpu_temp_c: {var: gpu_temp_c}
+  - metric:
+      name: ml_inference.gpu_temp_c
+      value: {var: gpu_temp_c}
+      unit: degC
+  - metric:
+      name: ml_inference.inference_latency_ms
+      value: {var: inference_latency_ms}
+      unit: ms
+  - every:
+      seconds: 15
+      state_key: _last_summary
+      steps:
+        - log:
+            level: INFO
+            message: '[ml-inference] summary total_inferences={_inferences_total} status=NOMINAL'
+            attrs:
+              operation: summary
+              ml.total_inferences: {var: _inferences_total}

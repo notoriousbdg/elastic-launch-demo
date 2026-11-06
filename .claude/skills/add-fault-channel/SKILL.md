@@ -7,6 +7,8 @@ description: Replace one fault channel in an existing scenario. Use when the use
 
 This skill replaces one existing fault channel in a scenario with a new or improved one. It replaces `scenarios/<id>/channels/NN-<slug>.yaml` and updates `agent_config.system_prompt` in `scenario.yaml`.
 
+A channel's `generator_impact` keys drive the generator's signals. The package alert rules, SLOs and ML anomaly detection jobs that read those signals are created by the deployer (step 21), so there is nothing to wire for them here; the description may name the SLO a fault burns.
+
 Read [GUARDRAILS.md](GUARDRAILS.md) now and hold every rule in it for the duration of this session.
 
 ---
@@ -28,7 +30,7 @@ Read the target channel file `scenarios/<id>/channels/NN-<slug>.yaml` in full. E
 
 1. The **current channel** fields: name, subsystem, error_type, error_message, fault_params, rca_clues
 2. The **valid service keys** — list the filenames under `scenarios/<id>/services/` (each filename stem is a service key)
-3. The **agent_config.system_prompt** from `scenarios/<id>/scenario.yaml` — use a targeted read to avoid loading the full 15KB file:
+3. The **`executive_kpi_emissions` names** (for `business_impact`) from the same file, then the **agent_config.system_prompt** from `scenarios/<id>/scenario.yaml` — use a targeted read to avoid loading the full 15KB file:
 
 ```bash
 grep -n "agent_config\|system_prompt" scenarios/<id>/scenario.yaml | head -5
@@ -68,6 +70,8 @@ Write a new `scenarios/<id>/channels/NN-<new-slug>.yaml`. Keep the same channel 
 
 Follow the field order from CONTRACT.md. See the full schema there.
 
+Include `business_impact` so BOTH dashboards react in proportion to the fault's scope: dict entries targeting `executive_kpi_emissions` names, enough to turn tiles yellow/red (scope = 2×affected + cascade; minor ≥2 non-green incl. 1 red, moderate ≥3 incl. 2 red, major ≥4 incl. 3 red), with `value:` ranges inside each KPI's red/yellow band. `affected_services` must include a trace entry service (a service with `entry_endpoints`), not only a database, or the ops dashboard stays green. Reference: `scenarios/space/channels/01-*.yaml`.
+
 `investigation_notes`: 5–6 numbered steps. Reference specific log field names, metric names, and `{placeholder}` values. Tell the agent exactly what to search for and how to confirm the fix.
 
 `fault_params` and `rca_clues` use the YAML DSL (see CONTRACT.md):
@@ -106,7 +110,7 @@ Run the CONTRACT.md checklist inline (no external script needed — inspect the 
 3. **Channel count** — run `ls scenarios/<id>/channels/*.yaml | wc -l` → must be 20.
 4. **HITL/auto-remediate** — channel ≤ 15: HITL action; channel 16–20: plausible auto-runbook action.
 5. **system_prompt sync** — new `error_type` appears in the prompt; old `error_type` (if changed) does not.
-6. **business_impact preserved** — if the old channel had a `business_impact` list, the new channel also has one (values may differ; see CONTRACT.md for guidance on choosing appropriate KPIs).
+6. **Dashboards react** — `business_impact` has dict entries targeting names from `executive_kpi_emissions` that land enough tiles in yellow/red for the channel's scope tier (copy the old channel's block as a starting point; re-check the values; see CONTRACT.md), every impacted KPI has `better:` set, and `affected_services` includes a trace entry service. `python3 scripts/verify_yaml_scenarios.py <id>` (Checks 30–32) is the arbiter.
 
 **Full integrity check:**
 ```bash

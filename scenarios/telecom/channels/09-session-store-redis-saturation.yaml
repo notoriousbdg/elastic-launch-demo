@@ -15,7 +15,7 @@ investigation_notes: |
   2. Session count growth rate — if new sessions exceed eviction rate, Redis enters thrashing mode. Current session count: redis-cli DBSIZE. Expected baseline: ~500K sessions.
   3. Thundering herd problem: evicted sessions trigger re-authentication on identity-db, which cannot handle the spike. Auth-service circuit breaker opens at 1000 req/s to protect identity-db.
   4. Increase Redis maxmemory immediately: redis-cli CONFIG SET maxmemory 8gb. Then investigate why session count exceeded capacity (possible session leak, missing TTL on new session types).
-  5. Review session TTL distribution — sessions without explicit TTL accumulate indefinitely. Ensure all session types have TTL <= 3600s: redis-cli --scan --pattern 'session:*' | head -20 | xargs -I{} redis-cli TTL {}.
+  5. Review session TTL distribution — sessions without explicit TTL accumulate indefinitely (more than 5% of session keys without a TTL confirms a missing-TTL leak). Ensure all session types have TTL <= 3600s: redis-cli --scan --pattern 'session:*' | head -20 | xargs -I{} redis-cli TTL {}.
 remediation_action: flush_expired_sessions
 error_message: '[AUTH] AUTH-SESSION-SATURATE: memory_used_pct={redis_memory_pct}% sessions={redis_session_count} evictions={redis_evictions}/min reauth_rate={reauth_rate}/min'
 stack_trace: |
@@ -23,7 +23,7 @@ stack_trace: |
   cluster=auth-redis-cluster  mode=sentinel
   --- MEMORY STATUS ---
     used_memory={redis_memory_pct}%  maxmemory=4GB
-    eviction_policy=allkeys-lru  evictions={redis_evictions}/min
+    eviction_policy=volatile-lru  evictions={redis_evictions}/min
     sessions_active={redis_session_count}  sessions_baseline=500000
   --- EVICTION CASCADE ---
     T+0s    memory_threshold_exceeded
@@ -36,7 +36,7 @@ stack_trace: |
     activation-service: blocked on auth, queue building
   ACTION: increase_maxmemory=true  flush_expired=true  alert=AUTH-SESSION-SATURATE
 infrastructure_events:
-- body: '[AzureHealth] RedisCacheMemorySaturation: resource=meridian-session-cache memory_used_pct=98 eviction_policy=volatile-lru evictions_per_sec=450 region=westeurope'
+- body: '[AzureMonitor] RedisMemorySaturation: cluster=auth-redis-cluster host=meridian-vm-01 memory_used_pct=98 eviction_policy=volatile-lru evictions_per_sec=450 region=westeurope'
   severity: ERROR
   event_name: azure.health.RedisCacheMemorySaturation
   service: auth-service
@@ -50,14 +50,15 @@ correlation_attr:
   key: infra.redis_cluster_config
   value: redis-7.2.4-sentinel-patch
 fault_params:
-  redis_memory_pct: {randint: [95, 100]}
-  redis_session_count: {randint: [500000, 1000000]}
+  redis_memory_pct: {randint: [99, 100]}
+  redis_session_count: {randint: [750000, 1000000]}
   redis_evictions: {randint: [500, 2000]}
   reauth_rate: {randint: [1000, 5000]}
 rca_clues:
   auth-service:
-    auth.redis_memory_pct: {randint: [95, 100]}
+    auth.redis_memory_pct: {randint: [99, 100]}
     auth.eviction_rate_per_min: {randint: [500, 2000]}
+    auth.sessions_without_ttl_pct: {uniform: [30, 60], round: 0}
   identity-db:
     db.reauth_connection_spike: {randint: [200, 500]}
     db.connection_pool_stress: true
@@ -69,10 +70,15 @@ rca_clues:
     activation.queue_building: true
 business_impact:
   - kpi: business.activations_per_min
-    factor: {uniform: [0.15, 0.45]}
+    value: {uniform: [230.87, 265.63]}
   - kpi: business.revenue_usd_per_min
     factor: {uniform: [0.15, 0.45]}
   - kpi: business.voluntary_churn_rate_pct
     factor: {uniform: [2.0, 5.0]}
   - kpi: business.support_tickets_per_min
     factor: {uniform: [3.0, 6.0]}
+generator_impact:
+  redis_otel:
+    memory_approaching_maxmemory: 95.0
+    high_eviction_rate: 250.0
+    rejected_connections: 20.0

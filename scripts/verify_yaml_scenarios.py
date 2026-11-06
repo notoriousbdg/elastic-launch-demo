@@ -7,7 +7,9 @@ Checks performed for each scenario:
       Missing → warning only (treated as '1.0', compatible with current engine).
       If older MAJOR than engine → error (upgrade_required).
       If same MAJOR, older MINOR → warning (outdated_compatible).
-  2.  channel count == 20; numbers are contiguous 01–20
+  2.  channel count == 20; numbers are contiguous 01–20. Counted on the channel
+      *files* as well as the loaded registry: the loader keeps one file per
+      number, so a duplicate number would otherwise hide a dead channel.
   3.  each channel has required fields (name, error_type, affected_services,
       error_message, stack_trace, fault_params)
   4.  service count == 9
@@ -21,8 +23,8 @@ Checks performed for each scenario:
       by at least one placeholder (orphan check)
   10. every affected_services / cascade_services value is a key in services
   11. every k8s_clusters[].services value is a key in services
-  12. agent_config.system_prompt references all 20 channel error_types, and
-      every error_type in the prompt is present in a channel (bidirectional)
+  12. agent_config.system_prompt references all 20 channel error_types
+      (channels -> prompt only; stale error_types left in the prompt are not detected)
   13. trace_attributes.services keys are all real service names
   14. executive_kpi_emissions is a list; executive_kpi_emitter_service_name
       names a real service; KPI section field names match emissions names
@@ -33,6 +35,48 @@ Checks performed for each scenario:
   17. get_rca_clues() returns a dict (spot-check)
   18. get_trace_attributes() returns a non-empty dict when trace_attributes defined
   19. (warning only) cloud_provider distribution is balanced
+  20. k8s_clusters entries have provider/region/platform (not cloud_-prefixed keys)
+  21. (warning only) host.name values don't use the generic 'scaffold-' prefix
+  22. (warning only) at least one channel has non-empty rca_clues
+  23. (warning only) at least one service has non-empty topology
+  24. (warning only) entry_endpoints for the sort_order:1 service aren't generic stubs
+  25. (warning only) trace_attributes richness (>=3 attrs) per service
+  26. generator wiring: generator_impact only references real generator ids and
+      impact_keys (error); every generator enabled via scenario.yaml's
+      generators: block has >=1 channel wiring it via generator_impact
+      (warning — see Check 26 comments for why this isn't a hard error); and
+      lists each enabled generator's alert knobs that no channel sets (warning)
+  27. generator enablement (error): a channel's generator_impact may only name a
+      generator that is enabled for the scenario; every id in the generators:
+      block must be a real generator; every enabled generator has its required
+      config_fields set
+  28. checked-in host account and instance ids match ScenarioIdentity, and no
+      account or instance id is shared by two namespaces (scenarios/ and
+      scenarios_testing/)
+  29. generators/**/generator.py does not format f"{ns}- / f"{db_prefix}_ identity
+      or embed the shared AWS account 123456789012
+  30. every channel carries dict-form business_impact entries ({kpi, factor|value})
+      whose kpi names exist in executive_kpi_emissions, so faults move the
+      executive dashboard (error); factor ranges straddling 1.0 (warning)
+  31. every channel lists at least one *trace entry* service in affected_services
+      (sort_order-first service or one with entry_endpoints, excluding database /
+      generates_traces:false services) — the trace generator only raises the
+      error rate for entry services, so otherwise the ops dashboard stays green
+  32. business_impact is scope-proportional: classified with the real executive
+      palette bands, each channel needs enough red/yellow KPI tiles for its scope
+      tier (see SCOPE_TIERS) — otherwise the executive tiles stay green
+  34. every topology callee is a defined service (an edge to an undefined service
+      used to crash the trace generator, leaving every ops tile at N/A)
+  33. incr_key state keys are initialised as a dict ({init: {}} / init_per_key),
+      not a scalar, or the service telemetry loop crashes every tick
+  35. every {placeholder} in investigation_notes is a fault_params key — the
+      KB docs, Cortex runbooks and channel runbook skill fill them with the
+      parameter's range, and an unknown one is shown as a literal {name}.
+      Shell syntax such as curl's %{time_total} or ${VAR} is not a placeholder.
+  36. (warning only) evidence quality: a choice rca_clue that can emit a
+      healthy-looking value (OFF, INTACT, false...) does not always indicate the
+      fault, which leaves investigations unable to confirm the cause; and a choice
+      fault_param that can pick a unit the stack_trace lists as healthy
 
 Usage::
 
@@ -52,7 +96,7 @@ from __future__ import annotations
 
 import re
 import sys
-from collections import Counter
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -87,6 +131,134 @@ _CHANNEL_REQUIRED_FIELDS = (
 def _placeholders(text: str) -> set[str]:
     # Match {word} but not {{word}} (double-brace escapes are literal in log lines).
     return set(re.findall(r"(?<!\{)\{(\w+)\}(?!\})", text))
+
+
+def _notes_placeholders(text: str) -> set[str]:
+    # As _placeholders, but shell syntax (%{x}, ${x}, @{x}) in commands is literal.
+    return set(re.findall(r"(?<![{%$@])\{(\w+)\}(?!\})", text))
+
+
+# Choice values that read as healthy: a clue that can emit one does not always
+# point at the fault.  Choices between fault identities (tank, port) are fine.
+_HEALTHY_CHOICE_VALUES = frozenset({
+    "off", "ok", "okay", "normal", "nominal", "healthy", "intact", "pass",
+    "passed", "green", "none", "false", "no", "idle", "stable", "online", "up",
+})
+
+
+def channel_file_problems(channels_dir: Path) -> list[str]:
+    """Problems with the channel *files* in *channels_dir* (empty list = fine).
+
+    A scenario has exactly 20 channels, numbered 01-20, one file each. The loader
+    keeps a single file per number, so this must look at the files themselves.
+    """
+    files = sorted(channels_dir.glob("*.yaml")) if channels_dir.is_dir() else []
+    problems: list[str] = []
+    by_num: dict[int, list[str]] = {}
+    for f in files:
+        head = f.stem.split("-", 1)[0]
+        if not head.isdigit():
+            problems.append(f"channel file '{f.name}' does not start with a number")
+            continue
+        by_num.setdefault(int(head), []).append(f.name)
+
+    if len(files) != 20:
+        problems.append(f"channels/ has {len(files)} files (expected exactly 20)")
+    for num, names in sorted(by_num.items()):
+        if len(names) > 1:
+            problems.append(
+                f"duplicate channel number {num:02d}: {', '.join(names)} "
+                "(only the last by filename is loaded)"
+            )
+    outside = sorted(n for n in by_num if not 1 <= n <= 20)
+    if outside:
+        problems.append(f"channel numbers outside 01-20: {outside}")
+    missing = [n for n in range(1, 21) if n not in by_num]
+    if missing:
+        problems.append(f"missing channel files for numbers: {missing}")
+    return problems
+
+
+
+# Scope-proportional dashboard impact (Check 32).  scope = 2 x affected + cascade;
+# each tier lists the minimum number of non-green and red executive KPI tiles a
+# channel's business_impact must produce.  Larger faults must light up more tiles.
+SCOPE_TIERS = (
+    # (max_scope, name, min_non_green, min_red)
+    (3, "minor", 2, 1),
+    (5, "moderate", 3, 2),
+    (10**6, "major", 4, 3),
+)
+
+
+def scope_tier(channel: dict[str, Any]) -> tuple[str, int, int, int]:
+    """Return ``(tier_name, scope, min_non_green, min_red)`` for a channel dict."""
+    scope = 2 * len(channel.get("affected_services") or []) + len(channel.get("cascade_services") or [])
+    for max_scope, name, non_green, red in SCOPE_TIERS:
+        if scope <= max_scope:
+            return name, scope, non_green, red
+    raise AssertionError("unreachable")
+
+
+def _uniform_mid(spec: Any) -> float | None:
+    if isinstance(spec, dict):
+        b = spec.get("uniform") or spec.get("randint")
+        if b and len(b) == 2:
+            return (float(b[0]) + float(b[1])) / 2
+    return None
+
+
+def impact_band_counts(
+    impacts: list[Any], emissions: dict[str, Any],
+) -> dict[str, int]:
+    # ``emissions`` maps KPI name -> the executive_kpi_emissions entry dict
+    # ({name, value, unit, better?}).
+    """Count green/yellow/red KPI tiles a channel's business_impact produces.
+
+    Uses the executive dashboard's own palette bands (``kpi_band``) on the
+    midpoint of the faulted value (nominal midpoint x factor midpoint, or the
+    ``value`` midpoint), so what the verifier accepts is what the tiles show.
+    """
+    from elastic_config.dashboards.generate_exec_dashboard import kpi_band, kpi_band_usable
+
+    counts = {"green": 0, "yellow": 0, "red": 0}
+    for impact in impacts or []:
+        if not isinstance(impact, dict):
+            continue
+        emission = emissions.get(impact.get("kpi")) or {}
+        spec = emission.get("value")
+        better = emission.get("better")
+        nominal = _uniform_mid(spec)
+        if nominal is None:
+            continue
+        if "factor" in impact:
+            fm = _uniform_mid(impact["factor"])
+            val = nominal * fm if fm is not None else None
+        else:
+            val = _uniform_mid(impact.get("value"))
+        band = (
+            kpi_band(impact["kpi"], spec, val, better)
+            if val is not None and kpi_band_usable(impact["kpi"], spec, better) else None
+        )
+        if band:
+            counts[band] += 1
+    return counts
+
+
+def _incr_key_state_keys(steps: Any) -> set[str]:
+    """Collect ``state_key`` of every incr_key step, recursing into nested step lists."""
+    found: set[str] = set()
+    if isinstance(steps, list):
+        for st in steps:
+            found |= _incr_key_state_keys(st)
+    elif isinstance(steps, dict):
+        ik = steps.get("incr_key")
+        if isinstance(ik, dict) and ik.get("state_key"):
+            found.add(str(ik["state_key"]))
+        for v in steps.values():
+            if isinstance(v, (list, dict)):
+                found |= _incr_key_state_keys(v)
+    return found
 
 
 def check_scenario(scenario_id: str) -> tuple[list[str], list[str]]:
@@ -139,6 +311,8 @@ def check_scenario(scenario_id: str) -> tuple[list[str], list[str]]:
     # ── Check 2+3: Channels count, contiguity, required fields ───────────────
     reg = s.channel_registry           # filtered view (display fields only)
     raw_channels = s._channels         # full channel data (includes fault_params, etc.)
+
+    errors.extend(channel_file_problems(scenario_dir / "channels"))
 
     if len(reg) != 20:
         errors.append(f"channel_registry has {len(reg)} entries (expected 20)")
@@ -228,12 +402,67 @@ def check_scenario(scenario_id: str) -> tuple[list[str], list[str]]:
                 f"{sorted(orphans)}"
             )
 
+    # ── Check 35: investigation_notes placeholders are fault_params ───────────
+    # ── Check 36 (warning): evidence quality ──────────────────────────────────
+    for ch_num, ch in sorted(reg.items()):
+        raw = raw_channels.get(ch_num, ch)
+        label = f"ch {ch_num} '{ch.get('name', '')}'"
+        param_keys = set((raw.get("fault_params") or {}).keys())
+        unknown = _notes_placeholders(raw.get("investigation_notes", "")) - param_keys
+        if unknown:
+            errors.append(
+                f"{label}: investigation_notes placeholders with no fault_params key "
+                f"(rendered as literal text): {sorted(unknown)}"
+            )
+        choice_clues = sorted(
+            f"{svc}:{key}"
+            for svc, clues in (raw.get("rca_clues") or {}).items()
+            for key, spec in (clues or {}).items()
+            if isinstance(spec, dict) and "choice" in spec
+            and any(str(v).strip().lower() in _HEALTHY_CHOICE_VALUES for v in spec["choice"])
+        )
+        if choice_clues:
+            warnings.append(
+                f"{label}: choice rca_clues can emit a healthy-looking value, so they "
+                f"do not always indicate the fault — keep only fault values: {choice_clues}"
+            )
+        # A faulty unit the frame dump also lists as healthy contradicts itself.
+        healthy_lines = [
+            line for line in (raw.get("stack_trace", "") or "").splitlines()
+            if re.search(r"\b(NOMINAL|PASS|TRACKING|OK|HEALTHY)\b", line)
+        ]
+        for key, spec in (raw.get("fault_params") or {}).items():
+            if not (isinstance(spec, dict) and "choice" in spec):
+                continue
+            clashes = sorted({
+                str(opt) for opt in spec["choice"]
+                if len(str(opt)) > 2
+                and any(re.search(rf"(?<![\w-]){re.escape(str(opt))}(?![\w-])", ln) for ln in healthy_lines)
+            })
+            if clashes:
+                warnings.append(
+                    f"{label}: fault_params '{key}' can pick {clashes}, which the "
+                    f"stack_trace lists as healthy — pin the faulty unit"
+                )
+
     # ── Check 10: Referential integrity — affected_services / cascade_services ─
     for ch_num, ch in sorted(reg.items()):
         for field in ("affected_services", "cascade_services"):
             for svc in ch.get(field, []):
                 if svc not in svc_keys:
                     errors.append(f"ch {ch_num}: {field} '{svc}' not in services")
+
+    # ── Check 10b: topology callees must be real services ──────────────────────
+    # An edge to an undefined service has no OTLP resource: the trace generator
+    # used to KeyError on it and emit no spans at all (every ops tile N/A).
+    for caller, calls in sorted(s.service_topology.items()):
+        for callee, *_ in calls:
+            if callee not in svc_keys:
+                errors.append(
+                    f"service '{caller}': topology callee '{callee}' is not a defined service "
+                    f"(add services/{callee}.yaml or remove the edge; external systems are "
+                    f"modelled as db_operations or log attributes, not topology)"
+                )
 
     # ── Check 11: k8s_clusters services membership ────────────────────────────
     for cluster in s.k8s_clusters:
@@ -336,6 +565,113 @@ def check_scenario(scenario_id: str) -> tuple[list[str], list[str]]:
                             f"any executive_kpi_emissions name"
                         )
                         break  # one error per section is enough
+
+    # ── Check 30: business_impact drives the executive dashboard ──────────────
+    # Without a dict-form business_impact the emitter leaves every KPI at its
+    # nominal draw, so the executive dashboard stays green during a fault.
+    if s.executive_kpi_emitter_service_name and isinstance(kpi_em, list):
+        unwired = []
+        for num, ch in sorted(raw_channels.items()):
+            impacts = ch.get("business_impact")
+            if not impacts:
+                unwired.append(num)
+                continue
+            if not isinstance(impacts, list):
+                errors.append(f"ch {num}: business_impact must be a list of {{kpi, factor|value}} entries")
+                continue
+            for impact in impacts:
+                if not isinstance(impact, dict) or not ("factor" in impact or "value" in impact):
+                    errors.append(
+                        f"ch {num}: business_impact entry {impact!r} must be a dict with "
+                        f"'kpi' and 'factor' or 'value' (bare KPI names are ignored at runtime)"
+                    )
+                elif impact.get("kpi") not in emission_names:
+                    errors.append(
+                        f"ch {num}: business_impact kpi '{impact.get('kpi')}' is not in executive_kpi_emissions"
+                    )
+                else:
+                    bounds = (impact.get("factor") or {}).get("uniform")
+                    if bounds and min(bounds) < 1.0 < max(bounds):
+                        warnings.append(
+                            f"ch {num}: business_impact factor {bounds} for '{impact['kpi']}' "
+                            f"straddles 1.0 — the KPI may not visibly move"
+                        )
+        if unwired:
+            errors.append(
+                f"channel(s) {unwired} have no business_impact — the executive "
+                f"dashboard will not react to them (see contract/channels.md §Business impact)"
+            )
+
+    # ── Check 31: a trace entry service is in affected_services ───────────────
+    # generators/traces/generator.py only raises the error rate when a trace's
+    # entry service is in the channel's affected_services, so a fault that only
+    # names a DB / non-entry service never turns the ops dashboard tiles red.
+    _no_trace = {
+        n for n, sp in svc_specs.items()
+        if sp.get("generates_traces") is False or sp.get("subsystem") == "database"
+    }
+    _ordered = sorted(
+        (n for n in svc_specs if n not in _no_trace),
+        key=lambda n: svc_specs[n].get("sort_order", 99),
+    )
+    entry_services = set(_ordered[:1]) | {
+        n for n, eps in s.entry_endpoints.items() if eps and n not in _no_trace
+    }
+    for num, ch in sorted(raw_channels.items()):
+        if not set(ch.get("affected_services") or []) & entry_services:
+            errors.append(
+                f"ch {num}: affected_services {ch.get('affected_services')} contains no trace "
+                f"entry service {sorted(entry_services)} — the ops dashboard will not react "
+                f"(add an entry service, see contract/channels.md §Dashboard visibility)"
+            )
+
+    # ── Check 32: business_impact is scope-proportional ───────────────────────
+    if s.executive_kpi_emitter_service_name and isinstance(kpi_em, list):
+        _emissions = {e["name"]: e for e in kpi_em if isinstance(e, dict) and "name" in e}
+        for _name, _em in sorted(_emissions.items()):
+            if _em.get("better") not in (None, "lower", "higher"):
+                errors.append(f"executive_kpi_emissions '{_name}': better must be 'lower' or 'higher', got {_em['better']!r}")
+        _impacted = {
+            i.get("kpi") for ch in raw_channels.values() for i in (ch.get("business_impact") or [])
+            if isinstance(i, dict)
+        }
+        _undirected = sorted(
+            k for k in _impacted
+            if k in _emissions and _emissions[k].get("better") is None
+        )
+        if _undirected:
+            errors.append(
+                f"executive_kpi_emissions {_undirected} are used by business_impact but have no "
+                f"`better: lower|higher` — tile colours would depend on a name-keyword guess"
+            )
+        for num, ch in sorted(raw_channels.items()):
+            if not ch.get("business_impact"):
+                continue  # already reported by Check 30
+            tier, scope, need_non_green, need_red = scope_tier(ch)
+            counts = impact_band_counts(ch["business_impact"], _emissions)
+            non_green = counts["yellow"] + counts["red"]
+            if non_green < need_non_green or counts["red"] < need_red:
+                errors.append(
+                    f"ch {num}: {tier} fault (scope {scope}) needs >= {need_non_green} yellow/red "
+                    f"KPI tiles incl. >= {need_red} red, business_impact gives {counts} "
+                    f"(see contract/channels.md §Dashboard visibility)"
+                )
+
+    # ── Check 33: incr_key state keys are dicts ───────────────────────────────
+    for name, spec in svc_specs.items():
+        keys = _incr_key_state_keys(spec.get("steps")) | _incr_key_state_keys(
+            spec.get("per_active_channel_steps")
+        )
+        for key in sorted(keys):
+            init = (spec.get("state") or {}).get(key)
+            ok = isinstance(init, dict) and (
+                "init_per_key" in init or ("init" in init and isinstance(init["init"], dict))
+            )
+            if not ok:
+                errors.append(
+                    f"service '{name}': incr_key state '{key}' must be initialised as a dict "
+                    f"(`{key}: {{init: {{}}}}`), got {init!r} — a scalar init crashes the loop"
+                )
 
     # ── Check 15: entry_endpoints on the sort_order:1 service ─────────────────
     entry_svc_name: str | None = None
@@ -493,7 +829,192 @@ def check_scenario(scenario_id: str) -> tuple[list[str], list[str]]:
             f"(e.g. add tier, feature flags, customer segment, region)"
         )
 
+    # ── Check 26: generator wiring ─────────────────────────────────────────────
+    # 26a/26b (error): generator_impact blocks may only reference real generator
+    # ids and real impact_keys for that generator — typos here silently no-op
+    # and the alert never breaches.
+    # 26c (warning, not error): every enabled generator should have at least one
+    # channel wiring it via generator_impact. This is a warning rather than a
+    # hard error because some enabled generators are legitimately unwired —
+    # e.g. QA/integration-testing harnesses that enable generators purely to
+    # keep telemetry flowing, or companion generators (like azure_billing
+    # riding along with azure_openai) for which a dedicated fault channel may
+    # not make sense. The scaffolder enforces 1:1 wiring at creation time for
+    # new scenarios; this check surfaces (without blocking) gaps in existing ones.
+    from generator_engine.registry import GENERATORS
+
+    # A `gid: false` (or `enabled: false`) entry turns a generator off, so it is
+    # not "enabled" and has nothing to wire.
+    enabled_gens = {
+        gid
+        for gid, cfg in (s.generators or {}).items()
+        if cfg is not False and not (isinstance(cfg, dict) and cfg.get("enabled") is False)
+    }
+    impacted_gens: set[str] = set()
+    impacted_keys: dict[str, set[str]] = {}
+    for ch in raw_channels.values():
+        gi = ch.get("generator_impact") or {}
+        for gid, keys in gi.items():
+            if gid not in GENERATORS:
+                errors.append(
+                    f"generator_impact references unknown generator id '{gid}' "
+                    f"(check python3 -m generator_engine.registry --list)"
+                )
+                continue
+            impacted_gens.add(gid)
+            spec = GENERATORS[gid]
+            for key in keys or {}:
+                impacted_keys.setdefault(gid, set()).add(key)
+                if key not in spec.impact_keys:
+                    errors.append(
+                        f"generator_impact.{gid} references unknown impact_key "
+                        f"'{key}' (check python3 -m generator_engine.registry "
+                        f"--describe {gid})"
+                    )
+
+    # Check 27: enablement. enabled_specs() applies the scenario's generators:
+    # block on top of each generator's default_enabled and ignores unknown ids,
+    # so each of these would otherwise fail silently at runtime.
+    from generator_engine.registry import enabled_specs
+
+    gen_block = s.generators or {}
+    enabled = {spec.id: spec for spec in enabled_specs(s)}
+    for gid in sorted(gen_block):
+        if gid not in GENERATORS:
+            errors.append(
+                f"generators: block references unknown generator id '{gid}' "
+                "(ignored at runtime; check python3 -m generator_engine.registry --list)"
+            )
+    for num, ch in sorted(raw_channels.items()):
+        for gid in (ch.get("generator_impact") or {}):
+            if gid in GENERATORS and gid not in enabled:
+                errors.append(
+                    f"channel {num:02d} ({ch.get('error_type')}) drives generator "
+                    f"'{gid}', which is not enabled for this scenario — the fault "
+                    f"would never be generated; add '{gid}: true' to generators:"
+                )
+    for gid, spec in sorted(enabled.items()):
+        cfg = gen_block.get(gid)
+        provided = cfg if isinstance(cfg, dict) else {}
+        for fld, meta in (spec.config_fields or {}).items():
+            if meta.get("required") and meta.get("default") is None and fld not in provided:
+                errors.append(
+                    f"generator '{gid}' is enabled but required config '{fld}' is not set"
+                )
+
+    # infra_impact: keys are applied by ChaosController.set_infra_spikes; an unknown key
+    # is stored and then never read by any generator.
+    from app.chaos.controller import INFRA_SPIKE_DEFAULTS
+
+    for num, ch in sorted(raw_channels.items()):
+        for key in (ch.get("infra_impact") or {}):
+            if key not in INFRA_SPIKE_DEFAULTS:
+                errors.append(
+                    f"channel {num:02d} ({ch.get('error_type')}) infra_impact key "
+                    f"'{key}' is not an infra spike (valid: {sorted(INFRA_SPIKE_DEFAULTS)})"
+                )
+
+    unwired = sorted(enabled_gens - impacted_gens)
+    if unwired:
+        warnings.append(
+            f"generator(s) enabled in scenario.yaml but not wired to any "
+            f"channel's generator_impact: {unwired} — their alerts will "
+            f"never fire; add a dedicated chaos channel or confirm this is "
+            f"intentional (e.g. a companion/QA-only generator)"
+        )
+
+    # 26d (warning): alert knobs no channel sets. Covers every enabled generator,
+    # core ones included, so a scenario shows which package alerts it can never
+    # fire. Knobs are the impact keys whose doc names an alert.
+    for gid, spec in sorted(enabled.items()):
+        if gid in unwired:
+            continue
+        knobs = {
+            key for key, meta in spec.impact_keys.items()
+            if "Drive alert" in meta.get("doc", "") or "Alert:" in meta.get("doc", "")
+        }
+        missing = sorted(knobs - impacted_keys.get(gid, set()))
+        if missing:
+            warnings.append(
+                f"{gid}: {len(missing)}/{len(knobs)} alert knob(s) not set by any "
+                f"channel, so those alerts never fire: {missing}"
+            )
+
     return errors, warnings
+
+
+_HOST_ID_FIELDS = ("host.id", "cloud.account.id", "cloud.instance.id")
+_GENERATOR_IDENTITY_BANS = (
+    'f"{ns}-',
+    "f'{ns}-",
+    'f"{db_prefix}_',
+    "f'{db_prefix}_",
+    "123456789012",
+)
+
+
+def check_checked_in_host_identity() -> list[str]:
+    """Fail when a scenario file's host ids disagree with ScenarioIdentity."""
+    import yaml
+    from generator_engine.identity import apply_host_identity
+
+    errors: list[str] = []
+    accounts: dict[str, set[str]] = defaultdict(set)
+    instances: dict[str, list[str]] = defaultdict(list)
+    roots = [SCENARIOS_DIR, REPO_ROOT / "scenarios_testing"]
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for path in sorted(root.glob("*/scenario.yaml")):
+            data = yaml.safe_load(path.read_text()) or {}
+            ns = str(data.get("namespace") or path.parent.name)
+            hosts = data.get("hosts") or []
+            expected = apply_host_identity(list(hosts), ns)
+            label = f"{root.name}/{path.parent.name}"
+            if len(hosts) != len(expected):
+                errors.append(f"{label}: host count mismatch")
+                continue
+            for index, (raw, exp) in enumerate(zip(hosts, expected), start=1):
+                for field in _HOST_ID_FIELDS:
+                    got = "" if raw.get(field) is None else str(raw.get(field))
+                    want = "" if exp.get(field) is None else str(exp.get(field))
+                    if got != want:
+                        errors.append(
+                            f"{label} host {index} {field} is {got!r}, expected {want!r}"
+                        )
+                account = str(raw.get("cloud.account.id") or "")
+                if account:
+                    accounts[account].add(ns)
+                for field in ("host.id", "cloud.instance.id"):
+                    value = str(raw.get(field) or "")
+                    if value:
+                        instances[value].append(f"{ns} {field} host {index}")
+    for account, namespaces in sorted(accounts.items()):
+        if len(namespaces) > 1:
+            errors.append(
+                f"cloud account {account} is shared by {sorted(namespaces)}"
+            )
+    for value, where in sorted(instances.items()):
+        namespaces = {item.split()[0] for item in where}
+        if len(namespaces) > 1 or len(where) > len(namespaces):
+            # Same namespace may repeat host.id and cloud.instance.id once each.
+            per_ns: dict[str, int] = Counter(item.split()[0] for item in where)
+            if len(namespaces) > 1 or any(count > 2 for count in per_ns.values()):
+                errors.append(f"instance id {value} is shared: {where}")
+    return errors
+
+
+def check_generator_identity_literals() -> list[str]:
+    """Fail when a generator still formats identity or uses the shared AWS account."""
+    errors: list[str] = []
+    for path in sorted((REPO_ROOT / "generators").glob("*/generator.py")):
+        text = path.read_text()
+        for ban in _GENERATOR_IDENTITY_BANS:
+            if ban in text:
+                errors.append(
+                    f"{path.relative_to(REPO_ROOT)} contains {ban!r}"
+                )
+    return errors
 
 
 def main() -> None:
@@ -535,6 +1056,18 @@ def main() -> None:
                 print(f"    ~ {w}")
         else:
             print(f"✓ {sid}")
+
+    for title, findings in (
+        ("host identity", check_checked_in_host_identity()),
+        ("generator identity literals", check_generator_identity_literals()),
+    ):
+        if findings:
+            overall_ok = False
+            print(f"\n✗ {title}:")
+            for finding in findings:
+                print(f"    - {finding}")
+        else:
+            print(f"\n✓ {title}")
 
     if overall_ok:
         print("\nAll checks passed.")

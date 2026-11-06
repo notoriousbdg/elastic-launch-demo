@@ -10,7 +10,7 @@ cascade_services:
 - oee-analytics
 description: Process variation exceeds Cpk threshold on a critical-to-quality (CTQ) characteristic
 investigation_notes: |-
-  Root Cause: An out-of-control signal (Western Electric / Nelson rules) means the process mean or variance has shifted. Common causes: tooling wear, fixture loosening, raw-material lot change, or a temperature/humidity excursion in the work cell. A rule-2 (9 points on one side of mean) is more diagnostic than a rule-1 (single point beyond 3σ).
+  Root Cause: An out-of-control signal (Western Electric / Nelson rules) means the process mean or variance has shifted. Common causes: tooling wear, fixture loosening, raw-material lot change, or a temperature/humidity excursion in the work cell. A Nelson rule-2 (9 points on one side of mean) is more diagnostic than a rule-1 (single point beyond 3σ). A raw-material lot change within 60 min before the signal points to the lot; tool wear under 80% of rated life, a fixture torque check of PASS and a cell temperature within ±1°C of setpoint rule out the others.
   Remediation: 1) Pull the SPC chart: `qc-admin spc-chart --characteristic {characteristic} --window 8h`. 2) Identify the rule fired and the timestamp. 3) Cross-reference with raw-material lot changes (`mes-admin lot-history --line {line_id}`) and operator/tooling changes. 4) Pause auto-release and shift to 100% inspection until the cause is found and corrected: `qc-admin set-inspection-mode --line {line_id} --mode FULL`. 5) Document a CAPA per IATF 16949.
 remediation_action: tighten_inspection
 error_message: '[QC] SPC-OUT-OF-CONTROL: characteristic={characteristic} rule={spc_rule} cpk={cpk} target_cpk=1.33 line={line_id}'
@@ -20,7 +20,7 @@ stack_trace: |-
   ------------------------------------------------------------------------
   RULE FIRED: {spc_rule}
     Western Electric Rule 1: 1 point beyond 3σ
-    Western Electric Rule 2: 9 consecutive points on one side of mean
+    Nelson Rule 2: 9 consecutive points on one side of mean
     Nelson Rule 5: 2 of 3 consecutive points beyond 2σ on same side
   ------------------------------------------------------------------------
   SAMPLE  | VALUE   | STATUS
@@ -35,15 +35,19 @@ correlation_attr:
   value: baseline-v2.3-tightened
 fault_params:
   characteristic: {choice: [LENGTH_MM, DIAMETER_MM, TORQUE_NM, WEIGHT_G]}
-  spc_rule: {choice: [WE-1, WE-2, Nelson-5]}
+  spc_rule: WE-1
   cpk: {uniform: [0.65, 1.20], round: 3}
   line_id: {choice: [LINE-01, LINE-02, LINE-03, LINE-04, LINE-05]}
 rca_clues:
   quality-inspector:
-    quality.spc_rule_fired: {choice: [WE-1, WE-2, Nelson-5]}
+    quality.spc_rule_fired: WE-1
     quality.cpk: {uniform: [0.65, 1.20], round: 3}
+    quality.tool_wear_pct: {uniform: [20, 40], round: 0}
+    quality.fixture_torque_check: PASS
+    quality.cell_temp_delta_c: {uniform: [-0.5, 0.5], round: 1}
   mes-controller:
     mes.lot_under_quarantine: true
+    mes.raw_lot_changed_min_ago: {randint: [5, 40]}
   oee-analytics:
     oee.quality_pct: {uniform: [82.0, 94.0], round: 1}
 business_impact:

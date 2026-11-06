@@ -9,7 +9,7 @@ cascade_services:
 - erp-bridge
 description: Hourly inventory delta batch from WMS to ERP failed; auto-retry eligible
 investigation_notes: |-
-  Root Cause: Transient batch failures in the WMS→ERP path are usually idempotent network or RFC-session timeouts. The auto-retry job is safe to invoke when the failure mode is `SOCKET_TIMEOUT` or `RFC_HANDLE_INVALID`.
+  Root Cause: Transient batch failures in the WMS→ERP path are usually idempotent network or RFC-session timeouts. The auto-retry job is safe to invoke when the failure mode is `SOCKET_TIMEOUT` or `RFC_INVALID_HANDLE`.
   Remediation (auto-remediate eligible): 1) Identify the failed batch: `wms-admin batch-status --last 1h --status FAILED`. 2) Retry: `wms-admin retry-batch --batch {batch_id}`. 3) Confirm reconciliation: `wms-admin reconcile --since {failure_time}`.
 remediation_action: retry_inventory_batch
 error_message: '[WMS] INVENTORY-SYNC-BATCH-FAIL: batch={batch_id} records={record_count} failure_mode={failure_mode} retry_count={retry_count}'
@@ -32,18 +32,18 @@ fault_params:
     format: "BATCH-{n}"
     n: {randint: [100000, 999999]}
   record_count: {randint: [500, 4500]}
-  failure_mode: {choice: [SOCKET_TIMEOUT, RFC_HANDLE_INVALID]}
+  failure_mode: RFC_INVALID_HANDLE
   retry_count: {randint: [0, 2]}
   failure_time: 2026-05-06T14:15:32Z
 rca_clues:
   inventory-sync:
-    wms.batch_failure_mode: {choice: [SOCKET_TIMEOUT, RFC_HANDLE_INVALID]}
+    wms.batch_failure_mode: RFC_INVALID_HANDLE
     wms.retry_count: {randint: [0, 2]}
   erp-bridge:
     erp.idoc_outbox_lag_s: {randint: [60, 600]}
 business_impact:
   - kpi: business.inventory_turns
-    factor: {uniform: [0.40, 0.70]}
+    value: {uniform: [4.25, 4.9], round: 2}
   - kpi: business.on_time_delivery_pct
     factor: {uniform: [0.45, 0.75]}
   - kpi: business.material_variance_usd

@@ -1,0 +1,64 @@
+service: data-platform
+sort_order: 5
+cloud_provider: gcp
+cloud_region: us-central1
+cloud_platform: gcp_compute_engine
+cloud_availability_zone: us-central1-b
+subsystem: orchestration
+language: python
+
+topology:
+  - [ml-inference, /api/v1/models/status, GET]
+  - [session-service, /api/v1/session/nodes, GET]
+
+db_operations:
+  - [SELECT, dag_runs, "SELECT dag_id, state FROM dag_runs WHERE execution_date > ?"]
+
+emit_fault_logs: true
+kpi_emitter: false
+
+constants:
+  DAGS: [generator_healthcheck_dag, fault_schedule_dag, coverage_report_dag]
+
+state:
+  _dag_runs_total: {init: 0}
+  _last_summary: {init: now}
+
+steps:
+  - sample:
+      dag_id: {choice: DAGS}
+      dag_failure_pct:
+        if_active: {uniform: [20.0, 70.0], round: 1}
+        else: {uniform: [0.0, 2.0], round: 1}
+      control_plane_latency_ms:
+        if_active: {uniform: [500.0, 5000.0], round: 1}
+        else: {uniform: [10.0, 90.0], round: 1}
+  - counter:
+      state_key: _dag_runs_total
+      by: 1
+  - log:
+      level: INFO
+      message: '[data-platform] dag_cycle dag={dag_id} failure_rate={dag_failure_pct}% control_plane_latency={control_plane_latency_ms}ms total={_dag_runs_total}'
+      attrs:
+        operation: dag_cycle
+        orchestration.dag_id: {var: dag_id}
+        orchestration.dag_failure_pct: {var: dag_failure_pct}
+        orchestration.control_plane_latency_ms: {var: control_plane_latency_ms}
+  - metric:
+      name: data_platform.dag_failure_pct
+      value: {var: dag_failure_pct}
+      unit: '%'
+  - metric:
+      name: data_platform.control_plane_latency_ms
+      value: {var: control_plane_latency_ms}
+      unit: ms
+  - every:
+      seconds: 15
+      state_key: _last_summary
+      steps:
+        - log:
+            level: INFO
+            message: '[data-platform] summary dag_runs={_dag_runs_total} status=NOMINAL'
+            attrs:
+              operation: summary
+              orchestration.dag_runs: {var: _dag_runs_total}

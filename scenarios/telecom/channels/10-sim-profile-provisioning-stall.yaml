@@ -14,7 +14,7 @@ investigation_notes: |
   1. Check HSS registration queue depth — queue above 5000 indicates HLR is not processing registrations fast enough. Monitor: provisioning-service metrics for hlr.registration_queue_depth.
   2. SIM OTA provisioning requires: ICCID validation → subscriber-db profile lookup → HLR registration → SIM profile download. The stall is at HLR registration step.
   3. Review HLR processing rate — baseline 200 registrations/min should handle normal activation volume. If processing rate drops below 50/min, check HLR backend connectivity.
-  4. eSIM activations are also affected — remote SIM provisioning (RSP) uses the same HLR registration path. eSIM QR code generation succeeds but profile activation fails.
+  4. eSIM activations are also affected — the SM-DP+ profile download (RSP) is independent of the HLR, but the IMSI must still be provisioned in the HSS/HLR before network attach. The eSIM profile downloads but the device cannot attach.
   5. Subscriber-db writes are queuing because provisioning-service cannot complete the activation cycle. Monitor activation_log table for INSERT queue growth.
 remediation_action: restart_hlr_registration
 error_message: '[PROV] PROV-SIM-STALL: iccid={sim_iccid} msisdn={msisdn} hlr_queue={hlr_queue_depth} processing_rate={hlr_processing_rate}/min stage={sim_stage}'
@@ -35,7 +35,7 @@ stack_trace: |
     esim_affected=true  physical_sim_affected=true
   ACTION: scale_hlr_workers=true  drain_queue=true  alert=PROV-SIM-STALL
 infrastructure_events:
-- body: '[GCP-Monitoring] HLRProvisioningStall: queue_depth=5000 processing_rate=0/min hlr_connection=TIMEOUT target=subscriber-db region=europe-west3'
+- body: '[GCP-Monitoring] HLRProvisioningStall: queue_depth=5000 processing_rate=35/min hlr_connection=SLOW target=hlr-fe-fra region=europe-west3'
   severity: ERROR
   event_name: gcp.monitoring.HLRProvisioningStall
   service: provisioning-service
@@ -50,16 +50,16 @@ correlation_attr:
 fault_params:
   sim_iccid: {format: "8949{n}", n: {randint: [1000000000000000, 9999999999999999]}}
   msisdn: {choice: ['+4915110000000', '+4916010000000', '+4917010000000']}
-  hlr_queue_depth: {randint: [3000, 8000]}
-  hlr_processing_rate: {randint: [20, 80]}
-  sim_stage: {choice: [hlr_registration, profile_download, ota_activation]}
+  hlr_queue_depth: {randint: [5100, 8000]}
+  hlr_processing_rate: {randint: [20, 48]}
+  sim_stage: hlr_registration
   sim_type: {choice: [physical_sim, esim, embedded_sim]}
   hlr_stall_ms: {randint: [10000, 60000]}
-  hlr_deficit: {randint: [100, 180]}
+  hlr_deficit: {randint: [152, 180]}
 rca_clues:
   provisioning-service:
-    provisioning.hlr_queue_depth: {randint: [3000, 8000]}
-    provisioning.hlr_processing_rate: {randint: [20, 80]}
+    provisioning.hlr_queue_depth: {randint: [5100, 8000]}
+    provisioning.hlr_processing_rate: {randint: [20, 48]}
   subscriber-db:
     db.activation_log_insert_queue: {randint: [500, 2000]}
     db.pending_status_updates: {randint: [200, 1000]}
@@ -71,10 +71,10 @@ rca_clues:
     notification.queue_depth: {randint: [500, 2000]}
 business_impact:
   - kpi: business.activations_per_min
-    factor: {uniform: [0.15, 0.40]}
+    value: {uniform: [141.36, 162.64]}
   - kpi: business.esim_provisions_per_min
-    factor: {uniform: [0.10, 0.35]}
+    value: {uniform: [74.4, 85.6]}
   - kpi: business.port_ins_per_min
-    factor: {uniform: [0.25, 0.55]}
+    value: {uniform: [76.73, 88.28]}
   - kpi: business.support_tickets_per_min
     factor: {uniform: [2.0, 4.5]}

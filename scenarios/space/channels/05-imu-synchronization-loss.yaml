@@ -24,10 +24,9 @@ stack_trace: |-
   ---------------------------------------------------------------
   AXIS    DRIFT_MS   THRESHOLD   GYRO_BIAS    STATUS
   {axis}       {drift_ms}ms    {threshold_ms}ms       +0.0021d/h   **SYNC_LOSS**
-  Y       0.42ms     3.0ms       -0.0008d/h   NOMINAL
-  Z       0.18ms     3.0ms       +0.0003d/h   NOMINAL
+  OTHERS  >{threshold_ms}ms   {threshold_ms}ms       --           **SYNC_LOSS** (common clock)
   ---------------------------------------------------------------
-  PPS_SOURCE: GPS_1PPS | CLOCK_REF: OCXO-A | TEMP: 42.1C
+  PPS_SOURCE: GPS_1PPS_A | PPS_AMPLITUDE: {pps_amplitude_v}V (min 2.5V) | CLOCK_REF: OCXO-A | TEMP: 42.1C
   GNC-IMU-SYNC-LOSS: {axis}-axis clock drift {drift_ms}ms exceeds threshold
   ACTION: Initiate IMU realignment sequence, verify PPS signal integrity
 correlation_attr:
@@ -37,12 +36,14 @@ fault_params:
   axis: {choice: [X, Y, Z]}
   drift_ms: {uniform: [5.0, 25.0], round: 1}
   threshold_ms: 3.0
+  pps_amplitude_v: {uniform: [1.4, 2.3], round: 2}
 rca_clues:
   navigation:
-    gnc.pps_source: {choice: [GPS_1PPS_A, GPS_1PPS_B]}
-    gnc.ocxo_temp_c: {uniform: [41.0, 43.5], round: 1}
+    gnc.pps_source: GPS_1PPS_A
+    gnc.pps_amplitude_v: {uniform: [1.4, 2.3], round: 2}
+    gnc.ocxo_temp_c: {uniform: [41.7, 42.3], round: 1}
   sensor-validator:
-    validation.imu_drift_axis: {choice: [X, Y, Z]}
+    validation.imu_drift_axis: X,Y,Z
     validation.clock_delta_ms: {uniform: [3.5, 15.0], round: 1}
   mission-control:
     upstream.degraded_subsystem: guidance

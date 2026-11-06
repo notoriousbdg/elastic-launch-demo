@@ -1,0 +1,67 @@
+name: Kms Throttling
+subsystem: payments
+vehicle_section: payments_pipeline
+error_type: PAY-KMS-THROTTLED
+sensor_type: health_check
+affected_services: [payment-processor]
+cascade_services: [orders-service]
+
+description: >
+  The payment-processor Lambda calls KMS Decrypt for every card token and exceeds the regional KMS request-rate quota, so calls fail with ThrottlingException and charges are delayed or rejected.
+
+investigation_notes: |
+  1. Search body.text for *PAY-KMS-THROTTLED* and confirm the {kms_requests_per_sec} requests/sec rate against the account-wide us-west-2 quota for symmetric cryptographic operations ({kms_quota_per_sec}/sec, shared by every caller in the account); key {kms_key_alias} carries most of the calls.
+  2. In CloudTrail, filter eventName=Decrypt and errorCode=ThrottlingException for the payment-processor execution role; the count should match {throttled_calls} in this window.
+  3. Check CloudWatch Lambda metrics for payment-processor: average Duration climbs to about 4500ms (alert above 3000ms, baseline under 800ms) because each throttled Decrypt retries up to 4 times with about {sdk_backoff_ms}ms of SDK backoff, and concurrent executions rise as invocations wait.
+  4. Confirm there is no data key caching: each invocation issues one Decrypt per token (cache_hit_ratio is {cache_hit_pct}%).
+  5. Check whether a traffic spike or a new Lambda concurrency limit raised the call rate (infra.kms_decrypt_mode shows direct per-call decrypt).
+  6. After approval, enable data key caching (AWS Encryption SDK cache or envelope encryption with a cached data key), then verify ThrottlingException count drops to 0 and request a quota increase only if still needed.
+
+remediation_action: enable_kms_data_key_caching
+
+error_message: |
+  PAY-KMS-THROTTLED: key={kms_key_alias} error=ThrottlingException requests_per_sec={kms_requests_per_sec} quota_per_sec={kms_quota_per_sec} throttled_calls={throttled_calls} cache_hit_pct={cache_hit_pct}
+
+stack_trace: |
+  botocore.exceptions.ClientError: An error occurred (ThrottlingException) when calling the Decrypt operation (reached max retries: 4): You have exceeded the rate at which you may call KMS. Reduce the frequency of your calls.
+    File "payment_processor/handler.py", line 88, in charge
+      card = token_vault.decrypt_token(token)
+    File "payment_processor/token_vault.py", line 41, in decrypt_token
+      return kms.decrypt(CiphertextBlob=blob, KeyId="{kms_key_alias}")
+    kms_key_alias={kms_key_alias}  requests_per_sec={kms_requests_per_sec}  quota_per_sec={kms_quota_per_sec}
+    sdk_backoff_ms={sdk_backoff_ms}  throttled_calls={throttled_calls}  data_key_cache=disabled
+
+correlation_attr:
+  key: infra.kms_decrypt_mode
+  value: per-call-decrypt-no-data-key-cache
+
+fault_params:
+  kms_key_alias: alias/payment-card-tokens
+  kms_requests_per_sec: {randint: [50500, 58000]}
+  kms_quota_per_sec: 50000
+  throttled_calls: {randint: [400, 6000]}
+  cache_hit_pct: {randint: [0, 3]}
+  sdk_backoff_ms: {randint: [900, 1100]}
+
+rca_clues:
+  payment-processor:
+    kms.throttling_exceptions: {randint: [400, 6000]}
+    kms.decrypt_calls_per_invocation: {randint: [1, 4]}
+    lambda.duration_inflation_ms: {randint: [3600, 4400]}
+    kms.data_key_cache_hit_pct: {randint: [0, 3]}
+  orders-service:
+    payment.charge_timeout_count: {randint: [50, 600]}
+    payment.retry_queue_depth: {randint: [20, 400]}
+
+business_impact:
+  - kpi: business.throughput_rpm
+    factor: {uniform: [0.30, 0.60]}
+  - kpi: business.error_rate_pct
+    factor: {uniform: [3.0, 7.0]}
+  - kpi: business.latency_p99_ms
+    factor: {uniform: [2.5, 5.0]}
+
+generator_impact:
+  aws_lambda_otel:
+    high_average_duration: 4500.0
+    high_concurrent_executions: 1000.0

@@ -1,0 +1,37 @@
+name: "GT activemq_otel: blocked_sends_detected"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-ACTIVEMQ-BLOCKED-SENDS-DETECTED
+sensor_type: impact_key_probe
+affected_services:
+  - gt-activemq-aws-svc-1
+cascade_services:
+  - gt-activemq-aws-svc-2
+description: "Tests impact_key blocked_sends_detected on generator activemq_otel."
+investigation_notes: |-
+  1. Verify activemq_otel is active and reporting metrics.
+  2. Check that the blocked_sends_detected metric has reached the trigger value (50.0).
+  3. Confirm generator_impact for activemq_otel.blocked_sends_detected is set to 50.0.
+  4. Look for correlated changes in service gt-activemq-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_blocked_sends_detected_baseline
+error_message: "GT-PROBE: gen=activemq_otel key=blocked_sends_detected value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=activemq_otel
+  impact_key: blocked_sends_detected
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 50.0
+  svc_name: gt-activemq-aws-svc-1
+rca_clues:
+  gt-activemq-aws-svc-1:
+    probe.generator: activemq_otel
+    probe.impact_key: blocked_sends_detected
+    probe.trigger_value: 50.0
+  gt-activemq-aws-svc-2:
+    probe.upstream_generator: activemq_otel
+    probe.upstream_key: blocked_sends_detected
+generator_impact:
+  activemq_otel:
+    blocked_sends_detected: 50.0

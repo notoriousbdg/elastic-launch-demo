@@ -1,0 +1,675 @@
+scenario_id: azure
+scenario_name: Azure GenAI Assistant
+scenario_description: GenAI customer assistant running entirely on Azure across eastus, eastus2 and westeurope. Application
+  Gateway fronts assistant-web, chat-orchestrator calls Azure OpenAI and Microsoft Foundry deployments through model-router,
+  AI Search and embeddings ground the answers, Cosmos DB stores history and cost-guard enforces token budgets. 20 fault channels
+  spanning quota, availability, cost and identity.
+namespace: azureai
+scenario_icon: 🤖
+sort_order: 11
+nominal_label: ONLINE
+schema_version: '1.2'
+apm_ml_bucket_span: 1m
+generators:
+  azure_ai_foundry: true
+  azure_billing: true
+  azure_activity_otel: true
+  azure_gateway_otel: true
+  azure_openai: true
+  aws_vpcflow_otel: false
+  gcp_vpcflow_otel: false
+hosts:
+  - host.name: azureai-azure-host-eus
+    host.id: /subscriptions/38514ecc-371c-5d0a-9c14-ab99a396027d/resourceGroups/azureai-rg/providers/Microsoft.Compute/virtualMachines/azureai-vm-01
+    host.arch: amd64
+    host.type: Standard_D4s_v3
+    host.cpu.model.name: Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz
+    host.cpu.vendor.id: GenuineIntel
+    host.cpu.family: '6'
+    host.cpu.model.id: '106'
+    host.cpu.stepping: '6'
+    host.cpu.cache.l2.size: 1310720
+    host.ip:
+      - 10.1.1.10
+      - 172.16.1.10
+    host.mac:
+      - 0a:1b:2c:3d:4e:10
+      - 0a:1b:2c:3d:4e:11
+    os.type: linux
+    os.description: Ubuntu 22.04.5 LTS
+    cloud.provider: azure
+    cloud.platform: azure_vm
+    cloud.region: eastus
+    cloud.availability_zone: eastus-1
+    cloud.account.id: 38514ecc-371c-5d0a-9c14-ab99a396027d
+    cloud.instance.id: azureai-vm-01
+    cpu_count: 4
+    memory_total_bytes: 17179869184
+    disk_total_bytes: 137438953472
+  - host.name: azureai-azure-host-eus2
+    host.id: /subscriptions/38514ecc-371c-5d0a-9c14-ab99a396027d/resourceGroups/azureai-rg/providers/Microsoft.Compute/virtualMachines/azureai-vm-02
+    host.arch: amd64
+    host.type: Standard_D4s_v3
+    host.cpu.model.name: Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz
+    host.cpu.vendor.id: GenuineIntel
+    host.cpu.family: '6'
+    host.cpu.model.id: '106'
+    host.cpu.stepping: '6'
+    host.cpu.cache.l2.size: 1310720
+    host.ip:
+      - 10.2.1.10
+      - 172.16.2.10
+    host.mac:
+      - 0a:1b:2c:3d:4e:20
+      - 0a:1b:2c:3d:4e:21
+    os.type: linux
+    os.description: Ubuntu 22.04.5 LTS
+    cloud.provider: azure
+    cloud.platform: azure_vm
+    cloud.region: eastus2
+    cloud.availability_zone: eastus2-1
+    cloud.account.id: 38514ecc-371c-5d0a-9c14-ab99a396027d
+    cloud.instance.id: azureai-vm-02
+    cpu_count: 4
+    memory_total_bytes: 17179869184
+    disk_total_bytes: 137438953472
+  - host.name: azureai-azure-host-weu
+    host.id: /subscriptions/38514ecc-371c-5d0a-9c14-ab99a396027d/resourceGroups/azureai-rg/providers/Microsoft.Compute/virtualMachines/azureai-vm-03
+    host.arch: amd64
+    host.type: Standard_D4s_v3
+    host.cpu.model.name: Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz
+    host.cpu.vendor.id: GenuineIntel
+    host.cpu.family: '6'
+    host.cpu.model.id: '106'
+    host.cpu.stepping: '6'
+    host.cpu.cache.l2.size: 1310720
+    host.ip:
+      - 10.3.1.10
+      - 172.16.3.10
+    host.mac:
+      - 0a:1b:2c:3d:4e:30
+      - 0a:1b:2c:3d:4e:31
+    os.type: linux
+    os.description: Ubuntu 22.04.5 LTS
+    cloud.provider: azure
+    cloud.platform: azure_vm
+    cloud.region: westeurope
+    cloud.availability_zone: westeurope-1
+    cloud.account.id: 38514ecc-371c-5d0a-9c14-ab99a396027d
+    cloud.instance.id: azureai-vm-03
+    cpu_count: 4
+    memory_total_bytes: 17179869184
+    disk_total_bytes: 137438953472
+k8s_clusters:
+  - name: azureai-aks-eus
+    provider: azure
+    platform: azure_aks
+    region: eastus
+    zones:
+      - eastus-1
+      - eastus-2
+      - eastus-3
+    os_description: Ubuntu 22.04
+    services:
+      - assistant-web
+      - chat-orchestrator
+      - retrieval-service
+  - name: azureai-aks-eus2
+    provider: azure
+    platform: azure_aks
+    region: eastus2
+    zones:
+      - eastus2-1
+      - eastus2-2
+      - eastus2-3
+    os_description: Ubuntu 22.04
+    services:
+      - prompt-guard
+      - model-router
+      - embedding-service
+  - name: azureai-aks-weu
+    provider: azure
+    platform: azure_aks
+    region: westeurope
+    zones:
+      - westeurope-1
+      - westeurope-2
+      - westeurope-3
+    os_description: Ubuntu 22.04
+    services:
+      - conversation-store
+      - cost-guard
+      - identity-broker
+agent_config:
+  id: azureai-analyst
+  name: Azure GenAI Assistant Operations Analyst
+  assessment_tool_name: azureai_readiness_assessment
+  system_prompt: "You are an expert SRE assistant for the Azure GenAI Assistant.\n\nWhen an incident is reported, your job\
+    \ is to:\n1. Diagnose the root cause from the error_type, stack traces, and RCA clues\n2. Recommend a specific remediation\
+    \ action\n3. Explain business impact in terms the executive team understands\n\nKnown fault channels and their error types:\n\
+    \  - AI-FOUNDRY-AVAILABILITY-DROP: Foundry Model Availability Drop\n  - AI-TOKEN-SPEND-RUNAWAY: Runaway Token Spend\n\
+    \  - IAM-PRIV-ESC-KEYVAULT-READ: Privilege Escalation Key Vault Read\n  - AGW-WAF-BLOCK-SURGE: App Gateway Waf Block Surge\n\
+    \  - RAG-INDEX-STALE: Rag Index Staleness\n  - EMB-DIMENSION-MISMATCH: Embedding Dimension Mismatch\n  - COSMOS-RU-THROTTLED:\
+    \ Cosmos Ru Throttling\n  - PROMPT-FILTER-FALSE-POSITIVE: Content Filter False Positives\n  - PROMPT-INJECTION-SPIKE:\
+    \ Prompt Injection Spike\n  - ROUTER-BAD-CANARY: Model Router Bad Canary\n  - RAG-LATENCY-REGRESSION: Retrieval Latency\
+    \ Regression\n  - COSMOS-HISTORY-INCONSISTENT: Conversation History Inconsistent\n  - EMB-BATCH-BACKLOG: Embedding Batch\
+    \ Backlog\n  - COST-BUDGET-MISCONFIG: Cost Budget Misconfiguration\n  - AGENT-TOOL-LOOP: Orchestrator Tool Loop\n  - OPENAI-QUOTA-EXHAUSTED:\
+    \ Openai Quota Exhaustion\n  - IDENTITY-TOKEN-EXPIRED: Entra Token Expiry\n  - AGW-BACKEND-UNHEALTHY: App Gateway Backend\
+    \ Unhealthy\n  - COSMOS-AUTOSCALE-CEILING: Cosmos Autoscale Ceiling\n  - RAG-CACHE-STALE: Retrieval Cache Stale\n\nFor\
+    \ each fault, examine the affected_services first, then look for cascade_services that may be experiencing downstream\
+    \ effects."
+assessment_tool_config:
+  id: azureai_readiness_assessment
+  description: 'Comprehensive Azure GenAI assistant readiness assessment. Evaluates the Application Gateway front door, Azure
+    OpenAI and Microsoft Foundry model capacity and availability, AI Search grounding freshness, Cosmos DB throughput headroom,
+    token spend against budget and Activity Log security signals. Returns evidence for each dimension so risks and causal
+    chains can be surfaced. Log message field: body.text (never use ''body'' alone).'
+executive_kpi_emitter_service_name: chat-orchestrator
+executive_dashboard_intro: '**Azure GenAI Assistant KPIs** — conversations and resolution, model capacity and quota, cost
+  and tokens, and platform reliability. Synthetic `business.*` OTLP gauges from `chat-orchestrator`.'
+executive_kpi_sections:
+  - header: '**Conversations and resolution** — volume, resolution, escalation, satisfaction'
+    specs:
+      - - Conversations / min
+        - metrics.business.conversations_per_min
+      - - Resolution rate (%)
+        - metrics.business.resolution_rate_pct
+      - - Escalations to a human / min
+        - metrics.business.human_escalations_per_min
+      - - CSAT (1-5)
+        - metrics.business.csat_score
+      - - Avg turns per conversation
+        - metrics.business.avg_turns_per_conversation
+      - - Answer groundedness (%)
+        - metrics.business.groundedness_pct
+  - header: '**Model capacity and quota** — quota headroom, availability, throttling'
+    specs:
+      - - OpenAI quota headroom (%)
+        - metrics.business.openai_quota_headroom_pct
+      - - Model availability (%)
+        - metrics.business.model_availability_pct
+      - - Throttled requests / min
+        - metrics.business.throttled_requests_per_min
+      - - Time to first token p95 (ms)
+        - metrics.business.ttft_p95_ms
+      - - Provisioned utilization (%)
+        - metrics.business.provisioned_utilization_pct
+      - - Fallback-model share (%)
+        - metrics.business.fallback_model_share_pct
+  - header: '**Cost and tokens** — cost per conversation, spend, budget'
+    specs:
+      - - Cost per conversation (USD)
+        - metrics.business.cost_per_conversation_usd
+      - - Token spend (USD/hr)
+        - metrics.business.token_spend_usd_per_hr
+      - - Tokens per conversation
+        - metrics.business.tokens_per_conversation
+      - - Budget consumed MTD (%)
+        - metrics.business.budget_consumed_mtd_pct
+      - - Prompt cache hit rate (%)
+        - metrics.business.prompt_cache_hit_pct
+      - - Blocked prompts / min
+        - metrics.business.blocked_prompts_per_min
+  - header: '**Platform reliability** — throughput, errors, latency, availability'
+    specs:
+      - - Throughput (req/min)
+        - metrics.business.throughput_rpm
+      - - Error rate (%)
+        - metrics.business.error_rate_pct
+      - - P99 latency (ms)
+        - metrics.business.latency_p99_ms
+      - - Availability (%)
+        - metrics.business.availability_pct
+      - - Retrieval p95 latency (ms)
+        - metrics.business.retrieval_latency_p95_ms
+      - - Active sessions
+        - metrics.business.active_sessions
+executive_trend_charts:
+  - title: Conversations / min
+    field: metrics.business.conversations_per_min
+    y_label: conv/min
+  - title: Resolution rate (%)
+    field: metrics.business.resolution_rate_pct
+    y_label: '%'
+  - title: Cost per conversation (USD)
+    field: metrics.business.cost_per_conversation_usd
+    y_label: USD
+  - title: OpenAI quota headroom (%)
+    field: metrics.business.openai_quota_headroom_pct
+    y_label: '%'
+  - title: P99 latency (ms)
+    field: metrics.business.latency_p99_ms
+    y_label: ms
+  - title: Availability (%)
+    field: metrics.business.availability_pct
+    y_label: '%'
+executive_kpi_emissions:
+  - name: business.conversations_per_min
+    better: higher
+    value:
+      uniform:
+        - 200.0
+        - 3000.0
+      round: 0
+    unit: conv/min
+  - name: business.resolution_rate_pct
+    better: higher
+    value:
+      uniform:
+        - 70.0
+        - 95.0
+      round: 1
+    unit: '%'
+  - name: business.human_escalations_per_min
+    value:
+      randint:
+        - 5
+        - 60
+    unit: escalations/min
+  - name: business.csat_score
+    value:
+      uniform:
+        - 4.1
+        - 4.7
+      round: 2
+    unit: score
+  - name: business.avg_turns_per_conversation
+    better: higher
+    value:
+      uniform:
+        - 3.5
+        - 7.5
+      round: 1
+    unit: turns
+  - name: business.groundedness_pct
+    value:
+      uniform:
+        - 91.0
+        - 98.0
+      round: 1
+    unit: '%'
+  - name: business.openai_quota_headroom_pct
+    better: higher
+    value:
+      uniform:
+        - 25.0
+        - 60.0
+      round: 1
+    unit: '%'
+  - name: business.model_availability_pct
+    better: higher
+    value:
+      uniform:
+        - 99.3
+        - 99.98
+      round: 2
+    unit: '%'
+  - name: business.throttled_requests_per_min
+    better: lower
+    value:
+      randint:
+        - 0
+        - 25
+    unit: requests/min
+  - name: business.ttft_p95_ms
+    value:
+      randint:
+        - 450
+        - 1400
+    unit: ms
+  - name: business.provisioned_utilization_pct
+    value:
+      uniform:
+        - 45.0
+        - 75.0
+      round: 1
+    unit: '%'
+  - name: business.fallback_model_share_pct
+    value:
+      uniform:
+        - 1.0
+        - 6.0
+      round: 1
+    unit: '%'
+  - name: business.cost_per_conversation_usd
+    better: lower
+    value:
+      uniform:
+        - 0.018
+        - 0.045
+      round: 4
+    unit: USD
+  - name: business.token_spend_usd_per_hr
+    better: lower
+    value:
+      uniform:
+        - 120.0
+        - 380.0
+      round: 0
+    unit: USD/hr
+  - name: business.tokens_per_conversation
+    better: lower
+    value:
+      randint:
+        - 2400
+        - 6800
+    unit: tokens
+  - name: business.budget_consumed_mtd_pct
+    value:
+      uniform:
+        - 38.0
+        - 62.0
+      round: 1
+    unit: '%'
+  - name: business.prompt_cache_hit_pct
+    better: higher
+    value:
+      uniform:
+        - 35.0
+        - 60.0
+      round: 1
+    unit: '%'
+  - name: business.blocked_prompts_per_min
+    value:
+      randint:
+        - 1
+        - 18
+    unit: prompts/min
+  - name: business.throughput_rpm
+    better: higher
+    value:
+      uniform:
+        - 1000.0
+        - 50000.0
+      round: 0
+    unit: req/min
+  - name: business.error_rate_pct
+    better: lower
+    value:
+      uniform:
+        - 0.0
+        - 5.0
+      round: 2
+    unit: '%'
+  - name: business.latency_p99_ms
+    better: lower
+    value:
+      uniform:
+        - 50.0
+        - 500.0
+      round: 0
+    unit: ms
+  - name: business.availability_pct
+    better: higher
+    value:
+      uniform:
+        - 99.0
+        - 100.0
+      round: 2
+    unit: '%'
+  - name: business.retrieval_latency_p95_ms
+    better: lower
+    value:
+      randint:
+        - 80
+        - 260
+    unit: ms
+  - name: business.active_sessions
+    value:
+      randint:
+        - 3000
+        - 15000
+    unit: sessions
+raw_log_profile:
+  service_name: azureai-assistant-web
+  user_id_prefix: u
+  tier_field: user_tier
+  tier_values:
+    - - standard
+      - 80
+    - - premium
+      - 20
+  country_weights:
+    US: 35
+    GB: 15
+    DE: 15
+    FR: 10
+    JP: 10
+    IN: 15
+  methods:
+    - GET
+    - POST
+    - PUT
+    - DELETE
+  paths:
+    - /api/v1/chat
+    - /api/v1/chat/stream
+    - /api/v1/conversations
+    - /api/v1/feedback
+    - /api/v1/health
+  change_point_path: /api/v1/chat
+trace_attributes:
+  base:
+    platform.region:
+      choice:
+        - eastus
+        - eastus
+        - eastus2
+        - westeurope
+    platform.traffic_tier:
+      choice:
+        - normal
+        - normal
+        - elevated
+        - peak
+  services:
+    assistant-web:
+      svc.version:
+        choice:
+          - 1.0.0
+          - 1.0.1
+          - 1.1.0
+      svc.environment:
+        choice:
+          - prod
+          - prod
+          - staging
+      client.channel:
+        choice:
+          - web
+          - mobile
+          - widget
+      agw.listener:
+        choice:
+          - https-443
+      customer.tier:
+        choice:
+          - free
+          - standard
+          - enterprise
+    chat-orchestrator:
+      svc.version:
+        choice:
+          - 1.0.0
+          - 1.0.1
+          - 1.1.0
+      svc.environment:
+        choice:
+          - prod
+          - prod
+          - staging
+      orchestration.mode:
+        choice:
+          - rag
+          - rag
+          - agent
+      model.family:
+        choice:
+          - chat-large
+          - chat-small
+      conversation.turn_bucket:
+        choice:
+          - 1-3
+          - 4-10
+          - 10+
+    retrieval-service:
+      svc.version:
+        choice:
+          - 1.0.0
+          - 1.0.1
+          - 1.1.0
+      svc.environment:
+        choice:
+          - prod
+          - prod
+          - staging
+      search.index:
+        choice:
+          - kb-docs-v7
+      search.mode:
+        choice:
+          - hybrid
+          - hybrid
+          - semantic
+      search.ranker:
+        choice:
+          - semantic-v2
+    prompt-guard:
+      svc.version:
+        choice:
+          - 1.0.0
+          - 1.0.1
+          - 1.1.0
+      svc.environment:
+        choice:
+          - prod
+          - prod
+          - staging
+      policy.version:
+        choice:
+          - '2026.09'
+          - '2026.10'
+      guard.mode:
+        choice:
+          - enforce
+          - enforce
+          - audit
+      guard.category:
+        choice:
+          - safe
+          - safe
+          - borderline
+    model-router:
+      svc.version:
+        choice:
+          - 1.0.0
+          - 1.0.1
+          - 1.1.0
+      svc.environment:
+        choice:
+          - prod
+          - prod
+          - staging
+      model.deployment:
+        choice:
+          - chat-primary
+          - chat-primary
+          - foundry-secondary
+      routing.policy:
+        choice:
+          - latency
+          - cost
+          - quality
+      canary.share:
+        choice:
+          - 0
+          - 0
+          - 0.1
+    embedding-service:
+      svc.version:
+        choice:
+          - 1.0.0
+          - 1.0.1
+          - 1.1.0
+      svc.environment:
+        choice:
+          - prod
+          - prod
+          - staging
+      embedding.model:
+        choice:
+          - embed-large-v3
+      batch.size:
+        choice:
+          - 16
+          - 32
+          - 64
+      vector.dimensions:
+        choice:
+          - 1536
+    conversation-store:
+      svc.version:
+        choice:
+          - 1.0.0
+          - 1.0.1
+          - 1.1.0
+      svc.environment:
+        choice:
+          - prod
+          - prod
+          - staging
+      cosmos.container:
+        choice:
+          - conversations
+      cosmos.consistency:
+        choice:
+          - session
+      partition.key:
+        choice:
+          - /tenantId
+    cost-guard:
+      svc.version:
+        choice:
+          - 1.0.0
+          - 1.0.1
+          - 1.1.0
+      svc.environment:
+        choice:
+          - prod
+          - prod
+          - staging
+      budget.scope:
+        choice:
+          - tenant
+          - tenant
+          - global
+      budget.currency:
+        choice:
+          - USD
+      budget.enforcement:
+        choice:
+          - soft
+          - hard
+    identity-broker:
+      svc.version:
+        choice:
+          - 1.0.0
+          - 1.0.1
+          - 1.1.0
+      svc.environment:
+        choice:
+          - prod
+          - prod
+          - staging
+      idp.type:
+        choice:
+          - entra-id
+      token.type:
+        choice:
+          - access
+          - access
+          - refresh
+      tenant.model:
+        choice:
+          - multi
+          - single

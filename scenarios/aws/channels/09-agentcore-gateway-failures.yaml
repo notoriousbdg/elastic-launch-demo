@@ -1,0 +1,93 @@
+name: Agentcore Gateway Failures
+subsystem: api_gateway
+vehicle_section: api_gateway_pipeline
+error_type: SUP-AGENTCORE-GATEWAY-ERRORS
+sensor_type: error_rate
+affected_services: [support-assistant]
+cascade_services: [storefront-web]
+
+description: >
+  Amazon Bedrock AgentCore gateway tool calls from support-assistant fail and slow down because the credential for a gateway target was rotated without updating the target.
+
+investigation_notes: |
+  1. Search body.text for *SUP-AGENTCORE-GATEWAY-ERRORS* and read the failing gateway ({gateway_id}) and target ({target_name}).
+  2. In CloudWatch (AWS/Bedrock-AgentCore), compare gateway Errors ({gateway_errors} in window) and Latency ({gateway_latency_ms}ms avg, baseline near 600ms) with the alert thresholds (above 5 errors and above 5000ms average latency).
+  3. Inspect the target's outbound auth: the {credential_provider} still injects the pre-rotation API key and the upstream returns {upstream_status}. Each 401 is fast, but the agent retries the tool call with backoff before falling back, which is what lifts gateway latency to {gateway_latency_ms}ms.
+  4. Check CloudTrail and Secrets Manager for RotateSecret or UpdateSecret on {secret_name} (last rotation {rotation_time}); the gateway target still holds the previous version.
+  5. Confirm the cascade: storefront-web support chat shows tool-call fallbacks and slow responses while Bedrock model invocations stay healthy.
+  6. Immediate action: re-sync the gateway target credential to the current secret version and verify tool calls succeed and latency returns to baseline.
+
+remediation_action: rotate_agentcore_gateway_target
+
+error_message: |
+  SUP-AGENTCORE-GATEWAY-ERRORS: gateway tool call failed gateway={gateway_id} target={target_name} status={upstream_status} latency_ms={gateway_latency_ms}
+
+stack_trace: |
+  === BEDROCK AGENTCORE GATEWAY REPORT ===
+  agent=support-assistant  gateway={gateway_id}  region=eu-west-1
+  --- FAILING TARGET ---
+    target={target_name}  tool={tool_name}
+    credential_provider={credential_provider}  secret={secret_name}
+    upstream_status={upstream_status}  error=credential_rejected
+  --- METRICS ---
+    METRIC            BASELINE    CURRENT
+    gateway_errors    0           {gateway_errors}
+    gateway_latency   600         {gateway_latency_ms}
+  --- ROTATION ---
+    last_rotation={rotation_time}  target_credential_version=stale
+  --- IMPACT ---
+    failed_tool_calls={failed_tool_calls}  support_sessions_degraded={degraded_sessions}
+  ACTION: resync_target_credential=true  alert=SUP-AGENTCORE-GATEWAY-ERRORS
+
+infrastructure_events:
+  - body: '[CloudTrail] RotateSecret: secret=agentcore/orders-lookup-api-key rotation=completed region=eu-west-1 event_source=secretsmanager.amazonaws.com'
+    severity: WARN
+    event_name: aws.cloudtrail.RotateSecret
+    service: support-assistant
+    attributes:
+      cloud.provider: aws
+      cloud.service: secretsmanager
+      aws.cloudtrail.event_name: RotateSecret
+      aws.secretsmanager.secret: agentcore/orders-lookup-api-key
+      infrastructure.source: CloudTrail
+
+correlation_attr:
+  key: infra.agentcore_target_credential
+  value: orders-lookup-api-key-AWSPREVIOUS
+
+fault_params:
+  gateway_id: support-tools-gateway
+  target_name: orders-lookup-target
+  tool_name: lookup_order_status
+  credential_provider: api-key-credential-provider
+  secret_name: agentcore/orders-lookup-api-key
+  upstream_status: 401
+  gateway_errors: {randint: [25, 90]}
+  gateway_latency_ms: {randint: [8000, 9000]}
+  rotation_time: 2026-10-21T13:40:00Z
+  failed_tool_calls: {randint: [120, 800]}
+  degraded_sessions: {randint: [40, 300]}
+
+rca_clues:
+  support-assistant:
+    agentcore.gateway_target: orders-lookup-target
+    agentcore.credential_stale: true
+    agentcore.gateway_errors: {randint: [25, 90]}
+    bedrock.model_invocation_errors: 0
+  storefront-web:
+    support_chat.tool_fallback_count: {randint: [40, 300]}
+    support_chat.response_latency_ms: {randint: [8000, 15000]}
+
+business_impact:
+  - kpi: business.revenue_usd_per_min
+    factor: {uniform: [0.50, 0.80]}
+  - kpi: business.latency_p99_ms
+    factor: {uniform: [4.0, 8.0]}
+  - kpi: business.error_rate_pct
+    factor: {uniform: [2.0, 4.0]}
+
+generator_impact:
+  aws_bedrock_agentcore:
+    gateway_errors: 20.0
+    gateway_high_latency: 8000.0
+    identity_token_fetch_failures: 15.0

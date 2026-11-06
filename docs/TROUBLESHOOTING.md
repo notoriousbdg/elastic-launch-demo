@@ -180,12 +180,12 @@ KQL: body.text: "FuelPressureException" AND severity_text: "ERROR"
 **Diagnosis:**
 ```bash
 # Check channel status
-curl -s http://localhost/api/chaos/status/2 | python3 -m json.tool
+curl -s 'http://localhost/api/chaos/status/2?deployment_id=<scenario-id>' | python3 -m json.tool
 
 # Trigger and check response
 curl -s -X POST http://localhost/api/chaos/trigger \
   -H 'Content-Type: application/json' \
-  -d '{"channel": 2}' | python3 -m json.tool
+  -d '{"channel": 2, "deployment_id": "<scenario-id>"}' | python3 -m json.tool
 ```
 
 **Common causes:**
@@ -202,10 +202,10 @@ curl -s -X POST http://localhost/api/chaos/trigger \
 
 ```bash
 # Try the remediate endpoint
-curl -X POST http://localhost/api/remediate/2
+curl -X POST 'http://localhost/api/remediate/2?deployment_id=<scenario-id>'
 
 # Check status after
-curl -s http://localhost/api/chaos/status/2
+curl -s 'http://localhost/api/chaos/status/2?deployment_id=<scenario-id>'
 ```
 
 If the channel is stuck, restarting the app process will clear all channel states.
@@ -292,7 +292,7 @@ FROM logs,logs.*
 **Symptoms:** Workflow completes but no email arrives.
 
 **Check:**
-- Email step uses the deploy-time `__EMAIL_CONNECTOR_ID__` pin (`elastic-cloud-email` on ECH, `Elastic-Cloud-SMTP` or similar on serverless)
+- Email step uses `elastic-cloud-email` connector — this is a preconfigured system connector
 - Verify the `user_email` is being extracted correctly from the event
 - Check workflow execution details for the email step output
 
@@ -343,7 +343,7 @@ If none of the above resolves your issue:
 1. **Collect diagnostic info:**
    ```bash
    curl -s http://localhost/health
-   curl -s http://localhost/api/status | python3 -m json.tool
+   curl -s 'http://localhost/api/status?deployment_id=<scenario-id>' | python3 -m json.tool
    curl -s http://localhost/api/deployments | python3 -m json.tool
    ps aux | grep uvicorn
    python3 --version

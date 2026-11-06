@@ -11,8 +11,8 @@ cascade_services:
 - policy-manager
 description: Document upload and digital storage service failing affecting claims photos and policy documents
 investigation_notes: |-
-  1. Check S3 upload failure type: S3_WRITE_TIMEOUT indicates network latency to S3 endpoint — verify VPC endpoint configuration and S3 gateway endpoint health in us-east-1.
-  2. BUCKET_QUOTA_EXCEEDED means storage limits hit — check bucket metrics: aws s3api head-bucket --bucket banking-member-docs-prod. Request quota increase or implement lifecycle policy for old documents.
+  1. Check S3 upload failure type: S3_WRITE_TIMEOUT indicates network latency to the S3 endpoint. document-vault runs in Azure eastus, so PutObject calls reach us-east-1 over the Azure-to-AWS VPN through an S3 interface VPC endpoint — verify that endpoint's configuration and the VPN tunnel latency.
+  2. S3 has no per-bucket storage quota; 503 SlowDown means the request rate per prefix is too high — check the bucket's 5xxErrors and request metrics in CloudWatch and spread keys across prefixes.
   3. ENCRYPTION_KEY_ERROR indicates KMS key access issue — verify the document-vault service role has kms:GenerateDataKey and kms:Decrypt permissions. Check KMS key rotation status.
   4. PII detection pipeline is working (ssn=REDACTED, dob=REDACTED) but uploads are blocking at S3. With 2,847 queued documents and oldest pending 12min, enable local cache fallback to prevent data loss.
   5. Critical document types: DD214_DISCHARGE and COE_VA_LOAN uploads are time-sensitive for member benefits. Flag these for priority retry when S3 recovers.
@@ -46,10 +46,12 @@ fault_params:
   doc_type: {choice: [CLAIM_PHOTO, POLICY_DEC_PAGE, ID_VERIFICATION, PROOF_OF_LOSS, COE_VA_LOAN, DD214_DISCHARGE]}
   doc_size_mb: {uniform: [0.5, 25.0], round: 1}
   member_id: {format: "M-{n}", n: {randint: [1000000, 9999999]}}
-  upload_error: {choice: [S3_WRITE_TIMEOUT, BUCKET_QUOTA_EXCEEDED, ENCRYPTION_KEY_ERROR, NETWORK_TIMEOUT]}
+  upload_error: S3_WRITE_TIMEOUT
 rca_clues:
   document-vault:
-    document.s3_error_type: {choice: [S3_WRITE_TIMEOUT, BUCKET_QUOTA_EXCEEDED, ENCRYPTION_KEY_ERROR]}
+    document.s3_error_type: S3_WRITE_TIMEOUT
+    document.s3_put_latency_ms: {randint: [8000, 30000]}
+    document.kms_key_status: OK
     document.upload_queue_depth: {randint: [1000, 5000]}
   member-portal:
     portal.upload_retry_display: FAILED
@@ -62,8 +64,10 @@ rca_clues:
     policy.renewal_docs_delayed: {randint: [100, 400]}
 business_impact:
   - kpi: business.self_service_deflection_pct
-    factor: {uniform: [0.30, 0.60]}
+    factor: {uniform: [0.3, 0.6]}
   - kpi: business.loan_origination_usd_per_min
-    factor: {uniform: [0.40, 0.70]}
+    value: {uniform: [169260.0, 194740.0], round: 1}
   - kpi: business.complaint_tickets_per_min
     factor: {uniform: [2.0, 4.0]}
+  - kpi: business.active_digital_sessions
+    value: {uniform: [4464.0, 5136.0]}

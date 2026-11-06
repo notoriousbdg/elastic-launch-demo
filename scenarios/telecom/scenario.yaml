@@ -10,7 +10,7 @@ nominal_label: ONLINE
 apm_ml_bucket_span: 1m
 hosts:
 - host.name: meridian-aws-host-01
-  host.id: i-0e1f2a3b4c5d67890
+  host.id: i-bef4e82e54930e6dd
   host.arch: amd64
   host.type: m5.2xlarge
   host.image.id: ami-0abcdef1234567890
@@ -32,13 +32,13 @@ hosts:
   cloud.platform: aws_ec2
   cloud.region: eu-central-1
   cloud.availability_zone: eu-central-1a
-  cloud.account.id: '223344556677'
-  cloud.instance.id: i-0e1f2a3b4c5d67890
+  cloud.account.id: '946670923872'
+  cloud.instance.id: i-bef4e82e54930e6dd
   cpu_count: 8
   memory_total_bytes: 34359738368
   disk_total_bytes: 536870912000
 - host.name: meridian-gcp-host-01
-  host.id: '5678901234567890123'
+  host.id: '3495331398844651'
   host.arch: amd64
   host.type: n2-standard-8
   host.image.id: projects/debian-cloud/global/images/debian-12-bookworm-v20250115
@@ -60,13 +60,13 @@ hosts:
   cloud.platform: gcp_compute_engine
   cloud.region: europe-west3
   cloud.availability_zone: europe-west3-a
-  cloud.account.id: meridian-telecom-prod
-  cloud.instance.id: '5678901234567890123'
+  cloud.account.id: meridian-project
+  cloud.instance.id: '3495331398844651'
   cpu_count: 8
   memory_total_bytes: 34359738368
   disk_total_bytes: 274877906944
 - host.name: meridian-azure-host-01
-  host.id: /subscriptions/def-456/resourceGroups/meridian-rg/providers/Microsoft.Compute/virtualMachines/meridian-vm-01
+  host.id: /subscriptions/12d8df88-df58-5730-b296-0c3e02ec0ec3/resourceGroups/meridian-rg/providers/Microsoft.Compute/virtualMachines/meridian-vm-01
   host.arch: amd64
   host.type: Standard_D4s_v3
   host.image.id: Canonical:0001-com-ubuntu-server-jammy:22_04-lts-gen2:latest
@@ -88,7 +88,7 @@ hosts:
   cloud.platform: azure_vm
   cloud.region: westeurope
   cloud.availability_zone: westeurope-1
-  cloud.account.id: def-456-ghi-789
+  cloud.account.id: 12d8df88-df58-5730-b296-0c3e02ec0ec3
   cloud.instance.id: meridian-vm-01
   cpu_count: 4
   memory_total_bytes: 17179869184
@@ -223,75 +223,92 @@ executive_trend_charts:
   y_label: NPS
 executive_kpi_emissions:
 - name: business.activations_per_min
+  better: higher
   value: {randint: [380, 1850]}
   unit: activations/min
 - name: business.mvno_net_adds_per_min
+  better: higher
   value: {randint: [45, 280]}
   unit: net-adds/min
 - name: business.port_ins_per_min
+  better: higher
   value: {randint: [120, 420]}
   unit: port-ins/min
 - name: business.port_outs_per_min
   value: {randint: [90, 380]}
   unit: port-outs/min
 - name: business.esim_provisions_per_min
+  better: higher
   value: {randint: [200, 1100]}
   unit: provisions/min
 - name: business.active_subscribers_m
   value: {uniform: [18.4, 19.2], round: 3}
   unit: subscribers (M)
 - name: business.revenue_usd_per_min
+  better: higher
   value: {uniform: [82000.0, 145000.0], round: 1}
   unit: USD/min
 - name: business.consumer_arpu_usd
   value: {uniform: [38.2, 52.6], round: 2}
   unit: USD
 - name: business.enterprise_arpu_usd
+  better: higher
   value: {uniform: [285.0, 480.0], round: 2}
   unit: USD
 - name: business.mvno_partner_revenue_usd_per_min
+  better: higher
   value: {uniform: [4500.0, 12800.0], round: 1}
   unit: USD/min
 - name: business.data_overage_charges_usd_per_min
+  better: higher
   value: {uniform: [1800.0, 8500.0], round: 1}
   unit: USD/min
 - name: business.roaming_revenue_usd_per_min
   value: {uniform: [2200.0, 9400.0], round: 1}
   unit: USD/min
 - name: business.handover_success_pct
+  better: higher
   value: {uniform: [98.2, 99.8], round: 3}
   unit: '%'
 - name: business.ran_latency_p95_ms
+  better: lower
   value: {uniform: [18.0, 38.0], round: 1}
   unit: ms
 - name: business.voice_mos
   value: {uniform: [3.9, 4.4], round: 2}
   unit: MOS
 - name: business.data_session_success_pct
+  better: higher
   value: {uniform: [97.5, 99.6], round: 3}
   unit: '%'
 - name: business.volte_call_setup_success_pct
   value: {uniform: [98.1, 99.7], round: 3}
   unit: '%'
 - name: business.throughput_p50_mbps
+  better: higher
   value: {uniform: [85.0, 220.0], round: 1}
   unit: Mbps
 - name: business.voluntary_churn_rate_pct
+  better: lower
   value: {uniform: [0.8, 2.4], round: 3}
   unit: '%'
 - name: business.nps
+  better: higher
   value: {randint: [32, 58]}
   unit: NPS
 - name: business.support_tickets_per_min
+  better: lower
   value: {randint: [28, 180]}
   unit: tickets/min
 - name: business.avg_ticket_resolution_min
   value: {uniform: [8.0, 42.0], round: 1}
   unit: min
 - name: business.first_call_resolution_pct
+  better: higher
   value: {uniform: [62.0, 84.0], round: 2}
   unit: '%'
 - name: business.trouble_to_billing_ratio_pct
+  better: lower
   value: {uniform: [1.2, 4.8], round: 3}
   unit: '%'
 raw_log_profile:
@@ -389,3 +406,8 @@ theme:
   chaos_title: Incident Simulator
   service_label: Service
   channel_label: Incident
+
+generators:
+  redis_otel: true
+  aws_rds_otel: true
+  kafka_otel: true

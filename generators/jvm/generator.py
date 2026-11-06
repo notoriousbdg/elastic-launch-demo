@@ -1,0 +1,461 @@
+#!/usr/bin/env python3
+"""JVM Metrics Generator — sends JVM runtime metrics via OTLP.
+
+Generates gauge metrics that populate the [Metrics JVM] Overview dashboard:
+  - jvm.cpu.recent_utilization (ratio 0-1)
+  - jvm.cpu.time (seconds, cumulative)
+  - jvm.cpu.count (vCPUs)
+  - jvm.memory.used (bytes, per type + pool)
+  - jvm.memory.committed (bytes, per type + pool)
+  - jvm.memory.limit (bytes, per type + pool)
+  - jvm.memory.used_after_last_gc (bytes, per type + pool)
+  - jvm.thread.count (per state + daemon)
+  - jvm.class.count (current loaded)
+  - jvm.class.loaded (cumulative)
+  - jvm.class.unloaded (cumulative)
+
+All sent as gauges with asDouble to match what the Elastic JVM dashboard
+ES|QL queries expect (the dashboard casts with ::long).
+
+Only emits for services whose language == "java" in the active scenario.
+
+Usage (standalone):
+    python3 -m generators.jvm.generator
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import random
+import signal
+import threading
+
+from app.telemetry import OTLPClient, _format_attributes, SCHEMA_URL
+from app.config import ACTIVE_SCENARIO, SERVICES, NAMESPACE
+from generator_engine.es_doc_common import resolve_active_chaos
+from generator_engine.scrape_clock import scrape_now_ns, scrape_start_ns
+
+logger = logging.getLogger("jvm-metrics-generator")
+
+METRICS_INTERVAL = int(os.getenv("JVM_METRICS_INTERVAL", "10"))
+
+SCOPE_NAME = "io.opentelemetry.jvm"
+SCOPE_VERSION = "2.12.0-alpha"
+
+# Memory pool definitions: (pool_name, memory_type, limit_mb)
+HEAP_POOLS = [
+    ("G1 Eden Space", "heap", 256),
+    ("G1 Old Gen", "heap", 1024),
+    ("G1 Survivor Space", "heap", 64),
+]
+NON_HEAP_POOLS = [
+    ("Metaspace", "non_heap", 256),
+    ("CodeCache", "non_heap", 240),
+    ("Compressed Class Space", "non_heap", 64),
+]
+ALL_POOLS = HEAP_POOLS + NON_HEAP_POOLS
+
+# Thread states
+THREAD_STATES = ["runnable", "blocked", "waiting", "timed_waiting"]
+
+# GC definitions: (gc_name, gc_action)
+GC_TYPES = [
+    ("G1 Young Generation", "end of minor GC"),
+    ("G1 Old Generation", "end of major GC"),
+]
+
+# Histogram bucket boundaries for jvm.gc.duration (seconds)
+GC_HISTOGRAM_BOUNDS = [
+    0.005,
+    0.01,
+    0.025,
+    0.05,
+    0.075,
+    0.1,
+    0.25,
+    0.5,
+    1.0,
+    2.5,
+    5.0,
+    10.0,
+]
+
+
+def _load_java_services():
+    """Return list of (service_name, service_cfg) for Java services."""
+    from scenario_engine import get_scenario
+
+    scenario = get_scenario(ACTIVE_SCENARIO)
+    services = scenario.services
+    return [
+        (name, cfg) for name, cfg in services.items() if cfg.get("language") == "java"
+    ]
+
+
+def _build_resource(service_name: str, cfg: dict, namespace: str, topology: dict | None = None) -> dict:
+    attrs = {
+        "service.name": service_name,
+        "service.namespace": namespace,
+        "service.version": "1.0.0",
+        "service.instance.id": f"{service_name}-001",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "2.12.0",
+        "telemetry.sdk.language": "java",
+        "cloud.provider": cfg["cloud_provider"],
+        "cloud.platform": cfg["cloud_platform"],
+        "cloud.region": cfg["cloud_region"],
+        "cloud.availability_zone": cfg["cloud_availability_zone"],
+        "host.name": f"{service_name}-host",
+        "host.architecture": "amd64",
+        "os.type": "linux",
+        "process.runtime.name": "OpenJDK Runtime Environment",
+        "process.runtime.version": "21.0.5+11-LTS",
+        "process.runtime.description": "Eclipse Adoptium OpenJDK 64-Bit Server VM 21.0.5+11-LTS",
+        "data_stream.type": "metrics",
+        "data_stream.dataset": "generic",
+        "data_stream.namespace": "default",
+    }
+    if topology:
+        from generator_engine.infra_topology import get_resource_attrs
+        infra = get_resource_attrs(topology, service_name)
+        if infra:
+            attrs.update(infra)
+            entry = topology.get(service_name, {})
+            attrs["service.instance.id"] = entry.get("_service_instance_id", f"{service_name}-001")
+    return {"attributes": _format_attributes(attrs), "schemaUrl": SCHEMA_URL}
+
+
+class JvmState:
+    """Tracks stateful metric values for one JVM instance."""
+
+    def __init__(self, rng: random.Random):
+        self._rng = rng
+        self.cpu_time_s = rng.uniform(500.0, 5000.0)
+        self.classes_loaded_total = rng.randint(8000, 15000)
+        self.classes_unloaded_total = rng.randint(10, 200)
+        # Per-pool memory state: {pool_name: used_mb}
+        self.pool_used = {}
+        for pool_name, _, limit_mb in ALL_POOLS:
+            self.pool_used[pool_name] = rng.uniform(limit_mb * 0.2, limit_mb * 0.6)
+        # GC cumulative state: {gc_name: (count, sum_seconds)}
+        self.gc_cumulative: dict[str, tuple[int, float]] = {}
+        for gc_name, _ in GC_TYPES:
+            self.gc_cumulative[gc_name] = (
+                rng.randint(500, 5000),
+                rng.uniform(5.0, 50.0),
+            )
+
+    def tick(self):
+        rng = self._rng
+        self.cpu_time_s += rng.uniform(0.5, 3.0)
+        if rng.random() < 0.1:
+            self.classes_loaded_total += rng.randint(1, 10)
+        if rng.random() < 0.02:
+            self.classes_unloaded_total += rng.randint(1, 3)
+        for pool_name, _, limit_mb in ALL_POOLS:
+            delta = rng.uniform(-limit_mb * 0.05, limit_mb * 0.08)
+            self.pool_used[pool_name] = max(
+                limit_mb * 0.1,
+                min(limit_mb * 0.9, self.pool_used[pool_name] + delta),
+            )
+        # Simulate GC events
+        for gc_name, _ in GC_TYPES:
+            count, total_s = self.gc_cumulative[gc_name]
+            is_young = "Young" in gc_name
+            new_events = (
+                rng.randint(1, 5) if is_young else (1 if rng.random() < 0.3 else 0)
+            )
+            for _ in range(new_events):
+                # Young GC: 5-50ms, Old GC: 50-500ms
+                duration = (
+                    rng.uniform(0.005, 0.05) if is_young else rng.uniform(0.05, 0.5)
+                )
+                total_s += duration
+                count += 1
+            self.gc_cumulative[gc_name] = (count, total_s)
+
+
+def _gauge(name: str, unit: str, value: float, attributes: dict | None = None) -> dict:
+    """Build a gauge metric with asDouble value."""
+    dp: dict = {"timeUnixNano": scrape_now_ns(), "asDouble": float(value)}
+    if attributes:
+        dp["attributes"] = _format_attributes(attributes)
+    return {"name": name, "unit": unit, "gauge": {"dataPoints": [dp]}}
+
+
+def _histogram(
+    name: str,
+    unit: str,
+    count: int,
+    sum_val: float,
+    bounds: list[float],
+    rng: random.Random,
+    attributes: dict | None = None,
+) -> dict:
+    """Build a cumulative histogram metric."""
+    # Distribute count across buckets (weighted toward lower buckets)
+    bucket_counts = [0] * (len(bounds) + 1)
+    for _ in range(count):
+        # Pick a random bucket, biased toward earlier ones
+        idx = min(int(rng.expovariate(3.0) * len(bounds)), len(bounds))
+        bucket_counts[idx] += 1
+    dp: dict = {
+        "timeUnixNano": scrape_now_ns(),
+        "startTimeUnixNano": scrape_start_ns(600),  # 10 min window
+        "count": count,
+        "sum": sum_val,
+        "bucketCounts": bucket_counts,
+        "explicitBounds": bounds,
+        "min": sum_val / max(count, 1) * 0.1,
+        "max": sum_val / max(count, 1) * 3.0,
+    }
+    if attributes:
+        dp["attributes"] = _format_attributes(attributes)
+    return {
+        "name": name,
+        "unit": unit,
+        "histogram": {
+            "dataPoints": [dp],
+            "aggregationTemporality": 2,  # CUMULATIVE
+        },
+    }
+
+
+def _generate_metrics(state: JvmState, rng: random.Random, active_chaos: dict | None = None) -> list:
+    state.tick()
+    metrics = []
+    MB = 1024 * 1024
+
+    heap_pressure = float((active_chaos or {}).get("heap_pressure", 0.0))
+    gc_pause_multiplier = float((active_chaos or {}).get("gc_pause_multiplier", 1.0))
+    under_stress = heap_pressure > 0 or gc_pause_multiplier > 1.0
+
+    # Channel tag dict — merged into every data point this scrape when chaos is active
+    chaos_attrs: dict = {}
+    if active_chaos:
+        chaos_attrs["chaos.channel"] = active_chaos["channel_id"]
+        if active_chaos.get("name"):
+            chaos_attrs["chaos.fault_type"] = active_chaos["name"]
+        if active_chaos.get("subsystem"):
+            chaos_attrs["chaos.subsystem"] = active_chaos["subsystem"]
+
+    def _ca(extra: dict | None = None) -> dict:
+        """Merge chaos_attrs into per-data-point attribute dict."""
+        if not chaos_attrs and not extra:
+            return {}
+        merged = dict(chaos_attrs)
+        if extra:
+            merged.update(extra)
+        return merged
+
+    # ── CPU ────────────────────────────────────────────────────────────
+    cpu_util = rng.uniform(0.05, 0.45) + heap_pressure * rng.uniform(0.35, 0.55)
+    if under_stress:
+        cpu_util = min(0.98, cpu_util + (gc_pause_multiplier - 1.0) * 0.02)
+    metrics.append(_gauge("jvm.cpu.recent_utilization", "1", cpu_util, _ca()))
+    metrics.append(_gauge("jvm.cpu.time", "s", state.cpu_time_s, _ca()))
+    metrics.append(_gauge("jvm.cpu.count", "{cpu}", 4.0, _ca()))
+
+    # ── Memory (per pool) ─────────────────────────────────────────────
+    for pool_name, mem_type, limit_mb in ALL_POOLS:
+        pool_attrs = {"jvm.memory.type": mem_type, "jvm.memory.pool.name": pool_name}
+        base_used = state.pool_used[pool_name] * MB
+        limit_bytes = float(limit_mb * MB)
+        if mem_type == "heap" and heap_pressure > 0:
+            target = base_used + heap_pressure * (limit_bytes - base_used)
+            used_bytes = min(limit_bytes * 0.98, target * rng.uniform(0.92, 1.0))
+        else:
+            used_bytes = base_used
+        committed_bytes = min(limit_bytes, used_bytes * rng.uniform(1.1, 1.4))
+        after_gc_bytes = used_bytes * rng.uniform(0.3, 0.7)
+
+        metrics.append(_gauge("jvm.memory.used", "By", used_bytes, _ca(pool_attrs)))
+        metrics.append(
+            _gauge("jvm.memory.committed", "By", committed_bytes, _ca(pool_attrs))
+        )
+        metrics.append(_gauge("jvm.memory.limit", "By", limit_bytes, _ca(pool_attrs)))
+        metrics.append(
+            _gauge("jvm.memory.used_after_last_gc", "By", after_gc_bytes, _ca(pool_attrs))
+        )
+
+    # ── Threads ───────────────────────────────────────────────────────
+    for thread_state in THREAD_STATES:
+        for daemon in [True, False]:
+            if thread_state == "runnable":
+                count = rng.randint(10, 40) if daemon else rng.randint(2, 8)
+            elif thread_state == "timed_waiting":
+                count = rng.randint(5, 20) if daemon else rng.randint(1, 5)
+            elif thread_state == "waiting":
+                count = rng.randint(3, 15) if daemon else rng.randint(1, 4)
+            else:  # blocked
+                if heap_pressure > 0.5 and daemon:
+                    count = rng.randint(8, 25)
+                else:
+                    count = rng.randint(0, 2) if daemon else rng.randint(0, 1)
+            metrics.append(
+                _gauge(
+                    "jvm.thread.count",
+                    "{thread}",
+                    float(count),
+                    _ca({"jvm.thread.state": thread_state, "jvm.thread.daemon": daemon}),
+                )
+            )
+
+    # ── Classes ───────────────────────────────────────────────────────
+    current_classes = state.classes_loaded_total - state.classes_unloaded_total
+    metrics.append(_gauge("jvm.class.count", "{class}", float(current_classes), _ca()))
+    metrics.append(
+        _gauge("jvm.class.loaded", "{class}", float(state.classes_loaded_total), _ca())
+    )
+    metrics.append(
+        _gauge("jvm.class.unloaded", "{class}", float(state.classes_unloaded_total), _ca())
+    )
+
+    # ── GC Duration (histogram) ──────────────────────────────────────
+    for gc_name, gc_action in GC_TYPES:
+        count, total_s = state.gc_cumulative[gc_name]
+        if "Old" in gc_name and gc_pause_multiplier > 1.0:
+            extra_pauses = max(1, int((gc_pause_multiplier - 1.0) * rng.randint(2, 6)))
+            for _ in range(extra_pauses):
+                total_s += rng.uniform(0.5, 2.0) * gc_pause_multiplier
+                count += 1
+            state.gc_cumulative[gc_name] = (count, total_s)
+        gc_attrs = {"jvm.gc.name": gc_name, "jvm.gc.action": gc_action}
+        metrics.append(
+            _histogram(
+                "jvm.gc.duration",
+                "s",
+                count,
+                total_s,
+                GC_HISTOGRAM_BOUNDS,
+                rng,
+                _ca(gc_attrs),
+            )
+        )
+
+    return metrics
+
+
+
+from generators.jvm import SPEC as _ALERT_SPEC
+from generator_engine.tick import run_tick_loop
+
+def run(
+    client: OTLPClient,
+    stop_event: threading.Event,
+    *,
+    scenario_data: dict | None = None,
+    chaos_controller=None,
+) -> None:
+    """Run JVM metrics generator loop until stop_event is set."""
+    rng = random.Random()
+
+    if scenario_data:
+        ns = scenario_data["namespace"]
+        services = scenario_data["services"]
+        java_services = [
+            (name, cfg)
+            for name, cfg in services.items()
+            if cfg.get("language") == "java"
+        ]
+    else:
+        ns = NAMESPACE
+        java_services = _load_java_services()
+
+    if not java_services:
+        logger.info(
+            "No Java services found in active scenario — JVM metrics generator idle"
+        )
+        return
+
+    _channel_registry: dict = scenario_data.get("channel_registry", {}) if scenario_data else {}
+
+    _topology_data = None
+    if scenario_data:
+        from generator_engine.infra_topology import build_topology as _build_infra_topology
+        _topology_data = _build_infra_topology(scenario_data)
+
+    resources = {name: _build_resource(name, cfg, ns, topology=_topology_data) for name, cfg in java_services}
+    states = {name: JvmState(rng) for name, _ in java_services}
+
+    logger.info(
+        "JVM metrics generator started (interval=%ds, services=%s, chaos_aware=%s)",
+        METRICS_INTERVAL,
+        [name for name, _ in java_services],
+        chaos_controller is not None,
+    )
+
+    scrape_count = 0
+    def _emit_tick() -> None:
+        nonlocal scrape_count
+        resolved_chaos = resolve_active_chaos(
+            chaos_controller=chaos_controller,
+            channel_registry=_channel_registry,
+            generator_id="jvm",
+            chaos_mode="any",
+            impact_keys=_ALERT_SPEC.impact_keys,
+        ) if chaos_controller and _channel_registry else None
+
+        chaos_affected: set[str] = set()
+        if chaos_controller and _channel_registry:
+            for ch_id in chaos_controller.get_active_channels():
+                ch = _channel_registry.get(ch_id)
+                if not ch:
+                    continue
+                chaos_affected.update(ch.get("affected_services", []))
+                chaos_affected.update(ch.get("cascade_services", []))
+
+        resource_metrics = []
+        for name, _ in java_services:
+            svc_chaos = resolved_chaos if resolved_chaos and name in chaos_affected else None
+            metrics = _generate_metrics(states[name], rng, active_chaos=svc_chaos)
+            resource_metrics.append(
+                {
+                    "resource": resources[name],
+                    "scopeMetrics": [
+                        {
+                            "scope": {"name": SCOPE_NAME, "version": SCOPE_VERSION},
+                            "metrics": metrics,
+                        }
+                    ],
+                }
+            )
+
+        payload = {"resourceMetrics": resource_metrics}
+        client._send(f"{client.endpoint}/v1/metrics", payload, "jvm-metrics")
+
+        scrape_count += 1
+        if scrape_count % 6 == 0:
+            logger.info(
+                "JVM metrics scrape %d complete (%d services)",
+                scrape_count,
+                len(java_services),
+            )
+
+    run_tick_loop(stop_event, _emit_tick, interval=lambda: METRICS_INTERVAL)
+
+    logger.info("JVM metrics generator stopped after %d scrapes", scrape_count)
+
+
+def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
+    )
+    client = OTLPClient()
+    stop_event = threading.Event()
+    signal.signal(signal.SIGINT, lambda *_: stop_event.set())
+    signal.signal(signal.SIGTERM, lambda *_: stop_event.set())
+
+    duration = int(os.environ.get("RUN_DURATION", "60"))
+    timer = threading.Timer(duration, stop_event.set)
+    timer.daemon = True
+    timer.start()
+    logger.info("Running for %ds (standalone)", duration)
+    run(client, stop_event)
+    timer.cancel()
+    client.close()
+
+
+if __name__ == "__main__":
+    main()

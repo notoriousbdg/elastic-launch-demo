@@ -39,12 +39,12 @@ fault_params:
   sensor_id:
     format: "SENS-{n}"
     n: {randint: [1000, 9999]}
-  actual_epoch: {randint: [1700000000, 1760000000]}
-  expected_epoch: {randint: [1760000001, 1800000000]}
+  actual_epoch: {randint: [1738014400, 1738097100]}
+  expected_epoch: 1738100800
 rca_clues:
   sensor-validator:
-    validation.epoch_delta_s: {randint: [3600, 86400]}
-    validation.rtc_battery_v: {uniform: [2.2, 2.9], round: 1}
+    validation.epoch_delta_s: {randint: [3700, 86400]}
+    validation.rtc_battery_v: {uniform: [2.2, 2.7], round: 1}
   mission-control:
     upstream.degraded_subsystem: validation
     telemetry.calibration_status: stale

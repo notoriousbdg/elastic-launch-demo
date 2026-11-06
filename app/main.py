@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import zipfile
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from typing import Optional
 
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from app.config import (
@@ -19,17 +19,13 @@ from app.config import (
     ACTIVE_SCENARIO_SET,
     APP_HOST,
     APP_PORT,
-    CHANNEL_REGISTRY,
     CHANNEL_TIMEOUT,
     ELASTIC_API_KEY,
     ELASTIC_URL,
     KIBANA_PROXY,
     KIBANA_URL,
     MISSION_ID,
-    MISSION_NAME,
-    NAMESPACE,
     OTLP_ENDPOINT,
-    SERVICES,
 )
 
 logging.basicConfig(
@@ -75,37 +71,69 @@ _deploy_progress: dict[str, dict] = {}
 _teardown_progress: dict[str, dict] = {}
 
 
+class AmbiguousDeployment(Exception):
+    """No deployment_id was given while more than one deployment is running."""
+
+    def __init__(self, deployments: list[str]):
+        super().__init__("deployment_id required")
+        self.deployments = deployments
+
+
+# Per-request holder for the deployment a route resolved to. The holder is a
+# mutable dict so a write from a threadpool route is visible to the middleware.
+_resolved_deployment: ContextVar[dict | None] = ContextVar("_resolved_deployment", default=None)
+
+
 def _get_instance(deployment_id: Optional[str] = None):
-    """Look up instance by id, or return first active instance as fallback."""
+    """Look up the instance a request targets.
+
+    - An explicit id returns that instance, or None if it isn't registered.
+      It never falls back, so a stale id can't act on a different deployment.
+    - No id with exactly one deployment returns it (single-deployment convenience).
+    - No id with several deployments raises AmbiguousDeployment (HTTP 400)
+      rather than guessing.
+    """
     if deployment_id:
         inst = registry.get(deployment_id)
+    else:
+        instances = registry.all_instances()
+        if len(instances) > 1:
+            raise AmbiguousDeployment(sorted(instances))
+        inst = next(iter(instances.values()), None)
         if inst:
-            return inst
-    return registry.first()
+            logger.info(
+                "legacy_api=true deployment_id omitted; using the only deployment %s",
+                inst.deployment_id,
+            )
+    holder = _resolved_deployment.get()
+    if inst and holder is not None:
+        holder["id"] = inst.deployment_id
+    return inst
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """On startup: restore active deployments from SQLite.  On shutdown: stop all."""
-    from app.context import ScenarioContext
-    from app.instance import ScenarioInstance
+    from app.instance import start_deployment
     from scenario_engine import get_scenario
 
     # Restore previously active deployments
     for rec in store.get_all_active():
         try:
             scenario = get_scenario(rec["scenario_id"])
-            ctx = ScenarioContext.from_scenario(
+            start_deployment(
                 scenario,
+                deployment_id=rec["deployment_id"],
+                registry=registry,
+                store=store,
+                chaos_store=chaos_store,
                 otlp_endpoint=rec["otlp_endpoint"],
                 otlp_api_key=rec["otlp_api_key"],
                 elastic_url=rec["elastic_url"],
                 elastic_api_key=rec["elastic_api_key"],
                 kibana_url=rec["kibana_url"],
+                persist=False,
             )
-            instance = ScenarioInstance(ctx, chaos_store=chaos_store)
-            instance.start()
-            registry.register(rec["deployment_id"], instance)
             logger.info(
                 "Restored deployment: %s (%s)", rec["deployment_id"], rec["scenario_id"]
             )
@@ -168,22 +196,14 @@ async def lifespan(app: FastAPI):
                     """
                     ep = OTLP_ENDPOINT or early_endpoint
                     try:
-                        ctx = ScenarioContext.from_scenario(
+                        from app.instance import start_deployment
+
+                        instance = start_deployment(
                             _scenario,
-                            otlp_endpoint=ep,
-                            otlp_api_key=api_key,
-                            elastic_url=elastic_url,
-                            elastic_api_key=api_key,
-                            kibana_url=kibana_url,
-                        )
-                        instance = ScenarioInstance(ctx, chaos_store=chaos_store)
-                        if ep:
-                            instance.otlp.reconfigure(ep, api_key)
-                        instance.start()
-                        registry.register(dep_id, instance)
-                        store.upsert(
                             deployment_id=dep_id,
-                            scenario_id=s_id,
+                            registry=registry,
+                            store=store,
+                            chaos_store=chaos_store,
                             otlp_endpoint=ep,
                             otlp_api_key=api_key,
                             elastic_url=elastic_url,
@@ -218,7 +238,7 @@ async def lifespan(app: FastAPI):
                     if final_endpoint and final_endpoint != _state["endpoint"]:
                         inst = _state["instance"]
                         if inst is not None:
-                            inst.otlp.reconfigure(final_endpoint, api_key)
+                            inst.reconfigure_otlp(final_endpoint, api_key)
                             logger.info(
                                 "Auto-deploy: OTLP endpoint updated post-deploy for %s → %s",
                                 dep_id,
@@ -232,22 +252,14 @@ async def lifespan(app: FastAPI):
                 # Priority: explicit env var → deployer-verified → pre-derived fallback
                 otlp_endpoint = OTLP_ENDPOINT or result.otlp_endpoint or _pre_derived_otlp
                 try:
-                    ctx = ScenarioContext.from_scenario(
+                    from app.instance import start_deployment
+
+                    start_deployment(
                         _scenario,
-                        otlp_endpoint=otlp_endpoint,
-                        otlp_api_key=api_key,
-                        elastic_url=elastic_url,
-                        elastic_api_key=api_key,
-                        kibana_url=kibana_url,
-                    )
-                    instance = ScenarioInstance(ctx, chaos_store=chaos_store)
-                    if otlp_endpoint:
-                        instance.otlp.reconfigure(otlp_endpoint, api_key)
-                    instance.start()
-                    registry.register(dep_id, instance)
-                    store.upsert(
                         deployment_id=dep_id,
-                        scenario_id=s_id,
+                        registry=registry,
+                        store=store,
+                        chaos_store=chaos_store,
                         otlp_endpoint=otlp_endpoint,
                         otlp_api_key=api_key,
                         elastic_url=elastic_url,
@@ -305,6 +317,37 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+
+
+@app.middleware("http")
+async def _deployment_id_header(request: Request, call_next):
+    """Report which deployment answered via an X-Deployment-Id response header."""
+    holder: dict = {}
+    token = _resolved_deployment.set(holder)
+    try:
+        response = await call_next(request)
+    finally:
+        _resolved_deployment.reset(token)
+    if holder.get("id"):
+        response.headers["X-Deployment-Id"] = holder["id"]
+    return response
+
+
+@app.exception_handler(AmbiguousDeployment)
+async def _ambiguous_deployment(request: Request, exc: AmbiguousDeployment):
+    logger.info(
+        "legacy_api=true %s %s without deployment_id while %d deployments run",
+        request.method, request.url.path, len(exc.deployments),
+    )
+    return JSONResponse(
+        status_code=400,
+        content={
+            "error": "deployment_id required: more than one deployment is running",
+            "deployments": exc.deployments,
+        },
+    )
+
+
 # ── Static file mounts ─────────────────────────────────────────────────────
 _base = os.path.dirname(__file__)
 app.mount(
@@ -325,7 +368,7 @@ def _get_scenario_for_deployment(deployment_id: Optional[str] = None):
     """Get scenario object from a running instance or fall back to default."""
     inst = _get_instance(deployment_id)
     if inst:
-        return inst.ctx.scenario
+        return inst.scenario
     from scenario_engine import get_scenario
 
     return get_scenario(ACTIVE_SCENARIO)
@@ -335,9 +378,9 @@ def _inject_theme(html: str, deployment_id: Optional[str] = None) -> str:
     """Inject active scenario's theme CSS vars and metadata into HTML."""
     inst = _get_instance(deployment_id)
     if inst:
-        scenario = inst.ctx.scenario
-        mission_id = inst.ctx.mission_id
-        kibana = inst.ctx.kibana_url or _get_default_creds()[1]
+        scenario = inst.scenario
+        mission_id = inst.mission_id
+        kibana = inst.kibana_url or _get_default_creds()[1]
     else:
         from scenario_engine import get_scenario
 
@@ -399,7 +442,9 @@ body { font-family: 'Inter', -apple-system, system-ui, sans-serif; }"""
 
     replacements = {
         "<!--THEME_CSS-->": f"<style>{css_override}</style>",
-        "DEPLOYMENT_ID_PLACEHOLDER": deployment_id or "",
+        # Pin the page to the deployment it resolved to, so a later second
+        # deployment can't make its API calls ambiguous.
+        "DEPLOYMENT_ID_PLACEHOLDER": (inst.deployment_id if inst else deployment_id) or "",
         "SCENARIO_NAME_PLACEHOLDER": scenario.scenario_name,
         "SCENARIO_DESC_PLACEHOLDER": scenario.scenario_description,
         "SCENARIO_ID_PLACEHOLDER": scenario.scenario_id,
@@ -505,6 +550,9 @@ async def health():
 
 @app.get("/chaos", response_class=HTMLResponse)
 async def chaos_page(deployment_id: Optional[str] = None):
+    if not deployment_id and len(registry.all_instances()) > 1:
+        # The selector lists each deployment with its own chaos link.
+        return RedirectResponse("/", status_code=307)
     path = os.path.join(_base, "chaos_ui", "static", "index.html")
     with open(path) as f:
         html = f.read()
@@ -626,11 +674,11 @@ async def list_deployments():
             {
                 "deployment_id": dep_id,
                 "scenario_id": inst.scenario_id,
-                "scenario_name": inst.ctx.scenario.scenario_name,
-                "namespace": inst.ctx.namespace,
+                "scenario_name": inst.scenario_name,
+                "namespace": inst.namespace,
                 "running": inst.running,
-                "kibana_url": inst.ctx.kibana_url,
-                "kibana_display_url": KIBANA_PROXY or inst.ctx.kibana_url,
+                "kibana_url": inst.kibana_url,
+                "kibana_display_url": KIBANA_PROXY or inst.kibana_url,
             }
         )
     return JSONResponse(result, headers={"Cache-Control": "no-store"})
@@ -669,17 +717,15 @@ async def chaos_trigger(request: Request, body: dict):
     if not inst:
         return JSONResponse(status_code=404, content={"error": "No active deployment"})
     channel = int(body.get("channel", 0))
-    mode = body.get("mode", "calibration")
     se_name = body.get("se_name", "")
     callback_url = body.get("callback_url", "")
     user_email = body.get("user_email", "") or request.headers.get("X-Forwarded-User", "") or os.environ.get("INSTRUQT_USER_EMAIL", "")
     session_id = body.get("session_id", "")
-    result = inst.chaos_controller.trigger(
+    result = inst.trigger_channel(
         channel,
-        mode,
-        se_name,
-        callback_url,
-        user_email,
+        se_name=se_name,
+        callback_url=callback_url,
+        user_email=user_email,
         session_id=session_id,
     )
     return result
@@ -694,7 +740,7 @@ async def chaos_resolve(body: dict):
     channel = int(body.get("channel", 0))
     session_id = body.get("session_id", "")
     user_email = body.get("user_email", "")
-    result = inst.chaos_controller.resolve(channel, session_id=session_id, user_email=user_email)
+    result = inst.resolve_channel(channel, session_id=session_id, user_email=user_email)
     if result.get("error") == "session_mismatch":
         return JSONResponse(status_code=403, content=result)
     return result
@@ -706,21 +752,17 @@ async def set_chaos_spikes(body: dict):
     inst = _get_instance(deployment_id)
     if not inst:
         return JSONResponse(status_code=404, content={"error": "No active deployment"})
-    inst.chaos_controller.set_infra_spikes(body)
-    return inst.chaos_controller.get_infra_spikes()
+    inst.set_infra_spikes(body)
+    return inst.infra_spikes()
 
 
 @app.get("/api/chaos/spikes")
 async def get_chaos_spikes(deployment_id: Optional[str] = None):
     inst = _get_instance(deployment_id)
     if not inst:
-        return {
-            "cpu_pct": 0,
-            "memory_pct": 0,
-            "k8s_oom_intensity": 0,
-            "latency_multiplier": 1.0,
-        }
-    return inst.chaos_controller.get_infra_spikes()
+        from app.chaos.controller import INFRA_SPIKE_DEFAULTS
+        return dict(INFRA_SPIKE_DEFAULTS)
+    return inst.infra_spikes()
 
 
 @app.get("/api/chaos/status")
@@ -728,7 +770,7 @@ async def chaos_status(deployment_id: Optional[str] = None):
     inst = _get_instance(deployment_id)
     if not inst:
         return {}
-    return inst.chaos_controller.get_status()
+    return inst.chaos_status()
 
 
 @app.get("/api/chaos/status/{channel}")
@@ -736,7 +778,7 @@ async def chaos_channel_status(channel: int, deployment_id: Optional[str] = None
     inst = _get_instance(deployment_id)
     if not inst:
         return {"error": "No active deployment"}
-    return inst.chaos_controller.get_channel_status(channel)
+    return inst.channel_status(channel)
 
 
 @app.get("/api/chaos/session/validate")
@@ -745,7 +787,7 @@ async def chaos_session_validate(session_id: str, deployment_id: Optional[str] =
     inst = _get_instance(deployment_id)
     if not inst:
         return {"valid": False, "channels": []}
-    channels = inst.chaos_controller.validate_session(session_id, user_email=user_email)
+    channels = inst.validate_session(session_id, user_email=user_email)
     return {"valid": len(channels) > 0, "channels": channels}
 
 
@@ -757,15 +799,7 @@ async def system_status(deployment_id: Optional[str] = None):
     inst = _get_instance(deployment_id)
     if not inst:
         return {"error": "No active deployment"}
-    return {
-        "scenario": inst.scenario_id,
-        "mission_id": inst.ctx.mission_id,
-        "mission_name": inst.ctx.scenario.scenario_name,
-        "namespace": inst.ctx.namespace,
-        "services": inst.service_manager.get_all_status(),
-        "generators": inst.service_manager.get_generator_status(),
-        "chaos": inst.chaos_controller.get_status(),
-    }
+    return inst.runtime_status()
 
 
 # ── Remediation endpoint (called by Elastic Workflow) ──────────────────────
@@ -776,7 +810,7 @@ async def remediate_channel(channel: int, deployment_id: Optional[str] = None):
     inst = _get_instance(deployment_id)
     if not inst:
         return JSONResponse(status_code=404, content={"error": "No active deployment"})
-    result = inst.chaos_controller.resolve(channel, force=True)
+    result = inst.resolve_channel(channel, force=True)
     return {"action": "remediated", "channel": channel, **result}
 
 
@@ -824,8 +858,8 @@ async def send_daily_update(body: dict):
     if not inst:
         return JSONResponse(status_code=404, content={"error": "No active deployment"})
 
-    kibana_url = inst.ctx.kibana_url
-    api_key = inst.ctx.elastic_api_key
+    kibana_url = inst.kibana_url
+    api_key = inst.elastic_api_key
     if not kibana_url or not api_key:
         return JSONResponse(status_code=400, content={"error": "No Kibana credentials"})
 
@@ -837,17 +871,10 @@ async def send_daily_update(body: dict):
     }
 
     async with _httpx.AsyncClient(timeout=30) as client:
-        # Find the workflow by name — try GET first, fall back to POST search
         search_resp = await client.get(
             f"{kibana_url}/api/workflows",
             headers=headers,
         )
-        if search_resp.status_code in (404, 405):
-            search_resp = await client.post(
-                f"{kibana_url}/api/workflows/search",
-                headers=headers,
-                json={"page": 1, "size": 100},
-            )
         if search_resp.status_code >= 300:
             return JSONResponse(
                 status_code=502,
@@ -870,18 +897,11 @@ async def send_daily_update(body: dict):
                 },
             )
 
-        # Trigger the workflow — try new path first, fall back to old
         run_resp = await client.post(
             f"{kibana_url}/api/workflows/workflow/{wf_id}/run",
             headers=headers,
             json={"inputs": {"email": email}},
         )
-        if run_resp.status_code in (404, 405):
-            run_resp = await client.post(
-                f"{kibana_url}/api/workflows/{wf_id}/run",
-                headers=headers,
-                json={"inputs": {"email": email}},
-            )
         if run_resp.status_code >= 300:
             return JSONResponse(
                 status_code=502,
@@ -908,7 +928,7 @@ async def env_creds_status():
 
 
 @app.post("/api/setup/test-connection")
-async def test_connection(body: dict):
+def test_connection(body: dict):
     """Test connectivity to each component independently."""
     from scenario_engine import get_scenario as _get_scenario_by_id
     from elastic_config.deployer import ScenarioDeployer
@@ -970,7 +990,7 @@ async def test_connection(body: dict):
 
 
 @app.post("/api/setup/launch")
-async def launch_setup(body: dict):
+def launch_setup(body: dict):
     """Launch deployment of a scenario to Elastic.
 
     Accepts scenario_id + kibana_url + api_key.  Derives ES and OTLP URLs.
@@ -979,8 +999,7 @@ async def launch_setup(body: dict):
     """
     from scenario_engine import get_scenario as _get_scenario_by_id
     from elastic_config.deployer import ScenarioDeployer
-    from app.context import ScenarioContext
-    from app.instance import ScenarioInstance
+    from app.instance import start_deployment
 
     scenario_id = body.get("scenario_id", ACTIVE_SCENARIO)
     _def_elastic, _def_kibana, _def_key = _get_default_creds()
@@ -1062,25 +1081,12 @@ async def launch_setup(body: dict):
             """
             ep = explicit_otlp or early_endpoint
             try:
-                ctx = ScenarioContext.from_scenario(
+                instance = start_deployment(
                     scenario,
-                    otlp_endpoint=ep,
-                    otlp_api_key=api_key,
-                    elastic_url=elastic_url,
-                    elastic_api_key=api_key,
-                    kibana_url=kibana_url,
-                )
-                instance = ScenarioInstance(ctx, chaos_store=chaos_store)
-                if ep:
-                    instance.otlp.reconfigure(ep, api_key)
-                    logger.info(
-                        "OTLPClient for %s reconfigured early to %s", scenario_id, ep
-                    )
-                instance.start()
-                registry.register(deployment_id, instance)
-                store.upsert(
                     deployment_id=deployment_id,
-                    scenario_id=scenario_id,
+                    registry=registry,
+                    store=store,
+                    chaos_store=chaos_store,
                     otlp_endpoint=ep,
                     otlp_api_key=api_key,
                     elastic_url=elastic_url,
@@ -1088,13 +1094,17 @@ async def launch_setup(body: dict):
                     kibana_url=kibana_url,
                     cloud_api_key=cloud_api_key,
                 )
+                if ep:
+                    logger.info(
+                        "OTLPClient for %s reconfigured early to %s", scenario_id, ep
+                    )
                 _state["started"] = True
                 _state["instance"] = instance
                 _state["endpoint"] = ep
                 logger.info(
                     "Launch: instance started early after OTLP derive (%s)", deployment_id
                 )
-            except Exception as exc:
+            except Exception:
                 logger.exception(
                     "Launch: early start failed for %s; will retry after deploy_all",
                     scenario_id,
@@ -1111,7 +1121,7 @@ async def launch_setup(body: dict):
             if final_endpoint and final_endpoint != _state["endpoint"]:
                 inst = _state["instance"]
                 if inst is not None:
-                    inst.otlp.reconfigure(final_endpoint, api_key)
+                    inst.reconfigure_otlp(final_endpoint, api_key)
                     logger.info(
                         "OTLPClient for %s updated post-deploy to %s",
                         scenario_id,
@@ -1124,32 +1134,13 @@ async def launch_setup(body: dict):
         # Use explicit OTLP override if provided, otherwise use derived
         otlp_endpoint = explicit_otlp or result.otlp_endpoint
 
-        # Create ScenarioContext + ScenarioInstance
         try:
-            ctx = ScenarioContext.from_scenario(
+            start_deployment(
                 scenario,
-                otlp_endpoint=otlp_endpoint or "",
-                otlp_api_key=api_key,
-                elastic_url=elastic_url,
-                elastic_api_key=api_key,
-                kibana_url=kibana_url,
-            )
-            instance = ScenarioInstance(ctx, chaos_store=chaos_store)
-
-            # Reconfigure OTLP if we have an endpoint
-            if otlp_endpoint:
-                instance.otlp.reconfigure(otlp_endpoint, api_key)
-                logger.info(
-                    "OTLPClient for %s reconfigured to %s", scenario_id, otlp_endpoint
-                )
-
-            instance.start()
-            registry.register(deployment_id, instance)
-
-            # Persist to SQLite
-            store.upsert(
                 deployment_id=deployment_id,
-                scenario_id=scenario_id,
+                registry=registry,
+                store=store,
+                chaos_store=chaos_store,
                 otlp_endpoint=otlp_endpoint or "",
                 otlp_api_key=api_key,
                 elastic_url=elastic_url,
@@ -1157,7 +1148,10 @@ async def launch_setup(body: dict):
                 kibana_url=kibana_url,
                 cloud_api_key=cloud_api_key,
             )
-
+            if otlp_endpoint:
+                logger.info(
+                    "OTLPClient for %s reconfigured to %s", scenario_id, otlp_endpoint
+                )
             logger.info("Deployment %s (%s) live", deployment_id, scenario_id)
         except Exception as exc:
             logger.exception("Failed to start instance for %s: %s", scenario_id, exc)
@@ -1190,12 +1184,24 @@ async def launch_setup(body: dict):
     }
 
 
+def _unknown_progress(deployment_id: str) -> dict:
+    """Finished-with-error progress for an id this process has no record of
+    (e.g. the app restarted mid-operation), so pollers stop instead of
+    rendering another deployment's steps."""
+    return {
+        "finished": True,
+        "error": f"No progress recorded for {deployment_id} (the app may have restarted)",
+        "steps": [],
+    }
+
+
 @app.get("/api/setup/progress")
 async def setup_progress(deployment_id: Optional[str] = None):
     """Return current deployment progress."""
-    if deployment_id and deployment_id in _deploy_progress:
-        return _deploy_progress[deployment_id]
-    # Fall back to most recent progress entry
+    if deployment_id:
+        # An explicit id never falls back to another deployment's progress.
+        return _deploy_progress.get(deployment_id) or _unknown_progress(deployment_id)
+    # No id: most recent progress entry
     if _deploy_progress:
         return list(_deploy_progress.values())[-1]
     return {"finished": True, "error": "", "steps": []}
@@ -1228,32 +1234,15 @@ async def active_deploys():
     }
 
 
-@app.get("/api/setup/auto-deploy")
-async def auto_deploy_status():
-    """Return any env-var-triggered auto-deploys that are currently in progress.
-
-    Kept for backward compatibility; the selector UI uses /api/setup/active-deploys.
-    """
-    deployments = [
-        {"deployment_id": s_id}
-        for s_id in ACTIVE_SCENARIO_LIST
-        if s_id in _deploy_progress and not _deploy_progress[s_id].get("finished", True)
-    ]
-    return {"deployments": deployments}
-
-
 @app.get("/api/setup/detect")
-async def detect_existing(deployment_id: Optional[str] = None):
+def detect_existing(deployment_id: Optional[str] = None):
     """Check if the active scenario is already deployed to Elastic."""
     from elastic_config.deployer import ScenarioDeployer
 
     # Try to use credentials from a specific deployment
     inst = _get_instance(deployment_id)
-    if inst and inst.ctx.elastic_url and inst.ctx.elastic_api_key:
-        elastic_url = inst.ctx.elastic_url
-        kibana_url = inst.ctx.kibana_url
-        api_key = inst.ctx.elastic_api_key
-        scenario = inst.ctx.scenario
+    if inst and inst.elastic_url and inst.elastic_api_key:
+        elastic_url, kibana_url, api_key, scenario = inst.elastic_connection()
     else:
         elastic_url, kibana_url, api_key = _get_default_creds()
         scenario = _get_scenario_for_deployment(deployment_id)
@@ -1266,18 +1255,15 @@ async def detect_existing(deployment_id: Optional[str] = None):
 
 
 @app.post("/api/setup/teardown")
-async def teardown_setup(body: dict = {}):
+def teardown_setup(body: dict = {}):
     """Remove a scenario's Elastic config (KB, workflows, alerts, etc)."""
     from elastic_config.deployer import ScenarioDeployer
 
     deployment_id = body.get("deployment_id") if body else None
     inst = _get_instance(deployment_id)
 
-    if inst and inst.ctx.elastic_url and inst.ctx.elastic_api_key:
-        elastic_url = inst.ctx.elastic_url
-        kibana_url = inst.ctx.kibana_url
-        api_key = inst.ctx.elastic_api_key
-        scenario = inst.ctx.scenario
+    if inst and inst.elastic_url and inst.elastic_api_key:
+        elastic_url, kibana_url, api_key, scenario = inst.elastic_connection()
     else:
         elastic_url, kibana_url, api_key = _get_default_creds()
         scenario = _get_scenario_for_deployment(deployment_id)
@@ -1318,17 +1304,18 @@ async def stop_and_teardown(body: dict = {}):
 
     inst = registry.remove(deployment_id)
 
-    if inst and inst.ctx.elastic_url and inst.ctx.elastic_api_key:
+    if inst and inst.elastic_url and inst.elastic_api_key:
         # Stop generators and run teardown together in a background thread so
         # this endpoint returns immediately (inst.stop() can take several seconds).
+        elastic_url, kibana_url, api_key, scenario = inst.elastic_connection()
         deployer = ScenarioDeployer(
-            inst.ctx.scenario,
-            inst.ctx.elastic_url,
-            inst.ctx.kibana_url,
-            inst.ctx.elastic_api_key,
+            scenario,
+            elastic_url,
+            kibana_url,
+            api_key,
         )
 
-        scenario_name = inst.ctx.scenario.scenario_name
+        scenario_name = inst.scenario_name
         scenario_id = inst.scenario_id
 
         def _progress_cb(progress):
@@ -1378,8 +1365,8 @@ async def stop_and_teardown(body: dict = {}):
 @app.get("/api/setup/teardown-progress")
 async def teardown_progress(deployment_id: Optional[str] = None):
     """Return current teardown progress."""
-    if deployment_id and deployment_id in _teardown_progress:
-        return _teardown_progress[deployment_id]
+    if deployment_id:
+        return _teardown_progress.get(deployment_id) or _unknown_progress(deployment_id)
     if _teardown_progress:
         return list(_teardown_progress.values())[-1]
     return {"finished": True, "error": "", "steps": []}

@@ -11,9 +11,9 @@ cascade_services:
 description: Fraud model generating excessive false positives, blocking legitimate transactions and degrading conversion rate
 investigation_notes: |-
   1. Check payment-processor logs for FRAUD-FALSE-POSITIVE — false_positive_rate={false_positive_pct}% vs expected <{fp_threshold_pct}%.
-  2. Review the fraud model version — a recent model update or feature drift (e.g., new geographic pattern) often causes false positive spikes.
-  3. Identify the common false positive pattern: `show fraud_blocks | group by block_reason` — velocity_check and new_device_fingerprint are the most common.
-  4. Check if a specific feature is stuck: avg_order_value metric spike or unusual geolocation cluster can push legitimate orders above the fraud threshold.
+  2. Review the fraud model version — a recent model update or feature drift (e.g., new geographic pattern) often causes false positive spikes. A geographic feature PSI above 0.25 indicates feature drift; a model deployed in the last 24h would point to the update instead.
+  3. Identify the common false positive pattern: `FROM logs.otel.ecommerce.* | WHERE body.text LIKE "*FRAUD-FALSE-POSITIVE*" | GROK body.text "block_reason=(?<block_reason>[a-z_]+)" | STATS count() BY block_reason` — velocity_check and new_device_fingerprint are the most common in normal operation; a geo_mismatch majority points to geographic drift.
+  4. Check if a specific feature is stuck: avg_order_value metric spike or unusual geolocation cluster can push legitimate orders above the fraud threshold (an average order value shift beyond ±10% indicates a stuck feature).
   5. Temporarily raise the fraud score threshold from {fraud_score_threshold} to {fraud_score_threshold_relaxed} to unblock legitimate traffic.
   6. Trigger a manual review queue for blocked orders above ${min_manual_review_usd} — these are likely legitimate high-value orders that were incorrectly blocked.
 remediation_action: retune_fraud_model
@@ -21,8 +21,10 @@ error_message: '[PaymentProcessor] FRAUD-FALSE-POSITIVE: blocked_orders={blocked
   threshold={fp_threshold_pct}% fraud_score={fraud_score}/{fraud_score_threshold} block_reason={block_reason} revenue_held_usd={revenue_held_usd}'
 stack_trace: |-
   FraudBlockException: FRAUD-FALSE-POSITIVE
-     at FraudEngine.evaluate(OrderId {order_id}, Score={fraud_score})
-     at PaymentProcessor.preAuthorize(CheckoutId {checkout_id})
+     at Ecommerce.Payments.Risk.FraudEngine.Evaluate(FraudContext context) in /src/Payments/Risk/FraudEngine.cs:line 164
+     at Ecommerce.Payments.PaymentProcessor.PreAuthorizeAsync(String checkoutId) in /src/Payments/PaymentProcessor.cs:line 212
+  Order:               {order_id}
+  Checkout:            {checkout_id}
   Blocked orders:      {blocked_orders}
   False positive rate: {false_positive_pct}%
   Fraud score:         {fraud_score}/{fraud_score_threshold}
@@ -39,7 +41,7 @@ fault_params:
   fraud_score: {randint: [75, 95]}
   fraud_score_threshold: 70
   fraud_score_threshold_relaxed: 80
-  block_reason: {choice: [velocity_check, new_device_fingerprint, high_value_new_account, geo_mismatch]}
+  block_reason: geo_mismatch
   revenue_held_usd: {uniform: [5000, 100000], round: 2}
   order_id: {format: "ORD-{n}", n: {randint: [100000, 999999]}}
   checkout_id: {format: "CHK-{n}", n: {randint: [100000, 999999]}}
@@ -49,18 +51,22 @@ rca_clues:
   payment-processor:
     payment.fraud_score_threshold_active: true
     payment.false_positive_rate_pct: {uniform: [8, 25], round: 1}
+    payment.top_block_reason: geo_mismatch
+    payment.geo_feature_psi: {uniform: [0.3, 0.6], round: 2}
+    payment.model_deployed_hours_ago: {randint: [240, 720]}
   order-management:
     order.payment_decline_rate_pct: {uniform: [10, 35], round: 1}
     order.legitimate_orders_blocked: {randint: [50, 500]}
+    order.avg_order_value_delta_pct: {uniform: [-3, 3], round: 1}
   storefront-gateway:
     storefront.checkout_decline_shown: true
     storefront.retry_rate_pct: {uniform: [20, 60], round: 1}
 business_impact:
   - kpi: business.conversion_rate_pct
-    factor: {uniform: [0.25, 0.50]}
+    value: {uniform: [0.67, 0.77], round: 2}
   - kpi: business.orders_placed_per_min
-    factor: {uniform: [0.25, 0.50]}
+    value: {uniform: [51.38, 59.12]}
   - kpi: business.gmv_usd_per_min
-    factor: {uniform: [0.25, 0.50]}
+    factor: {uniform: [0.25, 0.5]}
   - kpi: business.churn_risk_index_0_100
     factor: {uniform: [1.5, 3.0]}

@@ -1,0 +1,37 @@
+name: "GT iis_otel: application_pool_not_running"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-IIS-APPLICATION-POOL-NOT-RUNNING
+sensor_type: impact_key_probe
+affected_services:
+  - gt-iis-aws-svc-1
+cascade_services:
+  - gt-iis-aws-svc-2
+description: "Tests impact_key application_pool_not_running on generator iis_otel."
+investigation_notes: |-
+  1. Verify iis_otel is active and reporting metrics.
+  2. Check that the application_pool_not_running metric has reached the trigger value (0.8).
+  3. Confirm generator_impact for iis_otel.application_pool_not_running is set to 0.8.
+  4. Look for correlated changes in service gt-iis-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_application_pool_not_running_baseline
+error_message: "GT-PROBE: gen=iis_otel key=application_pool_not_running value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=iis_otel
+  impact_key: application_pool_not_running
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 0.8
+  svc_name: gt-iis-aws-svc-1
+rca_clues:
+  gt-iis-aws-svc-1:
+    probe.generator: iis_otel
+    probe.impact_key: application_pool_not_running
+    probe.trigger_value: 0.8
+  gt-iis-aws-svc-2:
+    probe.upstream_generator: iis_otel
+    probe.upstream_key: application_pool_not_running
+generator_impact:
+  iis_otel:
+    application_pool_not_running: 0.8

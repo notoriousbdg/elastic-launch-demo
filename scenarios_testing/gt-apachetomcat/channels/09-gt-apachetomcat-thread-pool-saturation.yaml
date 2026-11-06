@@ -1,0 +1,37 @@
+name: "GT apache_tomcat_otel: thread_pool_saturation"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-APACHETOMCAT-THREAD-POOL-SATURATION
+sensor_type: impact_key_probe
+affected_services:
+  - gt-apachetomcat-aws-svc-1
+cascade_services:
+  - gt-apachetomcat-aws-svc-2
+description: "Tests impact_key thread_pool_saturation on generator apache_tomcat_otel."
+investigation_notes: |-
+  1. Verify apache_tomcat_otel is active and reporting metrics.
+  2. Check that the thread_pool_saturation metric has reached the trigger value (90.0).
+  3. Confirm generator_impact for apache_tomcat_otel.thread_pool_saturation is set to 90.0.
+  4. Look for correlated changes in service gt-apachetomcat-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_thread_pool_saturation_baseline
+error_message: "GT-PROBE: gen=apache_tomcat_otel key=thread_pool_saturation value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=apache_tomcat_otel
+  impact_key: thread_pool_saturation
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 90.0
+  svc_name: gt-apachetomcat-aws-svc-1
+rca_clues:
+  gt-apachetomcat-aws-svc-1:
+    probe.generator: apache_tomcat_otel
+    probe.impact_key: thread_pool_saturation
+    probe.trigger_value: 90.0
+  gt-apachetomcat-aws-svc-2:
+    probe.upstream_generator: apache_tomcat_otel
+    probe.upstream_key: thread_pool_saturation
+generator_impact:
+  apache_tomcat_otel:
+    thread_pool_saturation: 90.0

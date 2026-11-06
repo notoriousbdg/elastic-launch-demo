@@ -10,7 +10,7 @@ schema_version: "1.2"
 nominal_label: NORMAL
 hosts:
 - host.name: gcpnet-host-central1
-  host.id: '4801234567890123456'
+  host.id: '5050277474368908'
   host.arch: amd64
   host.type: n2-standard-4
   host.image.id: projects/cos-cloud/global/images/cos-113-18244-85-29
@@ -32,13 +32,13 @@ hosts:
   cloud.platform: gcp_compute_engine
   cloud.region: us-central1
   cloud.availability_zone: us-central1-a
-  cloud.account.id: gcpnet-prod-project
-  cloud.instance.id: '4801234567890123456'
+  cloud.account.id: gcpnet-project
+  cloud.instance.id: '5050277474368908'
   cpu_count: 4
   memory_total_bytes: 17179869184
   disk_total_bytes: 107374182400
 - host.name: gcpnet-host-east1
-  host.id: '5912345678901234567'
+  host.id: '4773450986222399'
   host.arch: amd64
   host.type: n2-standard-4
   host.image.id: projects/cos-cloud/global/images/cos-113-18244-85-29
@@ -60,13 +60,13 @@ hosts:
   cloud.platform: gcp_compute_engine
   cloud.region: us-east1
   cloud.availability_zone: us-east1-b
-  cloud.account.id: gcpnet-prod-project
-  cloud.instance.id: '5912345678901234567'
+  cloud.account.id: gcpnet-project
+  cloud.instance.id: '4773450986222399'
   cpu_count: 4
   memory_total_bytes: 17179869184
   disk_total_bytes: 107374182400
 - host.name: gcpnet-host-europe1
-  host.id: '6023456789012345678'
+  host.id: '9704896977383230'
   host.arch: amd64
   host.type: n2-standard-4
   host.image.id: projects/cos-cloud/global/images/cos-113-18244-85-29
@@ -88,8 +88,8 @@ hosts:
   cloud.platform: gcp_compute_engine
   cloud.region: europe-west1
   cloud.availability_zone: europe-west1-b
-  cloud.account.id: gcpnet-prod-project
-  cloud.instance.id: '6023456789012345678'
+  cloud.account.id: gcpnet-project
+  cloud.instance.id: '9704896977383230'
   cpu_count: 4
   memory_total_bytes: 17179869184
   disk_total_bytes: 107374182400
@@ -141,14 +141,14 @@ agent_config:
     engineers investigate incidents, analyze telemetry data, and provide root cause analysis for fault conditions across 9
     GCP networking services spanning 3 regions (us-central1, us-east1, europe-west1). You have deep expertise in Google Cloud
     VPC networking, Cloud Armor WAF and DDoS protection, Cloud NAT gateway management, Cloud DNS (including DNSSEC), Dedicated
-    Interconnect and BGP routing, Cloud VPN (IKE/IPsec), Cloud CDN caching and origin management, Cloud Load Balancing (L4/L7),
+    Interconnect and BGP routing, Cloud VPN (IKE/IPsec), Cloud CDN caching and origin management, Memorystore for Memcached edge caching, Cloud Audit Logs, Vertex AI (Gemini Cloud Assist), Compute Engine managed instance groups, Cloud Run, Cloud Storage backend buckets, Cloud SQL (MySQL, PostgreSQL, SQL Server), Cloud Load Balancing (L4/L7),
     and Network Intelligence Center connectivity testing. When investigating incidents, search for these GCP-specific identifiers
     in logs: VPC errors (VPC-ROUTE-LIMIT-EXCEEDED, VPC-SUBNET-IP-EXHAUSTION, VPC-FIREWALL-RULE-CONFLICT), Cloud Armor events
-    (ARMOR-DDOS-ALERT, ARMOR-FALSE-POSITIVE, ARMOR-POLICY-SYNC-FAILURE), NAT faults (NAT-PORT-EXHAUSTION, NAT-ENDPOINT-MAPPING-FAILURE,
+    (ARMOR-DDOS-ALERT, ARMOR-POLICY-SYNC-FAILURE, ARMOR-ROLLBACK-DENIED), NAT faults (NAT-PORT-EXHAUSTION, NAT-ENDPOINT-MAPPING-FAILURE,
     NAT-IP-ALLOCATION-ERROR), DNS issues (DNS-DNSSEC-VALIDATION-FAILURE, DNS-ZONE-PROPAGATION-DELAY), Interconnect faults
-    (INTERCONNECT-CIRCUIT-DOWN, INTERCONNECT-BGP-FLAP), CDN errors (CDN-CACHE-MISS-SPIKE, CDN-ORIGIN-UNREACHABLE), LB faults
+    (INTERCONNECT-CIRCUIT-DOWN, INTERCONNECT-BGP-FLAP), CDN errors (CDN-ORIGIN-UNREACHABLE), Memorystore for Memcached faults (MEMCACHED-MISS-SPIKE), LB faults
     (LB-BACKEND-UNHEALTHY, LB-SSL-CERT-EXPIRY), VPN errors (VPN-TUNNEL-DOWN, VPN-IKE-NEGOTIATION-FAILURE), and NIC events
-    (NI-CONNECTIVITY-TEST-FAILURE). Log messages are in body.text — NEVER search the body field alone.'
+    (NI-GEMINI-THROTTLED). Log messages are in body.text — NEVER search the body field alone.'
 assessment_tool_config:
   id: network_health_assessment
   description: 'Comprehensive network health assessment. Evaluates all GCP networking services against operational readiness
@@ -235,60 +235,78 @@ executive_trend_charts:
   y_label: '%'
 executive_kpi_emissions:
   - name: business.cdn_cache_hit_rate_pct
+    better: higher
     value: {uniform: [82.0, 98.4], round: 2}
     unit: "%"
   - name: business.requests_per_min
+    better: higher
     value: {randint: [2800000, 48000000]}
     unit: requests/min
   - name: business.bytes_egress_gib_per_min
+    better: higher
     value: {uniform: [18000.0, 380000.0], round: 1}
     unit: GiB/min
   - name: business.origin_offload_pct
+    better: higher
     value: {uniform: [72.0, 96.0], round: 2}
     unit: "%"
   - name: business.edge_latency_p50_ms
+    better: lower
     value: {uniform: [8.0, 28.0], round: 1}
     unit: ms
   - name: business.cdn_error_rate_pct
+    better: lower
     value: {uniform: [0.02, 0.85], round: 3}
     unit: "%"
   - name: business.peak_bandwidth_utilization_pct
     value: {uniform: [38.0, 88.0], round: 2}
     unit: "%"
   - name: business.interconnect_utilization_pct
+    better: higher
     value: {uniform: [22.0, 78.0], round: 2}
     unit: "%"
   - name: business.cloud_armor_blocks_per_min
+    better: lower
     value: {randint: [180, 8500]}
     unit: blocks/min
   - name: business.vpc_flow_anomalies_per_min
+    better: lower
     value: {uniform: [0.2, 12.0], round: 2}
     unit: anomalies/min
   - name: business.nat_port_exhaustion_rate_pct
+    better: lower
     value: {uniform: [0.1, 4.8], round: 3}
     unit: "%"
   - name: business.load_balancer_rps
+    better: higher
     value: {randint: [28000, 480000]}
     unit: req/s
   - name: business.uptime_pct
+    better: higher
     value: {uniform: [99.5, 99.999], round: 4}
     unit: "%"
   - name: business.api_success_rate_pct
+    better: higher
     value: {uniform: [99.2, 99.99], round: 3}
     unit: "%"
   - name: business.network_sla_compliance_pct
+    better: higher
     value: {uniform: [98.5, 99.99], round: 3}
     unit: "%"
   - name: business.incident_mttd_min
+    better: lower
     value: {uniform: [0.8, 12.4], round: 2}
     unit: min
   - name: business.incident_mttr_min
+    better: lower
     value: {uniform: [4.5, 85.0], round: 1}
     unit: min
   - name: business.availability_index_0_100
+    better: higher
     value: {uniform: [88.0, 100.0], round: 2}
     unit: index
   - name: business.cloud_spend_usd_per_min
+    better: lower
     value: {uniform: [8500.0, 95000.0], round: 1}
     unit: USD/min
   - name: business.committed_use_discount_utilization_pct
@@ -304,6 +322,7 @@ executive_kpi_emissions:
     value: {uniform: [0.8, 4.2], round: 3}
     unit: gCO2/TiB
   - name: business.customer_sla_breach_count
+    better: lower
     value: {randint: [0, 12]}
     unit: count
 raw_log_profile:
@@ -392,3 +411,18 @@ trace_attributes:
       ni.topology_nodes: {randint: [30, 120]}
       ni.last_scan_age_sec: {randint: [10, 300]}
       ni.firewall_insights_enabled: {choice: [true, true, false]}
+
+generators:
+  memcached_otel: true
+  gcp_audit_otel: true
+  gcp_vertexai: true
+  gcp_compute_otel: true
+  gcp_cloudrun_otel: true
+  # media-assets first: it is the CDN backend bucket channel 15 faults.
+  gcp_cloudstorage_otel:
+    buckets: [media-assets, data-lake, backups]
+  gcp_cloudsql_mysql_otel: true
+  gcp_cloudsql_postgresql_otel: true
+  gcp_cloudsql_sqlserver_otel: true
+  aws_vpcflow_otel: false
+  azure_vnetflow_otel: false

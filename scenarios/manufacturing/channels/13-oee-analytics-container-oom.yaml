@@ -10,8 +10,8 @@ cascade_services:
 - shopfloor-portal
 description: OEE analytics k8s pod OOM-killed when caching unprocessed events during an upstream slowdown
 investigation_notes: |-
-  Root Cause: When the SCADA / MES upstream slows or backlogs, the OEE analytics service buffers incoming events. If the per-pod memory limit is below the buffer high-watermark, the kubelet kills the pod with OOMKilled (exit 137). Because the cached state is lost, the next pod recomputes from scratch — producing a saw-tooth OEE pattern that's misleading to operators.
-  Remediation: 1) Inspect the kill: `kubectl describe pod -n mfg oee-analytics-* | grep -A 5 'Last State'`. 2) Right-size the memory request/limit: `kubectl set resources deploy/oee-analytics -n mfg --limits=memory={new_mem_limit}`. 3) Reduce buffer high-watermark in the service config and redeploy. 4) Add a memory pressure HPA. 5) Add a Watcher rule for repeated OOMKills on this deployment.
+  Root Cause: When the SCADA / MES upstream slows or backlogs, the OEE analytics service buffers incoming events. If the per-pod memory limit is below the buffer high-watermark, the kernel cgroup OOM killer kills the container and Kubernetes reports OOMKilled (exit 137). Because the cached state is lost, the next pod recomputes from scratch — producing a saw-tooth OEE pattern that's misleading to operators.
+  Remediation: 1) Inspect the kill: `kubectl describe pods -n mfg oee-analytics | grep -A 5 'Last State'`. 2) Right-size the memory request/limit: `kubectl set resources deploy/oee-analytics -n mfg --limits=memory=1Gi`. 3) Reduce buffer high-watermark in the service config and redeploy. 4) Add a memory pressure HPA. 5) Add a Watcher rule for repeated OOMKills on this deployment.
 remediation_action: resize_pod_memory
 error_message: '[OEE-K8S] ANALYTICS-CONTAINER-OOM: pod={pod_name} container={container_name} restarts={restart_count} mem_limit={mem_limit_mb}MB
   last_exit_code=137'
@@ -40,12 +40,13 @@ fault_params:
   container_name: oee-analytics
   restart_count: {randint: [2, 12]}
   mem_limit_mb: 512
-  mem_peak_mb: {randint: [495, 525]}
+  mem_peak_mb: {randint: [506, 512]}
 rca_clues:
   oee-analytics:
     k8s.last_oom_kill: true
     k8s.restart_count: {randint: [2, 12]}
     k8s.mem_limit_mi: 512
+    oee.event_buffer_high_watermark_mb: {randint: [700, 900]}
   mes-controller:
     mes.oee_feedback_lag_s: {randint: [15, 90]}
   shopfloor-portal:
@@ -59,3 +60,7 @@ business_impact:
     factor: {uniform: [0.40, 0.70]}
   - kpi: business.unplanned_downtime_min_per_shift
     factor: {uniform: [1.5, 3.0]}
+generator_impact:
+  kubernetes_otel:
+    oomkilled_containers: 0.8
+    container_memory_near_limit: 0.98

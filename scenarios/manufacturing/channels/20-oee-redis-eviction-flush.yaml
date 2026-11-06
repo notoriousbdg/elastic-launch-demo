@@ -1,0 +1,53 @@
+name: OEE Redis Eviction Flush
+subsystem: oee
+vehicle_section: result_cache
+error_type: OEE-REDIS-EVICTION
+sensor_type: result_cache
+affected_services:
+- oee-analytics
+cascade_services:
+- shopfloor-portal
+description: OEE result Redis approaches maxmemory and mass-evicts computed windows, forcing analytics recompute storms
+investigation_notes: |-
+  Root Cause: OEE result Redis has hit maxmemory (used memory above 90% of maxmemory and now at the limit). Once used_memory exceeds maxmemory, LRU eviction drops already-computed OEE windows; dashboards miss until oee-analytics recomputes. Memory-approaching-maxmemory and high-eviction-rate alerts fire together.
+  Remediation: 1) Raise maxmemory or reduce key TTL. 2) Recompute the affected window: `oee-admin recompute --line {line_id} --window {affected_window}`. 3) Confirm dashboards refresh within 30s after eviction rate falls.
+remediation_action: resize_oee_redis
+error_message: '[OEE] OEE-REDIS-EVICTION: line={line_id} evicted_entries={stale_entries} correction_time={correction_time}
+  affected_window={affected_window}'
+stack_trace: |-
+  === OEE RESULT REDIS — MASS EVICTION ===
+  Line: {line_id} | Eviction started: {correction_time}
+  ------------------------------------------------------------------------
+  WINDOW START      | KEY                          | EVICTED
+  ------------------------------------------------------------------------
+  13:00–14:00       | oee:{line_id}:13:00          | YES
+  14:00–15:00       | oee:{line_id}:14:00          | YES
+  15:00–16:00       | oee:{line_id}:15:00          | YES
+  ------------------------------------------------------------------------
+  OEE-REDIS-EVICTION: {stale_entries} entries evicted; recompute required
+correlation_attr:
+  key: deployment.oee_redis_maxmemory
+  value: maxmemory-aggressive-2gb
+fault_params:
+  line_id: {choice: [LINE-01, LINE-02, LINE-03, LINE-04, LINE-05]}
+  stale_entries: {randint: [8, 80]}
+  correction_time: 2026-05-06T16:42:18Z
+  affected_window: "13:00–16:00"
+rca_clues:
+  oee-analytics:
+    oee.evicted_cache_entries: {randint: [8, 80]}
+    oee.recompute_window_min: {randint: [15, 240]}
+    oee.redis_used_memory_pct: {uniform: [95, 100], round: 1}
+  shopfloor-portal:
+    portal.oee_tile_recomputing: true
+business_impact:
+  - kpi: business.oee_overall_pct
+    factor: {uniform: [0.45, 0.75]}
+  - kpi: business.oee_availability_pct
+    factor: {uniform: [0.45, 0.75]}
+  - kpi: business.throughput_units_per_hour
+    factor: {uniform: [0.45, 0.75]}
+generator_impact:
+  redis_otel:
+    high_eviction_rate: 200.0
+    memory_approaching_maxmemory: 92.0

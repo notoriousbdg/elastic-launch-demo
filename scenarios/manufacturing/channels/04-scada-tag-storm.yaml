@@ -9,10 +9,10 @@ affected_services:
 cascade_services:
 - mes-controller
 - oee-analytics
-description: Runaway tag-update rate floods the historian write path, exhausting buffers
+description: Runaway tag-update rate floods the InfluxDB historian write path, exhausting buffers
 investigation_notes: |-
-  Root Cause: Tag storms typically come from a sensor stuck in fast-change mode (e.g., a dead-band value of 0 on a noisy signal) or from a PLC firmware update that reset the publishing interval to the minimum allowed by the OPC-UA server. The downstream historian buffer fills faster than the compaction job can drain it.
-  Remediation: 1) Identify offenders: `scada-admin top-publishers --window 60s`. 2) Apply a temporary dead-band: `scada-admin set-deadband --tag {tag_name} --pct 0.5`. 3) Reduce publishing rate: `scada-admin set-publish-interval --subscription {subscription_id} --ms 1000`. 4) Drain the historian buffer: `historian-admin flush-buffer --priority high`. 5) Open a biomed/maintenance ticket if a sensor is genuinely failing (constant noise above process limits).
+  Root Cause: Tag storms typically come from a sensor stuck in fast-change mode (e.g., a dead-band value of 0 on a noisy signal) or from a PLC firmware update that reset the publishing interval to the minimum allowed by the OPC-UA server. The downstream historian buffer fills faster than the compaction job can drain it. A dead-band of 0.0 on the storming tag confirms the stuck-sensor path; a publishing interval still at its configured 1000ms and no PLC firmware change rule out the firmware reset.
+  Remediation: 1) Identify offenders: `scada-admin top-publishers --window 60s`. 2) Apply a temporary dead-band: `scada-admin set-deadband --tag {tag_name} --pct 0.5`. 3) Reduce publishing rate: `scada-admin set-publish-interval --subscription {subscription_id} --ms 1000`. 4) Drain the historian buffer: `historian-admin flush-buffer --priority high`. 5) Open an instrumentation/maintenance ticket if a sensor is genuinely failing (constant noise above process limits).
 remediation_action: throttle_subscription
 error_message: '[SCADA] SCADA-TAG-STORM: subscription={subscription_id} rate={tag_rate}/s baseline=1200/s tag={tag_name} affected_plcs={affected_plcs}'
 stack_trace: |-
@@ -21,7 +21,7 @@ stack_trace: |-
   ------------------------------------------------------------------------
   TAG NAME             | RATE/s   | BASELINE | RATIO    | DEADBAND
   ------------------------------------------------------------------------
-  {tag_name}            | {tag_rate}    | 12       | {tag_rate}x      | 0.0
+  {tag_name}.* (all drives) | {tag_rate}    | 1200     | 12-50x   | 0.0
   MotorSpeed            | 8        | 8        | 1.0x     | 0.5
   OvenTempC             | 3        | 3        | 1.0x     | 0.5
   ------------------------------------------------------------------------
@@ -34,12 +34,14 @@ fault_params:
     format: "sub-{n}"
     n: {randint: [1000, 9999]}
   tag_rate: {randint: [15000, 60000]}
-  tag_name: {choice: [MotorSpeed, OvenTempC, ConveyorRPM, PressurePsi, PartsCounter]}
+  tag_name: ConveyorRPM
   affected_plcs: {randint: [1, 4]}
 rca_clues:
   scada-gateway:
     scada.publish_rate_per_s: {randint: [15000, 60000]}
     scada.deadband_pct: 0.0
+    scada.publish_interval_ms: 1000
+    scada.plc_firmware_changed: false
   ot-historian:
     historian.buffer_high_watermark_pct: {uniform: [85.0, 99.5], round: 1}
   mes-controller:
@@ -50,8 +52,12 @@ business_impact:
   - kpi: business.oee_overall_pct
     factor: {uniform: [0.35, 0.65]}
   - kpi: business.oee_performance_pct
-    factor: {uniform: [0.30, 0.60]}
+    factor: {uniform: [0.3, 0.6]}
   - kpi: business.throughput_units_per_hour
-    factor: {uniform: [0.35, 0.65]}
+    value: {uniform: [273.65, 314.85]}
   - kpi: business.unplanned_downtime_min_per_shift
     factor: {uniform: [1.8, 3.5]}
+generator_impact:
+  influxdb_otel:
+    cache_write_errors: 5.0
+    dropped_writes: 5.0

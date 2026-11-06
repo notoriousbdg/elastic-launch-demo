@@ -1,0 +1,70 @@
+name: Embedding Batch Backlog
+subsystem: embeddings
+vehicle_section: embeddings_pipeline
+error_type: EMB-BATCH-BACKLOG
+sensor_type: queue_depth
+affected_services: [embedding-service, retrieval-service]
+cascade_services: []
+
+description: Embedding batch jobs back up so newly ingested documents stay unsearchable in Azure AI Search for hours.
+
+investigation_notes: |
+  1. Search body.text LIKE *EMB-BATCH-BACKLOG* and read queue_depth={queue_depth} and oldest_job_age_min={oldest_job_age_min} to size the backlog.
+  2. Compare ingest rate docs_ingested_per_min={ingest_rate} against embedding throughput docs_embedded_per_min={embed_rate}; a persistent gap means the backlog is growing.
+  3. Check worker capacity on the embedding deployment: active_workers={active_workers} of max {max_workers} means every worker is busy and the pool cap is the bottleneck. Azure OpenAI throttling is negligible (throttled_calls={throttled_calls}) and the deployment keeps more than 40% of its TPM quota, so quota is not what limits throughput.
+  4. Confirm the downstream effect: retrieval-service shows freshness_lag_min={oldest_job_age_min} and new documents missing from the index.
+  5. Rule out a poison batch by checking failed_batches={failed_batches} (under 5) and the dead-letter queue for repeated retries.
+  6. Get approval, then scale the embedding batch workers and watch queue_depth drain toward zero.
+
+remediation_action: scale_embedding_batch_workers
+
+error_message: |
+  [EmbeddingService] EMB-BATCH-BACKLOG: queue={queue_name} queue_depth={queue_depth} oldest_job_age_min={oldest_job_age_min} workers={active_workers}/{max_workers}
+
+stack_trace: |
+  BatchBacklogException: EMB-BATCH-BACKLOG
+    at EmbeddingBatchScheduler.dispatch(queue={queue_name})
+    at EmbeddingService.processIngestBatch(batch_size={batch_size})
+  Queue depth:        {queue_depth}
+  Oldest job age:     {oldest_job_age_min} min
+  Ingest rate:        {ingest_rate} docs/min
+  Embed rate:         {embed_rate} docs/min
+  Workers:            {active_workers}/{max_workers}
+  Throttled calls:    {throttled_calls}
+  Failed batches:     {failed_batches}
+
+correlation_attr:
+  key: embedding.batch_worker_config
+  value: batch-workers-max4-batch256-2026-10-18
+
+fault_params:
+  queue_name: {choice: [ingest-embed-batch, reindex-embed-batch]}
+  queue_depth: {randint: [4000, 60000]}
+  oldest_job_age_min: {randint: [90, 480]}
+  ingest_rate: {randint: [900, 3000]}
+  embed_rate: {randint: [150, 600]}
+  active_workers: 4
+  max_workers: 4
+  batch_size: {choice: [128, 256, 512]}
+  throttled_calls: {randint: [0, 5]}
+  failed_batches: {randint: [0, 2]}
+
+rca_clues:
+  embedding-service:
+    embedding.queue_depth: {randint: [4000, 60000]}
+    embedding.oldest_job_age_min: {randint: [90, 480]}
+    embedding.workers_at_max: true
+    embedding.tpm_quota_remaining_pct: {uniform: [40.0, 70.0], round: 1}
+    embedding.dead_letter_batches: {randint: [0, 2]}
+  retrieval-service:
+    search.index_freshness_lag_min: {randint: [90, 480]}
+    search.new_docs_missing_count: {randint: [500, 12000]}
+
+business_impact:
+  - kpi: business.resolution_rate_pct
+    value: {uniform: [46.5, 53.5], round: 1}
+  - kpi: business.conversations_per_min
+    value: {uniform: [120.9, 139.1], round: 0}
+  - kpi: business.retrieval_latency_p95_ms
+    value: {uniform: [350.61, 403.39]}
+

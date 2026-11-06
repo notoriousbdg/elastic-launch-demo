@@ -12,7 +12,7 @@ cascade_services:
 description: 5G NR bearer setup requests timing out due to gNodeB resource exhaustion in target cell
 investigation_notes: |
   1. Check gNodeB resource utilization for the target cell — PRB (Physical Resource Block) usage above 95% prevents new bearer allocation. Query: network-core metrics for gnb.prb_utilization_pct.
-  2. Bearer setup involves S1-AP InitialContextSetupRequest → gNodeB resource allocation → E-RAB setup. Timeout at the gNodeB allocation step indicates radio resource congestion, not core network issues.
+  2. Bearer setup involves NGAP PDU Session Resource Setup Request (AMF → gNodeB) → gNodeB radio admission → DRB setup. Timeout at the gNodeB allocation step indicates radio resource congestion, not core network issues.
   3. Review concurrent bearer count per cell — max 256 active bearers per cell. If at capacity, new activations queue until existing bearers are released (average bearer lifetime 45min).
   4. Check for mass event scenarios (stadium, convention) that concentrate subscribers in a single cell. Enable carrier aggregation or activate temporary small cells if available.
   5. Provisioning-service retries bearer allocation 3x with exponential backoff (1s, 2s, 4s) before returning failure to activation-service. Monitor retry success rate to gauge recovery trajectory.
@@ -23,15 +23,15 @@ stack_trace: |
   cell_id={cell_id}  gnodeb={gnodeb_id}  sector=3
   --- ALLOCATION PIPELINE ---
     STEP                    STATUS      ELAPSED_MS
-    s1ap_initial_context    COMPLETE    42
+    ngap_pdu_session_setup  COMPLETE    42
     gnb_resource_check      COMPLETE    18
     prb_allocation          TIMEOUT     {bearer_timeout_ms}  <<< STUCK
-    erab_setup              SKIPPED     ---
+    drb_setup               SKIPPED     ---
     bearer_activation       SKIPPED     ---
   --- CELL RESOURCES ---
     prb_utilization={prb_util_pct}%  active_bearers={active_bearers}/256
     carrier_aggregation=DISABLED  small_cell_available=false
-    bearer_type={bearer_type}  qos_class=QCI-9
+    bearer_type={bearer_type}  qos_class=5QI-9
   --- SUBSCRIBER IMPACT ---
     queued_activations={queued_activations}  avg_wait_s=45
   ACTION: enable_ca=true  redistribute_load=true  alert=NET-BEARER-TIMEOUT
@@ -51,14 +51,14 @@ correlation_attr:
 fault_params:
   cell_id: {format: "CELL-EU-{n}", n: {randint: [10000, 99999]}}
   gnodeb_id: {format: "gNB-FRA-{n}", n: {randint: [100, 999]}}
-  bearer_type: {choice: [5G_NR, LTE, NR-DC, LTE-A]}
+  bearer_type: {choice: [5G_NR, NR-DC, EN-DC]}
   bearer_timeout_ms: {randint: [5000, 15000]}
-  prb_util_pct: {randint: [92, 99]}
+  prb_util_pct: {randint: [96, 99]}
   active_bearers: {randint: [240, 256]}
   queued_activations: {randint: [20, 100]}
 rca_clues:
   network-core:
-    network.prb_utilization_pct: {randint: [92, 99]}
+    network.prb_utilization_pct: {randint: [96, 99]}
     network.active_bearers: {randint: [240, 256]}
   provisioning-service:
     provisioning.bearer_retry_count: {randint: [2, 3]}
@@ -71,10 +71,10 @@ rca_clues:
     gateway.timeout_rate: {uniform: [0.05, 0.2], round: 2}
 business_impact:
   - kpi: business.activations_per_min
-    factor: {uniform: [0.20, 0.50]}
+    value: {uniform: [230.87, 265.63]}
   - kpi: business.data_session_success_pct
     factor: {uniform: [0.25, 0.55]}
   - kpi: business.ran_latency_p95_ms
     factor: {uniform: [2.5, 5.0]}
   - kpi: business.throughput_p50_mbps
-    factor: {uniform: [0.20, 0.50]}
+    value: {uniform: [33.11, 38.09], round: 1}

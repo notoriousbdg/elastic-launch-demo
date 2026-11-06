@@ -8,16 +8,16 @@ affected_services:
 - cloud-load-balancer
 cascade_services:
 - cloud-nat-gateway
-description: VPC peering route table exceeding maximum advertised route limit
+description: VPC peering route table exceeding maximum advertised route limit, dropping routes to the Cloud SQL for PostgreSQL private network
 investigation_notes: |-
-  Root cause: VPC peering has a hard limit of 250 advertised routes per peering connection. When custom routes are exported across peerings, aggregate routes from all subnets and static/dynamic routes count toward this limit. Check current usage with:
+  Root cause: vpc-network-manager's Cloud SQL for PostgreSQL instance is reached over Private Service Access, which is itself a VPC peering to servicenetworking. Once the peering exceeds its route limit, routes that don't fit are dropped. Application connections to the primary time out and the application opens a reconnect storm against it; the extra load on the primary slows replication to the cross-region read replica, so replication lag climbs. Confirm on the GCP Cloud SQL for PostgreSQL OTel dashboards (replica lag, number of backends). VPC Network Peering enforces route quotas per peering group (here {route_max} routes); subnet, static and dynamic routes imported from every peered network count toward them, and routes beyond the quota are dropped. Check current usage with:
     gcloud compute networks peerings list-routes <peering> --network=<vpc> --region=<region> --direction=INCOMING
-  Remediation: Consolidate overlapping CIDR ranges using supernets, remove stale static routes, or switch to a Shared VPC model which avoids peering route limits. If immediate relief is needed, request a quota increase via gcloud compute project-info describe --project=<project> and file a support case referencing the PEER_ROUTES_PER_PEERING quota.
+  Remediation: Consolidate overlapping CIDR ranges using supernets, remove stale static routes, or switch to a Shared VPC model which avoids peering route limits. If immediate relief is needed, find the peering-group route quota in Console > IAM & Admin > Quotas (filter on 'peering group') and request an increase there.
 remediation_action: reset_vpc_peering
 error_message: level=error ts={{timestamp}} caller=vpc_manager.go:312 msg="VPC-ROUTE-LIMIT-EXCEEDED" project={gcp_project}
   peering={vpc_peering_name} routes={route_count}/{route_max} network={vpc_network} region={gcp_region} dropped_prefixes={dropped_prefixes}
-stack_trace: "goroutine 234 [running]:\nruntime/debug.Stack()\n\t/usr/local/go/src/runtime/debug/stack.go:24 +0x5e\ncloud.google.com/go/compute/apiv1.(*RoutesClient).AggregatedList(0xc000518000,\
-  \ {{0xc000a12480}}, {{0xc000a124c0}})\n\t/app/internal/vpc/route_manager.go:312 +0x3a2\n  VPC Network: {vpc_network}\n \
+stack_trace: "goroutine 234 [running]:\nruntime/debug.Stack()\n\t/usr/local/go/src/runtime/debug/stack.go:24 +0x5e\ngcpnet/internal/vpc.(*RouteManager).checkPeeringRoutes(0xc000518000,\
+  \ {{0xc000a12480}}, {{0xc000a124c0}})\n\t/app/internal/vpc/vpc_manager.go:312 +0x3a2\n  VPC Network: {vpc_network}\n \
   \ Peering: {vpc_peering_name}\n  Routes: {route_count}/{route_max}\n  Dropped Prefixes: {dropped_prefixes}\n  Action: Consolidate\
   \ routes or request quota increase"
 correlation_attr:
@@ -27,14 +27,14 @@ fault_params:
   gcp_project: {choice: [gcpnet-prod-001, gcpnet-prod-002, gcpnet-staging]}
   gcp_region: {choice: [us-central1, us-east1, europe-west1]}
   vpc_network: {choice: [gcpnet-vpc-prod, gcpnet-vpc-staging, gcpnet-vpc-shared]}
-  vpc_peering_name: {choice: [peer-to-shared-vpc, peer-to-onprem, peer-to-partner]}
-  route_count: {randint: [240, 250]}
+  vpc_peering_name: servicenetworking-googleapis-com
+  route_count: 250
   route_max: 250
   dropped_prefixes: {randint: [5, 30]}
 rca_clues:
   vpc-network-manager:
-    vpc.route_utilization_pct: {uniform: [96, 100], round: 1}
-    vpc.peering_name: peer-to-shared-vpc
+    vpc.route_utilization_pct: 100.0
+    vpc.peering_name: servicenetworking-googleapis-com
   cloud-load-balancer:
     lb.route_advertisement_status: stale
     lb.backend_reachability: partial
@@ -50,3 +50,7 @@ business_impact:
     factor: {uniform: [0.80, 0.92]}
   - kpi: business.customer_sla_breach_count
     factor: {uniform: [2.0, 5.0]}
+generator_impact:
+  gcp_cloudsql_postgresql_otel:
+    replica_lag_high: 300.0
+    connections_high: 950.0

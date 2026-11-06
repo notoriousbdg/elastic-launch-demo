@@ -1,0 +1,37 @@
+name: "GT ibmmq_otel: fdc_files_increasing"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-IBMMQ-FDC-FILES-INCREASING
+sensor_type: impact_key_probe
+affected_services:
+  - gt-ibmmq-aws-svc-1
+cascade_services:
+  - gt-ibmmq-aws-svc-2
+description: "Tests impact_key fdc_files_increasing on generator ibmmq_otel."
+investigation_notes: |-
+  1. Verify ibmmq_otel is active and reporting metrics.
+  2. Check that the fdc_files_increasing metric has reached the trigger value (50.0).
+  3. Confirm generator_impact for ibmmq_otel.fdc_files_increasing is set to 50.0.
+  4. Look for correlated changes in service gt-ibmmq-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_fdc_files_increasing_baseline
+error_message: "GT-PROBE: gen=ibmmq_otel key=fdc_files_increasing value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=ibmmq_otel
+  impact_key: fdc_files_increasing
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 50.0
+  svc_name: gt-ibmmq-aws-svc-1
+rca_clues:
+  gt-ibmmq-aws-svc-1:
+    probe.generator: ibmmq_otel
+    probe.impact_key: fdc_files_increasing
+    probe.trigger_value: 50.0
+  gt-ibmmq-aws-svc-2:
+    probe.upstream_generator: ibmmq_otel
+    probe.upstream_key: fdc_files_increasing
+generator_impact:
+  ibmmq_otel:
+    fdc_files_increasing: 50.0

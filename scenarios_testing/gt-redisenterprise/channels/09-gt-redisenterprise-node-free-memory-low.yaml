@@ -1,0 +1,37 @@
+name: "GT redisenterprise_otel: node_free_memory_low"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-REDISENTERPRISE-NODE-FREE-MEMORY-LO
+sensor_type: impact_key_probe
+affected_services:
+  - gt-redisenterprise-aws-svc-1
+cascade_services:
+  - gt-redisenterprise-aws-svc-2
+description: "Tests impact_key node_free_memory_low on generator redisenterprise_otel."
+investigation_notes: |-
+  1. Verify redisenterprise_otel is active and reporting metrics.
+  2. Check that the node_free_memory_low metric has reached the trigger value (10.0).
+  3. Confirm generator_impact for redisenterprise_otel.node_free_memory_low is set to 10.0.
+  4. Look for correlated changes in service gt-redisenterprise-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_node_free_memory_low_baseline
+error_message: "GT-PROBE: gen=redisenterprise_otel key=node_free_memory_low value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=redisenterprise_otel
+  impact_key: node_free_memory_low
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 10.0
+  svc_name: gt-redisenterprise-aws-svc-1
+rca_clues:
+  gt-redisenterprise-aws-svc-1:
+    probe.generator: redisenterprise_otel
+    probe.impact_key: node_free_memory_low
+    probe.trigger_value: 10.0
+  gt-redisenterprise-aws-svc-2:
+    probe.upstream_generator: redisenterprise_otel
+    probe.upstream_key: node_free_memory_low
+generator_impact:
+  redisenterprise_otel:
+    node_free_memory_low: 10.0

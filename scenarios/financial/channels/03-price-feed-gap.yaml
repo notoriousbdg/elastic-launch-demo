@@ -13,7 +13,7 @@ description: Market data feed missing price ticks for one or more instruments
 investigation_notes: |-
   1. Check market-data-feed logs for MDF-PRICE-GAP — note symbol, exchange, gap_ms, and missing sequence range.
   2. Query FROM logs.otel.financial.* | WHERE body.text LIKE "*MDF-PRICE-GAP*" | STATS max(gap_ms) BY symbol, exchange to find worst-affected instruments.
-  3. Inspect the multicast group for packet loss — if the retransmit channel shows no response within 500ms the feed handler must failover.
+  3. Inspect the multicast group for packet loss (above 1% is a loss event) — if the retransmit channel shows no response within 500ms the feed handler must failover.
   4. Check matching-engine for stale_instruments count — any book marked STALE must halt new orders until fresh ticks arrive.
   5. If primary feed remains silent, trigger failover to backup feed and request retransmission from exchange for the missing sequence window.
 remediation_action: failover_to_backup_feed
@@ -28,19 +28,22 @@ stack_trace: |-
     ...  ({gap_ms}ms silence)
     seq {seq_end}  RECEIVED  price=244.7200  qty=1500  ts=14:32:07.882
   retransmit_requested=true  channel=FAST/FIX  multicast_grp=224.0.31.1:14310
-  handler_state=RECOVERING  stale_instruments=12  affected_books=3
+  handler_state=RECOVERING  stale_instruments={stale_instruments}  affected_books=3
   ACTION: mark_stale=true  request_retransmit=true  alert=MDF-PRICE-GAP
 correlation_attr: {}
 fault_params:
   symbol: {choice: [AAPL, GOOGL, MSFT, AMZN, TSLA, JPM, GS, MS, BAC, C]}
   gap_ms: {randint: [500, 10000]}
-  exchange: {choice: [NYSE, NASDAQ, CBOE, CME, ICE, BATS, IEX]}
-  seq_start: {randint: [1000000, 9999999]}
-  seq_end: {randint: [1000000, 9999999]}
+  exchange: {choice: [NYSE, NASDAQ, CBOE, IEX]}
+  seq_start: 4418230
+  seq_end: 4418977
+  stale_instruments: {randint: [1, 50]}
 rca_clues:
   market-data-feed:
     feed.gap_duration_ms: {randint: [500, 10000]}
     feed.stale_instruments_count: {randint: [1, 50]}
+    feed.multicast_packet_loss_pct: {uniform: [5.0, 40.0], round: 1}
+    feed.retransmit_wait_ms: {randint: [800, 5000]}
   matching-engine:
     engine.stale_book_count: {randint: [1, 20]}
     engine.halted_on_stale_feed: {randint: [1, 10]}
@@ -52,10 +55,10 @@ rca_clues:
     portal.feed_gap_alerts_shown: {randint: [1, 30]}
 business_impact:
   - kpi: business.order_flow_per_min
-    factor: {uniform: [0.35, 0.65]}
+    value: {uniform: [513.83, 591.18]}
   - kpi: business.fill_rate_pct
-    factor: {uniform: [0.30, 0.60]}
+    factor: {uniform: [0.3, 0.6]}
   - kpi: business.avg_spread_bps
     factor: {uniform: [2.5, 6.0]}
   - kpi: business.best_execution_pct
-    factor: {uniform: [0.70, 0.90]}
+    factor: {uniform: [0.7, 0.9]}

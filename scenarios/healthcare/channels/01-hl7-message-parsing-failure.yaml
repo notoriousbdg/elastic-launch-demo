@@ -11,19 +11,19 @@ cascade_services:
 - clinical-alerts
 description: HL7 v2.x message parsing fails due to malformed segments or unsupported message types in the ADT interface
 investigation_notes: |-
-  Root Cause: Malformed HL7 v2.x segments typically originate from upstream ADT/ORM source systems sending non-standard field encodings or unsupported Z-segments. Check the MSH-9 message type and MSH-12 version against the interface specification.
-  Remediation: 1) Review the ACK/NAK disposition — AE (Application Error) vs AR (Application Reject) determines retry eligibility. 2) Inspect the Mirth Connect or Rhapsody channel logs for the failing message ID. 3) Flush the dead-letter queue: `./mirth-cli queue flush --channel ADT-INBOUND --state ERROR`. 4) If messages are stuck, restart the HL7 listener: `systemctl restart mirth-hl7-listener`. 5) Verify segment encoding with: `hl7-validator --file /tmp/failed_msg.hl7 --version 2.5.1`. 6) Reconcile message control IDs in the MSA segment to ensure no duplicate deliveries after recovery.
+  Root Cause: Malformed HL7 v2.x segments typically originate from upstream ADT/ORM source systems sending non-standard field encodings or unsupported Z-segments. Check the MSH-9 message type and MSH-12 version against the interface specification. An inbound MSH-12 version of 2.3.1 against the 2.5.1 interface specification, with no Z-segments present, means the source system is sending non-standard v2.3.1 field encodings rather than unsupported Z-segments.
+  Remediation: 1) Review the ACK/NAK disposition — AE (Application Error) vs AR (Application Reject) determines retry eligibility. 2) Inspect the Mirth Connect or Rhapsody channel logs for the failing message ID. 3) After the source system corrects its field encoding, reprocess the errored messages instead of discarding them (Mirth Administrator > Message Browser on ADT-INBOUND, filter status ERROR, Reprocess). 4) If messages are stuck, restart the HL7 listener: `systemctl restart mirth-hl7-listener`. 5) Verify segment encoding with: `hl7-validator --file /tmp/failed_msg.hl7 --version 2.5.1`. 6) Reconcile message control IDs in the MSA segment to ensure no duplicate deliveries after recovery.
 remediation_action: restart_hl7_interface
-error_message: '[EHR] HL7-ACK-AE: msg_type={msg_type} segment={hl7_segment} position={position} patient=MRN-{mrn}'
+error_message: '[EHR] HL7-ACK-AE: msg_type={msg_type} segment={hl7_segment} position={position} patient={mrn}'
 stack_trace: |-
-  MSH|^~\&|EHR-CORE|FACILITY-01|LAB-LIS|LAB-01|20260217143052||{msg_type}|MSG-{mrn}.001|P|2.5.1|||AL|NE
-  EVN|A01|20260217143052|||ADMIN-SYS
+  MSH|^~\&|EHR-CORE|FACILITY-01|LAB-LIS|LAB-01|20260217143052||{msg_type}|MSG-{mrn}.001|P|2.3.1|||AL|NE
+  EVN||20260217143052|||ADMIN-SYS
   PID|1||{mrn}^^^FACILITY-01^MR||DOE^JANE^M||19650315|F|||123 MAIN ST^^ANYTOWN^ST^12345||555-0100|||M|NON|{encounter_id}
   {hl7_segment}|<<< PARSE ERROR at position {position} >>>
   --- ACK ---
   MSH|^~\&|LAB-LIS|LAB-01|EHR-CORE|FACILITY-01|20260217143052||ACK^{msg_type}|ACK-{mrn}.001|P|2.5.1
   MSA|AE|MSG-{mrn}.001|HL7-ACK-AE: Segment {hl7_segment} at position {position} contains invalid field encoding
-  ERR|^^^207&Application internal error&HL70357|{hl7_segment}^{position}|E|||Invalid segment structure
+  ERR||{hl7_segment}^1^{position}|102^Data type error^HL70357|E||||Invalid field encoding
 correlation_attr:
   key: deployment.ehr_hl7_version
   value: mirth-3.12.0-hotfix7
@@ -39,7 +39,8 @@ fault_params:
     n: {randint: [100000, 999999]}
 rca_clues:
   ehr-system:
-    hl7.segment_encoding: non_standard_z_segment
+    hl7.segment_encoding: non_standard_field_encoding
+    hl7.z_segment_count: 0
     hl7.msh_version: "2.3.1"
   lab-integration:
     hl7.oru_queue_depth: {randint: [200, 800]}
@@ -52,10 +53,10 @@ rca_clues:
     alerts.suppressed_count: {randint: [5, 30]}
 business_impact:
   - kpi: business.hl7_messages_per_min
-    factor: {uniform: [0.20, 0.45]}
+    value: {uniform: [513.83, 591.18]}
   - kpi: business.ehr_response_time_ms
     factor: {uniform: [1.8, 3.5]}
   - kpi: business.order_turnaround_min
     factor: {uniform: [1.6, 3.0]}
   - kpi: business.patient_safety_events_per_min
-    factor: {uniform: [1.5, 3.0]}
+    value: {uniform: [0.68, 0.79], round: 3}

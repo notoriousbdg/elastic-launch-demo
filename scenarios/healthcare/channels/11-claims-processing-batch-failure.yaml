@@ -11,24 +11,27 @@ cascade_services:
 - scheduling-api
 description: Batch claims processing pipeline fails during X12 837 generation or submission
 investigation_notes: |-
-  Root Cause: X12 837 Professional/Institutional claim rejections are stage-specific. Validation-stage failures indicate missing/invalid CLM segment data (DX codes, CPT codes, NPI). Submission-stage failures point to clearinghouse connectivity or envelope (ISA/GS) formatting issues. Adjudication-stage rejections come from payer business rules (timely filing, authorization requirements).
+  Root Cause: X12 837 Professional/Institutional claim rejections are stage-specific. Validation-stage failures indicate missing/invalid CLM segment data (DX codes, CPT codes, NPI). Submission-stage failures point to clearinghouse connectivity or envelope (ISA/GS) formatting issues. Adjudication-stage rejections come from payer business rules (timely filing, authorization requirements). A 999 rejection with IK3 pointing at the CLM segment, an ISA/GS envelope that passes validation and no payer 277 rejections place the failure at the validation stage (invalid CLM data).
   Remediation by stage: VALIDATION — run claim scrubber: `claims-admin scrub --batch {batch_id} --fix-codes`. SUBMISSION — verify clearinghouse connection: `claims-admin ch-status --payer {payer_id}` and resubmit: `claims-admin resubmit --batch {batch_id} --claims-only REJECTED`. ADJUDICATION — review the 999/277 response for specific rejection reason codes and correct per payer guidelines. General: 1) Reset the X12 837 gateway: `systemctl restart claims-submission-engine`. 2) Verify the 5010 companion guide for the rejecting payer is current. 3) Resubmit corrected claims: `claims-admin resubmit --batch {batch_id} --stage {claim_stage}`.
 remediation_action: resubmit_claims_batch
 error_message: '[CLAIMS] X12-837-REJECT: batch={batch_id} claim={claim_id} patient={patient_id} payer={payer_id} stage={claim_stage}'
 stack_trace: |-
   --- X12 837 CLAIM SUBMISSION TRACE ---
   >>> 837 Professional Claim
-  ISA*00*          *00*          *ZZ*FACILITY-01    *ZZ*{payer_id}        *20260217143052*^*00501*000000001*0*P*:
-  GS*HC*FACILITY-01*{payer_id}*20260217143052*0001*X*005010X222A1
+  ISA*00*          *00*          *ZZ*FACILITY-01    *ZZ*{payer_id:15s}*260217*1430*^*00501*000000001*0*P*:
+  GS*HC*FACILITY-01*{payer_id}*20260217*1430*0001*X*005010X222A1
   ST*837*0001*005010X222A1
-  BHT*0019*00*{batch_id}*20260217143052*CH
-  CLM*{claim_id}*5000***11:B:1*Y**A*Y*Y
+  BHT*0019*00*{batch_id}*20260217*1430*CH
+  CLM*{claim_id}*5000***1A:B:1*Y*A*Y*Y
   NM1*IL*1*DOE*JANE****MI*{insurance_id}
   SE*8*0001
   <<< 999 Acknowledgment
-    AK9*R*1*1*0
+    AK1*HC*0001*005010X222A1
+    AK2*837*0001*005010X222A1
     IK3*CLM*4*2300*8
-    IK4*2*782*7*{claim_stage}
+    IK4*5:1*1331*7*1A
+    IK5*R*5
+    AK9*R*1*1*0
   X12-837-REJECT: Claim {claim_id} in batch {batch_id} rejected at {claim_stage}
   Patient: {patient_id} | Payer: {payer_id} | Queued for correction
 correlation_attr:
@@ -45,14 +48,16 @@ fault_params:
     format: "PT-{n}"
     n: {randint: [100000, 999999]}
   payer_id: {choice: [BCBS-001, AETNA-002, UHC-003, CIGNA-004, MDCR-005, MDCD-006]}
-  claim_stage: {choice: [validation, scrubbing, submission, adjudication]}
+  claim_stage: validation
   insurance_id:
     format: "INS-{n}"
     n: {randint: [100000, 999999]}
 rca_clues:
   billing-processor:
     x12.batch_rejection_rate_pct: {uniform: [15, 60], round: 1}
-    x12.isa_envelope_error: true
+    x12.isa_envelope_validation: pass
+    x12.ik3_error_segment: CLM
+    x12.payer_277_rejections: 0
   data-warehouse:
     etl.claims_feed_stalled: true
     etl.pending_claim_records: {randint: [500, 5000]}
@@ -62,11 +67,11 @@ rca_clues:
     sched.charge_capture_lag_s: {randint: [300, 1800]}
 business_impact:
   - kpi: business.claims_submitted_per_min
-    factor: {uniform: [0.15, 0.40]}
+    value: {uniform: [7.25, 8.35]}
   - kpi: business.clean_claim_rate_pct
-    factor: {uniform: [0.15, 0.40]}
+    factor: {uniform: [0.15, 0.4]}
   - kpi: business.collections_usd_per_min
-    factor: {uniform: [0.15, 0.40]}
+    factor: {uniform: [0.15, 0.4]}
   - kpi: business.denials_per_min
     factor: {uniform: [2.5, 5.5]}
   - kpi: business.accounts_receivable_days

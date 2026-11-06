@@ -1,0 +1,61 @@
+name: Memorystore Edge Cache Miss Spike
+subsystem: content_delivery
+vehicle_section: edge_cache
+error_type: MEMCACHED-MISS-SPIKE
+sensor_type: cache_hit_ratio
+affected_services:
+- cloud-cdn-service
+- cloud-load-balancer
+cascade_services:
+- vpc-network-manager
+description: Memorystore for Memcached in front of backends sees get hit ratio collapse, driving origin latency and egress
+investigation_notes: |-
+  Root cause: Memorystore for Memcached get hit ratio dropped below alert threshold (miss ratio above 20%, hit ratio below 80%). Here the cache key policy includes query strings, so unique keys exceed 50,000 and every distinct query string is a cold key that misses on first use, and the one-off items crowd the busiest slab class, which explains the eviction rate above 10/s while overall cache fill stays under 70% and no flush_all ran, so undersized memory and a mass flush are ruled out. Common causes: cache key policy includes query strings that create too many unique keys, recent mass flush of popular keys, or undersized memory causing eviction thrash.
+  Diagnose via Memcached Overview (low_hit_ratio_for_get_operations / high_eviction_rate) and backend latency.
+  Remediation: warm hot paths, exclude noisy query params from cache keys, increase node memory or node count, and verify origins return cacheable responses (avoid no-store on static assets).
+remediation_action: warm_edge_memcached
+error_message: '[Memorystore] MEMCACHED-MISS-SPIKE backend={cdn_backend} hit_ratio={cdn_hit_ratio}% (SLA {cdn_hit_sla}%) miss_rate={cdn_miss_rate}/s
+  origin_latency={cdn_origin_latency_ms}ms cache_fill={cdn_cache_fill_pct}%'
+stack_trace: |-
+  Memorystore for Memcached Analysis
+  -----------------------------------
+  Backend:          {cdn_backend}
+  Hit Ratio:        {cdn_hit_ratio}% (SLA: {cdn_hit_sla}%)
+  Miss Rate:        {cdn_miss_rate}/s
+  Origin Latency:   {cdn_origin_latency_ms}ms
+  Cache Fill:       {cdn_cache_fill_pct}%
+  Top Missed Paths: /api/v2/assets, /media/images
+  Action: Review cache key policy, slab size, and TTL configuration
+correlation_attr:
+  key: deployment.memcached_cache_key
+  value: include-all-query-params
+fault_params:
+  cdn_backend: {choice: [gcpnet-mc-backend-01, gcpnet-mc-backend-02, gcpnet-mc-backend-03]}
+  cdn_hit_ratio: {uniform: [15.0, 45.0], round: 1}
+  cdn_hit_sla: 85
+  cdn_miss_rate: {randint: [500, 5000]}
+  cdn_origin_latency_ms: {randint: [200, 2000]}
+  cdn_cache_fill_pct: {uniform: [30.0, 60.0], round: 1}
+rca_clues:
+  cloud-cdn-service:
+    memcached.cache_key_policy: includes_query_strings
+    memcached.unique_cache_keys: {randint: [50000, 200000]}
+    memcached.recent_flush_all: false
+  cloud-load-balancer:
+    lb.origin_request_surge: {uniform: [300, 800], round: 0}
+    lb.backend_cpu_spike: true
+  vpc-network-manager:
+    vpc.egress_bandwidth_spike: true
+business_impact:
+  - kpi: business.cdn_cache_hit_rate_pct
+    factor: {uniform: [0.15, 0.40]}
+  - kpi: business.origin_offload_pct
+    factor: {uniform: [0.20, 0.45]}
+  - kpi: business.edge_latency_p50_ms
+    factor: {uniform: [3.0, 8.0]}
+  - kpi: business.cloud_spend_usd_per_min
+    factor: {uniform: [2.0, 4.5]}
+generator_impact:
+  memcached_otel:
+    low_hit_ratio_for_get_operations: 35.0
+    high_eviction_rate: 25.0

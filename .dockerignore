@@ -4,3 +4,13 @@ __pycache__
 **/__pycache__
 *.pyc
 .git
+.cache
+.cache/
+data/
+*.db
+.pytest_cache
+tests/
+**/test_*.py
+requirements-dev.txt
+pyproject.toml
+.venv/

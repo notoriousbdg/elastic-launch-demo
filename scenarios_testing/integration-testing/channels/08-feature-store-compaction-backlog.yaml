@@ -1,0 +1,81 @@
+name: Feature Store Compaction Backlog
+subsystem: platform
+vehicle_section: platform_pipeline
+error_type: FEATURESTORE-COMPACTION-BACKLOG
+sensor_type: queue_depth
+affected_services:
+- ml-inference
+cascade_services:
+- analytics-service
+description: 'The synthetic Cassandra-backed feature store is falling behind on compaction,
+  backing up {keyspace} and raising read latency and error rate for ml-inference lookups.
+
+  '
+investigation_notes: '1. Search for body.text containing *FEATURESTORE-COMPACTION-BACKLOG*
+  to find the affected keyspace.
+
+  2. Check ml-inference ml.inference_latency_ms for the resulting read latency increase.
+
+  3. Confirm cassandra_otel compaction_backlog/latency_multiplier/error_rate_multiplier
+  rise for {keyspace}.
+
+  4. Check analytics-service analytics.write_rejection_pct for cascading write pressure.
+
+  5. Verify backlog drains once a manual major compaction is triggered on {keyspace}.
+
+  '
+remediation_action: trigger_major_compaction
+error_message: 'FEATURESTORE-COMPACTION-BACKLOG: keyspace={keyspace} backlog_sstables={compaction_backlog_count}
+  read_latency_ms={feature_read_latency_ms}
+
+  '
+stack_trace: "CompactionBacklogError: keyspace={keyspace}\n  at MlInference.fetchFeatureVector()\n\
+  \  backlog_sstables={compaction_backlog_count} read_latency_ms={feature_read_latency_ms}\n"
+fault_params:
+  keyspace:
+    choice:
+    - feature_store_v1
+    - feature_store_v2
+  compaction_backlog_count:
+    randint:
+    - 100
+    - 500
+  feature_read_latency_ms:
+    uniform:
+    - 300.0
+    - 4000.0
+    round: 1
+rca_clues:
+  ml-inference:
+    ml.inference_latency_ms:
+      uniform:
+      - 300.0
+      - 4000.0
+      round: 1
+    ml.feature_store_error_rate_pct:
+      uniform:
+      - 10.0
+      - 60.0
+      round: 1
+  analytics-service:
+    analytics.write_rejection_pct:
+      uniform:
+      - 10.0
+      - 50.0
+      round: 1
+    analytics.feature_pipeline_stalled: true
+generator_impact:
+  cassandra_otel:
+    high_read_latency_p99: &id001
+      uniform:
+      - 6.0
+      - 18.0
+    high_write_latency_p99: *id001
+    high_error_rate_by_node:
+      uniform:
+      - 10.0
+      - 40.0
+    compaction_falling_behind_pending_tasks:
+      randint:
+      - 100
+      - 500

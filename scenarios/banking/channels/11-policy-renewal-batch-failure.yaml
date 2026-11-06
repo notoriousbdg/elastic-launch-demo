@@ -9,14 +9,14 @@ affected_services:
 cascade_services:
 - member-portal
 - document-vault
-description: Automated policy renewal batch processing failing causing coverage gaps
+description: Automated policy renewal batch CronJob failing causing coverage gaps
 investigation_notes: |-
   1. Check premium_calculation failure reason: RATING_ENGINE_TIMEOUT means the actuarial rating service is degraded — verify quote-engine health and response times in APM traces.
   2. MVR_DATA_STALE indicates driving record pulls returned cached data beyond acceptable freshness. Check the LexisNexis/TransUnion MVR feed connectivity and last successful pull timestamp.
   3. CLUE_SERVICE_UNAVAILABLE means loss history lookups failed — CLUE (Comprehensive Loss Underwriting Exchange) outages affect all carriers. Check A-PLUS/CLUE system status with LexisNexis.
   4. Coverage gap risk is HIGH — policies that fail renewal before effective_date create uninsured periods. Extend grace period to 30 days and notify members. State insurance departments require reporting of lapsed auto policies.
-  5. Check SCRA-protected members — 12 policies with deployment_hold cannot be non-renewed under the Servicemembers Civil Relief Act. These must be manually renewed at the prior term premium.
-  6. Run manual renewal batch for failed policies: POST /api/v1/policy/batch-renew with override flags.
+  5. Check deployment-hold members — 12 policies carry deployment_hold. Deployed members cannot easily act on a lapse notice, and SCRA and state rules limit default actions against them; route these policies to manual renewal so the batch failure does not cause a lapse.
+  6. Check the failed renewal Job in Kubernetes (kubectl get jobs -n banking-prod), then run manual renewal batch for failed policies: POST /api/v1/policy/batch-renew with override flags.
 remediation_action: restart_renewal_engine
 error_message: '[POLICY] POLICY-RENEWAL-FAIL: batch={renewal_batch_id} policies={renewal_count} failed={renewal_failed} reason={renewal_reason}
   effective={renewal_date}'
@@ -44,12 +44,12 @@ fault_params:
   renewal_batch_id: {format: "RNW-{n}", n: {randint: [1000, 9999]}}
   renewal_count: {randint: [500, 5000]}
   renewal_failed: {randint: [50, 500]}
-  renewal_reason: {choice: [RATING_ENGINE_TIMEOUT, MVR_DATA_STALE, CLUE_SERVICE_UNAVAILABLE, PREMIUM_CALC_OVERFLOW]}
+  renewal_reason: RATING_ENGINE_TIMEOUT
   renewal_date: "2026-03-01"
   deployment_hold: {choice: [true, false]}
 rca_clues:
   policy-manager:
-    policy.renewal_batch_failure_reason: {choice: [RATING_ENGINE_TIMEOUT, MVR_DATA_STALE, CLUE_SERVICE_UNAVAILABLE]}
+    policy.renewal_batch_failure_reason: RATING_ENGINE_TIMEOUT
     policy.scra_protected_count: {randint: [5, 20]}
   quote-engine:
     quote.rating_engine_response_ms: {randint: [8000, 30000]}
@@ -62,10 +62,14 @@ rca_clues:
     document.renewal_docs_pending: {randint: [200, 800]}
 business_impact:
   - kpi: business.fee_revenue_usd_per_min
-    factor: {uniform: [0.30, 0.60]}
+    value: {uniform: [4464.0, 5136.0], round: 1}
   - kpi: business.account_openings_per_min
-    factor: {uniform: [0.35, 0.65]}
+    value: {uniform: [0.48, 0.56], round: 2}
   - kpi: business.churn_risk_index_0_100
     factor: {uniform: [2.0, 4.0]}
   - kpi: business.complaint_tickets_per_min
     factor: {uniform: [2.0, 4.5]}
+
+generator_impact:
+  kubernetes_otel:
+    job_failures: 1.0

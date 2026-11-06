@@ -99,14 +99,6 @@ class OperationQueue:
 
     # ── Diagnostics ───────────────────────────────────────────────────────
 
-    def snapshot(self) -> dict:
-        with self._lock:
-            return {
-                "active": list(self._active),  # insertion order = start order
-                "deploy_queue": [op.deployment_id for op in self._deploy_q],
-                "teardown_queue": [op.deployment_id for op in self._teardown_q],
-            }
-
     def list_ordered(self, kind: str) -> list[str]:
         """Return deployment_ids for `kind` in execution order: actively running
         first (in the order they started), then queued (in queue position order).

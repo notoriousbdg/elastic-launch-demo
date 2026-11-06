@@ -12,18 +12,21 @@ description: TLS certificate for storefront domain expiring soon or expired — 
   HTTPS connections
 investigation_notes: |-
   1. Check storefront-gateway logs for SSL-CERT-EXPIRY — cert_days_remaining={cert_days_remaining} days for domain {cert_domain}.
-  2. Verify current certificate details: `openssl s_client -connect {cert_domain}:443 | openssl x509 -noout -dates` — check NotAfter field.
-  3. Check auto-renewal status: if using Let's Encrypt/ACME, verify the renewal cron job ran successfully in the last 60 days.
-  4. Identify all domains covered by this cert (SANs): `openssl x509 -noout -text | grep DNS:` — all listed domains are affected.
+  2. Verify current certificate details: `openssl s_client -connect {cert_domain}:443 -servername {cert_domain} </dev/null 2>/dev/null | openssl x509 -noout -dates` — check the notAfter field.
+  3. Check auto-renewal status: if using Let's Encrypt/ACME, verify the renewal cron job ran successfully in the last 60 days (a last successful renewal more than 60 days ago means the job is failing).
+  4. Identify all domains covered by this cert (SANs): `openssl s_client -connect {cert_domain}:443 -servername {cert_domain} </dev/null 2>/dev/null | openssl x509 -noout -ext subjectAltName` — all listed domains are affected.
   5. Payment processor integrations may reject requests if the cert is expired — PCI DSS requires valid TLS for cardholder data environments.
   6. Emergency renewal: use `certbot renew --force-renewal --cert-name {cert_domain}` or renew via your CA portal and deploy immediately.
 remediation_action: renew_ssl_certificate
 error_message: '[StorefrontGateway] SSL-CERT-EXPIRY: domain={cert_domain} cert_serial={cert_serial} days_remaining={cert_days_remaining}
   issuer={cert_issuer} san_count={cert_san_count} auto_renewal_status={auto_renewal_status}'
 stack_trace: |-
-  SSLCertificateException: SSL-CERT-EXPIRY
-    at TlsTerminator.validateCertificate(domain={cert_domain})
-    at StorefrontGateway.handleRequest(host={cert_domain})
+  Traceback (most recent call last):
+    File "/app/storefront/tls/cert_monitor.py", line 52, in run
+      self.check_certificate(domain)
+    File "/app/storefront/tls/cert_monitor.py", line 87, in check_certificate
+      raise CertificateExpiryError("SSL-CERT-EXPIRY")
+  storefront.tls.CertificateExpiryError: SSL-CERT-EXPIRY
   Domain:           {cert_domain}
   Serial:           {cert_serial}
   Days remaining:   {cert_days_remaining}
@@ -35,27 +38,29 @@ correlation_attr:
   value: true
 fault_params:
   cert_domain: {choice: [shop.example.com, checkout.example.com, api.example.com]}
-  cert_serial: {format: "{n:X}", n: {randint: [10000000, 99999999]}}
+  cert_serial: {format: "{a:012X}{b:012X}{c:012X}", a: {randint: [16777216, 281474976710655]}, b: {randint: [0, 281474976710655]}, c: {randint: [0, 281474976710655]}}
   cert_days_remaining: {randint: [0, 7]}
-  cert_issuer: {choice: ["Let's Encrypt", DigiCert, Comodo]}
+  cert_issuer: "Let's Encrypt"
   cert_san_count: {randint: [3, 15]}
-  auto_renewal_status: {choice: [FAILED, NOT_CONFIGURED, EXPIRED]}
+  auto_renewal_status: FAILED
 rca_clues:
   storefront-gateway:
     tls.cert_days_remaining: {randint: [0, 7]}
     tls.browser_warning_triggered: true
+    tls.auto_renewal_status: FAILED
+    tls.last_successful_renewal_days: {randint: [83, 90]}
   order-management:
     order.https_errors_count: {randint: [10, 500]}
-    order.mixed_content_warnings: {randint: [5, 50]}
+    order.tls_handshake_failures: {randint: [5, 50]}
   payment-processor:
     payment.pci_tls_validation_failed: true
     payment.secure_channel_degraded: true
 business_impact:
   - kpi: business.sessions_per_min
-    factor: {uniform: [0.10, 0.30]}
+    value: {uniform: [725.4, 834.6]}
   - kpi: business.conversion_rate_pct
-    factor: {uniform: [0.10, 0.25]}
+    factor: {uniform: [0.1, 0.25]}
   - kpi: business.orders_placed_per_min
-    factor: {uniform: [0.10, 0.25]}
+    factor: {uniform: [0.1, 0.25]}
   - kpi: business.gmv_usd_per_min
-    factor: {uniform: [0.10, 0.25]}
+    value: {uniform: [31620.0, 36380.0], round: 1}

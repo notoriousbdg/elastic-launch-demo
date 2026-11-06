@@ -10,9 +10,9 @@ cascade_services:
 - digital-marketplace
 description: Shipping label printers going offline or producing unreadable labels
 investigation_notes: |-
-  1. Check the Zebra printer error code: E1001 = print head overheated, E2003 = ribbon empty, E3005 = label gap detection failure, E4002 = paper out.
+  1. Check the Zebra printer error code: E1001 = print head element failure (dead dots/head worn), E2003 = ribbon empty, E3005 = label gap detection failure, E4002 = paper out.
   2. For OFFLINE status, verify the network connection: `ping <printer_ip>` and check the switch port: `show interface <port> status`.
-  3. HEAD_ERROR requires print head replacement — Zebra ZT411/ZT421 heads have a ~50km print life; check the odometer in the printer menu.
+  3. HEAD_ERROR requires print head replacement — Zebra ZT411/ZT421 heads are warranted for 1,000,000 inches (~25km) and rarely last past ~50km (odometer above 50km means the head is worn out); check the odometer in the printer menu.
   4. Unreadable labels (barcode scan failures) indicate print darkness is too low or the thermal ribbon is wrinkled — run a test label: `^XA^FO50,50^BY3^BCN,100,Y,N,N^FD1234567890^FS^XZ`.
   5. Queue depth above 200 while the printer is offline means shipments are stacking up — redirect traffic to a backup Zebra printer immediately.
   6. For carrier-specific label format issues (ZPL vs EPL), verify the printer firmware supports the required label format and update if needed.
@@ -37,15 +37,16 @@ correlation_attr:
   value: zebra-zpl-ii-v6.1-patched
 fault_params:
   label_printer_id: {choice: [ZBR-SHIP-01, ZBR-SHIP-02, ZBR-DOCK-01]}
-  label_printer_status: {choice: [OFFLINE, PAPER_OUT, HEAD_ERROR, RIBBON_EMPTY]}
-  label_error_code: {choice: [E1001, E2003, E3005, E4002]}
+  label_printer_status: HEAD_ERROR
+  label_error_code: E1001
   label_failed_count: {randint: [10, 100]}
   label_window_min: {randint: [5, 30]}
   label_carrier: {choice: [UPS, FedEx, USPS, DHL]}
   label_queue_depth: {randint: [50, 500]}
 rca_clues:
   packaging-fulfillment:
-    warehouse.label_printer_error: {choice: [E1001, E2003, E3005]}
+    warehouse.label_printer_error: E1001
+    warehouse.printer_head_odometer_km: {uniform: [52, 60], round: 1}
     warehouse.shipments_held: {randint: [50, 500]}
   card-printing-system:
     print.completed_no_label: {randint: [20, 200]}
@@ -55,10 +56,8 @@ rca_clues:
     marketplace.tracking_unavailable_count: {randint: [30, 300]}
 business_impact:
   - kpi: business.merch_gmv_usd_per_min
-    factor: {uniform: [0.25, 0.55]}
+    value: {uniform: [10416.0, 11984.0], round: 1}
   - kpi: business.loyalty_points_redeemed_per_min
-    factor: {uniform: [0.30, 0.60]}
+    value: {uniform: [15112.0, 17388.0]}
   - kpi: business.churn_risk_index_0_100
     factor: {uniform: [2.0, 4.0]}
-  - kpi: business.net_satisfaction_proxy_nps
-    factor: {uniform: [0.20, 0.50]}

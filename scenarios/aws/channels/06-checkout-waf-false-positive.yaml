@@ -1,0 +1,86 @@
+name: Checkout Waf False Positive
+subsystem: storefront
+vehicle_section: storefront_pipeline
+error_type: WEB-WAF-FALSE-POSITIVE
+sensor_type: health_check
+affected_services: [storefront-web]
+cascade_services: [orders-gateway]
+
+description: >
+  An AWS WAF managed rule group update starts matching SQL injection signatures against legitimate checkout JSON payloads, so storefront-web checkout submissions are blocked at the edge.
+
+investigation_notes: |
+  1. Search body.text for *WEB-WAF-FALSE-POSITIVE* and read the terminating rule ({waf_rule_id}) and rule group ({waf_rule_group}) on the blocked requests.
+  2. Compare the WAF block share ({block_pct}% of {sampled_requests} sampled requests) against the baseline of under 1%; filter the WAF log on action=BLOCK and uri=/api/checkout.
+  3. Inspect the matched payload field ({matched_field}): the blocked bodies are normal cart JSON containing apostrophes and SQL keywords (O'Neil, 'Select' apartments, 'or' in gift notes) in address and gift-note fields, not attack traffic.
+  4. Check CloudTrail for UpdateWebACL or a managed rule group version change shortly before the block rate rose (rule group version {rule_group_version}).
+  5. Confirm the downstream effect: orders-gateway request volume drops while storefront-web shows checkout 403 responses with no matching 5xx at the ALB.
+  6. Immediate action: switch {waf_rule_id} to Count mode on the web ACL, confirm checkout 403s clear, then add a scope-down or exclusion for the checkout JSON body.
+
+remediation_action: set_waf_rule_to_count
+
+error_message: |
+  WEB-WAF-FALSE-POSITIVE: AWS WAF blocked checkout request web_acl={web_acl} rule={waf_rule_id} rule_group={waf_rule_group} matched_field={matched_field} block_pct={block_pct}
+
+stack_trace: |
+  === AWS WAF BLOCK REPORT ===
+  web_acl={web_acl}  scope=REGIONAL  region=us-east-1
+  --- TERMINATING RULE ---
+    rule_group={waf_rule_group}  version={rule_group_version}
+    rule={waf_rule_id}  action=BLOCK
+    matched_field={matched_field}  uri=/api/checkout
+  --- BLOCK IMPACT ---
+    sampled_requests={sampled_requests}  blocked_pct={block_pct}
+    storefront-web checkout_http_403={checkout_403_count}
+  --- ASSESSMENT ---
+    payload_class=legitimate_customer_json  attack_indicators=none
+  ACTION: set_rule_action=COUNT  alert=WEB-WAF-FALSE-POSITIVE
+
+infrastructure_events:
+  - body: '[CloudTrail] UpdateWebACL: web_acl=awsorders-storefront-acl managed_rule_group=AWSManagedRulesSQLiRuleSet version=Version_2.0 region=us-east-1 event_source=wafv2.amazonaws.com'
+    severity: WARN
+    event_name: aws.cloudtrail.UpdateWebACL
+    service: storefront-web
+    attributes:
+      cloud.provider: aws
+      cloud.service: wafv2
+      aws.cloudtrail.event_name: UpdateWebACL
+      aws.waf.web_acl: awsorders-storefront-acl
+      aws.waf.rule_group: AWSManagedRulesSQLiRuleSet
+      infrastructure.source: CloudTrail
+
+correlation_attr:
+  key: infra.waf_rule_group_version
+  value: AWSManagedRulesSQLiRuleSet-Version_2.0
+
+fault_params:
+  web_acl: awsorders-storefront-acl
+  waf_rule_group: AWSManagedRulesSQLiRuleSet
+  waf_rule_id: SQLi_BODY
+  rule_group_version: Version_2.0
+  matched_field: {choice: [shipping_address.line2, gift_note, billing_name]}
+  block_pct: {randint: [38, 52]}
+  sampled_requests: {randint: [400, 1200]}
+  checkout_403_count: {randint: [150, 700]}
+
+rca_clues:
+  storefront-web:
+    waf.terminating_rule: SQLi_BODY
+    waf.block_pct: {randint: [38, 52]}
+    checkout.http_403_count: {randint: [150, 700]}
+  orders-gateway:
+    upstream.checkout_requests_dropped_pct: {randint: [30, 50]}
+    gateway.no_5xx_correlation: true
+
+business_impact:
+  - kpi: business.orders_per_min
+    value: {uniform: [120.9, 139.1], round: 0}
+  - kpi: business.revenue_usd_per_min
+    factor: {uniform: [0.4, 0.65]}
+  - kpi: business.error_rate_pct
+    factor: {uniform: [3.0, 6.0]}
+
+generator_impact:
+  aws_waf_otel:
+    block_rate: 0.45
+    records_per_cycle: 80

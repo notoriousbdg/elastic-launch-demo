@@ -1,0 +1,37 @@
+name: "GT docker_otel: memory_utilization_multiplier"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-DOCKER-MEMORY-UTILIZATION-MULTIPLIE
+sensor_type: impact_key_probe
+affected_services:
+  - gt-docker-aws-svc-1
+cascade_services:
+  - gt-docker-aws-svc-2
+description: "Tests impact_key memory_utilization_multiplier on generator docker_otel."
+investigation_notes: |-
+  1. Verify docker_otel is active and reporting metrics.
+  2. Check that the memory_utilization_multiplier metric has reached the trigger value (7.5).
+  3. Confirm generator_impact for docker_otel.memory_utilization_multiplier is set to 7.5.
+  4. Look for correlated changes in service gt-docker-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_memory_utilization_multiplier_baseline
+error_message: "GT-PROBE: gen=docker_otel key=memory_utilization_multiplier value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=docker_otel
+  impact_key: memory_utilization_multiplier
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 7.5
+  svc_name: gt-docker-aws-svc-1
+rca_clues:
+  gt-docker-aws-svc-1:
+    probe.generator: docker_otel
+    probe.impact_key: memory_utilization_multiplier
+    probe.trigger_value: 7.5
+  gt-docker-aws-svc-2:
+    probe.upstream_generator: docker_otel
+    probe.upstream_key: memory_utilization_multiplier
+generator_impact:
+  docker_otel:
+    memory_utilization_multiplier: 7.5

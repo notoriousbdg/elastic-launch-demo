@@ -1,0 +1,37 @@
+name: "GT couchdb_otel: high_5xx_server_error_rate"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-COUCHDB-HIGH-5XX-SERVER-ERROR-RATE
+sensor_type: impact_key_probe
+affected_services:
+  - gt-couchdb-aws-svc-1
+cascade_services:
+  - gt-couchdb-aws-svc-2
+description: "Tests impact_key high_5xx_server_error_rate on generator couchdb_otel."
+investigation_notes: |-
+  1. Verify couchdb_otel is active and reporting metrics.
+  2. Check that the high_5xx_server_error_rate metric has reached the trigger value (50.0).
+  3. Confirm generator_impact for couchdb_otel.high_5xx_server_error_rate is set to 50.0.
+  4. Look for correlated changes in service gt-couchdb-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_high_5xx_server_error_rate_baseline
+error_message: "GT-PROBE: gen=couchdb_otel key=high_5xx_server_error_rate value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=couchdb_otel
+  impact_key: high_5xx_server_error_rate
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 50.0
+  svc_name: gt-couchdb-aws-svc-1
+rca_clues:
+  gt-couchdb-aws-svc-1:
+    probe.generator: couchdb_otel
+    probe.impact_key: high_5xx_server_error_rate
+    probe.trigger_value: 50.0
+  gt-couchdb-aws-svc-2:
+    probe.upstream_generator: couchdb_otel
+    probe.upstream_key: high_5xx_server_error_rate
+generator_impact:
+  couchdb_otel:
+    high_5xx_server_error_rate: 50.0

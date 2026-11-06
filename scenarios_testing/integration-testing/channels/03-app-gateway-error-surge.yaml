@@ -1,0 +1,46 @@
+name: App Gateway Error Surge
+subsystem: api_gateway
+vehicle_section: api_gateway_pipeline
+error_type: APPGW-ERROR-SURGE
+sensor_type: error_rate
+affected_services: [session-service]
+cascade_services: [legacy-web-tier]
+
+description: >
+  The synthetic Azure Application Gateway fronting session-service is returning a surge of
+  5xx errors on backend pool {backend_pool_name}, degrading routing for downstream legacy calls.
+
+investigation_notes: |
+  1. Search for body.text containing *APPGW-ERROR-SURGE* to find the affected backend pool.
+  2. Check session-service session.replication_lag_ms for correlated backend instability.
+  3. Confirm azure_gateway_otel error_rate and records_per_cycle metrics spike on {backend_pool_name}.
+  4. Check legacy-web-tier legacyweb.response_time_ms for cascading slowdowns.
+  5. Verify error rate subsides once the unhealthy backend pool member is drained.
+
+remediation_action: drain_unhealthy_backend_pool
+
+error_message: |
+  APPGW-ERROR-SURGE: backend_pool={backend_pool_name} error_rate={gateway_error_rate_pct}% status={gateway_status_code}
+
+stack_trace: |
+  AppGatewayErrorSurgeError: backend_pool={backend_pool_name}
+    at ApplicationGateway.routeRequest()
+    error_rate={gateway_error_rate_pct}% status={gateway_status_code}
+
+fault_params:
+  backend_pool_name: {choice: [pool-a, pool-b, pool-c]}
+  gateway_error_rate_pct: {uniform: [30.0, 85.0], round: 1}
+  gateway_status_code: {choice: [502, 503, 504]}
+
+rca_clues:
+  session-service:
+    session.replication_lag_ms: {uniform: [800.0, 6000.0], round: 1}
+    session.backend_pool_errors: {randint: [50, 900]}
+  legacy-web-tier:
+    legacyweb.response_time_ms: {uniform: [800.0, 5000.0], round: 1}
+    legacyweb.upstream_5xx_flag: true
+
+generator_impact:
+  azure_gateway_otel:
+    error_rate: {uniform: [0.3, 0.85]}
+    records_per_cycle: {randint: [100, 450]}

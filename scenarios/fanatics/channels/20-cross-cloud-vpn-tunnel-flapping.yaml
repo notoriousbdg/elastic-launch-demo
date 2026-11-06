@@ -12,11 +12,11 @@ cascade_services:
 description: Site-to-site VPN tunnels between cloud providers repeatedly going up and down
 investigation_notes: |-
   1. Check IKE Phase status: Phase 1 FAILED means pre-shared key mismatch or proposal mismatch; Phase 2 FAILED means IPSec SA negotiation issue.
-  2. Verify DPD (Dead Peer Detection) settings match on both ends — mismatched DPD intervals cause one side to tear down the tunnel while the other thinks it is up.
+  2. Verify DPD (Dead Peer Detection) settings match on both ends — mismatched DPD intervals cause one side to tear down the tunnel while the other thinks it is up (no DPD timeouts here, ruling this out).
   3. For AWS VPN: check `aws ec2 describe-vpn-connections --vpn-connection-id <id>` for tunnel status and CloudWatch VPN metrics.
   4. For Azure VPN Gateway: check `az network vpn-connection show` and look for IKE SA rekey failures in the diagnostic logs.
-  5. MTU issues cause tunnel flapping under load — set TCP MSS clamping to 1360 on both VPN endpoints and test with large transfers.
-  6. If the tunnel is flapping on rekey (SA_EXPIRED), increase the IKE lifetime and IPSec SA lifetime to reduce rekey frequency during peak traffic.
+  5. MTU issues cause tunnel flapping under load (no MTU mismatch is detected here) — set TCP MSS clamping to 1360 on both VPN endpoints and test with large transfers.
+  6. If the tunnel flaps on Phase 2 rekey (SA_EXPIRED, more than 2 rekey failures in the window), rekeying is the cause — align Phase 2 lifetime (AWS max 3600s; Azure default 27000s), PFS and DH group on both ends via a custom Azure IPsec policy, then reset the tunnel.
 remediation_action: reset_vpn_tunnel
 error_message: cloud-networking VPN-TUNNEL-FLAP tunnel={vpn_tunnel_name} path={vpn_src_cloud}->{vpn_dst_cloud} flaps={vpn_flap_count}
   window={vpn_flap_window}s state={vpn_current_state} ike_phase={vpn_ike_phase} ike_status={vpn_ike_status} last_dpd={vpn_last_dpd_sec}s
@@ -30,8 +30,8 @@ stack_trace: |-
   IKE Phase:      {vpn_ike_phase}
   IKE Status:     {vpn_ike_status}
   Last DPD:       {vpn_last_dpd_sec}s ago
-  Local Gateway:  10.0.1.1
-  Remote Gateway: 10.2.0.1
+  Local Gateway:  3.215.48.17 (AWS tunnel outside IP)
+  Remote Gateway: 20.119.36.52 (Azure VPN GW public IP)
   MTU:            1400
   Rekey Interval: 3600s
   Action:         Check IPSec SA, verify gateway reachability
@@ -39,14 +39,14 @@ correlation_attr:
   key: network.vpn_gw_firmware
   value: vgw-strongswan-5.9.14-rc2
 fault_params:
-  vpn_tunnel_name: {choice: [aws-to-azure-01, aws-to-gcp-01, gcp-to-azure-01]}
-  vpn_src_cloud: {choice: [aws, gcp]}
-  vpn_dst_cloud: {choice: [azure, gcp]}
+  vpn_tunnel_name: aws-to-azure-01
+  vpn_src_cloud: aws
+  vpn_dst_cloud: azure
   vpn_flap_count: {randint: [5, 30]}
   vpn_flap_window: {randint: [60, 600]}
-  vpn_current_state: {choice: [DOWN, NEGOTIATING, REKEYING]}
-  vpn_ike_phase: {choice: ["1", "2"]}
-  vpn_ike_status: {choice: [FAILED, TIMEOUT, SA_EXPIRED]}
+  vpn_current_state: REKEYING
+  vpn_ike_phase: "2"
+  vpn_ike_status: SA_EXPIRED
   vpn_last_dpd_sec: {randint: [30, 300]}
 rca_clues:
   cloud-inventory-scanner:
@@ -54,19 +54,19 @@ rca_clues:
     cloud_scan.cross_cloud_latency_ms: {randint: [200, 2000]}
   network-controller:
     network.ike_rekey_failures: {randint: [3, 20]}
-    network.mtu_mismatch_detected: {choice: [true, false]}
+    network.mtu_mismatch_detected: false
   dns-dhcp-service:
     dns.cross_cloud_resolution_broken: true
-    dns.conditional_forwarder_down: {choice: [aws-to-azure, gcp-to-azure]}
+    dns.conditional_forwarder_down: aws-to-azure
   firewall-gateway:
     firewall.ipsec_esp_drops: {randint: [100, 5000]}
-    firewall.dpd_timeout_count: {randint: [5, 50]}
+    firewall.dpd_timeout_count: 0
 business_impact:
   - kpi: business.app_sessions_per_min
-    factor: {uniform: [0.20, 0.50]}
+    value: {uniform: [334.8, 385.2]}
   - kpi: business.page_views_per_min
-    factor: {uniform: [0.20, 0.50]}
+    value: {uniform: [66960.0, 77040.0]}
   - kpi: business.betting_handle_usd_per_min
-    factor: {uniform: [0.25, 0.55]}
+    value: {uniform: [66960.0, 77040.0], round: 1}
   - kpi: business.api_data_partner_revenue_usd_per_min
-    factor: {uniform: [0.25, 0.55]}
+    value: {uniform: [3627.0, 4173.0], round: 1}

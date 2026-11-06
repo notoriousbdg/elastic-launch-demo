@@ -1,0 +1,37 @@
+name: "GT aws_bedrock: guardrail_intervention_rate"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-AWSBEDROCK-GUARDRAIL-INTERVENTION-R
+sensor_type: impact_key_probe
+affected_services:
+  - gt-awsbedrock-aws-svc-1
+cascade_services:
+  - gt-awsbedrock-aws-svc-2
+description: "Tests impact_key guardrail_intervention_rate on generator aws_bedrock."
+investigation_notes: |-
+  1. Verify aws_bedrock is active and reporting metrics.
+  2. Check that the guardrail_intervention_rate metric has reached the trigger value (0.7).
+  3. Confirm generator_impact for aws_bedrock.guardrail_intervention_rate is set to 0.7.
+  4. Look for correlated changes in service gt-awsbedrock-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_guardrail_intervention_rate_baseline
+error_message: "GT-PROBE: gen=aws_bedrock key=guardrail_intervention_rate value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=aws_bedrock
+  impact_key: guardrail_intervention_rate
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 0.7
+  svc_name: gt-awsbedrock-aws-svc-1
+rca_clues:
+  gt-awsbedrock-aws-svc-1:
+    probe.generator: aws_bedrock
+    probe.impact_key: guardrail_intervention_rate
+    probe.trigger_value: 0.7
+  gt-awsbedrock-aws-svc-2:
+    probe.upstream_generator: aws_bedrock
+    probe.upstream_key: guardrail_intervention_rate
+generator_impact:
+  aws_bedrock:
+    guardrail_intervention_rate: 0.7

@@ -1,0 +1,72 @@
+name: Prompt Injection Spike
+subsystem: safety
+vehicle_section: safety_pipeline
+error_type: PROMPT-INJECTION-SPIKE
+sensor_type: health_check
+affected_services: [prompt-guard, chat-orchestrator]
+cascade_services: []
+
+description: >
+  prompt-guard detects a burst of prompt-injection attempts from a small set of client IPs, and security review is needed before blocking them.
+
+investigation_notes: |
+  1. Search body.text for *PROMPT-INJECTION-SPIKE* and read injection_attempts={injection_attempts} over {window_minutes} minutes against a baseline of {baseline_attempts}.
+  2. Group by client IP: {distinct_ips} source addresses account for {top_ip_share_pct}% of attempts, led by {top_client_ip}.
+  3. Classify the technique in {attack_pattern} and check whether any attempt reached the model, using the shield verdicts from prompt-guard versus blocked={blocked_count}.
+  4. On chat-orchestrator, check for sessions from these IPs with tool calls or system-prompt echo, and compare token usage per session for abuse.
+  5. Cross-check the Activity Log Security category, where Defender for AI raises prompt-injection alerts, plus the Application Gateway WAF log and Entra sign-in logs for the same IPs to see whether they are authenticated users or anonymous (more than 80% anonymous sessions marks external abuse rather than a compromised user).
+  6. Hand the IP list to security for review, then approve a block of confirmed offenders at the gateway rather than a blanket rule.
+
+remediation_action: block_offending_clients_after_review
+
+error_message: |
+  [PromptGuard] PROMPT-INJECTION-SPIKE: attempts={injection_attempts} window={window_minutes}m distinct_ips={distinct_ips} top_ip={top_client_ip} pattern={attack_pattern} blocked={blocked_count}
+
+stack_trace: |
+  PromptInjectionDetected: PROMPT-INJECTION-SPIKE
+    at PromptGuard.shield_prompt(pattern={attack_pattern})
+    at PromptGuard.handleScreenRequest(client_ip={top_client_ip})
+  Attempts:           {injection_attempts} in {window_minutes}m (baseline {baseline_attempts})
+  Distinct client IPs: {distinct_ips}
+  Top source:         {top_client_ip} ({top_ip_share_pct}% of attempts)
+  Blocked by shield:  {blocked_count}
+  Technique:          {attack_pattern}
+
+correlation_attr:
+  key: security.shield_ruleset_version
+  value: prompt-shield-ruleset-2026.10
+
+fault_params:
+  injection_attempts: {randint: [9000, 10000]}
+  window_minutes: {choice: [5, 10, 15]}
+  baseline_attempts: {randint: [3, 25]}
+  distinct_ips: {randint: [3, 9]}
+  top_client_ip:
+    format: "203.0.113.{n}"
+    n: {randint: [10, 250]}
+  top_ip_share_pct: {uniform: [55.0, 90.0], round: 1}
+  attack_pattern: system_prompt_extraction
+  blocked_count: {randint: [8600, 8900]}
+
+rca_clues:
+  prompt-guard:
+    safety.injection_attempts_per_min: {randint: [600, 2000]}
+    safety.top_ip_share_pct: {uniform: [55.0, 90.0], round: 1}
+    safety.shield_detection_rate_pct: {uniform: [86.0, 98.9], round: 1}
+    safety.top_attack_pattern: system_prompt_extraction
+  chat-orchestrator:
+    orchestrator.suspicious_sessions: {randint: [10, 200]}
+    orchestrator.tokens_per_session_p95: {randint: [6000, 40000]}
+    orchestrator.anonymous_session_share_pct: {uniform: [85.0, 100.0], round: 1}
+
+business_impact:
+  - kpi: business.error_rate_pct
+    value: {uniform: [7.67, 8.83], round: 2}
+  - kpi: business.latency_p99_ms
+    value: {uniform: [538.24, 619.26], round: 0}
+  - kpi: business.prompt_cache_hit_pct
+    value: {uniform: [20.46, 23.54], round: 1}
+
+generator_impact:
+  azure_activity_otel:
+    security_events: 1.0

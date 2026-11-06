@@ -1,0 +1,83 @@
+name: Lambda Cold Start Storm
+subsystem: platform
+vehicle_section: platform_pipeline
+error_type: LAMBDA-COLDSTART-STORM
+sensor_type: health_check
+affected_services:
+- worker-pool
+cascade_services:
+- analytics-service
+description: 'A synthetic burst of concurrent invocations against function {lambda_function}
+  is triggering a cold-start storm, spiking duration and throttle rate for worker-pool''s
+  async jobs.
+
+  '
+investigation_notes: '1. Search for body.text containing *LAMBDA-COLDSTART-STORM*
+  to find the affected function.
+
+  2. Check worker-pool worker_pool.jobs_per_sec for the throughput dip.
+
+  3. Confirm aws_lambda_otel duration_multiplier/throttle_rate/error_rate spike for
+  {lambda_function}.
+
+  4. Check analytics-service analytics.rollup_lag_s for cascading delay in downstream
+  rollups.
+
+  5. Verify duration and throttle rate normalize once provisioned concurrency is increased.
+
+  '
+remediation_action: increase_provisioned_concurrency
+error_message: 'LAMBDA-COLDSTART-STORM: function={lambda_function} duration_ms={lambda_duration_ms}
+  throttle_rate={lambda_throttle_rate}
+
+  '
+stack_trace: "LambdaColdStartStormError: function={lambda_function}\n  at WorkerPool.invokeAsync()\n\
+  \  duration_ms={lambda_duration_ms} throttle_rate={lambda_throttle_rate}\n"
+fault_params:
+  lambda_function:
+    choice:
+    - job-dispatcher
+    - coverage-rollup
+    - fault-scheduler
+  lambda_duration_ms:
+    randint:
+    - 3000
+    - 25000
+  lambda_throttle_rate:
+    uniform:
+    - 0.2
+    - 0.7
+    round: 2
+rca_clues:
+  worker-pool:
+    worker_pool.jobs_per_sec:
+      uniform:
+      - 1.0
+      - 10.0
+      round: 1
+    worker_pool.cold_start_count:
+      randint:
+      - 50
+      - 800
+  analytics-service:
+    analytics.rollup_lag_s:
+      uniform:
+      - 30.0
+      - 300.0
+      round: 1
+    analytics.async_backlog_flag: true
+generator_impact:
+  aws_lambda_otel:
+    high_error_rate:
+      uniform:
+      - 0.2
+      - 0.6
+    high_throttle_rate:
+      uniform:
+      - 0.2
+      - 0.7
+    high_average_duration: &id001
+      uniform:
+      - 8.0
+      - 40.0
+    high_tail_duration: *id001

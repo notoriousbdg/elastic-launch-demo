@@ -56,6 +56,7 @@ class StepIdx(IntEnum):
     LOGS_ML_JOBS         = 18
     SLOS                 = 19
     INTEGRATIONS         = 20
+    OOTB_ALERTS          = 21
 
 
 # ── Progress reporting ──────────────────────────────────────────────────────
@@ -99,20 +100,22 @@ ProgressCallback = Callable[[DeployProgress], None]
 
 # ── HTTP helpers ────────────────────────────────────────────────────────────
 
-def _kibana_headers(api_key: str) -> dict[str, str]:
-    return {
-        "Content-Type": "application/json",
+def _kibana_headers(api_key: str, *, content_type: str | None = "application/json") -> dict[str, str]:
+    headers = {
         "kbn-xsrf": "true",
         "x-elastic-internal-origin": "kibana",
         "Authorization": f"ApiKey {api_key}",
     }
+    if content_type:
+        headers["Content-Type"] = content_type
+    return headers
 
 
-def _es_headers(api_key: str) -> dict[str, str]:
-    return {
-        "Content-Type": "application/json",
-        "Authorization": f"ApiKey {api_key}",
-    }
+def _es_headers(api_key: str, *, content_type: str | None = "application/json") -> dict[str, str]:
+    headers = {"Authorization": f"ApiKey {api_key}"}
+    if content_type:
+        headers["Content-Type"] = content_type
+    return headers
 
 
 # ── Retry helper ────────────────────────────────────────────────────────────
@@ -190,15 +193,14 @@ class ConcurrentBulkIndexer:
         workers: int = _BULK_WORKERS,
         label: str = "",
         timeout: float = 60.0,
+        bulk_path: str | None = None,
     ):
-        self._url = f"{elastic_url}/{data_stream}/_bulk"
-        self._headers = {
-            "Content-Type": "application/x-ndjson",
-            "Authorization": f"ApiKey {api_key}",
-        }
+        path = bulk_path if bulk_path is not None else f"{data_stream}/_bulk"
+        self._url = f"{elastic_url.rstrip('/')}/{path.lstrip('/')}"
+        self._headers = _es_headers(api_key, content_type="application/x-ndjson")
         self._batch_size = batch_size
         self._label = label or "bulk"
-        self._buffer: list[dict] = []
+        self._buffer: list[tuple[dict, dict]] = []
         self._futures: list[concurrent.futures.Future] = []
         self._pool = concurrent.futures.ThreadPoolExecutor(max_workers=workers)
         # httpx.Client is thread-safe; cap open connections to match the pool.
@@ -212,9 +214,14 @@ class ConcurrentBulkIndexer:
 
     # ── Public API ──────────────────────────────────────────────────────────
 
-    def add(self, doc: dict) -> None:
-        """Buffer a document; submit a bulk request when the batch is full."""
-        self._buffer.append(doc)
+    def add(self, doc: dict, *, meta: dict | None = None) -> None:
+        """Buffer a document; submit a bulk request when the batch is full.
+
+        ``meta`` is the bulk action line. The default ``{"create": {}}`` targets
+        the data stream in the request URL. Pass an ``index`` action when the
+        document needs an explicit id.
+        """
+        self._buffer.append((meta or {"create": {}}, doc))
         if len(self._buffer) >= self._batch_size:
             self._submit(self._buffer)
             self._buffer = []   # new list — the old reference lives in the future
@@ -251,15 +258,15 @@ class ConcurrentBulkIndexer:
 
     # ── Internal ────────────────────────────────────────────────────────────
 
-    def _submit(self, docs: list[dict]) -> None:
+    def _submit(self, docs: list[tuple[dict, dict]]) -> None:
         future = self._pool.submit(self._send_batch, docs)
         self._futures.append(future)
 
-    def _send_batch(self, docs: list[dict]) -> int:
-        """Build NDJSON, POST to _bulk, return count of successfully created docs."""
+    def _send_batch(self, docs: list[tuple[dict, dict]]) -> int:
+        """Build NDJSON, POST to _bulk, return count of successfully written docs."""
         lines: list[str] = []
-        for doc in docs:
-            lines.append('{"create":{}}')
+        for meta, doc in docs:
+            lines.append(json.dumps(meta))
             lines.append(json.dumps(doc))
         body = "\n".join(lines) + "\n"
 
@@ -279,13 +286,14 @@ class ConcurrentBulkIndexer:
 
         result = resp.json()
         items = result.get("items", [])
-        ok = sum(
-            1 for item in items
-            if item.get("create", {}).get("status") in (200, 201)
-        )
-        if result.get("errors"):
-            for item in items:
-                err = item.get("create", {}).get("error")
+        ok = 0
+        for item in items:
+            op = next(iter(item), None)
+            status = (item.get(op) or {}).get("status") if op else None
+            if status in (200, 201):
+                ok += 1
+            elif result.get("errors") and op:
+                err = (item.get(op) or {}).get("error")
                 if err:
                     logger.warning(
                         "%s bulk error: %s", self._label, json.dumps(err)[:200]

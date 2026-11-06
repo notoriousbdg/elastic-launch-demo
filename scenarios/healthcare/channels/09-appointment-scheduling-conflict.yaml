@@ -10,7 +10,7 @@ cascade_services:
 - billing-processor
 description: Double-booking or resource conflict detected in appointment scheduling engine
 investigation_notes: |-
-  Root Cause: Scheduling conflicts arise from race conditions in the appointment booking engine when multiple schedulers attempt to reserve the same provider/resource/time slot simultaneously. The optimistic locking mechanism in the scheduling database fails under high concurrency during morning booking windows.
+  Root Cause: Scheduling conflicts arise from race conditions in the appointment booking engine when multiple schedulers attempt to reserve the same provider/resource/time slot simultaneously. The optimistic locking mechanism in the scheduling database fails under high concurrency during morning booking windows. Five or more concurrent bookings on the same slot with optimistic-lock version conflicts, while the scheduling DB pool stays below 70% active, point to a locking race rather than connection pool exhaustion: the conflict-retry path re-checks only the appointment row's version, not the provider/resource slot, so a retried booking commits into a slot another request already took.
   Remediation: 1) Review the conflicting bookings: `sched-admin conflicts --provider {provider_id} --date today`. 2) Release the conflicting slot lock: `sched-admin release-lock --slot {time_slot} --resource {resource_type}`. 3) Restart the scheduling conflict resolver: `systemctl restart scheduling-conflict-engine`. 4) Rebook the displaced patient into the next available slot: `sched-admin rebook --patient {patient_id} --provider {provider_id} --type new-patient`. 5) Enable pessimistic locking for high-demand providers during peak booking hours. 6) Verify the scheduling database connection pool is not exhausted: `sched-admin db-pool-status`.
 remediation_action: resolve_scheduling_conflict
 error_message: '[SCHED] SCHED-CONFLICT: provider={provider_id} slot={time_slot} patient={patient_id} encounter={encounter_id}
@@ -34,7 +34,7 @@ correlation_attr:
 fault_params:
   provider_id:
     format: "NPI-{n}"
-    n: {randint: [1000000000, 9999999999]}
+    n: {randint: [1000000000, 2999999999]}
   time_slot:
     format: "{hh:02d}:{mm}"
     hh: {randint: [7, 17]}
@@ -50,6 +50,8 @@ rca_clues:
   scheduling-api:
     sched.lock_type: optimistic
     sched.concurrent_bookings: {randint: [5, 20]}
+    sched.optimistic_lock_conflicts: {randint: [5, 30]}
+    sched.db_pool_active_pct: {uniform: [30, 60], round: 0}
   ehr-system:
     ehr.encounter_conflict_count: {randint: [2, 8]}
   billing-processor:
@@ -59,8 +61,8 @@ business_impact:
   - kpi: business.appointment_no_show_rate_pct
     factor: {uniform: [1.5, 3.0]}
   - kpi: business.patient_satisfaction_nps
-    factor: {uniform: [0.25, 0.55]}
+    value: {uniform: [11.3, 13.0], round: 1}
   - kpi: business.claims_submitted_per_min
-    factor: {uniform: [0.30, 0.60]}
+    factor: {uniform: [0.3, 0.6]}
   - kpi: business.denials_per_min
     factor: {uniform: [1.8, 3.5]}

@@ -1,0 +1,37 @@
+name: "GT ibmmq_otel: log_filesystem_critically_low"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-IBMMQ-LOG-FILESYSTEM-CRITICALLY-LOW
+sensor_type: impact_key_probe
+affected_services:
+  - gt-ibmmq-aws-svc-1
+cascade_services:
+  - gt-ibmmq-aws-svc-2
+description: "Tests impact_key log_filesystem_critically_low on generator ibmmq_otel."
+investigation_notes: |-
+  1. Verify ibmmq_otel is active and reporting metrics.
+  2. Check that the log_filesystem_critically_low metric has reached the trigger value (5.0).
+  3. Confirm generator_impact for ibmmq_otel.log_filesystem_critically_low is set to 5.0.
+  4. Look for correlated changes in service gt-ibmmq-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_log_filesystem_critically_low_baseline
+error_message: "GT-PROBE: gen=ibmmq_otel key=log_filesystem_critically_low value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=ibmmq_otel
+  impact_key: log_filesystem_critically_low
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 5.0
+  svc_name: gt-ibmmq-aws-svc-1
+rca_clues:
+  gt-ibmmq-aws-svc-1:
+    probe.generator: ibmmq_otel
+    probe.impact_key: log_filesystem_critically_low
+    probe.trigger_value: 5.0
+  gt-ibmmq-aws-svc-2:
+    probe.upstream_generator: ibmmq_otel
+    probe.upstream_key: log_filesystem_critically_low
+generator_impact:
+  ibmmq_otel:
+    log_filesystem_critically_low: 5.0

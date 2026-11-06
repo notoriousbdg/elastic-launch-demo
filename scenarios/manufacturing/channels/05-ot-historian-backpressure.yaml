@@ -8,10 +8,10 @@ affected_services:
 cascade_services:
 - scada-gateway
 - oee-analytics
-description: Historian write lag exceeds threshold; risks dropping OT tag data on the floor
+description: InfluxDB historian write lag exceeds threshold as compactions queue up; risks dropping OT tag data on the floor
 investigation_notes: |-
-  Root Cause: Backpressure occurs when the disk-write throughput on the historian archive volume falls below the incoming tag rate — usually due to a stuck compaction job, a snapshot operation blocking the write path, or a degraded RAID volume. Persistent lag risks the in-memory buffer cycling out un-archived points.
-  Remediation: 1) Check disk I/O: `iostat -x 1 5` on `mfg-historian-host`. 2) Check compaction job status: `historian-admin compaction-status`. 3) Pause non-essential snapshots: `historian-admin pause-snapshot --duration 15m`. 4) Force a buffer flush to a secondary volume if available: `historian-admin failover-write --target AR-SECONDARY`. 5) Open an infrastructure ticket if the disk SMART status shows degraded.
+  Root Cause: Backpressure occurs when the disk-write throughput on the historian archive volume falls below the incoming tag rate — usually due to a stuck compaction job, a snapshot operation blocking the write path, or a degraded RAID volume. Disk await above 50ms with a DEGRADED RAID state on the archive volume confirms the volume; a compaction job stalled behind it is a symptom, not a separately stuck job, and no active snapshot rules out a blocked write path. Persistent lag risks the in-memory buffer cycling out un-archived points.
+  Remediation: 1) Check disk I/O: `iostat -x 1 5` on the ot-historian node in mfg-eks-cluster. 2) Check compaction job status: `historian-admin compaction-status`. 3) Pause non-essential snapshots: `historian-admin pause-snapshot --duration 15m`. 4) Force a buffer flush to a secondary volume if available: `historian-admin failover-write --target AR-SECONDARY`. 5) Check the md array (`cat /proc/mdstat`, `mdadm --detail /dev/md0`); if a member EBS volume has failed, replace it, let the array resync, and open an infrastructure ticket.
 remediation_action: drain_historian_buffer
 error_message: '[HIST] OT-HISTORIAN-BACKPRESSURE: archive={archive_id} buffer_depth={buffer_depth} write_lag_s={write_lag_s}
   threshold=10s'
@@ -23,28 +23,35 @@ stack_trace: |-
   ------------------------------------------------------------------------
   ingest_queue        | OK        | 0.1      | 4200 pts/s
   buffer_to_archive   | DEGRADED  | {write_lag_s}      | 350 pts/s
-  compaction          | STALLED   | --       | 0 pts/s
+  compaction          | STALLED   | --       | 0 pts/s (waiting on volume I/O)
   ------------------------------------------------------------------------
   OT-HISTORIAN-BACKPRESSURE: write lag {write_lag_s}s; buffer at {buffer_depth}/50000
 correlation_attr:
   key: infra.historian_storage_volume
   value: ar-current-vol-degraded
 fault_params:
-  archive_id: {choice: [AR-CURRENT, AR-DAILY-01, AR-DAILY-02]}
+  archive_id: AR-CURRENT
   buffer_depth: {randint: [38000, 50000]}
-  write_lag_s: {randint: [8, 45]}
+  write_lag_s: {randint: [12, 45]}
 rca_clues:
   ot-historian:
-    historian.write_lag_s: {randint: [8, 45]}
+    historian.write_lag_s: {randint: [12, 45]}
     historian.compaction_status: stalled
+    historian.raid_state: DEGRADED
+    historian.disk_await_ms: {randint: [150, 600]}
+    historian.snapshot_active: false
   scada-gateway:
     scada.write_retry_count: {randint: [10, 200]}
   oee-analytics:
     oee.tag_feed_lag_s: {randint: [5, 30]}
 business_impact:
   - kpi: business.oee_overall_pct
-    factor: {uniform: [0.40, 0.70]}
+    factor: {uniform: [0.4, 0.7]}
   - kpi: business.throughput_units_per_hour
-    factor: {uniform: [0.45, 0.75]}
+    value: {uniform: [273.65, 314.85]}
   - kpi: business.unplanned_downtime_min_per_shift
-    factor: {uniform: [1.5, 3.0]}
+    value: {uniform: [57.1, 65.7], round: 1}
+generator_impact:
+  influxdb_otel:
+    compaction_queue_backlog: 25.0
+    storage_writer_timeouts: 5.0

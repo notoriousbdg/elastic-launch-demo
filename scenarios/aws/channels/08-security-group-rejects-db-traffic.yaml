@@ -1,0 +1,88 @@
+name: Security Group Rejects Db Traffic
+subsystem: database
+vehicle_section: database_pipeline
+error_type: NET-SG-REJECTS-DB-TRAFFIC
+sensor_type: health_check
+affected_services: [orders-service]
+cascade_services: [orders-db]
+
+description: >
+  A security group change removes the orders-service source rule from the orders-db RDS security group, so VPC flow logs show REJECT on port 5432 and orders-service cannot reach the database.
+
+investigation_notes: |
+  1. Search body.text for *NET-SG-REJECTS-DB-TRAFFIC* and note the connection errors from orders-service to {db_host}:5432.
+  2. Query VPC flow logs for dstport=5432 and action=REJECT: {reject_pct}% of flows from {src_cidr} to {db_eni} are rejected, against a baseline of 0%.
+  3. In CloudTrail look for RevokeSecurityGroupIngress on {db_sg_id} (event time {change_time}); the rule that allowed {orders_sg_id} on tcp/5432 is gone.
+  4. Confirm orders-db itself is healthy: CPU, connections and storage in CloudWatch are normal, so the database is unreachable rather than failing.
+  5. Check the cascade: orders-service HikariCP shows connect timeouts after {connect_timeout_ms}ms and rejected_flows={rejected_flows} in the window.
+  6. Immediate action: re-add the ingress rule on {db_sg_id} allowing tcp/5432 from {orders_sg_id}, then verify REJECT flows fall to zero.
+
+remediation_action: restore_security_group_rule
+
+error_message: |
+  NET-SG-REJECTS-DB-TRAFFIC: connect timeout orders-service to {db_host}:5432 sg={db_sg_id} reject_pct={reject_pct} timeout_ms={connect_timeout_ms}
+
+stack_trace: |
+  === VPC FLOW LOG REJECT REPORT ===
+  vpc={vpc_id}  region=us-east-1  interface={db_eni}
+  --- REJECTED FLOWS ---
+    src={src_cidr}  dst={db_host}  dstport=5432  protocol=tcp
+    action=REJECT  rejected_flows={rejected_flows}  reject_pct={reject_pct}
+  --- SECURITY GROUP CHANGE ---
+    change_event=RevokeSecurityGroupIngress  group={db_sg_id}
+    removed_rule=tcp/5432 from {orders_sg_id}  event_time={change_time}
+  --- APPLICATION IMPACT ---
+    orders-service  org.postgresql.util.PSQLException: The connection attempt failed. Caused by: java.net.SocketTimeoutException: Connect timed out (connectTimeout={connect_timeout_ms}ms)
+    orders-db  cpu=normal  connections=0 new
+  ACTION: authorize_ingress=tcp/5432 source={orders_sg_id}  alert=NET-SG-REJECTS-DB-TRAFFIC
+
+infrastructure_events:
+  - body: '[CloudTrail] RevokeSecurityGroupIngress: group=sg-0b7e41c9d2a85f136 revoked=tcp/5432 source_group=sg-0f3a9d27c61e8b405 region=us-east-1 event_source=ec2.amazonaws.com'
+    severity: WARN
+    event_name: aws.cloudtrail.RevokeSecurityGroupIngress
+    service: orders-db
+    attributes:
+      cloud.provider: aws
+      cloud.service: ec2
+      aws.cloudtrail.event_name: RevokeSecurityGroupIngress
+      aws.ec2.security_group: sg-0b7e41c9d2a85f136
+      aws.ec2.port: 5432
+      infrastructure.source: CloudTrail
+
+correlation_attr:
+  key: infra.security_group_rule_change
+  value: sg-0b7e41c9d2a85f136-revoke-5432
+
+fault_params:
+  db_host: orders-db.c8kq2x1vzjpd.us-east-1.rds.amazonaws.com
+  db_sg_id: sg-0b7e41c9d2a85f136
+  orders_sg_id: sg-0f3a9d27c61e8b405
+  vpc_id: vpc-04d7c1e8a93b2f650
+  db_eni: eni-0a61c4f9d2b87e350
+  src_cidr: 10.20.32.0/20
+  change_time: 2026-10-21T14:06:00Z
+  reject_pct: {randint: [70, 90]}
+  rejected_flows: {randint: [2000, 9000]}
+  connect_timeout_ms: {choice: [3000, 5000, 10000]}
+
+rca_clues:
+  orders-service:
+    network.vpc_flow_reject_pct: {randint: [70, 90]}
+    network.dst_port: 5432
+    db.connect_timeouts: {randint: [200, 900]}
+  orders-db:
+    db.new_connections: 0
+    db.healthy_but_unreachable: true
+    network.security_group_rule_removed: true
+
+business_impact:
+  - kpi: business.orders_per_min
+    factor: {uniform: [0.10, 0.35]}
+  - kpi: business.error_rate_pct
+    factor: {uniform: [6.0, 12.0]}
+  - kpi: business.availability_pct
+    factor: {uniform: [0.80, 0.92]}
+
+generator_impact:
+  aws_vpcflow_otel:
+    reject_rate: 0.8

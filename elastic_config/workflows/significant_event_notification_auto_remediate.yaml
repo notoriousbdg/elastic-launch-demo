@@ -1,5 +1,6 @@
 version: "1"
 name: __SCENARIO_NAME__ Significant Event Notification (Auto-Remediate)
+enabled: true
 description: >
   Notify launch operations team when a significant event is detected on an
   auto-remediation channel (16-20). Triggered by alert rules — uses
@@ -82,7 +83,7 @@ steps:
         Total errors in last 15 minutes: {{ steps.count_errors.output.values[0][0] }}
 
         ## Required checks
-        - Call the knowledge-base tool (`search_known_anomalies` or the channel runbook) for prior incidents and documented procedures matching this error type or affected services.
+        - Call the knowledge-base tool from the channel runbook skill for prior incidents and documented procedures matching this error type or affected services.
         - Identify blast radius and earliest confirmed break point when evidence supports them; state when they cannot be determined confidently.
         - Use compressed-output observability tools (topology, change points, correlations) when they help; parameterized log tools remain valid especially for this error type.
         - Prefer the **alert** time window for Discover/APM links and any second-pass query. The 15-minute parameterized tools are fine as a first look while the alert is fresh; do not use NOW()-relative windows for evidence links.
@@ -232,7 +233,9 @@ steps:
       message: |
         Generate a concise, informative case title based on the root cause analysis provided at the end of this message.
         Title rules:
-        - Return ONLY the title.
+        - Return ONLY the title text on a single line.
+        - Do not add any preface, explanation, notes, or commentary before or after it.
+        - Do not start with phrases like "I'll" or "Here is".
         - Maximum 12 words.
         - Maximum 160 characters (hard limit; longer titles fail case creation).
         - Do not use markdown, quotes, or a trailing period.
@@ -264,7 +267,9 @@ steps:
     type: cases.createCase
     if: "${{ event.alerts[0].kibana.alert.action_group != 'recovered' }}"
     with:
-      title: "{{ steps.create_case_title.output.message | strip | truncate: 160 }}"
+      # The title agent sometimes wraps the title in commentary ("I'll generate ... **Title** ...").
+      # Prefer the first **bold** span when present, else use the whole message.
+      title: "{%- assign raw = steps.create_case_title.output.message | strip -%}{%- assign bold = raw | split: '**' -%}{%- if bold.size > 2 -%}{{ bold[1] | strip | truncate: 160 }}{%- else -%}{{ raw | truncate: 160 }}{%- endif -%}"
       description: |
         {%- assign conv_url = context.kibanaUrl | append: "/app/agent_builder/conversations/" | append: steps.run_rca.output.conversation_id -%}
         {%- assign rca = steps.run_rca.output.message | replace: "__CONVERSATION_URL__", conv_url -%}

@@ -14,7 +14,7 @@ investigation_notes: |-
   1. Check account_lookup stage — this is the bottleneck. High latency here indicates the member account database is under load or replication lag is causing timeouts on lookups.
   2. DFAS (Defense Finance and Accounting Service) military pay files arrive in the 06:00 ET Fed window. Delays past 08:00 ET affect Early Pay eligibility — members expecting funds by morning will call.
   3. Review NACHA file parsing metrics — entry counts >30K in a single batch may overwhelm the OFAC screening step. Consider splitting large DFAS batches into sub-batches of 10K entries.
-  4. Check Aurora PostgreSQL connection pool on payment-engine: SELECT count(*) FROM pg_stat_activity WHERE state = 'active'. Connection saturation causes account_lookup stalls.
+  4. Check Aurora PostgreSQL connection pool on payment-engine: SELECT count(*) FROM pg_stat_activity WHERE state = 'active'. Connection saturation (above 90% of the pool active) causes account_lookup stalls.
   5. Verify OFAC screening service response times — the 45s elapsed is within SLA but leaves no headroom. If OFAC screening degrades, the entire batch pipeline will breach SLA. Monitor Treasury SDN list update status.
 remediation_action: reset_ach_processor
 error_message: '[PAY] PAY-ACH-DELAY: batch={ach_batch_id} entries={ach_entry_count} delay_min={ach_delay_min} sla_min={ach_sla_min}
@@ -32,7 +32,7 @@ stack_trace: |-
     balance_post         PENDING     ---
     notification         PENDING     ---
   --- IMPACT ---
-    military_pay_entries={ach_entry_count}  total_amount=$4,247,892.00
+    military_pay_entries={ach_entry_count}  avg_entry_amount=$2,847.12
     dfas_originator=true  early_pay_eligible=true
   delay={ach_delay_min}min  sla={ach_sla_min}min  breach=true
   ACTION: escalate_ops=true  notify_dfas_liaison=true  alert=PAY-ACH-DELAY
@@ -48,7 +48,8 @@ fault_params:
 rca_clues:
   payment-engine:
     payment.ach_batch_stage: account_lookup_stalled
-    payment.nacha_entry_count: {randint: [20000, 40000]}
+    payment.nacha_entry_count: {randint: [8000, 25000]}
+    payment.db_pool_active_pct: {uniform: [95, 100], round: 0}
   mobile-gateway:
     gateway.early_pay_status: DELAYED
     gateway.member_inquiries_spike: true
@@ -57,13 +58,13 @@ rca_clues:
     portal.dfas_pay_eta: UNKNOWN
   fraud-sentinel:
     fraud.ach_screening_queue_depth: {randint: [5000, 15000]}
-    fraud.ofac_response_ms: {randint: [30000, 60000]}
+    fraud.ofac_response_ms: {randint: [38000, 46000]}
 business_impact:
   - kpi: business.deposit_growth_usd_per_min
-    factor: {uniform: [0.10, 0.35]}
+    value: {uniform: [9300.0, 10700.0], round: 1}
   - kpi: business.net_interest_income_usd_per_min
-    factor: {uniform: [0.60, 0.80]}
+    value: {uniform: [109972.0, 126528.0], round: 1}
   - kpi: business.complaint_tickets_per_min
     factor: {uniform: [2.5, 5.0]}
   - kpi: business.csat_score_0_5
-    factor: {uniform: [0.45, 0.70]}
+    factor: {uniform: [0.45, 0.7]}

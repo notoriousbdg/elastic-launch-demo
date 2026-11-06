@@ -1,0 +1,37 @@
+name: "GT influxdb_otel: compaction_queue_backlog"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-INFLUXDB-COMPACTION-QUEUE-BACKLOG
+sensor_type: impact_key_probe
+affected_services:
+  - gt-influxdb-aws-svc-1
+cascade_services:
+  - gt-influxdb-aws-svc-2
+description: "Tests impact_key compaction_queue_backlog on generator influxdb_otel."
+investigation_notes: |-
+  1. Verify influxdb_otel is active and reporting metrics.
+  2. Check that the compaction_queue_backlog metric has reached the trigger value (75.0).
+  3. Confirm generator_impact for influxdb_otel.compaction_queue_backlog is set to 75.0.
+  4. Look for correlated changes in service gt-influxdb-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_compaction_queue_backlog_baseline
+error_message: "GT-PROBE: gen=influxdb_otel key=compaction_queue_backlog value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=influxdb_otel
+  impact_key: compaction_queue_backlog
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 75.0
+  svc_name: gt-influxdb-aws-svc-1
+rca_clues:
+  gt-influxdb-aws-svc-1:
+    probe.generator: influxdb_otel
+    probe.impact_key: compaction_queue_backlog
+    probe.trigger_value: 75.0
+  gt-influxdb-aws-svc-2:
+    probe.upstream_generator: influxdb_otel
+    probe.upstream_key: compaction_queue_backlog
+generator_impact:
+  influxdb_otel:
+    compaction_queue_backlog: 75.0

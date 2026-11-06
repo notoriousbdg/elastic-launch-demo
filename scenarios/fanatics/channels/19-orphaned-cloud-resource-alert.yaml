@@ -11,7 +11,7 @@ cascade_services:
 description: Cloud resources detected without owner tags or associated workloads
 investigation_notes: |-
   1. Query the cloud-inventory-scanner report for full orphan details: resource type, region, age, and daily cost.
-  2. Cross-reference the resource ID with Terraform state: `terraform state list | grep <resource_id>` — if present, the tag was stripped by a manual edit.
+  2. Cross-reference the resource ID with Terraform state: `terraform state list | grep <resource_id>` — if present, the tag was stripped by a manual edit; here it is absent, so the resource was created outside Terraform while the tag policy was unenforced.
   3. Check CloudTrail/Activity Log/Audit Log for who created the resource: `aws cloudtrail lookup-events --lookup-attributes AttributeKey=ResourceName,AttributeValue=<id>`.
   4. If the resource has no security group rules allowing inbound traffic and no associated ENI/NIC, it is likely safe to terminate.
   5. For resources older than 30 days with no owner, follow the governance runbook: tag as `pending-termination`, notify via Slack, terminate after 7-day grace.
@@ -37,19 +37,21 @@ correlation_attr:
   key: infra.cloud_policy_ver
   value: org-policy-v2.4.0-unenforced
 fault_params:
-  cloud_resource_type: {choice: [EC2 Instance, Azure VM, GCE Instance, EBS Volume, Managed Disk, S3 Bucket]}
+  cloud_resource_type: {choice: [EC2 Instance, RDS DB Instance, Application Load Balancer]}
   cloud_resource_id:
     format: "res-{n}"
     n: {randint: [10000, 99999]}
-  cloud_resource_provider: {choice: [aws, azure, gcp]}
-  cloud_resource_region: {choice: [us-east-1, eastus, us-central1]}
+  cloud_resource_provider: aws
+  cloud_resource_region: us-east-1
   cloud_resource_age_days: {randint: [14, 180]}
   cloud_resource_cost_daily: {uniform: [2.50, 85.00], round: 2}
-  cloud_resource_sg: {choice: [sg-0abc1234, nsg-fanatics-default, fw-rule-legacy]}
+  cloud_resource_sg: sg-0abc1234
 rca_clues:
   cloud-inventory-scanner:
     cloud_scan.orphan_daily_cost_usd: {uniform: [50, 2000], round: 2}
     cloud_scan.oldest_orphan_days: {randint: [14, 180]}
+    cloud_scan.in_terraform_state: false
+    cloud_scan.tag_policy_enforced: false
   network-controller:
     network.orphan_security_group_rules: {randint: [5, 50]}
     network.untagged_eni_count: {randint: [3, 30]}
@@ -58,6 +60,8 @@ rca_clues:
     firewall.stale_address_objects: {randint: [10, 100]}
 business_impact:
   - kpi: business.api_data_partner_revenue_usd_per_min
-    factor: {uniform: [0.30, 0.60]}
+    value: {uniform: [2232.0, 2568.0], round: 1}
   - kpi: business.ad_revenue_usd_per_min
-    factor: {uniform: [0.35, 0.65]}
+    value: {uniform: [51382.0, 59118.0], round: 1}
+  - kpi: business.sponsored_inventory_seconds_per_min
+    value: {uniform: [148.8, 171.2]}

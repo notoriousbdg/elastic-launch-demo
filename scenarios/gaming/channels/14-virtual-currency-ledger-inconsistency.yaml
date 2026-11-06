@@ -17,7 +17,7 @@ investigation_notes: |-
   3. Assess fraud risk: LOW fraud risk is reassuring but any ledger inconsistency must be treated as P1 — virtual currency duplication exploits spread rapidly once discovered.
   4. Remediate: issue `freeze_player_wallet` for affected players, then `reconcile_ledger` to recalculate balances from the transaction log source of truth.
   5. Deploy database-level serializable isolation for all currency mutations and add real-time balance checksumming that alerts immediately on any divergence >1 unit.
-remediation_action: restart_store_service
+remediation_action: reconcile_ledger
 error_message: '[IAP] IAP-LEDGER-INCONSIST: player={player_id} balance={currency_balance} ledger_sum={ledger_sum} currency={virtual_currency}
   discrepancy={discrepancy} last_txn={last_transaction_id}'
 stack_trace: |-
@@ -47,10 +47,10 @@ fault_params:
   player_id:
     format: "PLR-{n}"
     n: {randint: [100000, 999999]}
-  currency_balance: {randint: [100, 100000]}
-  ledger_sum: {randint: [100, 100000]}
+  currency_balance: 12850
+  ledger_sum: 12350
   virtual_currency: {choice: [gems, coins, credits, tokens]}
-  discrepancy: {randint: [1, 5000]}
+  discrepancy: 500
   last_transaction_id:
     format: "LTXN-{n}"
     n: {randint: [1000000, 9999999]}
@@ -67,10 +67,10 @@ rca_clues:
     analytics.ledger_discrepancy_count: {randint: [10, 200]}
 business_impact:
   - kpi: business.revenue_usd_per_min
-    factor: {uniform: [0.15, 0.40]}
+    value: {uniform: [4464.0, 5136.0], round: 1}
   - kpi: business.in_app_purchases_per_min
-    factor: {uniform: [0.20, 0.45]}
+    value: {uniform: [31.62, 36.38]}
   - kpi: business.loot_opens_per_min
-    factor: {uniform: [0.20, 0.50]}
+    value: {uniform: [169.26, 194.74]}
   - kpi: business.churn_risk_index_0_100
     factor: {uniform: [2.0, 4.5]}

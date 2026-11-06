@@ -76,7 +76,7 @@ Click the trigger button or run:
 ```bash
 curl -X POST http://<host>/api/chaos/trigger \
   -H 'Content-Type: application/json' \
-  -d '{"channel": 2}'
+  -d '{"channel": 2, "deployment_id": "<scenario-id>"}'
 ```
 
 ### Watch the Dashboard React
@@ -134,7 +134,7 @@ Watch the dashboard — services should return to NOMINAL.
 If demonstrating manual resolution:
 
 ```bash
-curl -X POST http://<host>/api/remediate/2
+curl -X POST 'http://<host>/api/remediate/2?deployment_id=<scenario-id>'
 ```
 
 > "The affected services are returning to NOMINAL. The cascade warnings are clearing. Telemetry is flowing cleanly again."

@@ -1,0 +1,77 @@
+name: Session Store Replication Lag
+subsystem: platform
+vehicle_section: platform_pipeline
+error_type: SESSIONSTORE-REPL-LAG
+sensor_type: health_check
+affected_services:
+- session-service
+cascade_services:
+- edge-gateway
+description: 'The synthetic CouchDB-backed session store is falling behind on replication
+  for {couch_node}, causing stale reads and elevated request latency for session lookups.
+
+  '
+investigation_notes: '1. Search for body.text containing *SESSIONSTORE-REPL-LAG* to
+  find the affected node.
+
+  2. Check session-service session.replication_lag_ms for the growing lag.
+
+  3. Confirm couchdb_otel request_latency_multiplier/error_rate rise for {couch_node}.
+
+  4. Check edge-gateway gateway.request_latency_ms for cascading slowdowns on session-dependent
+  routes.
+
+  5. Verify lag drains once replication is resynced for {couch_node}.
+
+  '
+remediation_action: resync_couchdb_replication
+error_message: 'SESSIONSTORE-REPL-LAG: node={couch_node} lag_ms={replication_lag_ms}
+  stale_reads={stale_read_count}
+
+  '
+stack_trace: "SessionStoreReplicationLagError: node={couch_node}\n  at SessionService.lookupSession()\n\
+  \  lag_ms={replication_lag_ms} stale_reads={stale_read_count}\n"
+fault_params:
+  couch_node:
+    choice:
+    - couch-node-1
+    - couch-node-2
+    - couch-node-3
+  replication_lag_ms:
+    uniform:
+    - 800.0
+    - 10000.0
+    round: 1
+  stale_read_count:
+    randint:
+    - 20
+    - 600
+rca_clues:
+  session-service:
+    session.replication_lag_ms:
+      uniform:
+      - 800.0
+      - 10000.0
+      round: 1
+    session.stale_read_ratio_pct:
+      uniform:
+      - 10.0
+      - 55.0
+      round: 1
+  edge-gateway:
+    gateway.request_latency_ms:
+      uniform:
+      - 300.0
+      - 3000.0
+      round: 1
+    gateway.session_dependent_route_flag: true
+generator_impact:
+  couchdb_otel:
+    high_average_request_time_latency:
+      uniform:
+      - 6.0
+      - 18.0
+    high_5xx_server_error_rate:
+      uniform:
+      - 0.15
+      - 0.6

@@ -1,0 +1,73 @@
+name: Asset Memcached Miss Storm
+subsystem: content_delivery
+vehicle_section: asset_cache
+error_type: MEMCACHED-MISS-STORM
+sensor_type: cache_monitor
+affected_services:
+- content-delivery
+- game-server
+cascade_services:
+- analytics-pipeline
+description: Game-asset Memcached hit ratio collapses with thrashing evictions, overwhelming origin/asset servers
+investigation_notes: |-
+  Root cause: undersized slab memory after the slab config change — the LRU evicts hot assets before they are re-requested, so get hit ratio drops below the Memcached alert threshold while eviction rate spikes (above 5,000 evictions/min with slab memory above 95% used). TTL alignment is not detected, so synchronized expiry is not the cause.
+  1. Check Memcached Overview — low_hit_ratio_for_get_operations and high_eviction_rate should both be firing.
+  2. Review eviction logs: high evictions/min with a cold warm_pct means the LRU is thrashing; increase cache capacity or tier hot assets.
+  3. Inspect per-asset-group miss rates: textures-hd is usually the primary driver — pre-warm via asset-cli prefetch.
+  4. Remediate: revert the slab config (or raise the memcached `-m` memory limit) so the hot asset set fits, then pre-warm hot assets; do not flush during the storm, since that adds misses against an already saturated origin.
+  5. Enable request coalescing so concurrent misses for the same asset collapse into a single origin fetch.
+remediation_action: warm_memcached_assets
+error_message: '[Memcached] MEMCACHED-MISS-STORM: edge={edge_node} hit_rate={cache_hit_rate}% threshold=85% origin_load={origin_load_pct}%
+  asset_group={asset_group}'
+stack_trace: |-
+  === MEMCACHED ASSET CACHE STATISTICS ===
+  edge={edge_node}  asset_group={asset_group}
+  ----------- cache metrics -----------
+    hit_rate    = {cache_hit_rate}%  (threshold 85%)
+    origin_load = {origin_load_pct}%
+    evictions   = {evictions_per_min}/min
+    warm_pct    = 32.1%
+    cold_pct    = 67.9%
+  ----------- origin load -------------
+    rps_to_origin   = 8,421
+    origin_p99_ms   = 847
+    origin_errors   = 127 (circuit_breaker=HALF_OPEN)
+    bandwidth_gbps  = 12.4
+  ----------- top miss groups ---------
+    textures-hd     : 4,201 misses/min
+    models-char     : 2,103 misses/min
+    audio-sfx       : 891 misses/min
+  MEMCACHED-MISS-STORM: edge {edge_node} hit rate {cache_hit_rate}% below threshold
+correlation_attr:
+  key: deployment.memcached_slab_config
+  value: slabs-v2.8.0-rc1
+fault_params:
+  edge_node: {choice: [mc-iad-01, mc-lax-02, mc-fra-01, mc-nrt-01]}
+  cache_hit_rate: {uniform: [20.0, 75.0], round: 1}
+  origin_load_pct: {uniform: [85.0, 100.0], round: 1}
+  asset_group: textures-hd
+  evictions_per_min: {randint: [10000, 20000]}
+rca_clues:
+  content-delivery:
+    memcached.ttl_alignment_detected: false
+    memcached.evictions_per_min: {randint: [10000, 20000]}
+    memcached.slab_memory_used_pct: {uniform: [97.0, 100.0], round: 1}
+    memcached.origin_rps: {randint: [5000, 15000]}
+  game-server:
+    game.asset_load_timeout_pct: {uniform: [5.0, 30.0], round: 1}
+    game.client_crash_rate: {uniform: [0.5, 3.0], round: 1}
+  analytics-pipeline:
+    analytics.cache_error_events: {randint: [1000, 5000]}
+business_impact:
+  - kpi: business.sessions_per_min
+    value: {uniform: [669.6, 770.4]}
+  - kpi: business.matches_played_per_min
+    value: {uniform: [229.71, 264.29]}
+  - kpi: business.crash_rate_pct
+    factor: {uniform: [2.0, 4.0]}
+  - kpi: business.new_registrations_per_min
+    factor: {uniform: [0.25, 0.55]}
+generator_impact:
+  memcached_otel:
+    low_hit_ratio_for_get_operations: 40.0
+    high_eviction_rate: 40.0

@@ -13,7 +13,7 @@ description: Margin requirement calculation fails due to stale collateral valuat
 investigation_notes: |-
   1. Check risk-calculator logs for RISK-MARGIN-CALL — note account_id, margin_ratio, and valuation_age_s for stale collateral.
   2. Query FROM logs.otel.financial.* | WHERE body.text LIKE "*RISK-MARGIN-CALL*" | STATS count() BY account_id to identify accounts with repeated margin calls.
-  3. Inspect settlement-processor for pending collateral transfers — a funding shortfall here often compounds the equity deficiency.
+  3. Inspect settlement-processor for pending collateral transfers — a funding shortfall here often compounds the equity deficiency (zero pending transfers rules out a funding shortfall).
   4. Check customer-portal for unsatisfied margin call notifications — the client may not have received the T+1 deadline alert.
   5. If valuation_age_s > 3600 force a collateral revaluation; if shortfall persists initiate liquidation of lowest-haircut assets first.
 remediation_action: force_collateral_revaluation
@@ -41,26 +41,26 @@ fault_params:
     n: {randint: [10000, 99999]}
   margin_ratio: {uniform: [0.05, 0.20], round: 3}
   maintenance_ratio: 0.25
-  valuation_age_s: {randint: [300, 3600]}
+  valuation_age_s: {randint: [3700, 14400]}
 rca_clues:
   risk-calculator:
     risk.margin_breach_count: {randint: [1, 20]}
-    risk.collateral_staleness_s: {randint: [300, 3600]}
+    risk.collateral_staleness_s: {randint: [3700, 14400]}
   settlement-processor:
-    settlement.collateral_transfer_pending: {randint: [1, 10]}
+    settlement.collateral_transfer_pending: 0
     settlement.equity_deficiency_usd: {randint: [500000, 5000000]}
   customer-portal:
     portal.margin_call_notifications_unseen: {randint: [1, 5]}
     portal.account_restricted: true
   compliance-monitor:
     compliance.margin_call_regulatory_flags: {randint: [1, 10]}
-    compliance.collateral_valuation_age_s: {randint: [300, 3600]}
+    compliance.collateral_valuation_age_s: {randint: [3700, 14400]}
 business_impact:
   - kpi: business.margin_utilization_pct
     factor: {uniform: [1.8, 3.5]}
   - kpi: business.counterparty_credit_risk_usd
-    factor: {uniform: [1.5, 3.0]}
+    value: {uniform: [7196340.0, 8279660.0], round: 1}
   - kpi: business.settlement_success_rate_pct
-    factor: {uniform: [0.80, 0.95]}
-  - kpi: business.mark_to_market_pnl_usd_per_min
-    factor: {uniform: [0.10, 0.40]}
+    factor: {uniform: [0.8, 0.95]}
+  - kpi: business.settlement_fails_in_queue
+    value: {uniform: [30.6, 35.2]}

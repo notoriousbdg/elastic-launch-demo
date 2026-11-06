@@ -7,7 +7,7 @@ from typing import Any
 
 import httpx
 
-from elastic_config.deployer_base import _kibana_headers, ProgressCallback, StepIdx
+from elastic_config.deployer_base import _kibana_headers, _retry_http, ProgressCallback, StepIdx
 
 logger = logging.getLogger("deployer")
 
@@ -87,8 +87,20 @@ class AgentMixin:
         # Build full system prompt from scenario properties
         system_prompt = self._generate_system_prompt(agent_cfg)
 
-        # Use only tools that were actually created successfully (Bug 4+5 fix)
-        tool_ids = list(self._created_tool_ids)
+        # Agent carries only platform builtins; scenario tools are accessed via skills.
+        # Defensive fallback: if any custom skill failed to deploy, include the
+        # scenario tools directly on the agent so capability is not silently lost.
+        custom_skill_ids = {sd["id"] for sd in self.scenario.skill_definitions}
+        missing_skills = custom_skill_ids - set(self._created_skill_ids)
+        if missing_skills:
+            logger.warning(
+                "Skills %s failed to deploy — falling back to including scenario "
+                "tools directly on the agent",
+                missing_skills,
+            )
+            tool_ids = list(self._created_tool_ids)
+        else:
+            tool_ids = []
         tool_ids.extend([
             "platform.core.cases",
             "platform.core.resume_workflow_execution",
@@ -113,23 +125,34 @@ class AgentMixin:
             "configuration": configuration,
         }
 
-        # DELETE + POST for reliable update
+        # DELETE + POST for reliable update. Retry transient Kibana errors.
         client.delete(
             f"{self.kibana_url}/api/agent_builder/agents/{agent_id}",
             headers=_kibana_headers(self.api_key),
         )
-        resp = client.post(
-            f"{self.kibana_url}/api/agent_builder/agents",
-            headers=_kibana_headers(self.api_key),
-            json=agent_body,
+        resp = _retry_http(
+            lambda: client.post(
+                f"{self.kibana_url}/api/agent_builder/agents",
+                headers=_kibana_headers(self.api_key),
+                json=agent_body,
+            ),
+            attempts=4,
+            base_delay=2.0,
+            label=f"agent {agent_id}",
         )
 
-        if resp.status_code < 300:
+        if resp is not None and resp.status_code < 300:
             step.status = "ok"
             step.detail = f"Agent {agent_id} created"
         else:
             step.status = "failed"
-            step.detail = f"HTTP {resp.status_code}: {resp.text[:200]}"
+            status = resp.status_code if resp is not None else "no response"
+            body = resp.text[:200] if resp is not None else ""
+            step.detail = f"HTTP {status}: {body}"
+            logger.warning(
+                "Agent %s create failed: HTTP %s — %s",
+                agent_id, status, body,
+            )
         notify(self.progress)
 
     def _generate_system_prompt(self, agent_cfg: dict[str, Any]) -> str:
@@ -156,9 +179,19 @@ class AgentMixin:
         )
 
         ns = scenario.namespace
-        p_investigation = f"{ns}-investigation-playbook"
-        p_channel_runbook = f"{ns}-channel-runbook"
-        p_remediation_guide = f"{ns}-remediation-guide"
+
+        # Build the skills block dynamically from skill_definitions.agent_prompt_hint.
+        # Only include skills that were successfully deployed.
+        skills_bullets = []
+        for sd in scenario.skill_definitions:
+            hint = sd.get("agent_prompt_hint", "")
+            if hint and sd["id"] in self._created_skill_ids:
+                skills_bullets.append(f"- {hint}")
+        skills_block = (
+            "\n".join(skills_bullets)
+            if skills_bullets
+            else "- (No scenario skills deployed — use tools directly.)"
+        )
 
         return f"""{identity}
 
@@ -173,39 +206,63 @@ class AgentMixin:
 - **Telemetry Source**: OpenTelemetry -> Elasticsearch (logs)
 
 ## Skills
-- Use **{p_investigation}** for ES|QL investigation, field name guidance, and root cause analysis
-- Use **{p_channel_runbook}** to look up fault channel procedures or identify the remediation action_type
-- Use **{p_remediation_guide}** before executing any remediation or escalation action
+
+Your telemetry query and remediation capabilities are provided by these procedures.
+Consult the applicable one before beginning any assessment, investigation, or remediation.
+
+{skills_block}
 
 ## Creating Visualizations
-Use the **visualization-creation** tool to create Lens charts and dashboards. Always provide complete,
+Use the **visualization-creation** skill to create Lens charts and dashboards. Always provide complete,
 specific parameters — vague requests will produce empty panels.
 
-**Data views** (always use these exact IDs):
-- Traces/APM: `traces.otel.{ns}`  — fields: `@timestamp`, `duration`, `status.code`,
-  `resource.attributes.service.name`, `span.name`, `trace.id`
-- Logs: `logs.otel.{ns}` — fields: `@timestamp`, `body.text`, `severity_text`, `service.name`,
-  `trace.id`, `span.id`
-- Metrics: `metrics.otel.{ns}` — fields: `@timestamp`, `metrics.k8s.node.cpu.utilization`,
+**Data sources — ES|QL FROM targets and Kibana data view IDs**:
+
+IMPORTANT: `metrics.otel.{ns}`, `traces.otel.{ns}` are Kibana **data view IDs** — they are NOT
+index names. Never use them in an ES|QL `FROM` clause or as an index pattern in a Lens panel.
+Use the real index patterns below instead.
+
+| Signal | ES|QL FROM / Lens index pattern | Kibana data view ID |
+|--------|--------------------------------|---------------------|
+| Logs | `logs.otel.{ns},logs.otel.{ns}.*` | `logs.otel.{ns}` |
+| Traces/APM | `traces-*` | `traces.otel.{ns}` |
+| Metrics | `metrics-*` | `metrics.otel.{ns}` |
+
+Key fields:
+- Traces (`traces-*`): `@timestamp`, `duration`, `status.code`,
+  `resource.attributes.service.name`, `span.name`, `trace.id`;
+  scope to namespace with `resource.attributes.service.namespace == "{ns}"`
+- Logs (`logs.otel.{ns},logs.otel.{ns}.*`): `@timestamp`, `body.text`, `severity_text`,
+  `service.name`, `trace.id`, `span.id`
+- Metrics (`metrics-*`): `@timestamp`, `metrics.system.cpu.utilization`,
+  `metrics.system.memory.utilization`, `metrics.k8s.node.cpu.utilization`,
   `metrics.k8s.pod.memory.usage`, `metrics.system.cpu.load_average.1m`,
-  `metrics.system.filesystem.utilization`, `resource.attributes.k8s.cluster.name`,
-  `resource.attributes.service.name`, `host.name`
+  `metrics.system.filesystem.utilization`, `resource.attributes.service.name`, `host.name`;
+  scope to namespace with `resource.attributes.service.namespace == "{ns}"`
 
 **Proven visualization patterns**:
-- Error rate over time → bar_stacked on `traces.otel.{ns}`, x=`@timestamp` (30s), y=count with
-  `status.code: Error` filter, split by `resource.attributes.service.name`
-- P99 latency by service → area on `traces.otel.{ns}`, x=`@timestamp`, y=percentile(duration,99),
-  split by `resource.attributes.service.name`
+- Error rate over time → bar_stacked on `traces-*`, x=`@timestamp` (30s), y=count with
+  `status.code: Error` filter, split by `resource.attributes.service.name`,
+  KQL scope: `resource.attributes.service.namespace: "{ns}"`
+- P99 latency by service → area on `traces-*`, x=`@timestamp`, y=percentile(duration,99),
+  split by `resource.attributes.service.name`,
+  KQL scope: `resource.attributes.service.namespace: "{ns}"`
 - Log volume → area on `logs.otel.{ns}`, x=`@timestamp` (30s), y=count, filter by `severity_text`
-- CPU utilization → metric tile on `metrics.otel.{ns}`, average of
-  `metrics.k8s.node.cpu.utilization`
-- Service health → metric tile on `traces.otel.{ns}`, error-rate formula
+- CPU utilization over time by service → line on `metrics-*`, x=`@timestamp`, y=avg of
+  `metrics.system.cpu.utilization` (or `metrics.k8s.node.cpu.utilization`),
+  split by `resource.attributes.service.name`,
+  KQL scope: `resource.attributes.service.namespace: "{ns}"`
+- Memory utilization over time by service → line on `metrics-*`, x=`@timestamp`, y=avg of
+  `metrics.system.memory.utilization` (or `metrics.k8s.pod.memory.usage`),
+  split by `resource.attributes.service.name`,
+  KQL scope: `resource.attributes.service.namespace: "{ns}"`
+- Service health → metric tile on `traces-*`, error-rate formula
   `count(kql='status.code: Error') / count()` filtered by
-  `resource.attributes.service.name: "<name>"`
+  `resource.attributes.service.name: "<name>" AND resource.attributes.service.namespace: "{ns}"`
 
-When asked to create a dashboard, always specify: data view ID, chart type, x-axis field with
-interval, y-axis metric, split field (if any), and any KQL filter. Ask for clarification only if
-the user's intent is genuinely ambiguous.
+When asked to create a dashboard, always specify: index pattern (FROM target), chart type,
+x-axis field with interval, y-axis metric, split field (if any), and any KQL filter.
+Ask for clarification only if the user's intent is genuinely ambiguous.
 
 ## Available Services
 {svc_names}"""

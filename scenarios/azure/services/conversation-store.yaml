@@ -1,0 +1,214 @@
+service: conversation-store
+sort_order: 7
+cloud_provider: azure
+cloud_region: westeurope
+cloud_platform: azure_vm
+cloud_availability_zone: westeurope-1
+subsystem: database
+language: python
+generates_traces: false
+
+# Topology: [downstream-service, endpoint, METHOD]
+topology: []
+
+db_operations:
+- - SELECT
+  - conversations
+  - SELECT c.id, c.sessionId, c.messages, c.updatedAt FROM c WHERE c.sessionId = @sessionId
+- - UPSERT
+  - conversations
+  - UPSERT INTO conversations (id, sessionId, tenantId, messages, tokenCount, updatedAt) VALUES (@id, @sessionId, @tenantId, @messages, @tokenCount, @updatedAt)
+- - SELECT
+  - conversation_summaries
+  - SELECT TOP 20 c.sessionId, c.summary, c.turnCount FROM c WHERE c.tenantId = @tenantId ORDER BY c.updatedAt DESC
+
+emit_fault_logs: true
+kpi_emitter: false
+
+constants:
+  CONTAINERS:
+  - conversations
+  - conversation_summaries
+  - feedback_events
+  REGIONS:
+  - West Europe
+  - North Europe
+  - East US
+  CONSISTENCY_LEVELS:
+  - Session
+  - Session
+  - BoundedStaleness
+
+steps:
+- sample:
+    container:
+      choice: CONTAINERS
+    region:
+      choice: REGIONS
+    ru_provisioned: 40000
+    ru_consumed_per_s:
+      if_active:
+        randint:
+        - 39000
+        - 48000
+      else:
+        randint:
+        - 9000
+        - 26000
+    ru_utilization_pct:
+      expr: round(ru_consumed_per_s / ru_provisioned * 100, 1)
+    throttled_429s:
+      if_active:
+        randint:
+        - 400
+        - 3500
+      else:
+        randint:
+        - 0
+        - 2
+- metric:
+    name: conversation_store.normalized_ru_consumption_pct
+    value:
+      var: ru_utilization_pct
+    unit: '%'
+- metric:
+    name: conversation_store.request_units_consumed
+    value:
+      var: ru_consumed_per_s
+    unit: RU/s
+- metric:
+    name: conversation_store.throttled_requests_429
+    value:
+      var: throttled_429s
+    unit: requests
+- log:
+    level: INFO
+    message: 'cosmosdb[convstore-weu]: ru_stats container={container} consumed={ru_consumed_per_s} RU/s of {ru_provisioned} autoscale max utilization={ru_utilization_pct}% http_429={throttled_429s}/min status=OK'
+    attrs:
+      operation: ru_stats
+      db.container:
+        var: container
+      db.ru_consumed_per_s:
+        var: ru_consumed_per_s
+      db.ru_provisioned: 40000
+      db.ru_utilization_pct:
+        var: ru_utilization_pct
+      db.throttled_429s:
+        var: throttled_429s
+- sample:
+    hottest_partition_pct:
+      if_active:
+        uniform:
+        - 78.0
+        - 99.0
+        round: 1
+      else:
+        uniform:
+        - 12.0
+        - 35.0
+        round: 1
+    partition_key_range:
+      randint:
+      - 0
+      - 15
+    read_latency_ms:
+      if_active:
+        uniform:
+        - 120.0
+        - 900.0
+        round: 1
+      else:
+        uniform:
+        - 3.0
+        - 12.0
+        round: 1
+    write_latency_ms:
+      if_active:
+        uniform:
+        - 250.0
+        - 2500.0
+        round: 1
+      else:
+        uniform:
+        - 5.0
+        - 18.0
+        round: 1
+- metric:
+    name: conversation_store.hot_partition_pct
+    value:
+      var: hottest_partition_pct
+    unit: '%'
+- metric:
+    name: conversation_store.server_read_latency_ms
+    value:
+      var: read_latency_ms
+    unit: ms
+- metric:
+    name: conversation_store.server_write_latency_ms
+    value:
+      var: write_latency_ms
+    unit: ms
+- log:
+    level: INFO
+    message: 'cosmosdb[convstore-weu]: partition_heat container={container} pkrange={partition_key_range} hottest_partition={hottest_partition_pct}% read_p99={read_latency_ms}ms write_p99={write_latency_ms}ms'
+    attrs:
+      operation: partition_heat
+      db.container:
+        var: container
+      db.partition_key_range:
+        var: partition_key_range
+      db.hottest_partition_pct:
+        var: hottest_partition_pct
+      db.read_latency_ms:
+        var: read_latency_ms
+      db.write_latency_ms:
+        var: write_latency_ms
+- sample:
+    replication_lag_ms:
+      if_active:
+        randint:
+        - 4000
+        - 45000
+      else:
+        randint:
+        - 40
+        - 400
+    consistency:
+      choice: CONSISTENCY_LEVELS
+    storage_gb:
+      uniform:
+      - 410.0
+      - 440.0
+      round: 1
+    documents_k:
+      randint:
+      - 8200
+      - 8600
+- metric:
+    name: conversation_store.replication_lag_ms
+    value:
+      var: replication_lag_ms
+    unit: ms
+- metric:
+    name: conversation_store.data_usage_gb
+    value:
+      var: storage_gb
+    unit: GB
+- metric:
+    name: conversation_store.document_count_k
+    value:
+      var: documents_k
+    unit: documents
+- log:
+    level: INFO
+    message: 'cosmosdb[convstore-weu]: replication region={region} consistency={consistency} replication_lag={replication_lag_ms}ms data_usage={storage_gb}GB documents={documents_k}k multi_region_writes=false'
+    attrs:
+      operation: replication_health
+      db.region:
+        var: region
+      db.consistency:
+        var: consistency
+      db.replication_lag_ms:
+        var: replication_lag_ms
+      db.data_usage_gb:
+        var: storage_gb

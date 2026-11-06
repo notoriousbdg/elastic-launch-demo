@@ -1,5 +1,6 @@
 version: "1"
 name: __SCENARIO_NAME__ Case Auto-Close (Alert Recovered)
+enabled: true
 description: >
   Periodically closes any open significant-event case whose underlying alert
   has recovered (the fault cleared and errors stopped).

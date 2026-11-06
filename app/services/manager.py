@@ -6,10 +6,8 @@ import logging
 import threading
 from typing import Any
 
-from app.config import (
-    SERVICES,
-    ACTIVE_SCENARIO,
-)
+from app.chaos.protocol import ChaosSource
+from app.config import ACTIVE_SCENARIO
 from app.telemetry import ESBulkClient, OTLPClient
 
 logger = logging.getLogger("nova7.manager")
@@ -20,7 +18,7 @@ class ServiceManager:
 
     def __init__(
         self,
-        chaos_controller,
+        chaos_controller: ChaosSource,
         ctx=None,
         otlp_client: OTLPClient | None = None,
     ):
@@ -42,6 +40,10 @@ class ServiceManager:
         self._generator_threads: list[threading.Thread] = []
 
         self._init_services()
+
+    @property
+    def stop_event(self) -> threading.Event:
+        return self._stop_event
 
     def _init_services(self) -> None:
         """Dynamically load and instantiate services from the active scenario."""
@@ -86,19 +88,17 @@ class ServiceManager:
     # ── Generators ────────────────────────────────────────────────────
 
     def _start_generators(self) -> None:
-        """Start log/trace/metrics generators as daemon threads."""
-        from log_generators.trace_generator import run as run_traces
-        from log_generators.host_metrics_generator import run as run_metrics
-        from log_generators.nginx_log_generator import run as run_nginx
-        from log_generators.mysql_log_generator import run as run_mysql
-        from log_generators.k8s_metrics_generator import run as run_k8s
-        from log_generators.nginx_metrics_generator import run as run_nginx_metrics
-        from log_generators.vpc_flow_generator import run as run_vpc
-        from log_generators.jvm_metrics_generator import run as run_jvm
-        from log_generators.raw_access_log_generator import run as run_raw_access
+        """Start log/trace/metrics generators as daemon threads.
+
+        The set of generators and their order comes from the generator registry.
+        The active scenario's ``generators:`` block controls which generators
+        are enabled and supplies domain-specific configuration for each one.
+        """
+        from generator_engine.registry import enabled_specs, load_entrypoint
 
         # Build scenario_data dict from context for scenario-dependent generators
         scenario_data = None
+        scenario = None
         if self._ctx:
             scenario = self._ctx.scenario
             scenario_data = {
@@ -113,54 +113,60 @@ class ServiceManager:
                 "scenario": scenario,
             }
 
-        # Trace generator needs chaos_controller and scenario_data
-        trace_args = (self.otlp, self._stop_event, self.chaos_controller)
-        trace_kwargs = {"scenario_data": scenario_data} if scenario_data else {}
+        # Resolve which generators to start.
+        # enabled_specs handles None gracefully: it returns all default-enabled
+        # generators when the scenario has no generators: block.
+        specs = enabled_specs(scenario)
 
-        # Host metrics generator needs chaos_controller and scenario_data
-        host_args = (self.otlp, self._stop_event)
-        host_kwargs = {"scenario_data": scenario_data} if scenario_data else {}
-        host_kwargs["chaos_controller"] = self.chaos_controller
+        # Build generator config lookup from the scenario generators: block
+        gen_block: dict = {}
+        if scenario is not None:
+            try:
+                gen_block = getattr(scenario, "generators", {}) or {}
+            except Exception:
+                gen_block = {}
 
-        # K8s metrics generator needs chaos_controller and scenario_data
-        k8s_args = (self.otlp, self._stop_event)
-        k8s_kwargs = {"scenario_data": scenario_data} if scenario_data else {}
-        k8s_kwargs["chaos_controller"] = self.chaos_controller
+        for spec in specs:
+            try:
+                fn = load_entrypoint(spec)
+            except (ImportError, AttributeError) as exc:
+                logger.error(
+                    "Cannot load generator '%s' from %s: %s",
+                    spec.id, spec.module, exc,
+                )
+                continue
 
-        # Common args/kwargs for generators that accept scenario_data
-        common_args = (self.otlp, self._stop_event)
-        common_kwargs = {"scenario_data": scenario_data} if scenario_data else {}
+            # Pick the right transport client
+            client = self.es_bulk if spec.client == "es_bulk" else self.otlp
 
-        # Chaos-aware kwargs for infra log generators (nginx, mysql, jvm)
-        chaos_kwargs = dict(common_kwargs)
-        chaos_kwargs["chaos_controller"] = self.chaos_controller
+            # Build generator config from the scenario generators: block
+            cfg = gen_block.get(spec.id, {}) or {}
+            if isinstance(cfg, bool):
+                cfg = {}
 
-        # Raw access-log generator uses ESBulkClient instead of OTLPClient
-        raw_access_args = (self.es_bulk, self._stop_event)
-        raw_access_kwargs = {"scenario_data": scenario_data} if scenario_data else {}
+            # run(client, stop_event, *, scenario_data, chaos_controller)
+            kwargs: dict[str, Any] = {}
+            if scenario_data is not None:
+                if cfg:
+                    sd = dict(scenario_data)
+                    sd["generator_config"] = cfg
+                    kwargs["scenario_data"] = sd
+                else:
+                    kwargs["scenario_data"] = scenario_data
 
-        generators = [
-            ("gen-traces", run_traces, trace_args, trace_kwargs),
-            ("gen-host-metrics", run_metrics, host_args, host_kwargs),
-            ("gen-k8s-metrics", run_k8s, k8s_args, k8s_kwargs),
-            ("gen-jvm-metrics", run_jvm, common_args, chaos_kwargs),
-            ("gen-vpc-flow", run_vpc, common_args, common_kwargs),
-            ("gen-raw-access", run_raw_access, raw_access_args, raw_access_kwargs),
-            ("gen-nginx", run_nginx, common_args, chaos_kwargs),
-            ("gen-nginx-metrics", run_nginx_metrics, common_args, common_kwargs),
-            ("gen-mysql", run_mysql, common_args, chaos_kwargs),
-        ]
-        for name, fn, args, kwargs in generators:
+            if spec.wants_chaos:
+                kwargs["chaos_controller"] = self.chaos_controller
+
             t = threading.Thread(
                 target=fn,
-                args=args,
+                args=(client, self._stop_event),
                 kwargs=kwargs,
-                name=name,
+                name=spec.thread_name,
                 daemon=True,
             )
             t.start()
             self._generator_threads.append(t)
-            logger.info("Started generator thread: %s", name)
+            logger.info("Started generator thread: %s", spec.thread_name)
 
     def get_generator_status(self) -> dict[str, str]:
         """Return status of each generator thread."""

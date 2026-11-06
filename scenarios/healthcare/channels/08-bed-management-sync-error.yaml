@@ -8,9 +8,9 @@ affected_services:
 - ehr-system
 cascade_services:
 - clinical-alerts
-description: Bed management system loses synchronization with ADT events, showing stale census data
+description: Bed management system loses synchronization with ADT events as its Kafka consumer lags on hot ADT partitions, showing stale census data
 investigation_notes: |-
-  Root Cause: The bed board receives ADT A01 (admit), A02 (transfer), and A03 (discharge) events via HL7 interface. Sync lag occurs when the ADT feed queue backs up or the bed board API fails to process events in order, causing census discrepancies between the bed board UI and actual patient locations.
+  Root Cause: The bed board receives ADT A01 (admit), A02 (transfer), and A03 (discharge) events via HL7 interface. Sync lag occurs when the ADT feed queue backs up or the bed board API fails to process events in order, causing census discrepancies between the bed board UI and actual patient locations. An ADT queue lag above 60s with zero out-of-order events points to the ADT feed queue backing up, not the bed board API processing events out of order; census accuracy below 95% confirms stale bed status.
   Remediation: 1) Check the ADT-to-bed-board interface queue: `bed-admin queue-status --unit {nursing_unit}`. 2) Force a census resync from the ADT master: `bed-admin resync --unit {nursing_unit} --source ADT-MASTER`. 3) Restart the bed board sync service: `systemctl restart bed-management-sync`. 4) Verify the HL7 ADT listener port is accepting connections: `netstat -an | grep 2575`. 5) Manually update conflicting bed status via charge nurse console if patient safety is at risk. 6) Review the bed board event processing log for out-of-order sequence numbers.
 remediation_action: resync_bed_board
 error_message: '[SCHED] SCHED-BED-MGMT-FAIL: unit={nursing_unit} bed={bed_id} status={bed_status} adt_event={adt_event} sync_lag={sync_lag_seconds}s'
@@ -36,9 +36,9 @@ fault_params:
   bed_id:
     format: "{ward}-{num}"
     ward: {choice: [A, B, C, D]}
-    num: {randint: [101, 450]}
-  bed_status: {choice: [occupied, vacant, cleaning, blocked]}
-  adt_event: {choice: [discharge, transfer, admit]}
+    num: {randint: [400, 450]}
+  bed_status: occupied
+  adt_event: {choice: [discharge, transfer]}
   sync_lag_seconds: {randint: [60, 600]}
   patient_id:
     format: "PT-{n}"
@@ -47,6 +47,7 @@ rca_clues:
   scheduling-api:
     bed_board.adt_queue_lag_s: {randint: [60, 600]}
     bed_board.stale_census_count: {randint: [3, 15]}
+    bed_board.out_of_order_events: 0
   ehr-system:
     ehr.adt_event_backlog: {randint: [20, 100]}
     ehr.census_accuracy_pct: {uniform: [70, 90], round: 1}
@@ -55,10 +56,13 @@ rca_clues:
     alerts.affected_units: {randint: [1, 4]}
 business_impact:
   - kpi: business.admits_per_min
-    factor: {uniform: [0.20, 0.50]}
+    value: {uniform: [0.48, 0.56], round: 2}
   - kpi: business.discharges_per_min
     factor: {uniform: [0.25, 0.55]}
   - kpi: business.ed_door_to_provider_min
     factor: {uniform: [1.5, 3.0]}
   - kpi: business.hcahps_proxy_score
-    factor: {uniform: [0.30, 0.60]}
+    factor: {uniform: [0.3, 0.6]}
+generator_impact:
+  kafka_otel:
+    high_consumer_lag_per_partition: 12000.0

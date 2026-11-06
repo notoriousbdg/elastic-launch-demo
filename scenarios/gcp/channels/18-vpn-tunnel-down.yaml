@@ -15,12 +15,12 @@ investigation_notes: |-
     gcloud compute vpn-tunnels describe <tunnel> --region=<region> --format='value(status,detailedStatus)'
     gcloud compute vpn-tunnels list --filter='status!=ESTABLISHED' --format='table(name,region,status,peerIp)'
     Console > Hybrid Connectivity > VPN > <tunnel> > Status tab (IKE logs)
-  Remediation: Reset the VPN tunnel to force IKE renegotiation:
+  Remediation: Confirm the pre-shared key with the remote side, then recreate the tunnel with the corrected secret (Cloud VPN tunnels cannot be edited in place):
     gcloud compute vpn-tunnels delete <tunnel> --region=<region>
-    gcloud compute vpn-tunnels create <tunnel> --region=<region> --peer-address=<peer-ip> --shared-secret=<secret> --ike-version=2 --router=<router> --vpn-gateway=<gw> --interface=0
+    gcloud compute vpn-tunnels create <tunnel> --region=<region> --peer-external-gateway=<peer-gw> --peer-external-gateway-interface=0 --shared-secret=<secret> --ike-version=2 --router=<router> --vpn-gateway=<gw> --interface=0
   Verify the remote peer is reachable: ping <peer-ip> from a VM in the same region. Check if the remote side has rotated the pre-shared key.
 remediation_action: reset_vpn_tunnel
-error_message: '[CloudVPN] VPN-TUNNEL-DOWN tunnel={vpn_tunnel_name} gateway={vpn_gateway_name} peer={vpn_peer_ip} status=DOWN
+error_message: '[CloudVPN] VPN-TUNNEL-DOWN tunnel={vpn_tunnel_name} gateway={vpn_gateway_name} peer={vpn_peer_ip} status=AUTHORIZATION_ERROR
   since {vpn_down_sec}s ike_version={vpn_ike_version} last_handshake={vpn_last_handshake_sec}s ago'
 stack_trace: |-
   Cloud VPN Tunnel Report
@@ -28,10 +28,11 @@ stack_trace: |-
   Tunnel:          {vpn_tunnel_name}
   Gateway:         {vpn_gateway_name}
   Peer IP:         {vpn_peer_ip}
-  Status:          DOWN
+  Status:          AUTHORIZATION_ERROR
   Down Since:      {vpn_down_sec}s
   IKE Version:     {vpn_ike_version}
   Last Handshake:  {vpn_last_handshake_sec}s ago
+  Last IKE Error:  AUTHENTICATION_FAILED (pre-shared key)
   Action: Verify peer gateway and IKE configuration
 correlation_attr:
   key: infra.vpn_psk_rotation
@@ -47,6 +48,9 @@ rca_clues:
   cloud-vpn-gateway:
     vpn.ipsec_sa_status: EXPIRED
     vpn.last_rekey_sec_ago: {randint: [300, 3600]}
+    vpn.ike_auth_result: AUTHENTICATION_FAILED
+    vpn.peer_icmp_reachable: true
+    vpn.peer_ip_changed: false
   cloud-interconnect:
     interconnect.vpn_backup_needed: true
     interconnect.capacity_headroom_pct: {uniform: [5, 30], round: 1}
@@ -58,10 +62,10 @@ rca_clues:
     ni.latency_via_backup_ms: {randint: [20, 120]}
 business_impact:
   - kpi: business.interconnect_utilization_pct
-    factor: {uniform: [1.5, 3.0]}
+    value: {uniform: [8.18, 9.42], round: 2}
   - kpi: business.network_sla_compliance_pct
-    factor: {uniform: [0.55, 0.80]}
+    factor: {uniform: [0.55, 0.8]}
   - kpi: business.bytes_egress_gib_per_min
-    factor: {uniform: [0.40, 0.70]}
+    value: {uniform: [10881.0, 12519.0], round: 1}
   - kpi: business.incident_mttr_min
     factor: {uniform: [2.5, 5.5]}

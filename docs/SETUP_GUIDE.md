@@ -176,7 +176,7 @@ curl http://localhost/api/setup/progress?deployment_id=<id>
 ### Check Services Are Running
 
 ```bash
-curl -s http://localhost/api/status | python3 -m json.tool
+curl -s 'http://localhost/api/status?deployment_id=<scenario-id>' | python3 -m json.tool
 ```
 
 All 9 services should show NOMINAL status.
@@ -226,12 +226,12 @@ After deployment, check in Kibana:
 # Trigger a fault
 curl -X POST http://<host>/api/chaos/trigger \
   -H 'Content-Type: application/json' \
-  -d '{"channel": 2}'
+  -d '{"channel": 2, "deployment_id": "<scenario-id>"}'
 
 # Check status
-curl -s http://<host>/api/chaos/status/2
+curl -s 'http://<host>/api/chaos/status/2?deployment_id=<scenario-id>'
 
 # Resolve
-curl -X POST http://<host>/api/remediate/2
+curl -X POST 'http://<host>/api/remediate/2?deployment_id=<scenario-id>'
 ```
 

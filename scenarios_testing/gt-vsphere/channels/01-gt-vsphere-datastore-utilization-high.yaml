@@ -1,0 +1,37 @@
+name: "GT vsphere_otel: datastore_utilization_high"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-VSPHERE-DATASTORE-UTILIZATION-HIGH
+sensor_type: impact_key_probe
+affected_services:
+  - gt-vsphere-aws-svc-1
+cascade_services:
+  - gt-vsphere-aws-svc-2
+description: "Tests impact_key datastore_utilization_high on generator vsphere_otel."
+investigation_notes: |-
+  1. Verify vsphere_otel is active and reporting metrics.
+  2. Check that the datastore_utilization_high metric has reached the trigger value (600.0).
+  3. Confirm generator_impact for vsphere_otel.datastore_utilization_high is set to 600.0.
+  4. Look for correlated changes in service gt-vsphere-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_datastore_utilization_high_baseline
+error_message: "GT-PROBE: gen=vsphere_otel key=datastore_utilization_high value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=vsphere_otel
+  impact_key: datastore_utilization_high
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 600.0
+  svc_name: gt-vsphere-aws-svc-1
+rca_clues:
+  gt-vsphere-aws-svc-1:
+    probe.generator: vsphere_otel
+    probe.impact_key: datastore_utilization_high
+    probe.trigger_value: 600.0
+  gt-vsphere-aws-svc-2:
+    probe.upstream_generator: vsphere_otel
+    probe.upstream_key: datastore_utilization_high
+generator_impact:
+  vsphere_otel:
+    datastore_utilization_high: 600.0

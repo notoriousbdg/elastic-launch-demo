@@ -1,0 +1,37 @@
+name: "GT cassandra_otel: high_error_rate_by_node"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-CASSANDRA-HIGH-ERROR-RATE-BY-NODE
+sensor_type: impact_key_probe
+affected_services:
+  - gt-cassandra-aws-svc-1
+cascade_services:
+  - gt-cassandra-aws-svc-2
+description: "Tests impact_key high_error_rate_by_node on generator cassandra_otel."
+investigation_notes: |-
+  1. Verify cassandra_otel is active and reporting metrics.
+  2. Check that the high_error_rate_by_node metric has reached the trigger value (50.0).
+  3. Confirm generator_impact for cassandra_otel.high_error_rate_by_node is set to 50.0.
+  4. Look for correlated changes in service gt-cassandra-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_high_error_rate_by_node_baseline
+error_message: "GT-PROBE: gen=cassandra_otel key=high_error_rate_by_node value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=cassandra_otel
+  impact_key: high_error_rate_by_node
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 50.0
+  svc_name: gt-cassandra-aws-svc-1
+rca_clues:
+  gt-cassandra-aws-svc-1:
+    probe.generator: cassandra_otel
+    probe.impact_key: high_error_rate_by_node
+    probe.trigger_value: 50.0
+  gt-cassandra-aws-svc-2:
+    probe.upstream_generator: cassandra_otel
+    probe.upstream_key: high_error_rate_by_node
+generator_impact:
+  cassandra_otel:
+    high_error_rate_by_node: 50.0

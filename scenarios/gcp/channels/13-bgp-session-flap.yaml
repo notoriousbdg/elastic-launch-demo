@@ -11,13 +11,14 @@ cascade_services:
 - cloud-nat-gateway
 description: Cloud Router BGP session repeatedly flapping on interconnect attachment
 investigation_notes: |-
-  Root cause: BGP session flapping indicates the Cloud Router is repeatedly establishing and dropping the BGP peering with the on-premises router. Common causes: MTU mismatch (Interconnect supports 1440-byte MTU for BGP), hold timer too aggressive, route advertisement exceeding peer capacity, or unstable physical link causing BFD to trigger fast failover. Diagnose:
+  Root cause: BGP session flapping indicates the Cloud Router is repeatedly establishing and dropping the BGP peering with the on-premises router. Common causes: MTU mismatch (VLAN attachments support 1440, 1460, 1500 or 8896-byte MTU; both sides must match), hold timer too aggressive, route advertisement exceeding peer capacity, or unstable physical link causing BFD to trigger fast failover. Diagnose:
     gcloud compute routers describe <router> --region=<region> --format='value(bgpPeers)'
     gcloud compute routers get-status <router> --region=<region>
     Console > Hybrid Connectivity > Cloud Routers > <router> > BGP Sessions tab
-  Remediation: Increase BGP hold timer to reduce flap sensitivity:
-    gcloud compute routers update-bgp-peer <router> --region=<region> --peer-name=<peer> --advertised-route-priority=100
-  Disable BFD temporarily to confirm if physical link instability is the trigger. Verify peer ASN and IP configuration match on both sides. Reduce advertised routes with custom route advertisements to stay under peer import limits.
+  Remediation: Set BFD on both sides to timers Cloud Router supports:
+    gcloud compute routers update-bgp-peer <router> --region=<region> --peer-name=<peer> --bfd-min-transmit-interval=1000 --bfd-min-receive-interval=1000 --bfd-multiplier=5
+  then align the on-premises router's BFD profile to the same values (detect multiplier 5 or higher).
+  Each BFD side times out its neighbour using the multiplier the neighbour advertises. Cloud Router's own multiplier is 5-16 (default 5), so a peer BFD detect multiplier of 2 at 1000 ms means Cloud Router drops the session after only two lost BFD packets, and brief packet loss on the attachment flaps BGP. A peer multiplier of 2 with BFD Status DOWN, peer MTU 1440, the default 60s hold timer and fewer than 100 advertised routes points to the over-aggressive peer BFD multiplier. Disable BFD temporarily to confirm if physical link instability is the trigger. Verify peer ASN and IP configuration match on both sides. Reduce advertised routes with custom route advertisements to stay under peer import limits.
 remediation_action: restart_bgp_session
 error_message: '[CloudRouter] INTERCONNECT-BGP-FLAP router={cloud_router} peer={bgp_peer_ip} peer_asn={bgp_peer_asn} flaps={bgp_flap_count}
   window={bgp_flap_window}s state={bgp_state} advertised_routes={bgp_advertised_routes}'
@@ -34,25 +35,28 @@ stack_trace: |-
   Action: Check peer configuration and physical link
 correlation_attr:
   key: network.bgp_timer_profile
-  value: aggressive-bfd-50ms
+  value: onprem-bfd-multiplier-2
 fault_params:
   cloud_router: {choice: [gcpnet-router-central1, gcpnet-router-east1, gcpnet-router-europe1]}
   bgp_peer_ip:
     format: "169.254.{a}.{b}"
     a: {randint: [0, 255]}
     b: {randint: [1, 254]}
-  bgp_peer_asn: {choice: [16550, 64512, 64513, 65001]}
+  bgp_peer_asn: {choice: [65001, 65010, 65020, 65100]}
   bgp_flap_count: {randint: [5, 30]}
   bgp_flap_window: {randint: [60, 600]}
   bgp_state: {choice: [IDLE, ACTIVE, CONNECT, OPEN_SENT]}
   bgp_advertised_routes: {randint: [0, 50]}
 rca_clues:
   cloud-interconnect:
-    interconnect.bgp_hold_timer: {choice: [90, 120, 180]}
+    interconnect.bgp_hold_timer: 60
+    interconnect.peer_bfd_interval_ms: 1000
+    interconnect.peer_bfd_multiplier: 2
+    interconnect.peer_mtu: 1440
     interconnect.bfd_status: DOWN
   cloud-vpn-gateway:
     vpn.route_convergence_delayed: true
-    vpn.backup_route_active: {choice: [true, false]}
+    vpn.backup_route_active: true
   vpc-network-manager:
     vpc.route_table_oscillating: true
     vpc.stale_routes: {randint: [5, 20]}
@@ -60,10 +64,10 @@ rca_clues:
     nat.outbound_path_flapping: true
 business_impact:
   - kpi: business.interconnect_utilization_pct
-    factor: {uniform: [0.20, 0.50]}
+    value: {uniform: [8.18, 9.42], round: 2}
   - kpi: business.bytes_egress_gib_per_min
-    factor: {uniform: [0.35, 0.65]}
+    value: {uniform: [10881.0, 12519.0], round: 1}
   - kpi: business.network_sla_compliance_pct
-    factor: {uniform: [0.50, 0.78]}
+    factor: {uniform: [0.5, 0.78]}
   - kpi: business.incident_mttr_min
     factor: {uniform: [2.0, 5.0]}

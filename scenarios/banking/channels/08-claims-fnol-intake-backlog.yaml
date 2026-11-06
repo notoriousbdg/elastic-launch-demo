@@ -9,13 +9,13 @@ affected_services:
 cascade_services:
 - payment-engine
 - member-portal
-description: First Notice of Loss intake queue backlogged after catastrophic weather event
+description: First Notice of Loss intake queue backlogged on the FNOL intake Kafka topic after catastrophic weather event
 investigation_notes: |-
   1. Activate CAT (catastrophe) response team — surge staffing protocol brings in adjusters from unaffected regions. Check CAT team deployment status and estimated time to field.
   2. Monitor intake vs processing rate deficit — at 55 claims/hr deficit, the backlog grows by ~1,320 claims per day. Enable virtual adjusting and photo-based estimates to increase processing throughput.
   3. Review claim distribution by type — auto_comp (hail/flood) claims marked HIGH severity require field inspection. Property claims marked SEVERE may need emergency mitigation services.
   4. Enable self-service FNOL paths: mobile app photo submission, automated triage chatbot, and simplified loss reporting forms to reduce call center load and queue depth.
-  5. Check military base proximity — catastrophic events near military installations (Fort Liberty, Fort Cavazos, NAS Jacksonville) affect concentrated member populations. Coordinate with base family readiness groups for member outreach. Priority-queue SCRA-protected members.
+  5. Check military base proximity — catastrophic events near military installations (Fort Bragg, Fort Hood, NAS Jacksonville) affect concentrated member populations. Coordinate with base family readiness groups for member outreach. Priority-queue SCRA-protected members.
 remediation_action: activate_cat_response
 error_message: '[CLAIMS] CLAIMS-FNOL-BACKLOG: queue_depth={claims_queue} avg_wait_min={claims_wait_min} cat_event={cat_event}
   region={cat_region} pending={claims_pending}'
@@ -41,8 +41,8 @@ correlation_attr:
 fault_params:
   claims_queue: {randint: [200, 2000]}
   claims_wait_min: {randint: [30, 240]}
-  cat_event: {choice: [CAT-2026-GULF-HURRICANE, CAT-2026-TX-HAILSTORM, CAT-2026-CA-WILDFIRE, CAT-2026-FL-FLOODING, CAT-2026-CO-TORNADO, CAT-2026-NC-ICE-STORM]}
-  cat_region: {choice: [Gulf Coast TX, San Antonio TX, Jacksonville FL, Virginia Beach VA, Colorado Springs CO, Fayetteville NC]}
+  cat_event: CAT-2026-TX-HAILSTORM
+  cat_region: {choice: [San Antonio TX, Killeen TX, Austin TX]}
   claims_pending: {randint: [100, 1000]}
 rca_clues:
   claims-processor:
@@ -59,10 +59,14 @@ rca_clues:
     portal.claims_status_queries_spike: {randint: [3000, 10000]}
 business_impact:
   - kpi: business.net_satisfaction_proxy_nps
-    factor: {uniform: [0.30, 0.60]}
+    value: {uniform: [14.28, 16.42], round: 1}
   - kpi: business.csat_score_0_5
-    factor: {uniform: [0.40, 0.65]}
+    factor: {uniform: [0.4, 0.65]}
   - kpi: business.complaint_tickets_per_min
     factor: {uniform: [3.0, 6.0]}
   - kpi: business.churn_risk_index_0_100
     factor: {uniform: [2.0, 4.0]}
+
+generator_impact:
+  kafka_otel:
+    high_consumer_lag_by_topic: 80000.0

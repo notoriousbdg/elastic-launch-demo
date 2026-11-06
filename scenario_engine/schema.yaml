@@ -37,7 +37,7 @@ migrations:
     breaking: false
     summary: "Add business_impact blocks to all channel YAMLs so executive KPIs react to faults"
     guidance: |
-      For each file in `channels/NN-<slug>.yaml`, add an optional top-level
+      For each file in `channels/NN-<slug>.yaml`, add a top-level
       `business_impact:` list mapping this fault to 2–4 semantically related
       KPIs from `scenario.yaml`'s `executive_kpi_emissions:` list.
 
@@ -60,9 +60,17 @@ migrations:
         - Down-KPIs (factor < 1): revenue, gmv, conversion_rate, orders, sessions,
           page_views, fulfillment_sla, csat, nps, same_day_eligible.
         - Up-KPIs (factor > 1): cancel_rate, returns, churn_risk, error_* metrics.
-        - Use 2–4 impacts per channel for legibility. Not every KPI needs to move.
-        - Channels unrelated to business outcomes (infra/network-only) can omit
-          `business_impact:` entirely; the emitter treats absence as nominal.
+        - Scale the number of impacts with the fault's scope (2 x affected + cascade
+          services): minor >= 2 yellow/red tiles (1 red), moderate >= 3 (2 red),
+          major >= 4 (3 red). Prefer `value:` ranges inside the KPI's red/yellow band,
+          and set `better: lower|higher` on every impacted KPI in
+          `executive_kpi_emissions` (verifier checks 30 + 32).
+        - `affected_services` must include a trace entry service (a service with
+          `entry_endpoints`), not only a database, or the ops dashboard stays green
+          (verifier check 31).
+        - Every channel needs a `business_impact:` block, including infra/network-only
+          ones (map them to availability, error-rate and latency KPIs); a channel
+          without one leaves the executive dashboard green during its fault.
 
       Finally, bump `schema_version` in `scenario.yaml` from "1.1" to "1.2"
       (or add it as "1.2" if the field was absent).

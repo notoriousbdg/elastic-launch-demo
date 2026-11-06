@@ -1,0 +1,66 @@
+name: Conversation History Inconsistent
+subsystem: database
+vehicle_section: database_pipeline
+error_type: COSMOS-HISTORY-INCONSISTENT
+sensor_type: health_check
+affected_services: [conversation-store, chat-orchestrator]
+cascade_services: []
+
+description: Cosmos DB multi-region writes produce conflicting conversation history with missing or duplicated turns that the assistant replays to users.
+
+investigation_notes: |
+  1. Search body.text LIKE *COSMOS-HISTORY-INCONSISTENT* and group by conversation_id to scope how many sessions are affected ({conflict_count} conflicts in the window).
+  2. Check the conflict resolution policy on "{container}": policy={resolution_policy} resolves conflicts automatically on _ts and discards the losing write without recording it in the conflicts feed, so an empty conflicts feed does not mean no turns were lost.
+  3. Compare turn sequence numbers: missing_turns={missing_turns} and duplicate_turns={duplicate_turns} point to concurrent writes from {region_a} and {region_b}.
+  4. Check replication lag between regions; if replication_lag_ms={replication_lag_ms}, failover or a write-region change may have caused overlapping writes.
+  5. Confirm chat-orchestrator is replaying the bad history by looking for history_turn_gap warnings in its logs for the same conversation_id.
+  6. This needs human scoping, so get approval before reconciling: decide which conversations to rebuild from the change feed, then run the reconcile job.
+
+remediation_action: reconcile_conversation_history
+
+error_message: |
+  [ConversationStore] COSMOS-HISTORY-INCONSISTENT: container={container} conversation_id={conversation_id} missing_turns={missing_turns} duplicate_turns={duplicate_turns} regions={region_a}/{region_b}
+
+stack_trace: |
+  CosmosConflictException: COSMOS-HISTORY-INCONSISTENT
+    at ConversationRepository.appendTurn(conversation_id={conversation_id})
+    at ConversationRepository.loadHistory(container={container})
+  Resolution policy:  {resolution_policy}
+  Write regions:      {region_a}, {region_b}
+  Replication lag:    {replication_lag_ms}ms
+  Missing turns:      {missing_turns}
+  Duplicate turns:    {duplicate_turns}
+  LWW conflicts:      {conflict_count}
+
+correlation_attr:
+  key: cosmos.multi_region_write_policy
+  value: multi-write-lww-_ts-2026-10-19
+
+fault_params:
+  container: {choice: [conversations, chat-turns, session-history]}
+  conversation_id: {choice: ["conv-7f3a91", "conv-b20c4d", "conv-e5518a", "conv-0d96f2"]}
+  resolution_policy: LastWriterWins
+  region_a: eastus
+  region_b: westeurope
+  replication_lag_ms: {randint: [800, 9000]}
+  missing_turns: {randint: [1, 6]}
+  duplicate_turns: {randint: [1, 5]}
+  conflict_count: {randint: [40, 900]}
+
+rca_clues:
+  conversation-store:
+    cosmos.lww_resolved_conflicts: {randint: [40, 900]}
+    cosmos.cross_region_replication_lag_ms: {randint: [800, 9000]}
+    cosmos.write_regions_active: 2
+    cosmos.conflict_resolution_policy: LastWriterWins
+  chat-orchestrator:
+    orchestrator.history_turn_gap_warnings: {randint: [20, 400]}
+    orchestrator.duplicate_turn_replays: {randint: [10, 250]}
+
+business_impact:
+  - kpi: business.resolution_rate_pct
+    factor: {uniform: [0.6, 0.85]}
+  - kpi: business.error_rate_pct
+    value: {uniform: [7.67, 8.83], round: 2}
+  - kpi: business.avg_turns_per_conversation
+    value: {uniform: [2.6, 3.0], round: 1}

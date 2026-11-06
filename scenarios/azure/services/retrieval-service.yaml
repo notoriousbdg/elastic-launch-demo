@@ -1,0 +1,94 @@
+service: retrieval-service
+sort_order: 3
+cloud_provider: azure
+cloud_region: eastus
+cloud_platform: azure_vm
+cloud_availability_zone: eastus-3
+subsystem: retrieval
+language: python
+
+# Topology: [downstream-service, endpoint, METHOD]
+topology:
+  - [embedding-service, /api/v1/embed, POST]
+
+entry_endpoints:
+  - [/api/v1/retrieve, POST]
+
+db_operations:
+  - [SEARCH, kb-articles-index, "POST /indexes/kb-articles-index/docs/search?api-version=2024-07-01 {search, vectorQueries[k=8], queryType=semantic, top=8}"]
+  - [SEARCH, policy-docs-index, "POST /indexes/policy-docs-index/docs/search?api-version=2024-07-01 {search, vectorQueries[k=5], filter=audience eq 'customer', top=5}"]
+
+emit_fault_logs: true
+kpi_emitter: false
+
+constants:
+  INDEXES: [kb-articles-index, policy-docs-index, product-faq-index]
+
+steps:
+  - sample:
+      search_latency_ms:
+        if_active: {uniform: [900.0, 3800.0], round: 1}
+        else: {uniform: [45.0, 160.0], round: 1}
+      semantic_rank_ms:
+        if_active: {uniform: [400.0, 1500.0], round: 1}
+        else: {uniform: [30.0, 110.0], round: 1}
+      hits_returned:
+        if_active: {randint: [0, 3]}
+        else: {randint: [5, 8]}
+      avg_relevance:
+        if_active: {uniform: [0.31, 0.52], round: 3}
+        else: {uniform: [0.72, 0.91], round: 3}
+      index_freshness_min:
+        if_active: {uniform: [240.0, 1440.0], round: 0}
+        else: {uniform: [2.0, 18.0], round: 0}
+      cache_hit_pct:
+        if_active: {uniform: [5.0, 25.0], round: 1}
+        else: {uniform: [38.0, 66.0], round: 1}
+      search_units_used_pct: {uniform: [22.0, 71.0], round: 1}
+      index: {choice: INDEXES}
+  - metric:
+      name: retrieval.search_latency_ms
+      value: {var: search_latency_ms}
+      unit: ms
+  - metric:
+      name: retrieval.semantic_ranker_ms
+      value: {var: semantic_rank_ms}
+      unit: ms
+  - metric:
+      name: retrieval.hits_returned
+      value: {var: hits_returned}
+      unit: hits
+  - metric:
+      name: retrieval.avg_relevance_score
+      value: {var: avg_relevance}
+      unit: score
+  - metric:
+      name: retrieval.index_freshness_minutes
+      value: {var: index_freshness_min}
+      unit: min
+  - metric:
+      name: retrieval.cache_hit_pct
+      value: {var: cache_hit_pct}
+      unit: '%'
+  - metric:
+      name: retrieval.search_units_used_pct
+      value: {var: search_units_used_pct}
+      unit: '%'
+  - log:
+      level: INFO
+      message: 'retrieval.search_health index={index} search_latency_ms={search_latency_ms} semantic_ranker_ms={semantic_rank_ms} hits={hits_returned} avg_relevance={avg_relevance}'
+      attrs:
+        operation: search_health
+        search.index: {var: index}
+        search.latency_ms: {var: search_latency_ms}
+        search.semantic_ranker_ms: {var: semantic_rank_ms}
+        search.hits_returned: {var: hits_returned}
+        search.avg_relevance: {var: avg_relevance}
+  - log:
+      level: INFO
+      message: 'retrieval.index_status index={index} freshness_min={index_freshness_min} cache_hit={cache_hit_pct}% search_units={search_units_used_pct}%'
+      attrs:
+        operation: index_status
+        search.index: {var: index}
+        search.index_freshness_min: {var: index_freshness_min}
+        search.cache_hit_pct: {var: cache_hit_pct}

@@ -10,7 +10,7 @@ cascade_services:
 - ehr-system
 description: Clinical data warehouse ETL pipeline stalls during extraction or transformation phase
 investigation_notes: |-
-  Root Cause: ETL pipeline stalls are caused by source database connection pool exhaustion, long-running transformation queries locking clinical tables, or target warehouse staging area disk full conditions. Extract-phase stalls often indicate the source EHR database is under heavy OLTP load during clinical hours.
+  Root Cause: ETL pipeline stalls are caused by source database connection pool exhaustion, long-running transformation queries locking clinical tables, or target warehouse staging area disk full conditions. Extract-phase stalls often indicate the source EHR database is under heavy OLTP load during clinical hours. A source pool above 95% active at the extract stage, with no blocking queries and the staging area below 80% used, confirms source connection pool exhaustion.
   Remediation: 1) Check the ETL job status: `etl-admin pipeline-status --pipeline {pipeline_id}`. 2) Restart the stalled pipeline stage: `etl-admin restart-stage --pipeline {pipeline_id} --stage {etl_stage}`. 3) Verify source database connectivity: `etl-admin test-source --pipeline {pipeline_id}`. 4) Check for blocking queries on the source: `etl-admin blocking-queries --pipeline {pipeline_id}`. 5) If the target staging area is full, expand or purge: `etl-admin staging-cleanup --pipeline {pipeline_id} --older-than 7d`. 6) Reschedule extract-phase jobs to off-peak hours (02:00-05:00) to avoid OLTP contention.
 remediation_action: restart_etl_pipeline
 error_message: '[DW] ETL-PIPELINE-STALL: pipeline={pipeline_id} stage={etl_stage} rows={rows_processed}/{total_rows} stalled={stall_seconds}s'
@@ -31,15 +31,17 @@ correlation_attr:
   key: infra.etl_db_pool_config
   value: hikari-pool-experimental-64conn
 fault_params:
-  pipeline_id: {choice: [ETL-CLINICAL-01, ETL-BILLING-02, ETL-LAB-03, ETL-QUALITY-04]}
-  etl_stage: {choice: [extract, transform, load, validate]}
+  pipeline_id: ETL-CLINICAL-01
+  etl_stage: extract
   rows_processed: {randint: [10000, 500000]}
   total_rows: {randint: [500000, 2000000]}
   stall_seconds: {randint: [120, 1800]}
 rca_clues:
   data-warehouse:
     etl.source_db_pool_exhausted: true
-    etl.blocking_query_count: {randint: [3, 12]}
+    etl.source_db_pool_active_pct: {uniform: [98, 100], round: 0}
+    etl.blocking_query_count: 0
+    etl.staging_disk_used_pct: {uniform: [40, 60], round: 0}
   billing-processor:
     billing.revenue_cycle_report_stale: true
     billing.days_behind: {randint: [1, 5]}

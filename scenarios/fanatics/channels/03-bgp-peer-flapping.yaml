@@ -3,18 +3,14 @@ subsystem: network_core
 vehicle_section: routing_engine
 error_type: BGP-3-NOTIFICATION
 sensor_type: bgp_session
-affected_services:
-- network-controller
-- firewall-gateway
-cascade_services:
-- dns-dhcp-service
-- cloud-inventory-scanner
+affected_services: [network-controller, firewall-gateway, cloud-inventory-scanner]
+cascade_services: [dns-dhcp-service]
 description: BGP peering session repeatedly transitioning between Established and Idle states
 investigation_notes: |-
   1. Run `show bgp neighbors <peer_ip>` to check the last NOTIFICATION code and hold timer status.
   2. Examine `show bgp summary` for Established vs non-Established peers and check PfxRcd (prefix received) for anomalies.
-  3. Hold Timer Expired (code 4/0) usually means keepalives are not reaching the peer — check interface utilization and MTU with `show interface <intf>`.
-  4. Cease/Admin Reset (6/4) indicates the remote side cleared the session — coordinate with the peer AS administrator.
+  3. Hold Timer Expired (code 4/0) usually means keepalives are not reaching the peer — check interface utilization and MTU with `show interface <intf>`. If utilization stays under 50% and MTU matches, check the firewall between the peers: a stateful TCP idle timeout shorter than the BGP keepalive interval (60s) ages out the session state, so later keepalives on TCP/179 are dropped and the hold timer expires — that is the cause. The hold timer configuration itself is correct.
+  4. Cease/Admin Reset (6/4) would indicate the remote side cleared the session (not seen here) — coordinate with the peer AS administrator.
   5. Check route policy: `show route-map` and `show ip prefix-list` — a misconfigured prefix filter can cause constant UPDATE/WITHDRAW cycling.
   6. Verify TCP session health: `show tcp brief | include <peer_ip>` and check for retransmissions that indicate an underlying transport issue.
 remediation_action: reset_bgp_session
@@ -23,7 +19,7 @@ error_message: '%BGP-3-NOTIFICATION: Neighbor {bgp_peer_ip} (AS {bgp_peer_as}) s
 stack_trace: |-
   router# show bgp neighbors {bgp_peer_ip}
   BGP neighbor is {bgp_peer_ip}, remote AS {bgp_peer_as}, external link
-    BGP state = {bgp_last_state}, up for 00:00:03
+    BGP state = {bgp_last_state}, last reset 00:00:03, due to BGP Notification received, hold time expired
     Last read 00:00:03, Last write 00:00:08
     Hold time is 180, keepalive interval is 60 seconds
     Neighbor sessions: 1 active
@@ -31,7 +27,7 @@ stack_trace: |-
     Flap count: {bgp_flap_count} in {bgp_flap_window}s
       Opens:           Sent 12   Rcvd 9
       Notifications:   Sent 0    Rcvd {bgp_flap_count}
-      Updates:         Sent 245  Rcvd 0
+      Updates:         Sent 245  Rcvd 312
       Keepalives:      Sent 1024 Rcvd 891
 correlation_attr:
   key: network.bgp_policy_rev
@@ -46,21 +42,19 @@ fault_params:
   bgp_notification:
     choice:
     - "Hold Timer Expired (code 4/0)"
-    - "Cease/Admin Reset (code 6/4)"
-    - "UPDATE Message Error (code 3/1)"
-    - "FSM Error (code 5/0)"
   bgp_flap_count: {randint: [5, 25]}
   bgp_flap_window: {randint: [30, 300]}
   bgp_last_state: {choice: [Idle, Active, OpenSent, OpenConfirm]}
 rca_clues:
   network-controller:
-    bgp.hold_timer_misconfig: true
+    bgp.hold_timer_misconfig: false
+    bgp.interface_util_pct: {uniform: [20, 45], round: 1}
+    bgp.mtu_mismatch: false
     bgp.prefix_withdraw_count: {randint: [50, 500]}
   firewall-gateway:
     firewall.bgp_port_179_drops: {randint: [10, 100]}
-    firewall.policy_id_blocking:
-      format: "rule-{n}"
-      n: {randint: [100, 999]}
+    firewall.tcp_idle_timeout_s: {randint: [20, 45]}
+    firewall.bgp_keepalive_interval_s: 60
   dns-dhcp-service:
     dns.forwarder_unreachable: true
     dns.affected_queries_pct: {uniform: [30, 80], round: 1}
@@ -69,10 +63,10 @@ rca_clues:
     cloud_scan.affected_provider: {choice: [aws, azure]}
 business_impact:
   - kpi: business.app_sessions_per_min
-    factor: {uniform: [0.20, 0.50]}
+    value: {uniform: [334.8, 385.2]}
   - kpi: business.page_views_per_min
-    factor: {uniform: [0.20, 0.50]}
+    value: {uniform: [66960.0, 77040.0]}
   - kpi: business.ad_revenue_usd_per_min
-    factor: {uniform: [0.25, 0.55]}
+    value: {uniform: [31620.0, 36380.0], round: 1}
   - kpi: business.betting_handle_usd_per_min
-    factor: {uniform: [0.25, 0.55]}
+    value: {uniform: [108810.0, 125190.0], round: 1}

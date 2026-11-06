@@ -1,0 +1,37 @@
+name: "GT docker_otel: cpu_throttle_rate"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-DOCKER-CPU-THROTTLE-RATE
+sensor_type: impact_key_probe
+affected_services:
+  - gt-docker-aws-svc-1
+cascade_services:
+  - gt-docker-aws-svc-2
+description: "Tests impact_key cpu_throttle_rate on generator docker_otel."
+investigation_notes: |-
+  1. Verify docker_otel is active and reporting metrics.
+  2. Check that the cpu_throttle_rate metric has reached the trigger value (0.75).
+  3. Confirm generator_impact for docker_otel.cpu_throttle_rate is set to 0.75.
+  4. Look for correlated changes in service gt-docker-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_cpu_throttle_rate_baseline
+error_message: "GT-PROBE: gen=docker_otel key=cpu_throttle_rate value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=docker_otel
+  impact_key: cpu_throttle_rate
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 0.75
+  svc_name: gt-docker-aws-svc-1
+rca_clues:
+  gt-docker-aws-svc-1:
+    probe.generator: docker_otel
+    probe.impact_key: cpu_throttle_rate
+    probe.trigger_value: 0.75
+  gt-docker-aws-svc-2:
+    probe.upstream_generator: docker_otel
+    probe.upstream_key: cpu_throttle_rate
+generator_impact:
+  docker_otel:
+    cpu_throttle_rate: 0.75

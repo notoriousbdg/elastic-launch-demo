@@ -1,0 +1,87 @@
+name: Orders Service Memory Leak
+subsystem: order_management
+vehicle_section: order_management_pipeline
+error_type: ORD-ECS-MEMORY-LEAK
+sensor_type: memory_usage
+affected_services: [orders-service]
+cascade_services: [orders-gateway]
+
+description: >
+  Orders-service ECS tasks leak heap until memory utilization reaches the hard limit and the tasks are OOM-killed and recycled, dropping in-flight requests behind orders-gateway.
+
+investigation_notes: |
+  1. Search body.text containing *ORD-ECS-MEMORY-LEAK* and check MemoryUtilization for ECS service {ecs_service}: it climbs steadily to {memory_pct}% of the {memory_limit_mb}MB hard limit and then resets.
+  2. Check ECS task stopped reasons: tasks stop with OutOfMemoryError: Container killed due to memory usage and exit code {exit_code}, {task_restarts} restarts in the window.
+  3. Read the JVM heap data in the orders-service logs: old-generation heap grows by about {heap_growth_mb}MB per hour and is not reclaimed by full GC, which points at a leak rather than load.
+  4. Check CloudTrail and the ECS deployment history for correlation_attr infra.orders_service_image: image {image_tag} introduced a cache that never evicts {leaked_object}.
+  5. Confirm the cascade in orders-gateway: requests routed to recycling tasks fail with {gateway_errors} upstream 502 and 504 errors and the ALB reports a spike in target 5XX responses, aligned to each task restart.
+  6. Run a rolling restart of {ecs_service} to clear the heap, then redeploy the previous image or fix the cache while watching MemoryUtilization stay flat.
+
+remediation_action: rolling_restart_ecs_service
+
+error_message: |
+  ORD-ECS-MEMORY-LEAK: service={ecs_service} memory_pct={memory_pct} limit_mb={memory_limit_mb} exit_code={exit_code} restarts={task_restarts} leaked={leaked_object}
+
+stack_trace: |
+  === ECS MEMORY LEAK REPORT ===
+  cluster=awsorders-prod  service={ecs_service}  image={image_tag}  region=us-east-1
+  --- ECS TASK EVENT ---
+    stopped_reason=OutOfMemoryError: Container killed due to memory usage
+    exit_code={exit_code}  restarts_in_window={task_restarts}
+  --- JVM HEAP ---
+    [gc] Pause Full (G1 Compaction Pause) old gen not reclaimed after full GC
+      top retainer: com.awsorders.orders.cache.OrderCache (unbounded map, no eviction)
+    old_gen_growth_mb_per_hour={heap_growth_mb}  retained_objects={leaked_object}
+    memory_utilization_pct={memory_pct}  hard_limit_mb={memory_limit_mb}
+  --- IMPACT ---
+    orders-gateway upstream_errors={gateway_errors} during task recycling
+  ACTION: rolling_restart=true  alert=ORD-ECS-MEMORY-LEAK
+
+infrastructure_events:
+- body: '[ECS] Task stopped: service=orders-service reason=OutOfMemoryError exit_code=137 cluster=awsorders-prod region=us-east-1'
+  severity: WARN
+  event_name: aws.ecs.TaskStateChange
+  service: orders-service
+  attributes:
+    cloud.provider: aws
+    cloud.service: ecs
+    aws.ecs.cluster: awsorders-prod
+    aws.ecs.service: orders-service
+    aws.ecs.stopped_reason: OutOfMemoryError
+    infrastructure.source: ECS
+
+correlation_attr:
+  key: infra.orders_service_image
+  value: orders-service:2026.10.3-cache-rework
+
+fault_params:
+  ecs_service: orders-service
+  image_tag: orders-service:2026.10.3-cache-rework
+  memory_pct: {randint: [95, 99]}
+  memory_limit_mb: {choice: [2048, 4096]}
+  exit_code: 137
+  task_restarts: {randint: [4, 20]}
+  heap_growth_mb: {randint: [150, 600]}
+  leaked_object: OrderSessionSnapshot
+  gateway_errors: {randint: [100, 1200]}
+
+rca_clues:
+  orders-service:
+    ecs.memory_utilization_pct: {randint: [95, 99]}
+    ecs.oom_kill_count: {randint: [4, 20]}
+    jvm.old_gen_growth_mb_per_hour: {randint: [150, 600]}
+  orders-gateway:
+    gateway.upstream_502_504_count: {randint: [100, 1200]}
+    gateway.errors_align_with_task_restarts: true
+
+business_impact:
+  - kpi: business.throughput_rpm
+    value: {uniform: [604.5, 695.5], round: 0}
+  - kpi: business.availability_pct
+    factor: {uniform: [0.85, 0.95]}
+
+generator_impact:
+  aws_ecs_otel:
+    memory_utilization_high: 95.0
+  aws_elb_metrics_otel:
+    high_application_load_balancer_target_5xx_error_rate: 150.0

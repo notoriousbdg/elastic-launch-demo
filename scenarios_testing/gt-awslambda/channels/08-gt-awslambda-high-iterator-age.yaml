@@ -1,0 +1,37 @@
+name: "GT aws_lambda_otel: high_iterator_age"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-AWSLAMBDA-HIGH-ITERATOR-AGE
+sensor_type: impact_key_probe
+affected_services:
+  - gt-awslambda-aws-svc-1
+cascade_services:
+  - gt-awslambda-aws-svc-2
+description: "Tests impact_key high_iterator_age on generator aws_lambda_otel."
+investigation_notes: |-
+  1. Verify aws_lambda_otel is active and reporting metrics.
+  2. Check that the high_iterator_age metric has reached the trigger value (450000.0).
+  3. Confirm generator_impact for aws_lambda_otel.high_iterator_age is set to 450000.0.
+  4. Look for correlated changes in service gt-awslambda-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_high_iterator_age_baseline
+error_message: "GT-PROBE: gen=aws_lambda_otel key=high_iterator_age value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=aws_lambda_otel
+  impact_key: high_iterator_age
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 450000.0
+  svc_name: gt-awslambda-aws-svc-1
+rca_clues:
+  gt-awslambda-aws-svc-1:
+    probe.generator: aws_lambda_otel
+    probe.impact_key: high_iterator_age
+    probe.trigger_value: 450000.0
+  gt-awslambda-aws-svc-2:
+    probe.upstream_generator: aws_lambda_otel
+    probe.upstream_key: high_iterator_age
+generator_impact:
+  aws_lambda_otel:
+    high_iterator_age: 450000.0

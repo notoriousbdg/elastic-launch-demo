@@ -92,6 +92,7 @@
                 channelData = data;
                 populateDropdown(data);
                 updateActiveChannels(data);
+                updateSpikesScope(data);
             })
             .catch(e => console.error('Failed to fetch channels:', e));
     }
@@ -102,6 +103,7 @@
             .then(data => {
                 channelData = data;
                 updateActiveChannels(data);
+                updateSpikesScope(data);
                 if (selectedChannel && data[selectedChannel]) {
                     updateChannelInfo(selectedChannel, data[selectedChannel]);
                 }
@@ -190,7 +192,6 @@
     // ── Trigger / Resolve ─────────────────────────────────────
     window.triggerFault = function () {
         if (!selectedChannel) return;
-        const mode = document.querySelector('input[name="fault-mode"]:checked').value;
         const userEmail = document.getElementById('user-email').value.trim();
         const callbackUrl = window.location.origin;
 
@@ -202,7 +203,6 @@
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 channel: selectedChannel,
-                mode: mode,
                 se_name: channelData[selectedChannel]?.name || '',
                 callback_url: callbackUrl,
                 user_email: userEmail,
@@ -343,7 +343,70 @@
     }
 
     // ── Infrastructure Spikes ─────────────────────────────────
+    // Table-driven: one row per control. `kind`: pct (0-100 slider), mult (slider value
+    // is x10), count (0-max slider), toggle (checkbox, 0/1). Ordered node -> pod ->
+    // workload -> apm. Keys must exist in INFRA_SPIKE_DEFAULTS (app/chaos/controller.py).
+    const SPIKE_GROUPS = [
+        { id: 'node', title: 'NODE' },
+        { id: 'pod', title: 'POD' },
+        { id: 'workload', title: 'WORKLOAD' },
+        { id: 'apm', title: 'APM' },
+    ];
+    const SPIKES = [
+        { id: 'spike-cpu', key: 'cpu_pct', group: 'node', kind: 'pct', label: 'CPU UTILIZATION' },
+        { id: 'spike-memory', key: 'memory_pct', group: 'node', kind: 'pct', label: 'MEMORY UTILIZATION' },
+        { id: 'spike-node-disk', key: 'node_disk_fill_pct', group: 'node', kind: 'pct', label: 'DISK FILL' },
+        { id: 'spike-node-notready', key: 'k8s_node_not_ready', group: 'node', kind: 'toggle', label: 'NODE NOT READY' },
+        { id: 'spike-pod-cpu', key: 'k8s_pod_cpu_intensity', group: 'pod', kind: 'pct', label: 'CPU UTILIZATION' },
+        { id: 'spike-pod-memory', key: 'k8s_pod_memory_intensity', group: 'pod', kind: 'pct', label: 'MEMORY UTILIZATION' },
+        { id: 'spike-oom', key: 'k8s_oom_intensity', group: 'pod', kind: 'pct', label: 'OOM EVENT FREQUENCY' },
+        { id: 'spike-pvc', key: 'k8s_pvc_fill_pct', group: 'pod', kind: 'pct', label: 'PVC FILL' },
+        { id: 'spike-crashloop', key: 'k8s_crashloop', group: 'pod', kind: 'toggle', label: 'CRASHLOOPBACKOFF' },
+        { id: 'spike-readiness', key: 'k8s_readiness_fail', group: 'pod', kind: 'toggle', label: 'READINESS PROBE FAILING' },
+        { id: 'spike-liveness', key: 'k8s_liveness_fail', group: 'pod', kind: 'toggle', label: 'LIVENESS PROBE FAILING' },
+        { id: 'spike-hpa', key: 'k8s_hpa_capped', group: 'workload', kind: 'toggle', label: 'HPA CAPPED AT MAX' },
+        { id: 'spike-ds', key: 'k8s_daemonset_misscheduled', group: 'workload', kind: 'count', max: 3, label: 'DAEMONSET MISSCHEDULED (CLUSTER-WIDE)' },
+        { id: 'spike-latency', key: 'latency_multiplier', group: 'apm', kind: 'mult', label: 'LATENCY MULTIPLIER' },
+        { id: 'spike-apm-errors', key: 'apm_error_rate', group: 'apm', kind: 'pct', label: 'FAILED TRANSACTION RATE' },
+    ];
     let spikeDebounceTimer = null;
+
+    function spikeInactiveValue(ctl) { return ctl.kind === 'mult' ? 10 : 0; }
+
+    function formatSpike(ctl, val) {
+        if (ctl.kind === 'mult') return (val / 10).toFixed(1) + 'x';
+        if (ctl.kind === 'toggle') return val > 0 ? 'ON' : 'OFF';
+        if (ctl.kind === 'count') return val > 0 ? String(val) : 'OFF';
+        return val > 0 ? val + '%' : 'OFF';
+    }
+
+    // Slider/checkbox position <-> API value.
+    function spikeToApi(ctl, uiVal) { return ctl.kind === 'mult' ? uiVal / 10 : uiVal; }
+    function spikeFromApi(ctl, apiVal) {
+        const v = parseFloat(apiVal);
+        if (ctl.kind === 'mult') return (isNaN(v) ? 1.0 : v) * 10;
+        return isNaN(v) ? 0 : v;
+    }
+
+    function renderSpikeControls() {
+        const root = document.getElementById('spikes-groups');
+        if (!root) return;
+        root.innerHTML = SPIKE_GROUPS.map(g => {
+            const controls = SPIKES.filter(c => c.group === g.id).map(c => {
+                const input = c.kind === 'toggle'
+                    ? `<input type="checkbox" id="${c.id}" class="spike-toggle">`
+                    : `<input type="range" id="${c.id}" class="spike-slider" min="${c.kind === 'mult' ? 10 : 0}" max="${c.kind === 'mult' ? 100 : (c.max || 100)}" value="${spikeInactiveValue(c)}" step="${c.kind === 'count' ? 1 : 5}">`;
+                return `<div class="spike-control spike-kind-${c.kind}">
+                    <div class="spike-header">
+                        <span class="spike-label">${c.label}</span>
+                        <span class="spike-value" id="${c.id}-value">${formatSpike(c, spikeInactiveValue(c))}</span>
+                    </div>
+                    ${input}
+                </div>`;
+            }).join('');
+            return `<div class="spike-group-title">${g.title}</div><div class="spikes-grid">${controls}</div>`;
+        }).join('');
+    }
 
     function updateSpikesLock() {
         const locked = myOwnedChannels.size === 0;
@@ -353,23 +416,55 @@
         if (duSection) duSection.classList.toggle('locked', locked);
     }
 
+    // Header: which active channels and services the spikes currently affect.
+    function updateSpikesScope(data) {
+        const el = document.getElementById('spikes-scope');
+        if (!el) return;
+        const active = Object.entries(data || {}).filter(([, ch]) => ch.state === 'ACTIVE');
+        el.textContent = active.length
+            ? 'affecting: ' + active.map(([id, ch]) =>
+                'CH' + String(id).padStart(2, '0') + ' ' + (ch.affected_services || []).join(', ')).join(' | ')
+            : 'activate a channel to use these controls';
+    }
+
+    function setSpikeControl(ctl, apiVal) {
+        const input = document.getElementById(ctl.id);
+        const display = document.getElementById(ctl.id + '-value');
+        if (!input || !display) return;
+        const uiVal = spikeFromApi(ctl, apiVal);
+        if (ctl.kind === 'toggle') input.checked = uiVal > 0; else input.value = uiVal;
+        paintSpike(ctl, uiVal);
+    }
+
+    function paintSpike(ctl, uiVal) {
+        const input = document.getElementById(ctl.id);
+        const display = document.getElementById(ctl.id + '-value');
+        const isActive = uiVal > spikeInactiveValue(ctl);
+        display.textContent = formatSpike(ctl, uiVal);
+        display.classList.toggle('on', isActive);
+        input.closest('.spike-control').classList.toggle('active', isActive);
+    }
+
+    function applySpikeState(data) {
+        SPIKES.forEach(ctl => setSpikeControl(ctl, data[ctl.key]));
+    }
+
     function initSpikes() {
-        // Load current spike state
+        renderSpikeControls();
         fetch('/api/chaos/spikes' + qs)
             .then(r => r.json())
-            .then(data => {
-                setSpikeSlider('spike-cpu', data.cpu_pct || 0, 'spike-cpu-value', formatPct);
-                setSpikeSlider('spike-memory', data.memory_pct || 0, 'spike-memory-value', formatPct);
-                setSpikeSlider('spike-oom', data.k8s_oom_intensity || 0, 'spike-oom-value', formatPct);
-                setSpikeSlider('spike-latency', (data.latency_multiplier || 1.0) * 10, 'spike-latency-value', formatMult);
-            })
+            .then(applySpikeState)
             .catch(() => { /* ignore */ });
 
-        // Wire up slider events
-        wireSlider('spike-cpu', 'spike-cpu-value', formatPct);
-        wireSlider('spike-memory', 'spike-memory-value', formatPct);
-        wireSlider('spike-oom', 'spike-oom-value', formatPct);
-        wireSlider('spike-latency', 'spike-latency-value', formatMult);
+        SPIKES.forEach(ctl => {
+            const input = document.getElementById(ctl.id);
+            if (!input) return;
+            input.addEventListener(ctl.kind === 'toggle' ? 'change' : 'input', function () {
+                const uiVal = ctl.kind === 'toggle' ? (this.checked ? 1 : 0) : parseFloat(this.value);
+                paintSpike(ctl, uiVal);
+                debounceSendSpikes();
+            });
+        });
 
         updateSpikesLock();
     }
@@ -377,42 +472,8 @@
     function refreshSpikes() {
         fetch('/api/chaos/spikes' + qs)
             .then(r => r.json())
-            .then(data => {
-                setSpikeSlider('spike-cpu', data.cpu_pct || 0, 'spike-cpu-value', formatPct);
-                setSpikeSlider('spike-memory', data.memory_pct || 0, 'spike-memory-value', formatPct);
-                setSpikeSlider('spike-oom', data.k8s_oom_intensity || 0, 'spike-oom-value', formatPct);
-                setSpikeSlider('spike-latency', (data.latency_multiplier || 1.0) * 10, 'spike-latency-value', formatMult);
-            })
+            .then(applySpikeState)
             .catch(() => { /* ignore */ });
-    }
-
-    function formatPct(val) { return val > 0 ? val + '%' : 'OFF'; }
-    function formatMult(val) { return (val / 10).toFixed(1) + 'x'; }
-
-    function setSpikeSlider(sliderId, value, valueId, formatter) {
-        const slider = document.getElementById(sliderId);
-        const display = document.getElementById(valueId);
-        if (!slider || !display) return;
-        slider.value = value;
-        const formatted = formatter(parseFloat(value));
-        display.textContent = formatted;
-        const isActive = sliderId === 'spike-latency' ? parseFloat(value) > 10 : parseFloat(value) > 0;
-        display.classList.toggle('on', isActive);
-        slider.closest('.spike-control').classList.toggle('active', isActive);
-    }
-
-    function wireSlider(sliderId, valueId, formatter) {
-        const slider = document.getElementById(sliderId);
-        if (!slider) return;
-        slider.addEventListener('input', function () {
-            const val = parseFloat(this.value);
-            const display = document.getElementById(valueId);
-            display.textContent = formatter(val);
-            const isActive = sliderId === 'spike-latency' ? val > 10 : val > 0;
-            display.classList.toggle('on', isActive);
-            this.closest('.spike-control').classList.toggle('active', isActive);
-            debounceSendSpikes();
-        });
     }
 
     function debounceSendSpikes() {
@@ -422,22 +483,21 @@
 
     function sendSpikes() {
         if (myOwnedChannels.size === 0) return; // locked — no active session
-        const cpu = parseFloat(document.getElementById('spike-cpu').value);
-        const mem = parseFloat(document.getElementById('spike-memory').value);
-        const oom = parseFloat(document.getElementById('spike-oom').value);
-        const lat = parseFloat(document.getElementById('spike-latency').value) / 10;
+        const body = {
+            session_id: getSessionId() || '',
+            deployment_id: deployId || undefined,
+        };
+        SPIKES.forEach(ctl => {
+            const input = document.getElementById(ctl.id);
+            if (!input) return;
+            const uiVal = ctl.kind === 'toggle' ? (input.checked ? 1 : 0) : parseFloat(input.value);
+            body[ctl.key] = spikeToApi(ctl, uiVal);
+        });
 
         fetch('/api/chaos/spikes', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                cpu_pct: cpu,
-                memory_pct: mem,
-                k8s_oom_intensity: oom,
-                latency_multiplier: lat,
-                session_id: getSessionId() || '',
-                deployment_id: deployId || undefined,
-            }),
+            body: JSON.stringify(body),
         })
             .then(r => r.json())
             .catch(e => console.error('Failed to update spikes:', e));

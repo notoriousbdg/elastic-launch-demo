@@ -3,20 +3,16 @@ subsystem: network_core
 vehicle_section: switching_fabric
 error_type: SPANTREE-2-TOPO_CHANGE
 sensor_type: stp_state
-affected_services:
-- network-controller
-- firewall-gateway
-cascade_services:
-- dns-dhcp-service
-- wifi-controller
+affected_services: [network-controller, firewall-gateway, cloud-inventory-scanner]
+cascade_services: [dns-dhcp-service, wifi-controller]
 description: Rapid spanning tree topology changes destabilizing Layer 2 forwarding
 investigation_notes: |-
   1. Run `show spanning-tree vlan <id> detail` to identify the port generating Topology Change Notifications (TCNs).
   2. Check `show spanning-tree detail | include ieee|from|occur` across all switches to pinpoint the originating bridge.
-  3. Verify BPDU Guard and Root Guard are enabled on access ports: `show spanning-tree inconsistentports`.
-  4. A sudden burst of TCNs often indicates a flapping uplink or a new device plugged into a trunk port — correlate with interface up/down events.
+  3. Verify BPDU Guard and Root Guard are enabled on access ports: `show spanning-tree inconsistentports` (zero BPDU Guard violations rules out a new device on an edge or trunk port).
+  4. A sudden burst of TCNs often indicates a flapping uplink or a new device plugged into a trunk port — correlate with interface up/down events. If uplink {interface} shows more than 5 link up/down transitions in the window, the flapping uplink is the cause.
   5. Enable `spanning-tree portfast` on all edge/access ports to prevent end-host connections from triggering topology changes.
-  6. If the root bridge is shifting, set explicit root priority: `spanning-tree vlan <id> root primary` on the designated core switch.
+  6. The root bridge is not shifting here; to keep it that way, set explicit root priority: `spanning-tree vlan <id> root primary` on the designated core switch.
 remediation_action: reset_spanning_tree
 error_message: '%SPANTREE-2-TOPO_CHANGE: Topology Change received on VLAN {vlan_id} instance {stp_instance} from bridge {bridge_id}
   via port {interface}, {tc_count} TCN BPDUs in {tc_window}s'
@@ -45,16 +41,18 @@ fault_params:
     d: {randint: [0, 255]}
     e: {randint: [0, 255]}
     f: {randint: [0, 255]}
-  interface: {choice: [Gi0/0/1, Gi0/0/2, Te1/0/1, Te1/0/2, Po1]}
+  interface: Te1/0/1
   tc_count: {randint: [15, 80]}
   tc_window: {randint: [10, 60]}
 rca_clues:
   network-controller:
-    stp.root_bridge_change: true
-    stp.tcn_source_port: {choice: [Gi0/0/2, Po1, Te1/0/1]}
+    stp.root_bridge_change: false
+    stp.tcn_source_port: Te1/0/1
+    stp.uplink_link_flaps: {randint: [10, 40]}
+    stp.bpduguard_violations: 0
   firewall-gateway:
-    firewall.l2_loop_detected: true
-    firewall.broadcast_storm_pps: {randint: [5000, 50000]}
+    firewall.l2_loop_detected: false
+    firewall.broadcast_storm_pps: {randint: [50, 400]}
   dns-dhcp-service:
     dns.resolution_flapping: true
     dns.affected_zone: fanatics.internal
@@ -63,10 +61,10 @@ rca_clues:
     wifi.ap_isolation_triggered: {randint: [2, 10]}
 business_impact:
   - kpi: business.app_sessions_per_min
-    factor: {uniform: [0.25, 0.55]}
+    value: {uniform: [334.8, 385.2]}
   - kpi: business.page_views_per_min
-    factor: {uniform: [0.25, 0.55]}
+    value: {uniform: [66960.0, 77040.0]}
   - kpi: business.live_concurrent_viewers
-    factor: {uniform: [0.30, 0.60]}
+    value: {uniform: [47151.0, 54249.0]}
   - kpi: business.churn_risk_index_0_100
     factor: {uniform: [1.8, 3.5]}

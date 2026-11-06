@@ -27,21 +27,25 @@ stack_trace: |-
     cache_hits=14,230  cache_misses=0  evictions=0
   --- FEED STATUS ---
     primary_feed={data_source}  status=CONNECTED  last_msg=14:31:42.112
-    backup_feed=Reuters-Elektron  status=CONNECTED  last_msg=14:31:41.890
+    backup_feed=Reuters-Elektron  status=CONNECTED  last_msg_age_ms={backup_age_ms}
     failover_triggered=false
   --- IMPACT ---
-    dependent_books=4  stale_risk_calcs=12  client_views_affected=89
+    dependent_books=4  stale_risk_calcs={stale_risk_calcs}  client_views_affected=89
   ACTION: mark_indicative=true  trigger_failover=PENDING  alert=MDF-STALE-QUOTE
 correlation_attr: {}
 fault_params:
   symbol: {choice: [AAPL, GOOGL, MSFT, AMZN, TSLA, JPM, GS, MS, BAC, C]}
-  stale_ms: {randint: [5000, 60000]}
+  stale_ms: {randint: [6500, 60000]}
   quote_max_age_ms: 3000
-  data_source: {choice: [Bloomberg-B-PIPE, Reuters-Elektron, CQS-SIP, OPRA, CME-MDP3]}
+  data_source: Bloomberg-B-PIPE
+  backup_age_ms: {randint: [10, 80]}
+  stale_risk_calcs: {randint: [5, 100]}
 rca_clues:
   market-data-feed:
-    feed.quote_staleness_ms: {randint: [5000, 60000]}
-    feed.primary_feed_silent_ms: {randint: [5000, 60000]}
+    feed.quote_staleness_ms: {randint: [6500, 60000]}
+    feed.primary_feed_silent_ms: {randint: [6500, 60000]}
+    feed.primary_feed_status: CONNECTED
+    feed.backup_feed_age_ms: {randint: [10, 80]}
   risk-calculator:
     risk.stale_quote_risk_calcs: {randint: [5, 100]}
     risk.indicative_price_var_usd: {randint: [50000, 1000000]}
@@ -53,7 +57,7 @@ rca_clues:
     portal.client_views_affected: {randint: [10, 200]}
 business_impact:
   - kpi: business.order_flow_per_min
-    factor: {uniform: [0.35, 0.65]}
+    value: {uniform: [513.83, 591.18]}
   - kpi: business.avg_spread_bps
     factor: {uniform: [2.0, 5.5]}
   - kpi: business.slippage_cost_usd_per_min

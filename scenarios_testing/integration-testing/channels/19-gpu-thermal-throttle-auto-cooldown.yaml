@@ -1,0 +1,69 @@
+name: Gpu Thermal Throttle Auto Cooldown
+subsystem: platform
+vehicle_section: platform_pipeline
+error_type: GPU-THERMAL-THROTTLE
+sensor_type: health_check
+affected_services:
+- ml-inference
+cascade_services:
+- analytics-service
+description: 'A synthetic GPU node running {model_name} briefly overheats under inference
+  load; the platform auto-throttles utilization and cools the node before resuming
+  full throughput.
+
+  '
+investigation_notes: '1. Search for body.text containing *GPU-THERMAL-THROTTLE* to
+  find the affected model/node.
+
+  2. Check ml-inference ml.gpu_temp_c for the temperature spike.
+
+  3. Confirm nvidia_gpu_otel temperature_spike/utilization_multiplier reflect the
+  throttle event.
+
+  4. Check analytics-service analytics.rollup_lag_s for a brief cascading delay from
+  reduced throughput.
+
+  5. Confirm the auto-cooldown restores gpu_temp_c and inference latency to baseline.
+
+  '
+remediation_action: auto_throttle_and_cooldown_gpu
+error_message: 'GPU-THERMAL-THROTTLE: model={model_name} gpu_temp_c={gpu_temp_c} auto_cooldown={auto_cooldown_triggered}
+
+  '
+stack_trace: "GpuThermalThrottleError: model={model_name}\n  at MlInference.runInference()\n\
+  \  gpu_temp_c={gpu_temp_c} auto_cooldown={auto_cooldown_triggered}\n"
+fault_params:
+  model_name:
+    choice:
+    - anomaly-scorer-v2
+    - fault-classifier-v1
+  gpu_temp_c:
+    uniform:
+    - 88.0
+    - 105.0
+    round: 1
+  auto_cooldown_triggered:
+    choice:
+    - true
+rca_clues:
+  ml-inference:
+    ml.gpu_temp_c:
+      uniform:
+      - 88.0
+      - 105.0
+      round: 1
+    ml.throttle_active_flag: true
+  analytics-service:
+    analytics.rollup_lag_s:
+      uniform:
+      - 10.0
+      - 90.0
+      round: 1
+    analytics.brief_backlog_flag: true
+generator_impact:
+  nvidia_gpu_otel:
+    gpu_temperature_critical: true
+    gpu_utilization_saturated:
+      uniform:
+      - 0.1
+      - 0.4

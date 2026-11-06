@@ -1,0 +1,37 @@
+name: "GT aws_lambda_otel: high_tail_duration"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-AWSLAMBDA-HIGH-TAIL-DURATION
+sensor_type: impact_key_probe
+affected_services:
+  - gt-awslambda-aws-svc-1
+cascade_services:
+  - gt-awslambda-aws-svc-2
+description: "Tests impact_key high_tail_duration on generator aws_lambda_otel."
+investigation_notes: |-
+  1. Verify aws_lambda_otel is active and reporting metrics.
+  2. Check that the high_tail_duration metric has reached the trigger value (75000.0).
+  3. Confirm generator_impact for aws_lambda_otel.high_tail_duration is set to 75000.0.
+  4. Look for correlated changes in service gt-awslambda-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_high_tail_duration_baseline
+error_message: "GT-PROBE: gen=aws_lambda_otel key=high_tail_duration value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=aws_lambda_otel
+  impact_key: high_tail_duration
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 75000.0
+  svc_name: gt-awslambda-aws-svc-1
+rca_clues:
+  gt-awslambda-aws-svc-1:
+    probe.generator: aws_lambda_otel
+    probe.impact_key: high_tail_duration
+    probe.trigger_value: 75000.0
+  gt-awslambda-aws-svc-2:
+    probe.upstream_generator: aws_lambda_otel
+    probe.upstream_key: high_tail_duration
+generator_impact:
+  aws_lambda_otel:
+    high_tail_duration: 75000.0

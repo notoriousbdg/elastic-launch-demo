@@ -1,0 +1,462 @@
+scenario_id: integration-testing
+scenario_name: Integration Test Harness
+scenario_description: A synthetic QA environment whose sole purpose is to keep every observability
+  integration in the platform actively emitting telemetry. Nine services spanning AWS, GCP, and
+  Azure generate traces, logs, and metrics continuously, while 20 fault channels exercise every
+  infrastructure, database, proxy, queue, and web-server generator so engineers can verify each
+  integration end-to-end without needing a real customer workload.
+namespace: inttest
+scenario_icon: 🧪
+sort_order: 50
+nominal_label: ONLINE
+schema_version: '1.3'
+apm_ml_bucket_span: 1m
+hosts:
+  - host.name: inttest-aws-host-01
+    host.id: i-28dcd3daa07612323
+    host.arch: amd64
+    host.type: m5.2xlarge
+    host.image.id: ami-0a1b2c3d4e5f67891
+    host.cpu.model.name: Intel(R) Xeon(R) Platinum 8259CL CPU @ 2.50GHz
+    host.cpu.vendor.id: GenuineIntel
+    host.cpu.family: '6'
+    host.cpu.model.id: '85'
+    host.cpu.stepping: '7'
+    host.cpu.cache.l2.size: 1310720
+    host.ip:
+      - 10.0.1.10
+      - 172.16.0.10
+    host.mac:
+      - 0a:1b:2c:3d:4e:5f
+      - 0a:1b:2c:3d:4e:60
+    os.type: linux
+    os.description: Amazon Linux 2023.6.20250115
+    cloud.provider: aws
+    cloud.platform: aws_ec2
+    cloud.region: us-east-1
+    cloud.availability_zone: us-east-1a
+    cloud.account.id: '933218774221'
+    cloud.instance.id: i-28dcd3daa07612323
+    cpu_count: 8
+    memory_total_bytes: 34359738368
+    disk_total_bytes: 536870912000
+  - host.name: inttest-gcp-host-02
+    host.id: '5993262477432668'
+    host.arch: amd64
+    host.type: n2-standard-8
+    host.image.id: projects/debian-cloud/global/images/debian-12-bookworm-v20250115
+    host.cpu.model.name: Intel(R) Xeon(R) CPU @ 2.80GHz
+    host.cpu.vendor.id: GenuineIntel
+    host.cpu.family: '6'
+    host.cpu.model.id: '85'
+    host.cpu.stepping: '7'
+    host.cpu.cache.l2.size: 1048576
+    host.ip:
+      - 10.128.0.10
+      - 10.128.0.11
+    host.mac:
+      - 42:01:0a:80:00:0a
+      - 42:01:0a:80:00:0b
+    os.type: linux
+    os.description: Debian GNU/Linux 12 (bookworm)
+    cloud.provider: gcp
+    cloud.platform: gcp_compute_engine
+    cloud.region: us-central1
+    cloud.availability_zone: us-central1-a
+    cloud.account.id: inttest-project
+    cloud.instance.id: '5993262477432668'
+    cpu_count: 8
+    memory_total_bytes: 34359738368
+    disk_total_bytes: 274877906944
+  - host.name: inttest-azure-host-03
+    host.id: /subscriptions/24d33f35-a020-5590-9245-44645e39cf05/resourceGroups/inttest-rg/providers/Microsoft.Compute/virtualMachines/inttest-vm-01
+    host.arch: amd64
+    host.type: Standard_D4s_v3
+    host.image.id: Canonical:0001-com-ubuntu-server-jammy:22_04-lts-gen2:latest
+    host.cpu.model.name: Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz
+    host.cpu.vendor.id: GenuineIntel
+    host.cpu.family: '6'
+    host.cpu.model.id: '106'
+    host.cpu.stepping: '6'
+    host.cpu.cache.l2.size: 1310720
+    host.ip:
+      - 10.0.2.10
+      - 10.0.2.11
+    host.mac:
+      - 00:0d:3a:1b:2c:3d
+      - 00:0d:3a:1b:2c:3e
+    os.type: linux
+    os.description: Ubuntu 22.04.5 LTS
+    cloud.provider: azure
+    cloud.platform: azure_vm
+    cloud.region: eastus
+    cloud.availability_zone: eastus-1
+    cloud.account.id: 24d33f35-a020-5590-9245-44645e39cf05
+    cloud.instance.id: inttest-vm-01
+    cpu_count: 4
+    memory_total_bytes: 17179869184
+    disk_total_bytes: 137438953472
+k8s_clusters:
+  - name: inttest-aws-k8s
+    provider: aws
+    platform: aws_eks
+    region: us-east-1
+    zones:
+      - us-east-1a
+      - us-east-1b
+      - us-east-1c
+    os_description: Amazon Linux 2
+    services:
+      - edge-gateway
+      - worker-pool
+      - cache-tier
+  - name: inttest-gcp-k8s
+    provider: gcp
+    platform: gcp_gke
+    region: us-central1
+    zones:
+      - us-central1-a
+      - us-central1-b
+      - us-central1-c
+    os_description: Container-Optimized OS
+    services:
+      - analytics-service
+      - data-platform
+      - ml-inference
+  - name: inttest-azure-k8s
+    provider: azure
+    platform: azure_aks
+    region: eastus
+    zones:
+      - eastus-1
+      - eastus-2
+      - eastus-3
+    os_description: Ubuntu 22.04
+    services:
+      - billing-service
+      - legacy-web-tier
+      - session-service
+agent_config:
+  id: inttest-analyst
+  name: Integration Test Harness Operations Analyst
+  assessment_tool_name: inttest_readiness_assessment
+  system_prompt: |
+    You are the Integration Test Harness Operations Analyst, an expert AI assistant for a synthetic
+    QA environment used to validate that every telemetry generator and observability integration in
+    the platform is emitting data correctly. There is no real customer traffic here — the sole purpose
+    of this environment is to exercise cache, cloud-audit, cloud-compute, database, platform, proxy,
+    queue, and web-server integrations continuously so engineers can confirm each one works end-to-end.
+    You help engineers investigate synthetic incidents and perform root cause analysis across 9
+    services spanning AWS, GCP, and Azure.
+    When investigating, search for these error identifiers in logs (field: body.text), grouped by subsystem:
+    Caching (CACHE-MEM-PRESSURE), Ingress/WAF (WAF-BLOCK-SPIKE, INGRESS-PROXY-BACKEND-OUTAGE),
+    Application gateway (APPGW-ERROR-SURGE), Cloud audit (GCP-AUDIT-DENY-SURGE),
+    Compute fleet (FLEET-CPU-SATURATION, ALB-UNHEALTHY-TARGETS, LAMBDA-COLDSTART-STORM),
+    ML/feature platform (FEATURESTORE-COMPACTION-BACKLOG, MODELSTORE-CONN-STORM, GPU-THERMAL-THROTTLE),
+    Billing ledger (LEDGER-RANGE-UNAVAILABLE, LEGACYWEB-THREAD-EXHAUSTION),
+    Session/identity (SESSIONSTORE-REPL-LAG, IDENTITYSTORE-POOL-EXHAUSTION),
+    Analytics (ANALYTICS-WRITE-REJECT-SURGE), Legacy database (ERPDB-TNS-TIMEOUT),
+    Orchestration/control plane (ORCH-CONTROLPLANE-INSTABILITY, PLATFORM-NODE-AUTO-RECOVERY),
+    Messaging (BROKER-QUEUE-DEPTH-SPIKE).
+    Log messages are in body.text — NEVER search the body field alone.
+assessment_tool_config:
+  id: inttest_readiness_assessment
+  description: |
+    Comprehensive assessment of the Integration Test Harness environment. Evaluates whether every
+    enabled telemetry generator (cache, cloud-audit, cloud-compute, database, platform, proxy, queue,
+    and web-server integrations) is actively emitting logs, metrics, or traces, and whether each of
+    the 20 synthetic fault channels is exercising its target integration as expected. Log message
+    field: body.text (never use 'body' alone).
+executive_kpi_emitter_service_name: edge-gateway
+executive_dashboard_intro: '**Executive view** — synthetic load, generator health, fault exercise
+  coverage, and infra footprint for the Integration Test Harness (synthetic `business.*` from
+  `edge-gateway`). These are QA proxies, not real business metrics.'
+executive_kpi_sections:
+  - header: '**Synthetic load & throughput** — requests, jobs, cache/db ops, and queue traffic'
+    specs:
+      - - Requests / min
+        - metrics.business.requests_per_min
+      - - Jobs processed / min
+        - metrics.business.jobs_processed_per_min
+      - - Cache ops / min
+        - metrics.business.cache_ops_per_min
+      - - DB ops / min
+        - metrics.business.db_ops_per_min
+      - - Queue messages / min
+        - metrics.business.queue_messages_per_min
+      - - Active synthetic sessions
+        - metrics.business.active_synthetic_sessions
+  - header: '**Generator health & coverage** — active generators, signal volume, ingest success'
+    specs:
+      - - Active generators
+        - metrics.business.generators_active_count
+      - - Signals emitted / min
+        - metrics.business.signals_emitted_per_min
+      - - Active datasets
+        - metrics.business.datasets_active_count
+      - - Installed packages
+        - metrics.business.packages_installed_count
+      - - Ingest success rate (%)
+        - metrics.business.ingest_success_rate_pct
+      - - Collector uptime (%)
+        - metrics.business.otel_collector_uptime_pct
+  - header: '**Fault exercise & chaos coverage** — active faults, HITL queue, auto-remediation'
+    specs:
+      - - Active fault channels
+        - metrics.business.active_fault_channels
+      - - HITL faults pending approval
+        - metrics.business.hitl_faults_pending_approval
+      - - Auto-remediated faults / hr
+        - metrics.business.auto_remediated_faults_per_hr
+      - - Faults exercised today
+        - metrics.business.faults_exercised_today
+      - - Mean fault duration (min)
+        - metrics.business.mean_fault_duration_min
+      - - Unique error types fired
+        - metrics.business.unique_error_types_fired
+  - header: '**Infra resource footprint** — CPU, memory, GPU, network, disk, and node health'
+    specs:
+      - - Avg CPU utilization (%)
+        - metrics.business.avg_cpu_utilization_pct
+      - - Avg memory utilization (%)
+        - metrics.business.avg_memory_utilization_pct
+      - - GPU utilization (%)
+        - metrics.business.gpu_utilization_pct
+      - - Network throughput (Mbps)
+        - metrics.business.network_throughput_mbps
+      - - Disk IOPS
+        - metrics.business.disk_io_ops_per_sec
+      - - Healthy node count
+        - metrics.business.healthy_node_count
+executive_trend_charts:
+  - title: Requests per minute
+    field: metrics.business.requests_per_min
+    y_label: req/min
+  - title: Signals emitted trend
+    field: metrics.business.signals_emitted_per_min
+    y_label: signals/min
+  - title: Ingest success rate
+    field: metrics.business.ingest_success_rate_pct
+    y_label: '%'
+  - title: Active fault channels
+    field: metrics.business.active_fault_channels
+    y_label: channels
+  - title: Avg CPU utilization
+    field: metrics.business.avg_cpu_utilization_pct
+    y_label: '%'
+  - title: Healthy node count
+    field: metrics.business.healthy_node_count
+    y_label: nodes
+executive_kpi_emissions:
+  - name: business.requests_per_min
+    value: {uniform: [8000.0, 42000.0], round: 0}
+    unit: req/min
+  - name: business.jobs_processed_per_min
+    value: {uniform: [500.0, 6000.0], round: 0}
+    unit: jobs/min
+  - name: business.cache_ops_per_min
+    value: {uniform: [20000.0, 180000.0], round: 0}
+    unit: ops/min
+  - name: business.db_ops_per_min
+    value: {uniform: [3000.0, 40000.0], round: 0}
+    unit: ops/min
+  - name: business.queue_messages_per_min
+    value: {uniform: [200.0, 5000.0], round: 0}
+    unit: msgs/min
+  - name: business.active_synthetic_sessions
+    value: {randint: [500, 12000]}
+    unit: sessions
+  - name: business.generators_active_count
+    value: {randint: [38, 41]}
+    unit: generators
+  - name: business.signals_emitted_per_min
+    value: {uniform: [15000.0, 95000.0], round: 0}
+    unit: signals/min
+  - name: business.datasets_active_count
+    value: {randint: [30, 45]}
+    unit: datasets
+  - name: business.packages_installed_count
+    value: {randint: [32, 38]}
+    unit: packages
+  - name: business.ingest_success_rate_pct
+    value: {uniform: [97.5, 99.98], round: 2}
+    unit: '%'
+  - name: business.otel_collector_uptime_pct
+    value: {uniform: [99.0, 100.0], round: 2}
+    unit: '%'
+  - name: business.active_fault_channels
+    value: {randint: [0, 4]}
+    unit: channels
+  - name: business.hitl_faults_pending_approval
+    value: {randint: [0, 3]}
+    unit: faults
+  - name: business.auto_remediated_faults_per_hr
+    value: {uniform: [0.0, 6.0], round: 1}
+    unit: faults/hr
+  - name: business.faults_exercised_today
+    value: {randint: [0, 20]}
+    unit: faults
+  - name: business.mean_fault_duration_min
+    value: {uniform: [2.0, 25.0], round: 1}
+    unit: min
+  - name: business.unique_error_types_fired
+    value: {randint: [0, 20]}
+    unit: types
+  - name: business.avg_cpu_utilization_pct
+    value: {uniform: [25.0, 78.0], round: 1}
+    unit: '%'
+  - name: business.avg_memory_utilization_pct
+    value: {uniform: [35.0, 82.0], round: 1}
+    unit: '%'
+  - name: business.gpu_utilization_pct
+    value: {uniform: [10.0, 95.0], round: 1}
+    unit: '%'
+  - name: business.network_throughput_mbps
+    value: {uniform: [50.0, 2200.0], round: 1}
+    unit: Mbps
+  - name: business.disk_io_ops_per_sec
+    value: {uniform: [200.0, 8000.0], round: 0}
+    unit: IOPS
+  - name: business.healthy_node_count
+    value: {randint: [7, 9]}
+    unit: nodes
+raw_log_profile:
+  service_name: inttest-edge-gateway
+  user_id_prefix: qa
+  tier_field: caller_type
+  tier_values:
+    - [synthetic, 90]
+    - [smoke_test, 10]
+  country_weights: {US: 40, GB: 10, DE: 10, IN: 15, JP: 10, BR: 5, AU: 5, SG: 5}
+  methods: [GET, POST, PUT, DELETE]
+  paths:
+    - /api/v1/ingest
+    - /api/v1/generators/status
+    - /api/v1/faults/trigger
+    - /api/v1/metrics/synthetic
+    - /api/v1/session
+    - /health
+  change_point_path: /api/v1/ingest
+trace_attributes:
+  base:
+    platform.region: {choice: [us-east-1, us-central1, eastus]}
+    platform.traffic_tier: {choice: [normal, normal, elevated, peak]}
+  services:
+    edge-gateway:
+      gateway.route: {choice: [/api/v1/ingest, /api/v1/generators/status, /api/v1/faults/trigger, /api/v1/session]}
+      gateway.client_sdk: {choice: [otel-python-1.28, otel-go-1.30, otel-java-2.9, synthetic-probe]}
+      gateway.auth_mode: {choice: [api_key, service_token, none]}
+      gateway.region_pop: {choice: [iad, ord, dfw]}
+    worker-pool:
+      worker.job_type: {choice: [fault_injection, generator_healthcheck, telemetry_replay, backfill]}
+      worker.queue_name: {choice: [inttest-jobs, inttest-faults, inttest-backfill]}
+      worker.retry_count: {randint: [0, 3]}
+      worker.pool_size: {randint: [4, 32]}
+    cache-tier:
+      cache.backend: {choice: [memcached, redis_enterprise]}
+      cache.keyspace: {choice: [session, generator_state, fault_state]}
+      cache.eviction_policy: {choice: [lru, lfu, ttl]}
+      cache.hit_ratio_bucket: {choice: [high, medium, low]}
+    analytics-service:
+      analytics.pipeline: {choice: [signal_rollup, coverage_report, generator_scorecard]}
+      analytics.write_mode: {choice: [batch, streaming]}
+      analytics.retention_tier: {choice: [hot, warm, cold]}
+      analytics.query_engine: {choice: [influxdb, internal_olap]}
+    data-platform:
+      orchestration.dag_id: {choice: [generator_healthcheck_dag, fault_schedule_dag, coverage_report_dag]}
+      orchestration.scheduler_state: {choice: [running, idle, backlogged]}
+      orchestration.executor_type: {choice: [celery, kubernetes, local]}
+      orchestration.coordinator_role: {choice: [leader, follower]}
+    ml-inference:
+      ml.model_name: {choice: [anomaly-scorer-v2, fault-classifier-v1]}
+      ml.accelerator: {choice: [nvidia_a100, cpu_fallback]}
+      ml.batch_size: {randint: [1, 64]}
+      ml.inference_mode: {choice: [online, batch]}
+    billing-service:
+      billing.ledger_shard: {choice: [shard-0, shard-1, shard-2]}
+      billing.currency: {choice: [USD, EUR, GBP]}
+      billing.txn_type: {choice: [usage_metering, synthetic_invoice]}
+      billing.settlement_status: {choice: [posted, pending, retrying]}
+    legacy-web-tier:
+      legacyweb.app_server: {choice: [apache_httpd, apache_tomcat, iis]}
+      legacyweb.servlet_context: {choice: [/legacy/reports, /legacy/admin, /legacy/api]}
+      legacyweb.session_affinity: {choice: [sticky, roundrobin]}
+      legacyweb.connector_type: {choice: [http11, ajp13]}
+    session-service:
+      session.protocol: {choice: [http2, grpc, websocket]}
+      session.sticky: {choice: [true, false]}
+      session.backend_pool: {choice: [pool-a, pool-b, pool-c]}
+      session.tls_version: {choice: [TLSv1.2, TLSv1.3]}
+generators:
+  memcached_otel: true
+  redisenterprise_otel: true
+  aws_waf_otel: true
+  azure_gateway_otel: true
+  gcp_audit_otel: true
+  aws_ec2_otel: true
+  aws_ecs_otel: true
+  aws_elb_metrics_otel: true
+  aws_elb_otel: true
+  aws_lambda_otel: true
+  cassandra_otel: true
+  cockroachdb_otel: true
+  couchdb_otel: true
+  influxdb_otel: true
+  mongodb_otel: true
+  mysql_otel: true
+  oracle_otel: true
+  supabase_otel: true
+  airflow_otel: true
+  etcd_otel: true
+  nvidia_gpu_otel: true
+  vercel_otel: true
+  vsphere_otel: true
+  zookeeper_otel: true
+  envoyproxy_otel: true
+  haproxy_otel: true
+  nginx_ingress_controller_otel: true
+  traefik_otel: true
+  activemq_otel: true
+  ibmmq_otel: true
+  apache_otel: true
+  apache_tomcat_otel: true
+  iis_otel: true
+  redis_otel: true
+  postgresql_otel: true
+  microsoft_sqlserver_otel: true
+  kafka_otel: true
+  rabbitmq_otel: true
+  aws_rds_otel: true
+  aws_sqs_otel: true
+  aws_cloudtrail_otel: true
+  azure_activity_otel: true
+  docker_otel: true
+  aws_bedrock: true
+  aws_bedrock_agentcore: true
+  azure_openai: true
+  azure_ai_foundry: true
+  azure_billing: true
+  gcp_vertexai: true
+  gcp_compute_otel: true
+  gcp_cloudrun_otel: true
+  gcp_cloudstorage_otel: true
+  gcp_cloudsql_mysql_otel: true
+  gcp_cloudsql_postgresql_otel: true
+  gcp_cloudsql_sqlserver_otel: true
+  temporal_otel: true
+  otel_collector_internal_telemetry: true
+  profilingmetrics_otel: true
+  otel_rum_dashboards: true
+  otel_android_dashboards: true
+  otel_ios_dashboards: true
+  # core / default-on generators, listed so every generator is named
+  host_metrics: true
+  kubernetes_otel: true
+  nginx_otel: true
+  nginx_metrics: true
+  jvm: true
+  raw_access: true
+  traces: true
+  aws_vpcflow_otel: true
+  azure_vnetflow_otel: true
+  gcp_vpcflow_otel: true

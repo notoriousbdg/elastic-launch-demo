@@ -1,0 +1,41 @@
+# Generator schema version registry.
+#
+# current            — the schema version all bundled generators ship at.
+# default_unversioned — a SPEC with no schema_version is treated as this version
+#                      (same MAJOR as current, so it is "outdated_compatible",
+#                      never "upgrade_required").
+# migrations         — ordered list of schema transitions.  Each entry describes
+#                      what changed and how to apply it.  The upgrade-telemetry-generator
+#                      skill walks this list during **upgrade** to bring any
+#                      generator up to current.
+#
+# Migration entry fields:
+#   to        (str)  — the version this migration produces
+#   breaking  (bool) — true → MAJOR bump (generator is "upgrade_required" and
+#                      scenarios that enable it cannot Launch until migrated);
+#                      false → MINOR bump (generator still runs, just
+#                      "outdated_compatible")
+#   summary   (str)  — one-line description shown in the version status table
+#   guidance  (str)  — step-by-step instructions the skill follows when applying
+#                      this migration to a generator package
+#   needs_input (bool) — true → skill must AskUserQuestion to gather a value
+#                        before it can apply this migration
+
+current: "1.0"
+default_unversioned: "1.0"
+
+migrations:
+  - to: "1.0"
+    breaking: false
+    summary: "Baseline generator plugin contract (SPEC + light __init__.py)"
+    guidance: |
+      Ensure the generator package under generators/<id>/ has:
+
+        __init__.py       — SPEC = GeneratorSpec(...) only; imports only
+                            generator_engine.spec; includes schema_version="1.0"
+        generator.py      — run() entrypoint
+        test_generator.py — unit tests
+
+      SPEC.module must be "generators.<id>.generator".
+      Do not place engine helpers (db_common, registry, etc.) under generators/.
+    needs_input: false

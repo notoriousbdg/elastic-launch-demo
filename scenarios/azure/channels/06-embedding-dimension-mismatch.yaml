@@ -1,0 +1,62 @@
+name: Embedding Dimension Mismatch
+subsystem: embeddings
+vehicle_section: embeddings_pipeline
+error_type: EMB-DIMENSION-MISMATCH
+sensor_type: health_check
+affected_services: [embedding-service, retrieval-service]
+cascade_services: []
+
+description: >
+  embedding-service switched to a newer embedding model whose vector dimension no longer matches the Azure AI Search index schema, so retrieval queries fail or return empty results.
+
+investigation_notes: |
+  1. Search body.text for *EMB-DIMENSION-MISMATCH* and compare model_dimensions={model_dimensions} against index_dimensions={index_dimensions} in the error text.
+  2. Check the embedding-service deployment history for a change of embedding_deployment to {embedding_deployment}; embedding-service config was switched to the {embedding_deployment} deployment (text-embedding-3-large, 3072 dimensions by default) without a matching index change.
+  3. Inspect the Azure AI Search index {search_index}: the vector field dimensions property is fixed at creation and cannot be altered in place.
+  4. On retrieval-service, look for HTTP 400 responses from AI Search and a rise in empty_result_ratio ({empty_result_pct}% of queries) - the assistant is answering without grounding.
+  5. Confirm rejected_vectors={rejected_vectors} keeps climbing; no new documents are being indexed while the mismatch persists.
+  6. Approve a reindex into a new index with matching dimensions, then swap the index alias and pin the embedding deployment version.
+
+remediation_action: reindex_with_matching_dimensions
+
+error_message: |
+  [EmbeddingService] EMB-DIMENSION-MISMATCH: deployment={embedding_deployment} model_dimensions={model_dimensions} index_dimensions={index_dimensions} index={search_index} rejected_vectors={rejected_vectors}
+
+stack_trace: |
+  VectorDimensionMismatchError: EMB-DIMENSION-MISMATCH
+    at EmbeddingService.upsert_vectors(index={search_index})
+    at SearchClient.merge_or_upload_documents(batch_size=64)
+  Embedding deployment: {embedding_deployment}
+  Model dimensions:     {model_dimensions}
+  Index dimensions:     {index_dimensions}
+  Rejected vectors:     {rejected_vectors}
+  Empty result ratio:   {empty_result_pct}%
+
+correlation_attr:
+  key: deployment.embedding_model_version
+  value: text-embedding-3-large-1
+
+fault_params:
+  embedding_deployment: embed-prod-large
+  model_dimensions: 3072
+  index_dimensions: 1536
+  search_index: {choice: [kb-articles-v4, support-docs-v7]}
+  rejected_vectors: {randint: [500, 40000]}
+  empty_result_pct: {uniform: [35.0, 90.0], round: 1}
+
+rca_clues:
+  embedding-service:
+    embedding.model_dimensions: 3072
+    embedding.index_schema_dimensions: 1536
+    embedding.deployment_changed_min_ago: {randint: [5, 90]}
+  retrieval-service:
+    retrieval.search_http_400_count: {randint: [200, 5000]}
+    retrieval.empty_result_ratio_pct: {uniform: [35.0, 90.0], round: 1}
+
+business_impact:
+  - kpi: business.conversations_per_min
+    value: {uniform: [74.4, 85.6], round: 0}
+  - kpi: business.error_rate_pct
+    factor: {uniform: [2.0, 4.0]}
+  - kpi: business.latency_p99_ms
+    value: {uniform: [538.24, 619.26], round: 0}

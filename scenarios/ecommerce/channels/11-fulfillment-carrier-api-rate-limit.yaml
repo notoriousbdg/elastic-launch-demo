@@ -11,23 +11,23 @@ cascade_services:
 description: Carrier API rate limit hit, causing shipping label creation to fail and orders to stall in fulfillment queue
 investigation_notes: |-
   1. Check fulfillment-orchestrator logs for CARRIER-RATE-LIMIT — which carrier ({carrier_name}) and what quota ({api_quota_used}/{api_quota_max}) is affected.
-  2. Check rate limit reset time: `X-RateLimit-Reset: {rate_limit_reset_epoch}` — the quota resets at that epoch; plan a burst recovery strategy.
-  3. Review API call distribution: if calls are concentrated in a short window, implement exponential backoff with jitter across the burst.
+  2. Check rate limit reset time: `X-RateLimit-Reset` — the quota resets in {reset_in_sec}s; plan a burst recovery strategy.
+  3. Review API call distribution: if calls are concentrated in a short window (a peak minute above 3x the average minute), implement exponential backoff with jitter across the burst.
   4. Switch eligible shipments to secondary carrier — if {secondary_carrier} has capacity, reroute to avoid further queue buildup.
-  5. Check if an upstream order spike is driving the API volume — correlate fulfillment_orders_queued with orders.per_minute metric for causality.
-  6. Rotate the API key: some carriers bind rate limits per API key — using a second key doubles effective quota until the primary key resets.
+  5. Check if an upstream order spike is driving the API volume — correlate fulfillment_orders_queued with orders.per_minute metric for causality (orders per minute more than 20% above baseline would point to an upstream order spike).
+  6. Smooth label creation: release queued label requests through a token bucket at or below the carrier's per-window limit, and if sustained volume needs more, request a quota increase from the carrier account team. Do not spread calls across extra API keys to bypass the limit.
 remediation_action: rotate_carrier_api_key
 error_message: '[FulfillmentOrchestrator] CARRIER-RATE-LIMIT: carrier={carrier_name} quota={api_quota_used}/{api_quota_max}
   reset_in={reset_in_sec}s queued_labels={queued_labels} secondary_carrier={secondary_carrier}'
-stack_trace: "com.ecommerce.fulfillment.CarrierApiException: CARRIER-RATE-LIMIT\n\tat com.ecommerce.fulfillment.CarrierClient.createLabel(carrier={carrier_name})\n\
-  \tat com.ecommerce.fulfillment.FulfillmentOrchestrator.shipOrder(order_id={order_id})\nCarrier:          {carrier_name}\n\
+stack_trace: "com.ecommerce.fulfillment.CarrierApiException: CARRIER-RATE-LIMIT\n\tat com.ecommerce.fulfillment.CarrierClient.createLabel(CarrierClient.java:187)\n\
+  \tat com.ecommerce.fulfillment.FulfillmentOrchestrator.shipOrder(FulfillmentOrchestrator.java:242)\nOrder:            {order_id}\nCarrier:          {carrier_name}\n\
   Quota used:       {api_quota_used}/{api_quota_max}\nReset in:         {reset_in_sec}s\nQueued labels:    {queued_labels}\n\
   Secondary:        {secondary_carrier}\nHTTP Status:      429 Too Many Requests"
 correlation_attr:
   key: fulfillment.carrier_throttled
   value: true
 fault_params:
-  carrier_name: {choice: [FedEx, UPS, DHL]}
+  carrier_name: FedEx
   api_quota_used: {randint: [9800, 10000]}
   api_quota_max: 10000
   reset_in_sec: {randint: [60, 3600]}
@@ -38,9 +38,12 @@ rca_clues:
   fulfillment-orchestrator:
     fulfillment.carrier_429_count: {randint: [100, 2000]}
     fulfillment.label_creation_queue_depth: {randint: [200, 5000]}
+    fulfillment.carrier_name: FedEx
+    fulfillment.call_burst_ratio: {uniform: [6, 12], round: 1}
   order-management:
     order.in_fulfillment_stuck_count: {randint: [50, 500]}
     order.sla_breach_risk_count: {randint: [10, 100]}
+    order.orders_per_min_delta_pct: {uniform: [-5, 5], round: 1}
   analytics-pipeline:
     analytics.fulfillment_event_lag: true
     analytics.on_time_metric_stale: true

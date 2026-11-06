@@ -11,10 +11,10 @@ cascade_services:
 - payment-engine
 description: Mobile banking API requests exceeding response time SLA causing member app failures
 investigation_notes: |-
-  1. Check mobile-gateway connection pool utilization — pool_active near pool_max indicates exhaustion. Run: kubectl exec -it mobile-gateway -- curl localhost:8080/actuator/metrics/hikaricp.connections.active
+  1. Check mobile-gateway connection pool utilization — pool_active near pool_max indicates exhaustion. Run: kubectl exec -it deploy/mobile-gateway -n banking-prod -- curl -s 'localhost:8080/actuator/metrics/httpcomponents.httpclient.pool.total.connections?tag=state:leased'
   2. Review backend_routing phase — latency spike at this stage points to upstream service degradation, not the gateway itself. Check auth-gateway and payment-engine response times in APM.
   3. Inspect circuit breaker state: HALF_OPEN means the gateway is testing recovery. If stuck in HALF_OPEN for >60s, the upstream service is intermittently failing. Check: /actuator/health for dependency status.
-  4. Queue depth >2000 indicates backpressure buildup — consider scaling mobile-gateway replicas or enabling request shedding. Check HPA metrics: kubectl get hpa mobile-gateway -n banking-prod.
+  4. Queue depth >2000 indicates backpressure buildup — consider scaling mobile-gateway replicas or enabling request shedding. Check HPA metrics: kubectl get hpa mobile-gateway -n banking-prod shows the HPA pinned at max replicas while nginx ingress active connections pile up.
   5. Verify CACHE_STALE fallback is returning acceptable data — stale cached responses may show incorrect balances. Review cache TTL settings in mobile-gateway ConfigMap.
 remediation_action: restart_mobile_gateway
 error_message: '[MOBILE] MOBILE-API-TIMEOUT: endpoint={endpoint} latency_ms={latency_ms} sla_ms={sla_ms} member={member_id}
@@ -47,20 +47,27 @@ rca_clues:
     gateway.connection_pool_active: {randint: [800, 1000]}
     gateway.backend_routing_phase: stalled
   auth-gateway:
-    auth.token_verify_latency_ms: {randint: [400, 900]}
-    auth.session_cache_hit_rate: {uniform: [0.1, 0.3], round: 2}
+    auth.token_verify_latency_ms: {randint: [120, 220]}
+    auth.session_cache_hit_rate: {uniform: [0.92, 0.98], round: 2}
   member-portal:
     upstream.degraded_dependency: mobile-gateway
     portal.response_queue_depth: {randint: [1500, 3000]}
   payment-engine:
     payment.upstream_timeout_count: {randint: [50, 200]}
     payment.circuit_breaker_state: HALF_OPEN
+    payment.response_p99_ms: {randint: [4000, 12000]}
 business_impact:
   - kpi: business.active_digital_sessions
-    factor: {uniform: [0.25, 0.55]}
+    value: {uniform: [4464.0, 5136.0]}
   - kpi: business.mobile_logins_per_min
-    factor: {uniform: [0.20, 0.50]}
+    value: {uniform: [148.8, 171.2]}
   - kpi: business.api_calls_per_min
-    factor: {uniform: [0.15, 0.45]}
+    value: {uniform: [13299.0, 15301.0]}
   - kpi: business.digital_transaction_pct
     factor: {uniform: [0.35, 0.65]}
+
+generator_impact:
+  kubernetes_otel:
+    hpa_at_max_replicas: 1.0
+  nginx_otel:
+    high_active_connections: 400.0

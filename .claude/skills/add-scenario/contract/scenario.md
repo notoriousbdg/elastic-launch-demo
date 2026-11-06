@@ -3,7 +3,7 @@
 Use this as a generation checklist for `scenario.yaml`. Work top-to-bottom and verify every property is present and correctly shaped.
 
 The runtime reads scenario data from three sources:
-- `scenarios/<id>/scenario.yaml` — scenario-level properties (identity, infra, agent, KPIs, trace attrs)
+- `scenarios/<id>/scenario.yaml` — scenario-level properties (identity, infra, agent, KPIs, trace attrs, generators)
 - `scenarios/<id>/channels/NN-<slug>.yaml` — one file per fault channel
 - `scenarios/<id>/services/<svc>.yaml` — one file per service (identity, topology, telemetry DSL)
 
@@ -24,6 +24,34 @@ Reference implementation: [`scenario_engine/yaml_scenario.py`](scenario_engine/y
 | `nominal_label` | optional | `str` | Label for the "nominal" state. Default `"NORMAL"`. |
 
 ---
+
+## Generators
+
+Beyond the 9 services and 8 always-on `core` generators (traces, raw_access, host_metrics, kubernetes_otel, nginx_otel, aws_vpcflow_otel, gcp_vpcflow_otel, azure_vnetflow_otel), a scenario can opt in to any number of the 60+ generators registered in `generator_engine.registry.GENERATORS`. Selection happens in Phase 3 Step A.
+
+Enable a generator by adding it to a top-level `generators:` block in `scenario.yaml`:
+
+```yaml
+generators:
+  redis_otel: true               # enable with defaults
+  zookeeper_otel:                 # enable with config_fields overrides
+    node_names: [zk-node-1, zk-node-2, zk-node-3]
+```
+
+Inspect a generator before wiring it up — this is the source of truth for its `config_fields` and the impact keys/ranges its channels can drive:
+
+```bash
+python3 -m generator_engine.registry --describe <gen_id>
+```
+
+**Every selected generator must have exactly one chaos channel with a `generator_impact` block** — otherwise the generator is enabled but no channel ever breaches its alert threshold. See `contract/channels.md` §Generator impact for the channel-side schema.
+
+Two reference patterns already in the repo:
+- `scenarios/ecommerce/channels/10-catalog-redis-purge-storm.yaml` — one channel driving multiple impact keys on one generator, alongside a rich business-impact/RCA story.
+- `scenarios/gt-*/channels/*.yaml` — one channel per impact key, minimal (built for generator coverage testing, not vertical storytelling — don't copy their sparse style into a real scenario).
+
+---
+
 
 ## Infrastructure
 
@@ -138,11 +166,15 @@ executive_trend_charts:
 executive_kpi_emissions:
   - name: business.gmv_usd_per_min
     value: {uniform: [1000.0, 9000.0], round: 1}
+    better: higher            # lower | higher — drives tile colours; required if a channel impacts it
     unit: USD/min
   # one entry per metric; field name must match executive_kpi_sections specs
 ```
 
 `field` in `executive_kpi_sections.specs` must be `"metrics.business.<name>"` where `<name>` matches the `name:` in `executive_kpi_emissions` with `"business."` prefix stripped.
+
+Keep nominal ranges narrow and always set `better:` — the executive tile is green inside the nominal band and
+yellow/red outside it (see contract/channels.md §Dashboard visibility). Renaming or removing a KPI means retargeting every channel's `business_impact` (see contract/channels.md §Business impact); the verifier errors on stale names.
 
 ---
 
@@ -182,3 +214,24 @@ raw_log_profile:
     - /api/v1/products
   change_point_path: /api/v1/checkout   # highest-revenue path; spikes during faults
 ```
+
+---
+
+## Library workflow inputs (optional)
+
+When the scenario enables generators whose data a Template Library investigation
+workflow reads (today the AWS RDS, ALB, Lambda and SQS generators), the deployer
+installs that workflow and wires it to the matching OOTB package alert rule. The
+generators supply the resource ids it needs (`load_balancer`, `db_instance_identifier`,
+`function_name`, `queue_name`). Add the scenario's own meaning with:
+
+```yaml
+workflow_template_inputs:
+  service_name: orders-gateway                       # every workflow with a service_name input
+  aws-rds-connection-exhaustion-investigation-otel:  # one workflow (slug) overrides
+    service_name: orders-service
+```
+
+Values become the manual-run defaults and the fallback alert-triggered runs use.
+Omit the block when the generic wording ("the backend service") is fine.
+

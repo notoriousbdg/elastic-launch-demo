@@ -1,0 +1,63 @@
+name: Cosmos Autoscale Ceiling
+subsystem: database
+vehicle_section: database_pipeline
+error_type: COSMOS-AUTOSCALE-CEILING
+sensor_type: health_check
+affected_services: [conversation-store, chat-orchestrator]
+cascade_services: []
+
+description: Cosmos DB autoscale for the conversation container reaches its configured maximum RU/s during a traffic peak and begins throttling writes.
+
+investigation_notes: |
+  1. Search body.text for *COSMOS-AUTOSCALE-CEILING* and read consumed_rus={consumed_rus} against max_rus={max_rus} on container {container}.
+  2. Check the Normalized RU Consumption metric: normalized_ru_pct={normalized_ru_pct}% is pinned near 100% on every PartitionKeyRangeId and total consumed RU/s equals the autoscale maximum; that confirms the autoscale ceiling, not a hot partition (a hot key shows one range at 100% while total consumption stays well below the maximum).
+  3. Confirm 429 responses ({throttled_requests_per_min}/min) coincide with a legitimate traffic peak (active conversations up 60% or more, no single client above 10% of requests) rather than a runaway client.
+  4. Review chat-orchestrator history write latency; retries add delay but no data is lost once writes succeed.
+  5. Raise the autoscale maximum throughput on {container} (for example to {new_max_rus} RU/s); autoscale scales back down automatically after the peak.
+  6. Verify 429s clear and normalized RU consumption drops below 70%; revisit capacity planning for peak hours.
+
+remediation_action: raise_cosmos_max_throughput
+
+error_message: |
+  COSMOS-AUTOSCALE-CEILING: container={container} consumed_rus={consumed_rus} max_rus={max_rus} normalized_ru={normalized_ru_pct}% throttled={throttled_requests_per_min}/min
+
+stack_trace: |
+  CosmosHttpResponseError: (429) Request rate is large, autoscale at maximum
+    at ConversationStore.append_message(container={container})
+    at CosmosClient.upsert_item()
+  Max autoscale RU/s: {max_rus}
+  Consumed RU/s:      {consumed_rus}
+  Normalized RU:      {normalized_ru_pct}%
+  Throttled per min:  {throttled_requests_per_min}
+  Suggested max RU/s: {new_max_rus}
+
+correlation_attr:
+  key: cosmos.autoscale_max_throughput
+  value: conversations-autoscale-max-10000
+
+fault_params:
+  container: conversations
+  consumed_rus: {randint: [9700, 10000]}
+  max_rus: 10000
+  new_max_rus: 20000
+  normalized_ru_pct: {randint: [98, 100]}
+  throttled_requests_per_min: {randint: [150, 2500]}
+
+rca_clues:
+  conversation-store:
+    cosmos.autoscale_max_rus: 10000
+    cosmos.normalized_ru_consumption_pct: {randint: [98, 100]}
+    cosmos.throttled_429_count: {randint: [150, 2500]}
+    cosmos.top_client_request_share_pct: {uniform: [3.0, 9.0], round: 1}
+  chat-orchestrator:
+    orchestrator.history_write_retries: {randint: [50, 900]}
+    orchestrator.history_write_latency_ms: {randint: [800, 6000]}
+    orchestrator.active_conversations_change_pct: {uniform: [60.0, 120.0], round: 1}
+
+business_impact:
+  - kpi: business.throughput_rpm
+    value: {uniform: [604.5, 695.5], round: 0}
+  - kpi: business.latency_p99_ms
+    factor: {uniform: [2.0, 4.0]}
+  - kpi: business.error_rate_pct
+    factor: {uniform: [2.0, 6.0]}

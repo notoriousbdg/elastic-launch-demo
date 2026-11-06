@@ -1,0 +1,207 @@
+service: identity-broker
+sort_order: 9
+cloud_provider: azure
+cloud_region: westeurope
+cloud_platform: azure_vm
+cloud_availability_zone: westeurope-3
+subsystem: identity
+language: java
+
+# Topology: [downstream-service, endpoint, METHOD]
+topology: []
+
+db_operations: []
+
+emit_fault_logs: true
+kpi_emitter: false
+
+constants:
+  GRANT_TYPES:
+  - authorization_code
+  - refresh_token
+  - client_credentials
+  - on_behalf_of
+  TENANT_APPS:
+  - assistant-web-spa
+  - chat-orchestrator-api
+  - partner-portal
+  SECRETS:
+  - {name: assistant-web-client-secret, kv: kv-azureai-weu}
+  - {name: orchestrator-signing-cert, kv: kv-azureai-weu}
+  - {name: partner-portal-client-secret, kv: kv-azureai-weu}
+
+state:
+  _validations:
+    init: 0
+  _failures:
+    init: 0
+  _last_summary:
+    init: now
+
+steps:
+- sample:
+    grant_type:
+      choice: GRANT_TYPES
+    app:
+      choice: TENANT_APPS
+    validate_latency_ms:
+      if_active:
+        uniform:
+        - 900.0
+        - 9000.0
+        round: 1
+      else:
+        uniform:
+        - 8.0
+        - 60.0
+        round: 1
+    result:
+      if_active:
+        choice:
+        - valid
+        - valid
+        - expired
+        - invalid_audience
+      else:
+        choice:
+        - valid
+        - valid
+        - valid
+        - valid
+        - valid
+        - valid
+        - valid
+        - valid
+        - valid
+        - valid
+        - valid
+        - valid
+        - valid
+        - valid
+        - valid
+        - expired
+- counter:
+    state_key: _validations
+    by: 1
+- log:
+    level: INFO
+    message: 'entra[token_validate] app={app} grant={grant_type} result={result} latency={validate_latency_ms}ms issuer=login.microsoftonline.com jwks_cache=hit'
+    attrs:
+      operation: token_validate
+      auth.app:
+        var: app
+      auth.grant_type:
+        var: grant_type
+      auth.result:
+        var: result
+      auth.latency_ms:
+        var: validate_latency_ms
+- metric:
+    name: identity_broker.token_validation_latency_ms
+    value:
+      var: validate_latency_ms
+    unit: ms
+- sample:
+    tokens_issued_per_min:
+      randint:
+      - 2800
+      - 5200
+    validations_per_min:
+      randint:
+      - 14000
+      - 26000
+    failure_pct:
+      if_active:
+        uniform:
+        - 12.0
+        - 45.0
+        round: 1
+      else:
+        uniform:
+        - 0.1
+        - 1.2
+        round: 1
+    failures_per_min:
+      expr: int(validations_per_min * failure_pct / 100)
+- counter:
+    state_key: _failures
+    by:
+      var: failures_per_min
+- metric:
+    name: identity_broker.tokens_issued_per_min
+    value:
+      var: tokens_issued_per_min
+    unit: tokens/min
+- metric:
+    name: identity_broker.token_validations_per_min
+    value:
+      var: validations_per_min
+    unit: validations/min
+- metric:
+    name: identity_broker.token_failure_pct
+    value:
+      var: failure_pct
+    unit: '%'
+- log:
+    level: INFO
+    message: 'entra[token_stats] issued={tokens_issued_per_min}/min validated={validations_per_min}/min failures={failures_per_min}/min failure_rate={failure_pct}% tenant=azureai-prod'
+    attrs:
+      operation: token_stats
+      auth.tokens_issued_per_min:
+        var: tokens_issued_per_min
+      auth.validations_per_min:
+        var: validations_per_min
+      auth.failures_per_min:
+        var: failures_per_min
+      auth.failure_pct:
+        var: failure_pct
+- for_each:
+    in: SECRETS
+    as: s
+    steps:
+    - sample:
+        days_to_expiry:
+          if_active:
+            randint:
+            - 0
+            - 2
+          else:
+            randint:
+            - 21
+            - 180
+    - metric:
+        name: identity_broker.credential_days_to_expiry
+        value:
+          var: days_to_expiry
+        unit: days
+- every:
+    seconds: 10
+    state_key: _last_summary
+    steps:
+    - sample:
+        next_expiry_days:
+          if_active:
+            randint:
+            - 0
+            - 2
+          else:
+            randint:
+            - 21
+            - 180
+        key_vault_reads_per_min:
+          randint:
+          - 3
+          - 14
+    - log:
+        level: INFO
+        message: 'entra[credential_health] next_expiry_in={next_expiry_days}d key_vault_reads={key_vault_reads_per_min}/min total_validations={_validations} total_failures={_failures} jwks_rotation=ok'
+        attrs:
+          operation: credential_health
+          auth.next_expiry_days:
+            var: next_expiry_days
+          auth.key_vault_reads_per_min:
+            var: key_vault_reads_per_min
+          auth.total_validations:
+            var: _validations
+          auth.total_failures:
+            var: _failures

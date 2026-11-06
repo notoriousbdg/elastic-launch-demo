@@ -1,0 +1,250 @@
+service: orders-db
+sort_order: 4
+cloud_provider: aws
+cloud_region: us-east-1
+cloud_platform: aws_ec2
+cloud_availability_zone: us-east-1a
+subsystem: database
+language: python
+generates_traces: false
+
+# Topology: [downstream-service, endpoint, METHOD]
+topology: []
+
+db_operations:
+- - SELECT
+  - orders
+  - SELECT order_id, customer_id, status, total_cents, currency, created_at FROM orders WHERE order_id = $1
+- - INSERT
+  - orders
+  - INSERT INTO orders (order_id, customer_id, status, total_cents, currency, created_at) VALUES ($1, $2, 'PENDING', $3, $4, now())
+- - INSERT
+  - order_items
+  - INSERT INTO order_items (order_id, sku, quantity, unit_price_cents) VALUES ($1, $2, $3, $4)
+- - UPDATE
+  - payments
+  - UPDATE payments SET status = $1, auth_code = $2, captured_at = now() WHERE order_id = $3 AND status = 'AUTHORIZED'
+
+emit_fault_logs: true
+kpi_emitter: false
+
+constants:
+  DB_TABLES:
+  - orders
+  - order_items
+  - payments
+  - shipments
+  DB_CLIENTS:
+  - orders-service
+  - orders-service
+  - orders-service
+  - reporting-batch
+  DB_INSTANCE: orders-prod-pg-01
+
+steps:
+- sample:
+    table:
+      choice: DB_TABLES
+    db_connections:
+      if_active:
+        randint:
+        - 392
+        - 410
+      else:
+        randint:
+        - 90
+        - 220
+    max_connections: 410
+    conn_utilization_pct:
+      expr: round(db_connections / max_connections * 100, 1)
+    idle_in_txn:
+      if_active:
+        randint:
+        - 180
+        - 320
+      else:
+        randint:
+        - 2
+        - 25
+- metric:
+    name: aws.rds.database_connections
+    value:
+      var: db_connections
+    unit: connections
+- metric:
+    name: aws.rds.connection_utilization_pct
+    value:
+      var: conn_utilization_pct
+    unit: '%'
+- metric:
+    name: orders_db.idle_in_transaction_sessions
+    value:
+      var: idle_in_txn
+    unit: sessions
+- log:
+    level: INFO
+    message: 'postgresql[orders-prod-pg-01]: connections active={db_connections}/{max_connections} utilization={conn_utilization_pct}% idle_in_transaction={idle_in_txn}'
+    attrs:
+      operation: connection_health
+      db.system: postgresql
+      db.instance: orders-prod-pg-01
+      db.connections_active:
+        var: db_connections
+      db.connections_max: 410
+      db.utilization_pct:
+        var: conn_utilization_pct
+      db.idle_in_transaction:
+        var: idle_in_txn
+- sample:
+    client:
+      choice: DB_CLIENTS
+    commit_latency_ms:
+      if_active:
+        uniform:
+        - 120.0
+        - 900.0
+        round: 1
+      else:
+        uniform:
+        - 1.0
+        - 6.0
+        round: 1
+    read_latency_ms:
+      if_active:
+        uniform:
+        - 80.0
+        - 700.0
+        round: 1
+      else:
+        uniform:
+        - 0.8
+        - 4.0
+        round: 1
+    replica_lag_ms:
+      if_active:
+        uniform:
+        - 800.0
+        - 6000.0
+        round: 1
+      else:
+        uniform:
+        - 5.0
+        - 60.0
+        round: 1
+    cpu_utilization_pct:
+      if_active:
+        uniform:
+        - 72.0
+        - 96.0
+        round: 1
+      else:
+        uniform:
+        - 18.0
+        - 48.0
+        round: 1
+- metric:
+    name: aws.rds.commit_latency_ms
+    value:
+      var: commit_latency_ms
+    unit: ms
+- metric:
+    name: aws.rds.read_latency_ms
+    value:
+      var: read_latency_ms
+    unit: ms
+- metric:
+    name: aws.rds.replica_lag_ms
+    value:
+      var: replica_lag_ms
+    unit: ms
+- metric:
+    name: aws.rds.cpu_utilization_pct
+    value:
+      var: cpu_utilization_pct
+    unit: '%'
+- log:
+    level: INFO
+    message: 'postgresql[orders-prod-pg-01]: latency_stats table={table} client={client} commit_ms={commit_latency_ms} read_ms={read_latency_ms} replica_lag_ms={replica_lag_ms} cpu={cpu_utilization_pct}%'
+    attrs:
+      operation: latency_stats
+      db.table:
+        var: table
+      db.client:
+        var: client
+      db.commit_latency_ms:
+        var: commit_latency_ms
+      db.read_latency_ms:
+        var: read_latency_ms
+      db.replica_lag_ms:
+        var: replica_lag_ms
+- sample:
+    slow_queries:
+      if_active:
+        randint:
+        - 40
+        - 160
+      else:
+        randint:
+        - 0
+        - 3
+    cache_hit_ratio:
+      if_active:
+        uniform:
+        - 0.72
+        - 0.86
+        round: 3
+      else:
+        uniform:
+        - 0.97
+        - 0.995
+        round: 3
+    refused_connections:
+      if_active:
+        randint:
+        - 25
+        - 140
+      else: 0
+    pg_event:
+      if_active:
+        choice:
+        - 'FATAL: remaining connection slots are reserved for roles with privileges of the "rds_reserved" role'
+        - 'FATAL: remaining connection slots are reserved for roles with privileges of the "rds_reserved" role'
+        - 'LOG: duration: 4812.337 ms statement: SELECT order_id, status FROM orders WHERE customer_id = $1 ORDER BY created_at DESC LIMIT 20'
+      else:
+        choice:
+        - 'LOG: checkpoint complete: wrote 412 buffers (0.3%); sync files=18, longest=0.004 s'
+        - 'LOG: automatic vacuum of table "orders.public.order_items": index scans: 1, pages removed: 0'
+        - 'LOG: automatic analyze of table "orders.public.orders"'
+- metric:
+    name: orders_db.slow_query_count
+    value:
+      var: slow_queries
+    unit: queries
+- metric:
+    name: orders_db.buffer_cache_hit_ratio
+    value:
+      var: cache_hit_ratio
+    unit: ratio
+- metric:
+    name: orders_db.refused_connections
+    value:
+      var: refused_connections
+    unit: connections
+- log:
+    level: INFO
+    message: 'postgresql[orders-prod-pg-01]: perf_health cache_hit={cache_hit_ratio} slow_queries={slow_queries}/min refused_connections={refused_connections} rds_status=available'
+    attrs:
+      operation: perf_health
+      db.cache_hit_ratio:
+        var: cache_hit_ratio
+      db.slow_queries:
+        var: slow_queries
+      db.refused_connections:
+        var: refused_connections
+- log:
+    level: INFO
+    message: 'postgresql[orders-prod-pg-01]: {pg_event}'
+    attrs:
+      operation: postgres_log
+      db.system: postgresql
+      db.instance: orders-prod-pg-01

@@ -14,7 +14,7 @@ investigation_notes: |-
   2. Query FROM logs.otel.financial.* | WHERE body.text LIKE "*PORTAL-VALUATION-LAG*" | STATS max(lag_s), count() BY portfolio_id to find most-affected portfolios.
   3. Inspect the valuation pipeline bottleneck — fx_conversion stage SLOW indicates a currency rate provider timeout; check which FX pairs are affected.
   4. Check risk-calculator for stale_risk_calcs — if risk calcs are also stale, the issue is upstream at market-data-feed, not the portal itself.
-  5. Trigger priority revaluation for the largest portfolios; display the stale data banner to clients and update disclaimer_shown=true to meet MiFID II best-execution disclosure requirements.
+  5. Trigger priority revaluation for the largest portfolios; display the stale data banner to clients and update disclaimer_shown=true to meet MiFID II Art. 24(3) fair, clear and not misleading client-information requirements.
 remediation_action: trigger_priority_portfolio_revaluation
 error_message: '[PORTAL] PORTAL-VALUATION-LAG: portfolio={portfolio_id} lag_s={lag_s} max_lag_s={max_lag_s} pending_positions={position_count}'
 stack_trace: |-
@@ -23,7 +23,7 @@ stack_trace: |-
   --- VALUATION PIPELINE ---
     market_data_fetch   OK       12ms
     price_snap          OK       8ms
-    fx_conversion       SLOW     4,200ms  <<< BOTTLENECK
+    fx_conversion       SLOW     {fx_conversion_ms}ms  <<< BOTTLENECK
     greeks_calc         QUEUED   ---
     pnl_attribution     QUEUED   ---
     total_lag           {lag_s}s  max={max_lag_s}s
@@ -40,13 +40,14 @@ fault_params:
   lag_s: {uniform: [30.0, 300.0], round: 1}
   max_lag_s: 15.0
   position_count: {randint: [50, 500]}
+  fx_conversion_ms: {randint: [3000, 10000]}
 rca_clues:
   customer-portal:
     portal.valuation_lag_s: {uniform: [30.0, 300.0], round: 1}
     portal.stale_pnl_positions: {randint: [50, 500]}
   risk-calculator:
-    risk.stale_greeks_count: {randint: [10, 200]}
-    risk.fx_conversion_timeout_ms: {randint: [1000, 10000]}
+    risk.stale_risk_calcs: 0
+    risk.fx_conversion_timeout_ms: {randint: [3000, 10000]}
   compliance-monitor:
     compliance.best_execution_disclosure_missing: true
     compliance.stale_data_client_views: {randint: [10, 500]}

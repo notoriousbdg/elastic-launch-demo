@@ -11,8 +11,8 @@ cascade_services:
 description: Product search index corrupted or partially rebuilt, returning incomplete or incorrect results
 investigation_notes: |-
   1. Check product-catalog logs for CATALOG-INDEX-CORRUPT — note the affected shard ({shard_id}) and document count mismatch.
-  2. Run an index health check: GET /_cluster/health — red/yellow status with unassigned shards confirms corruption.
-  3. Check for partial writes during a previous index rebuild: `show index stats` — a rebuild that aborted midway leaves an inconsistent index.
+  2. Run an index health check: GET _cluster/health and GET _cat/shards?v&h=index,shard,prirep,state,docs,unassigned.reason — a RED primary is a candidate; GET _cluster/allocation/explain showing ALLOCATION_FAILED with CorruptIndexException confirms corruption rather than a lost node.
+  3. Check for partial writes during a previous index rebuild: GET _cat/indices?v&h=index,health,docs.count and compare docs.count with the source of truth — a rebuild that aborted midway leaves an inconsistent index (catalog.last_rebuild_status ABORTED confirms it).
   4. Identify affected categories: query `catalog.items_indexed` metric — a drop below {expected_items} items indicates missing documents.
   5. Do not trigger a full rebuild during peak traffic — it will consume all indexing throughput and further degrade search latency.
   6. Roll back to the last known-good snapshot and replay the indexing changelog from that point forward.
@@ -28,15 +28,17 @@ correlation_attr:
   value: true
 fault_params:
   shard_id: {format: "shard-{n}", n: {randint: [0, 7]}}
-  expected_items: {randint: [500000, 2000000]}
-  actual_items: {randint: [100000, 400000]}
-  doc_delta: {randint: [100000, 1600000]}
+  expected_items: 1200000
+  actual_items: 912000
+  doc_delta: 288000
   affected_categories: {choice: ["electronics,apparel", "home,beauty", "sports,books", all_categories]}
   snapshot_age_min: {randint: [60, 480]}
 rca_clues:
   product-catalog:
     catalog.shard_health: RED
-    catalog.missing_docs_pct: {uniform: [5, 40], round: 1}
+    catalog.missing_docs_pct: 24.0
+    catalog.items_indexed: 912000
+    catalog.last_rebuild_status: ABORTED
     catalog.search_accuracy_pct: {uniform: [40, 80], round: 1}
   storefront-gateway:
     storefront.search_zero_results_pct: {uniform: [20, 60], round: 1}
@@ -46,10 +48,10 @@ rca_clues:
     reco.fallback_to_trending: true
 business_impact:
   - kpi: business.search_queries_per_min
-    factor: {uniform: [0.25, 0.50]}
+    value: {uniform: [230.64, 265.36]}
   - kpi: business.sessions_per_min
-    factor: {uniform: [0.30, 0.55]}
+    value: {uniform: [725.4, 834.6]}
   - kpi: business.conversion_rate_pct
-    factor: {uniform: [0.25, 0.50]}
+    value: {uniform: [0.67, 0.77], round: 2}
   - kpi: business.page_views_per_min
-    factor: {uniform: [0.30, 0.55]}
+    factor: {uniform: [0.3, 0.55]}

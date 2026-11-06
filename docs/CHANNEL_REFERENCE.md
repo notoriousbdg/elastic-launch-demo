@@ -295,23 +295,23 @@ Complete reference for the fault channel system. Each scenario defines 20 indepe
 ```bash
 curl -X POST http://<host>/api/chaos/trigger \
   -H 'Content-Type: application/json' \
-  -d '{"channel": 7}'
+  -d '{"channel": 7, "deployment_id": "<scenario-id>"}'
 ```
 
 ### Resolve a channel
 
 ```bash
-curl -X POST http://<host>/api/remediate/7
+curl -X POST 'http://<host>/api/remediate/7?deployment_id=<scenario-id>'
 ```
 
 ### Check channel status
 
 ```bash
-curl -s http://<host>/api/chaos/status/7 | python3 -m json.tool
+curl -s 'http://<host>/api/chaos/status/7?deployment_id=<scenario-id>' | python3 -m json.tool
 ```
 
 ### Check all channels
 
 ```bash
-curl -s http://<host>/api/chaos/status | python3 -m json.tool
+curl -s 'http://<host>/api/chaos/status?deployment_id=<scenario-id>' | python3 -m json.tool
 ```

@@ -1,0 +1,63 @@
+name: Cloud Armor Policy Rollback Denied
+subsystem: security
+vehicle_section: armor_policy
+error_type: ARMOR-ROLLBACK-DENIED
+sensor_type: audit_log_errors
+affected_services:
+- cloud-armor-waf
+- cloud-cdn-service
+cascade_services:
+- cloud-load-balancer
+description: Emergency rollback of a Cloud Armor security policy fails with IAM permission errors in Cloud Audit Logs while a bad rule keeps blocking legitimate API traffic
+investigation_notes: |-
+  Root cause: A preconfigured Cloud Armor rule (OWASP CRS) is blocking legitimate API traffic, and the on-call rollback of the security policy is rejected. Cloud Audit Logs show securityPolicies.patch calls failing with PERMISSION_DENIED because the deploy service account lost compute.securityAdmin during a recent IAM cleanup.
+  Diagnose with Cloud Audit Logs filtered by protoPayload.methodName="v1.compute.securityPolicies.patch" and status.code=7 (PERMISSION_DENIED). The gcp_audit_otel error_rate impact drives the elevated permission-error volume during the fault.
+  Remediation: Restore compute.securityAdmin on the deploy service account (or use a break-glass admin), re-apply the previous policy revision, then put the rule in preview mode while tuning sensitivity. Monitor audit-log error rate recovery after the change.
+remediation_action: restore_armor_policy_access
+error_message: 'cloudaudit: ARMOR-ROLLBACK-DENIED policy={armor_policy} rule={armor_rule_id} method={audit_method} principal={audit_principal} denied_calls={audit_denied_count}/m
+  blocked_requests={armor_blocked_count}/m false_positive_rate={armor_fp_rate}%'
+stack_trace: |-
+  Cloud Armor Rollback Analysis
+  -----------------------------
+  Policy:              {armor_policy}
+  Offending Rule:      {armor_rule_id}
+  Audit Method:        {audit_method}
+  Principal:           {audit_principal}
+  Denied Calls/min:    {audit_denied_count}
+  Blocked Requests/min:{armor_blocked_count}
+  False Positive Rate: {armor_fp_rate}%
+  Status:              PERMISSION_DENIED (code 7)
+  Action: Restore compute.securityAdmin for the principal and re-apply the previous policy revision
+correlation_attr:
+  key: iam.policy_cleanup_rev
+  value: iam-cleanup-2026-q3-untested
+fault_params:
+  armor_policy: {choice: [gcpnet-web-policy, gcpnet-ddos-policy, gcpnet-edge-policy]}
+  armor_rule_id: sqli-v33-stable
+  audit_method: compute.securityPolicies.patch
+  audit_principal: deploy-sa@gcpnet-project.iam.gserviceaccount.com
+  audit_denied_count: {randint: [20, 400]}
+  armor_blocked_count: {randint: [100, 5000]}
+  armor_fp_rate: {uniform: [15.0, 60.0], round: 1}
+rca_clues:
+  cloud-armor-waf:
+    armor.false_positive_rule: sqli-v33-stable
+    armor.rollback_denied: true
+  cloud-cdn-service:
+    cdn.blocked_asset_paths: /api/v2/search,/graphql
+    cdn.cache_miss_from_blocks: true
+  cloud-load-balancer:
+    lb.legitimate_traffic_dropped_pct: {uniform: [5, 25], round: 1}
+business_impact:
+  - kpi: business.requests_per_min
+    factor: {uniform: [0.45, 0.75]}
+  - kpi: business.api_success_rate_pct
+    factor: {uniform: [0.50, 0.78]}
+  - kpi: business.cdn_cache_hit_rate_pct
+    factor: {uniform: [0.55, 0.80]}
+  - kpi: business.customer_sla_breach_count
+    factor: {uniform: [2.5, 5.5]}
+generator_impact:
+  gcp_audit_otel:
+    error_rate: 0.6
+    records_per_cycle: 80

@@ -22,11 +22,9 @@ stack_trace: |-
   === RISK CALCULATION REPORT ===
   desk={desk_id}  asset_class={asset_class}
   --- EXPOSURE BREAKDOWN ---
-    gross_long     ${exposure}
-    gross_short    $42.3M
-    net_exposure   ${exposure}
+    gross_exposure ${exposure}
     limit          ${risk_limit}
-    utilization    287%  <<< BREACH
+    utilization    {utilization_pct}%  <<< BREACH
   --- VAR IMPACT ---
     VaR_95  $18.7M   (pre-breach: $9.2M)
     VaR_99  $28.1M   (pre-breach: $13.8M)
@@ -37,17 +35,16 @@ correlation_attr: {}
 fault_params:
   desk_id:
     format: "DESK-{t}"
-    t: {choice: [EQ-FLOW, EQ-PROP, FI-RATES, FX-SPOT, DRV-VOL]}
+    t: {choice: [EQ-FLOW, EQ-PROP]}
   exposure:
     format: "{n}M"
-    n: {randint: [10, 500]}
-  risk_limit:
-    format: "{n}M"
-    n: {randint: [5, 100]}
-  asset_class: {choice: [equity, fixed_income, fx, derivatives, commodities]}
+    n: {randint: [310, 400]}
+  risk_limit: 100M
+  utilization_pct: {uniform: [310.0, 400.0], round: 1}
+  asset_class: equity
 rca_clues:
   risk-calculator:
-    risk.limit_utilization_pct: {uniform: [200.0, 400.0], round: 1}
+    risk.limit_utilization_pct: {uniform: [310.0, 400.0], round: 1}
     risk.var_99_usd: {randint: [10000000, 50000000]}
   order-gateway:
     oms.kill_switch_active: true
@@ -60,9 +57,9 @@ rca_clues:
     compliance.desk_limit_violations: {randint: [1, 5]}
 business_impact:
   - kpi: business.order_flow_per_min
-    factor: {uniform: [0.15, 0.40]}
+    value: {uniform: [316.2, 363.8]}
   - kpi: business.notional_value_usd_per_min
-    factor: {uniform: [0.20, 0.50]}
+    value: {uniform: [1692600.0, 1947400.0], round: 1}
   - kpi: business.position_limit_breaches
     factor: {uniform: [3.0, 8.0]}
   - kpi: business.margin_utilization_pct

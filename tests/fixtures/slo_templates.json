@@ -1,0 +1,5704 @@
+{
+ "activemq_otel-broker-memory-utilization-99.5-Rolling30Days": {
+  "generators": [
+   "activemq_otel"
+  ],
+  "package": "activemq_otel",
+  "version": "0.3.1",
+  "id": "activemq_otel-broker-memory-utilization-99.5-Rolling30Days",
+  "name": "[ActiveMQ OTel] Broker memory utilization 99.5% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"activemq.otel\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "activemq.otel"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "last_value",
+    "field": "activemq.memory.utilization",
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "metric": "A"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "1m"
+  },
+  "group_by": [
+   "resource.attributes.activemq.broker.name"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "resource.attributes.activemq.broker.name",
+   "activemq.memory.utilization"
+  ],
+  "comparator": "LT",
+  "threshold": 0.85
+ },
+ "activemq_otel-message-wait-time-99.5-Rolling30Days": {
+  "generators": [
+   "activemq_otel"
+  ],
+  "package": "activemq_otel",
+  "version": "0.3.1",
+  "id": "activemq_otel-message-wait-time-99.5-Rolling30Days",
+  "name": "[ActiveMQ OTel] Message wait time 99.5% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"activemq.otel\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "activemq.otel"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "avg",
+    "field": "activemq.message.wait_time.avg",
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "metric": "A"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "1m"
+  },
+  "group_by": [
+   "resource.attributes.activemq.broker.name"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "resource.attributes.activemq.broker.name",
+   "activemq.message.wait_time.avg"
+  ],
+  "comparator": "LT",
+  "threshold": 1000
+ },
+ "activemq_otel-store-utilization-99.5-Rolling30Days": {
+  "generators": [
+   "activemq_otel"
+  ],
+  "package": "activemq_otel",
+  "version": "0.3.1",
+  "id": "activemq_otel-store-utilization-99.5-Rolling30Days",
+  "name": "[ActiveMQ OTel] Store utilization 99.5% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"activemq.otel\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "activemq.otel"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "last_value",
+    "field": "activemq.store.utilization",
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "metric": "A"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "1m"
+  },
+  "group_by": [
+   "resource.attributes.activemq.broker.name"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "resource.attributes.activemq.broker.name",
+   "activemq.store.utilization"
+  ],
+  "comparator": "LT",
+  "threshold": 0.9
+ },
+ "activemq_otel-zero-blocked-sends-99.5-Rolling30Days": {
+  "generators": [
+   "activemq_otel"
+  ],
+  "package": "activemq_otel",
+  "version": "0.3.1",
+  "id": "activemq_otel-zero-blocked-sends-99.5-Rolling30Days",
+  "name": "[ActiveMQ OTel] Zero blocked sends 99.5% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"activemq.otel\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "activemq.otel"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "max",
+    "field": "activemq.queue.blocked.sends",
+    "filter": ""
+   },
+   {
+    "part": "metric",
+    "name": "B",
+    "aggregation": "min",
+    "field": "activemq.queue.blocked.sends",
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "metric": "A - B"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "1m"
+  },
+  "group_by": [
+   "activemq.destination.name",
+   "resource.attributes.activemq.broker.name"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "activemq.destination.name",
+   "resource.attributes.activemq.broker.name",
+   "activemq.queue.blocked.sends"
+  ],
+  "comparator": "LT",
+  "threshold": 1
+ },
+ "airflow_otel-dag-import-errors-zero-99.5-Rolling30Days": {
+  "generators": [
+   "airflow_otel"
+  ],
+  "package": "airflow_otel",
+  "version": "0.3.0",
+  "id": "airflow_otel-dag-import-errors-zero-99.5-Rolling30Days",
+  "name": "[Airflow OTel] DAG import errors zero 99.5% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"airflow.otel\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "airflow.otel"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "max",
+    "field": "airflow.dag_processing.import_errors",
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "metric": "A"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "1m"
+  },
+  "group_by": [],
+  "fields": [
+   "data_stream.dataset",
+   "airflow.dag_processing.import_errors"
+  ],
+  "comparator": "LT",
+  "threshold": 1
+ },
+ "airflow_otel-scheduler-loop-duration-99.5-Rolling30Days": {
+  "generators": [
+   "airflow_otel"
+  ],
+  "package": "airflow_otel",
+  "version": "0.3.0",
+  "id": "airflow_otel-scheduler-loop-duration-99.5-Rolling30Days",
+  "name": "[Airflow OTel] Scheduler loop duration 99.5% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"airflow.otel\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "airflow.otel"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "avg",
+    "field": "airflow.scheduler.scheduler_loop_duration",
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "metric": "A"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "1m"
+  },
+  "group_by": [],
+  "fields": [
+   "data_stream.dataset",
+   "airflow.scheduler.scheduler_loop_duration"
+  ],
+  "comparator": "LT",
+  "threshold": 120
+ },
+ "airflow_otel-task-success-rate-99.5-Rolling30Days": {
+  "generators": [
+   "airflow_otel"
+  ],
+  "package": "airflow_otel",
+  "version": "0.3.0",
+  "id": "airflow_otel-task-success-rate-99.5-Rolling30Days",
+  "name": "[Airflow OTel] Task success rate 99.5% rolling 30 days",
+  "indicator": "sli.metric.custom",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"airflow.otel\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "airflow.otel"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "good",
+    "name": "A",
+    "aggregation": "sum",
+    "field": "airflow.ti_successes",
+    "filter": ""
+   },
+   {
+    "part": "total",
+    "name": "A",
+    "aggregation": "sum",
+    "field": "airflow.ti_successes",
+    "filter": ""
+   },
+   {
+    "part": "total",
+    "name": "B",
+    "aggregation": "sum",
+    "field": "airflow.ti_failures",
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "good": "A",
+   "total": "A + B"
+  },
+  "budgeting": "occurrences",
+  "objective": {
+   "target": 0.995
+  },
+  "group_by": [],
+  "fields": [
+   "data_stream.dataset",
+   "airflow.ti_successes",
+   "airflow.ti_failures"
+  ]
+ },
+ "apache_otel-avg-request-latency-99-Rolling30Days": {
+  "generators": [
+   "apache_otel"
+  ],
+  "package": "apache_otel",
+  "version": "0.6.1",
+  "id": "apache_otel-avg-request-latency-99-Rolling30Days",
+  "name": "[Apache OTel] Average request latency 99% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"apachereceiver.otel\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "apachereceiver.otel"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "max",
+    "field": "apache.request.time",
+    "filter": ""
+   },
+   {
+    "part": "metric",
+    "name": "B",
+    "aggregation": "min",
+    "field": "apache.request.time",
+    "filter": ""
+   },
+   {
+    "part": "metric",
+    "name": "C",
+    "aggregation": "max",
+    "field": "apache.requests",
+    "filter": ""
+   },
+   {
+    "part": "metric",
+    "name": "D",
+    "aggregation": "min",
+    "field": "apache.requests",
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "metric": "(A-B)/(C-D)"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.99,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "1m"
+  },
+  "group_by": [
+   "resource.attributes.apache.server.name"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "resource.attributes.apache.server.name",
+   "apache.request.time",
+   "apache.requests"
+  ],
+  "comparator": "LT",
+  "threshold": 200
+ },
+ "apache_tomcat_otel-avg-request-latency-99.5-Rolling30Days": {
+  "generators": [
+   "apache_tomcat_otel"
+  ],
+  "package": "apache_tomcat_otel",
+  "version": "0.3.2",
+  "id": "apache_tomcat_otel-avg-request-latency-99.5-Rolling30Days",
+  "name": "[Tomcat OTel] Average request latency 99.5% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"tomcat.otel\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "tomcat.otel"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "max",
+    "field": "Catalina_GlobalRequestProcessor_processingTime",
+    "filter": ""
+   },
+   {
+    "part": "metric",
+    "name": "B",
+    "aggregation": "min",
+    "field": "Catalina_GlobalRequestProcessor_processingTime",
+    "filter": ""
+   },
+   {
+    "part": "metric",
+    "name": "C",
+    "aggregation": "max",
+    "field": "Catalina_GlobalRequestProcessor_requestCount",
+    "filter": ""
+   },
+   {
+    "part": "metric",
+    "name": "D",
+    "aggregation": "min",
+    "field": "Catalina_GlobalRequestProcessor_requestCount",
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "metric": "(A-B)/(C-D)"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "1m"
+  },
+  "group_by": [
+   "resource.attributes.service.instance.id"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "resource.attributes.service.instance.id",
+   "Catalina_GlobalRequestProcessor_processingTime",
+   "Catalina_GlobalRequestProcessor_requestCount"
+  ],
+  "comparator": "LT",
+  "threshold": 500
+ },
+ "apache_tomcat_otel-request-error-rate-99.5-Rolling30Days": {
+  "generators": [
+   "apache_tomcat_otel"
+  ],
+  "package": "apache_tomcat_otel",
+  "version": "0.3.2",
+  "id": "apache_tomcat_otel-request-error-rate-99.5-Rolling30Days",
+  "name": "[Tomcat OTel] Request error rate 99.5% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"tomcat.otel\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "tomcat.otel"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "max",
+    "field": "Catalina_GlobalRequestProcessor_errorCount",
+    "filter": ""
+   },
+   {
+    "part": "metric",
+    "name": "B",
+    "aggregation": "min",
+    "field": "Catalina_GlobalRequestProcessor_errorCount",
+    "filter": ""
+   },
+   {
+    "part": "metric",
+    "name": "C",
+    "aggregation": "max",
+    "field": "Catalina_GlobalRequestProcessor_requestCount",
+    "filter": ""
+   },
+   {
+    "part": "metric",
+    "name": "D",
+    "aggregation": "min",
+    "field": "Catalina_GlobalRequestProcessor_requestCount",
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "metric": "(A-B)/(C-D)"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "1m"
+  },
+  "group_by": [
+   "resource.attributes.service.instance.id"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "resource.attributes.service.instance.id",
+   "Catalina_GlobalRequestProcessor_errorCount",
+   "Catalina_GlobalRequestProcessor_requestCount"
+  ],
+  "comparator": "LT",
+  "threshold": 0.05
+ },
+ "apache_tomcat_otel-thread-pool-utilization-99.5-Rolling30Days": {
+  "generators": [
+   "apache_tomcat_otel"
+  ],
+  "package": "apache_tomcat_otel",
+  "version": "0.3.2",
+  "id": "apache_tomcat_otel-thread-pool-utilization-99.5-Rolling30Days",
+  "name": "[Tomcat OTel] Thread pool utilization 99.5% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"tomcat.otel\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "tomcat.otel"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "avg",
+    "field": "Catalina_ThreadPool_currentThreadsBusy",
+    "filter": ""
+   },
+   {
+    "part": "metric",
+    "name": "B",
+    "aggregation": "avg",
+    "field": "Catalina_ThreadPool_maxThreads",
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "metric": "A/B"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "1m"
+  },
+  "group_by": [
+   "resource.attributes.service.instance.id"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "resource.attributes.service.instance.id",
+   "Catalina_ThreadPool_currentThreadsBusy",
+   "Catalina_ThreadPool_maxThreads"
+  ],
+  "comparator": "LT",
+  "threshold": 0.8
+ },
+ "aws_ec2_otel-status-check-availability-99.5-Rolling30Days": {
+  "generators": [
+   "aws_ec2_otel"
+  ],
+  "package": "aws_ec2_otel",
+  "version": "0.14.0",
+  "id": "aws_ec2_otel-status-check-availability-99.5-Rolling30Days",
+  "name": "[AWS EC2 OTel] Status check availability 99.5% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"aws.ec2.otel\" AND Namespace: \"AWS/EC2\" AND MetricName: \"StatusCheckFailed\" AND stat: \"Maximum\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "aws.ec2.otel"
+   },
+   {
+    "field": "Namespace",
+    "value": "AWS/EC2"
+   },
+   {
+    "field": "MetricName",
+    "value": "StatusCheckFailed"
+   },
+   {
+    "field": "stat",
+    "value": "Maximum"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "max",
+    "field": "metrics.amazonaws.com/AWS/EC2/StatusCheckFailed",
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "metric": "A"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "5m"
+  },
+  "group_by": [
+   "cloud.region",
+   "InstanceId"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "Namespace",
+   "MetricName",
+   "stat",
+   "cloud.region",
+   "InstanceId",
+   "metrics.amazonaws.com/AWS/EC2/StatusCheckFailed"
+  ],
+  "comparator": "LT",
+  "threshold": 1
+ },
+ "aws_elb_metrics_otel-request-availability-99.5-Rolling30Days": {
+  "generators": [
+   "aws_elb_metrics_otel"
+  ],
+  "package": "aws_elb_metrics_otel",
+  "version": "0.12.1",
+  "id": "aws_elb_metrics_otel-request-availability-99.5-Rolling30Days",
+  "name": "[AWS ELB OTel] Application Load Balancer request availability 99.5% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"aws.elb.otel\" AND Namespace: \"AWS/ApplicationELB\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "aws.elb.otel"
+   },
+   {
+    "field": "Namespace",
+    "value": "AWS/ApplicationELB"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "sum",
+    "field": "metrics.amazonaws.com/AWS/ApplicationELB/RequestCount",
+    "filter": "MetricName: \"RequestCount\" AND stat: \"Sum\" AND metrics.amazonaws.com/AWS/ApplicationELB/RequestCount > 0"
+   },
+   {
+    "part": "metric",
+    "name": "B",
+    "aggregation": "sum",
+    "field": "metrics.amazonaws.com/AWS/ApplicationELB/HTTPCode_Target_5XX_Count",
+    "filter": "MetricName: \"HTTPCode_Target_5XX_Count\" AND stat: \"Sum\""
+   },
+   {
+    "part": "metric",
+    "name": "C",
+    "aggregation": "sum",
+    "field": "metrics.amazonaws.com/AWS/ApplicationELB/HTTPCode_ELB_5XX_Count",
+    "filter": "MetricName: \"HTTPCode_ELB_5XX_Count\" AND stat: \"Sum\""
+   }
+  ],
+  "equations": {
+   "metric": "(B+C)/A"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "1m"
+  },
+  "group_by": [
+   "cloud.region",
+   "LoadBalancer"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "Namespace",
+   "cloud.region",
+   "LoadBalancer",
+   "metrics.amazonaws.com/AWS/ApplicationELB/RequestCount",
+   "MetricName",
+   "stat",
+   "metrics.amazonaws.com/AWS/ApplicationELB/HTTPCode_Target_5XX_Count",
+   "metrics.amazonaws.com/AWS/ApplicationELB/HTTPCode_ELB_5XX_Count"
+  ],
+  "comparator": "LT",
+  "threshold": 0.005
+ },
+ "aws_elb_metrics_otel-target-response-time-avg-99.5-Rolling30Days": {
+  "generators": [
+   "aws_elb_metrics_otel"
+  ],
+  "package": "aws_elb_metrics_otel",
+  "version": "0.12.1",
+  "id": "aws_elb_metrics_otel-target-response-time-avg-99.5-Rolling30Days",
+  "name": "[AWS ELB OTel] Application Load Balancer target response time average 99.5% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"aws.elb.otel\" AND Namespace: \"AWS/ApplicationELB\" AND MetricName: \"TargetResponseTime\" AND stat: \"Average\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "aws.elb.otel"
+   },
+   {
+    "field": "Namespace",
+    "value": "AWS/ApplicationELB"
+   },
+   {
+    "field": "MetricName",
+    "value": "TargetResponseTime"
+   },
+   {
+    "field": "stat",
+    "value": "Average"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "avg",
+    "field": "metrics.amazonaws.com/AWS/ApplicationELB/TargetResponseTime",
+    "filter": "MetricName: \"TargetResponseTime\" AND stat: \"Average\""
+   }
+  ],
+  "equations": {
+   "metric": "A"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "1m"
+  },
+  "group_by": [
+   "cloud.region",
+   "LoadBalancer",
+   "TargetGroup"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "Namespace",
+   "MetricName",
+   "stat",
+   "cloud.region",
+   "LoadBalancer",
+   "TargetGroup",
+   "metrics.amazonaws.com/AWS/ApplicationELB/TargetResponseTime"
+  ],
+  "comparator": "LT",
+  "threshold": 1
+ },
+ "aws_lambda_otel-avg-duration-99.5-Rolling30Days": {
+  "generators": [
+   "aws_lambda_otel"
+  ],
+  "package": "aws_lambda_otel",
+  "version": "0.12.0",
+  "id": "aws_lambda_otel-avg-duration-99.5-Rolling30Days",
+  "name": "[AWS Lambda OTel] Average duration 99.5% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"aws.lambda.otel\" AND Namespace: \"AWS/Lambda\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "aws.lambda.otel"
+   },
+   {
+    "field": "Namespace",
+    "value": "AWS/Lambda"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "avg",
+    "field": "metrics.amazonaws.com/AWS/Lambda/Duration",
+    "filter": "MetricName: \"Duration\" AND stat: \"Average\""
+   }
+  ],
+  "equations": {
+   "metric": "A"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "1m"
+  },
+  "group_by": [
+   "cloud.region",
+   "FunctionName"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "Namespace",
+   "cloud.region",
+   "FunctionName",
+   "metrics.amazonaws.com/AWS/Lambda/Duration",
+   "MetricName",
+   "stat"
+  ],
+  "comparator": "LT",
+  "threshold": 3000
+ },
+ "aws_lambda_otel-invocation-success-rate-99.5-Rolling30Days": {
+  "generators": [
+   "aws_lambda_otel"
+  ],
+  "package": "aws_lambda_otel",
+  "version": "0.12.0",
+  "id": "aws_lambda_otel-invocation-success-rate-99.5-Rolling30Days",
+  "name": "[AWS Lambda OTel] Invocation success rate 99.5% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"aws.lambda.otel\" AND Namespace: \"AWS/Lambda\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "aws.lambda.otel"
+   },
+   {
+    "field": "Namespace",
+    "value": "AWS/Lambda"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "sum",
+    "field": "metrics.amazonaws.com/AWS/Lambda/Errors",
+    "filter": "MetricName: \"Errors\" AND stat: \"Sum\""
+   },
+   {
+    "part": "metric",
+    "name": "B",
+    "aggregation": "sum",
+    "field": "metrics.amazonaws.com/AWS/Lambda/Invocations",
+    "filter": "MetricName: \"Invocations\" AND stat: \"Sum\" AND metrics.amazonaws.com/AWS/Lambda/Invocations > 0"
+   }
+  ],
+  "equations": {
+   "metric": "A/B"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "1m"
+  },
+  "group_by": [
+   "cloud.region",
+   "FunctionName"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "Namespace",
+   "cloud.region",
+   "FunctionName",
+   "metrics.amazonaws.com/AWS/Lambda/Errors",
+   "MetricName",
+   "stat",
+   "metrics.amazonaws.com/AWS/Lambda/Invocations"
+  ],
+  "comparator": "LT",
+  "threshold": 0.005
+ },
+ "aws_rds_otel-avg-read-latency-99.5-Rolling30Days": {
+  "generators": [
+   "aws_rds_otel"
+  ],
+  "package": "aws_rds_otel",
+  "version": "0.12.0",
+  "id": "aws_rds_otel-avg-read-latency-99.5-Rolling30Days",
+  "name": "[AWS RDS OTel] Average read latency 99.5% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"aws.rds.otel\" AND Namespace: \"AWS/RDS\" AND MetricName: \"ReadLatency\" AND stat: \"Average\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "aws.rds.otel"
+   },
+   {
+    "field": "Namespace",
+    "value": "AWS/RDS"
+   },
+   {
+    "field": "MetricName",
+    "value": "ReadLatency"
+   },
+   {
+    "field": "stat",
+    "value": "Average"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "avg",
+    "field": "metrics.amazonaws.com/AWS/RDS/ReadLatency",
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "metric": "A"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "1m"
+  },
+  "group_by": [
+   "cloud.region",
+   "DBInstanceIdentifier"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "Namespace",
+   "MetricName",
+   "stat",
+   "cloud.region",
+   "DBInstanceIdentifier",
+   "metrics.amazonaws.com/AWS/RDS/ReadLatency"
+  ],
+  "comparator": "LT",
+  "threshold": 0.01
+ },
+ "aws_sqs_otel-dlq-empty-99.5-Rolling30Days": {
+  "generators": [
+   "aws_sqs_otel"
+  ],
+  "package": "aws_sqs_otel",
+  "version": "0.13.0",
+  "id": "aws_sqs_otel-dlq-empty-99.5-Rolling30Days",
+  "name": "[AWS SQS OTel] DLQ empty 99.5% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"aws.sqs.otel\" AND Namespace: \"AWS/SQS\" AND MetricName: \"ApproximateNumberOfMessagesVisible\" AND stat: \"Maximum\" AND QueueName: *dlq*",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "aws.sqs.otel"
+   },
+   {
+    "field": "Namespace",
+    "value": "AWS/SQS"
+   },
+   {
+    "field": "MetricName",
+    "value": "ApproximateNumberOfMessagesVisible"
+   },
+   {
+    "field": "stat",
+    "value": "Maximum"
+   },
+   {
+    "field": "QueueName",
+    "value": "*dlq*"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "max",
+    "field": "metrics.amazonaws.com/AWS/SQS/ApproximateNumberOfMessagesVisible",
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "metric": "A"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "1m"
+  },
+  "group_by": [
+   "cloud.region",
+   "QueueName"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "Namespace",
+   "MetricName",
+   "stat",
+   "QueueName",
+   "cloud.region",
+   "metrics.amazonaws.com/AWS/SQS/ApproximateNumberOfMessagesVisible"
+  ],
+  "comparator": "LTE",
+  "threshold": 0
+ },
+ "aws_sqs_otel-oldest-message-age-99.5-Rolling30Days": {
+  "generators": [
+   "aws_sqs_otel"
+  ],
+  "package": "aws_sqs_otel",
+  "version": "0.13.0",
+  "id": "aws_sqs_otel-oldest-message-age-99.5-Rolling30Days",
+  "name": "[AWS SQS OTel] Oldest message age 99.5% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"aws.sqs.otel\" AND Namespace: \"AWS/SQS\" AND MetricName: \"ApproximateAgeOfOldestMessage\" AND stat: \"Maximum\" AND NOT QueueName: *dlq*",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "aws.sqs.otel"
+   },
+   {
+    "field": "Namespace",
+    "value": "AWS/SQS"
+   },
+   {
+    "field": "MetricName",
+    "value": "ApproximateAgeOfOldestMessage"
+   },
+   {
+    "field": "stat",
+    "value": "Maximum"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "max",
+    "field": "metrics.amazonaws.com/AWS/SQS/ApproximateAgeOfOldestMessage",
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "metric": "A"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "1m"
+  },
+  "group_by": [
+   "cloud.region",
+   "QueueName"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "Namespace",
+   "MetricName",
+   "stat",
+   "QueueName",
+   "cloud.region",
+   "metrics.amazonaws.com/AWS/SQS/ApproximateAgeOfOldestMessage"
+  ],
+  "comparator": "LT",
+  "threshold": 300
+ },
+ "azure_activity_logs_otel-administrative-latency-99.5-Rolling30Days": {
+  "generators": [
+   "azure_activity_otel"
+  ],
+  "package": "azure_activity_otel",
+  "version": "0.2.0",
+  "id": "azure_activity_logs_otel-administrative-latency-99.5-Rolling30Days",
+  "name": "[Azure Activity Logs OTel] Administrative operation latency 99.5% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "logs-azure.activity.otel-*",
+  "filter": "data_stream.dataset: \"azure.activity.otel\" and azure.category: \"Administrative\" and not (azure.result.type: \"Start\" or azure.result.type: \"Started\")",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "azure.activity.otel"
+   },
+   {
+    "field": "azure.category",
+    "value": "Administrative"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "avg",
+    "field": "azure.duration",
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "metric": "A"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "1m"
+  },
+  "group_by": [],
+  "fields": [
+   "data_stream.dataset",
+   "azure.category",
+   "azure.result.type",
+   "azure.duration"
+  ],
+  "comparator": "LT",
+  "threshold": 3000
+ },
+ "azure_activity_logs_otel-administrative-success-rate-99.5-Rolling30Days": {
+  "generators": [
+   "azure_activity_otel"
+  ],
+  "package": "azure_activity_otel",
+  "version": "0.2.0",
+  "id": "azure_activity_logs_otel-administrative-success-rate-99.5-Rolling30Days",
+  "name": "[Azure Activity Logs OTel] Administrative operation success rate 99.5% rolling 30 days",
+  "indicator": "sli.metric.custom",
+  "index": "logs-azure.activity.otel-*",
+  "filter": "data_stream.dataset: \"azure.activity.otel\" and azure.category: \"Administrative\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "azure.activity.otel"
+   },
+   {
+    "field": "azure.category",
+    "value": "Administrative"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "good",
+    "name": "A",
+    "aggregation": "doc_count",
+    "field": null,
+    "filter": "not (azure.result.type: \"Start\" or azure.result.type: \"Started\") and not (azure.result.type: \"Failure\" or azure.result.type: \"Failed\")"
+   },
+   {
+    "part": "total",
+    "name": "A",
+    "aggregation": "doc_count",
+    "field": null,
+    "filter": "not (azure.result.type: \"Start\" or azure.result.type: \"Started\")"
+   }
+  ],
+  "equations": {
+   "good": "A",
+   "total": "A"
+  },
+  "budgeting": "occurrences",
+  "objective": {
+   "target": 0.995
+  },
+  "group_by": [],
+  "fields": [
+   "data_stream.dataset",
+   "azure.category",
+   "azure.result.type"
+  ]
+ },
+ "cassandra_otel-read-latency-p99-99.5-Rolling30Days": {
+  "generators": [
+   "cassandra_otel"
+  ],
+  "package": "cassandra_otel",
+  "version": "0.3.1",
+  "id": "cassandra_otel-read-latency-p99-99.5-Rolling30Days",
+  "name": "[Cassandra OTel] Read latency p99 99.5% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"cassandra.otel\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "cassandra.otel"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "last_value",
+    "field": "cassandra.client.request.read.latency.99p",
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "metric": "A"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "1m"
+  },
+  "group_by": [
+   "resource.attributes.server.address"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "resource.attributes.server.address",
+   "cassandra.client.request.read.latency.99p"
+  ],
+  "comparator": "LT",
+  "threshold": 50000
+ },
+ "cassandra_otel-request-success-rate-99.5-Rolling30Days": {
+  "generators": [
+   "cassandra_otel"
+  ],
+  "package": "cassandra_otel",
+  "version": "0.3.1",
+  "id": "cassandra_otel-request-success-rate-99.5-Rolling30Days",
+  "name": "[Cassandra OTel] Request success rate 99.5% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"cassandra.otel\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "cassandra.otel"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "max",
+    "field": "cassandra.client.request.count",
+    "filter": "attributes.operation: Read"
+   },
+   {
+    "part": "metric",
+    "name": "B",
+    "aggregation": "min",
+    "field": "cassandra.client.request.count",
+    "filter": "attributes.operation: Read"
+   },
+   {
+    "part": "metric",
+    "name": "C",
+    "aggregation": "max",
+    "field": "cassandra.client.request.count",
+    "filter": "attributes.operation: Write"
+   },
+   {
+    "part": "metric",
+    "name": "D",
+    "aggregation": "min",
+    "field": "cassandra.client.request.count",
+    "filter": "attributes.operation: Write"
+   },
+   {
+    "part": "metric",
+    "name": "E",
+    "aggregation": "max",
+    "field": "cassandra.client.request.count",
+    "filter": "attributes.operation: RangeSlice"
+   },
+   {
+    "part": "metric",
+    "name": "F",
+    "aggregation": "min",
+    "field": "cassandra.client.request.count",
+    "filter": "attributes.operation: RangeSlice"
+   },
+   {
+    "part": "metric",
+    "name": "G",
+    "aggregation": "max",
+    "field": "cassandra.client.request.error.count",
+    "filter": "attributes.operation: Read AND attributes.status: Timeout"
+   },
+   {
+    "part": "metric",
+    "name": "H",
+    "aggregation": "min",
+    "field": "cassandra.client.request.error.count",
+    "filter": "attributes.operation: Read AND attributes.status: Timeout"
+   },
+   {
+    "part": "metric",
+    "name": "I",
+    "aggregation": "max",
+    "field": "cassandra.client.request.error.count",
+    "filter": "attributes.operation: Read AND attributes.status: Unavailable"
+   },
+   {
+    "part": "metric",
+    "name": "J",
+    "aggregation": "min",
+    "field": "cassandra.client.request.error.count",
+    "filter": "attributes.operation: Read AND attributes.status: Unavailable"
+   },
+   {
+    "part": "metric",
+    "name": "K",
+    "aggregation": "max",
+    "field": "cassandra.client.request.error.count",
+    "filter": "attributes.operation: Read AND attributes.status: Failure"
+   },
+   {
+    "part": "metric",
+    "name": "L",
+    "aggregation": "min",
+    "field": "cassandra.client.request.error.count",
+    "filter": "attributes.operation: Read AND attributes.status: Failure"
+   },
+   {
+    "part": "metric",
+    "name": "M",
+    "aggregation": "max",
+    "field": "cassandra.client.request.error.count",
+    "filter": "attributes.operation: Write AND attributes.status: Timeout"
+   },
+   {
+    "part": "metric",
+    "name": "N",
+    "aggregation": "min",
+    "field": "cassandra.client.request.error.count",
+    "filter": "attributes.operation: Write AND attributes.status: Timeout"
+   },
+   {
+    "part": "metric",
+    "name": "O",
+    "aggregation": "max",
+    "field": "cassandra.client.request.error.count",
+    "filter": "attributes.operation: Write AND attributes.status: Unavailable"
+   },
+   {
+    "part": "metric",
+    "name": "P",
+    "aggregation": "min",
+    "field": "cassandra.client.request.error.count",
+    "filter": "attributes.operation: Write AND attributes.status: Unavailable"
+   },
+   {
+    "part": "metric",
+    "name": "Q",
+    "aggregation": "max",
+    "field": "cassandra.client.request.error.count",
+    "filter": "attributes.operation: Write AND attributes.status: Failure"
+   },
+   {
+    "part": "metric",
+    "name": "R",
+    "aggregation": "min",
+    "field": "cassandra.client.request.error.count",
+    "filter": "attributes.operation: Write AND attributes.status: Failure"
+   },
+   {
+    "part": "metric",
+    "name": "S",
+    "aggregation": "max",
+    "field": "cassandra.client.request.error.count",
+    "filter": "attributes.operation: RangeSlice AND attributes.status: Timeout"
+   },
+   {
+    "part": "metric",
+    "name": "T",
+    "aggregation": "min",
+    "field": "cassandra.client.request.error.count",
+    "filter": "attributes.operation: RangeSlice AND attributes.status: Timeout"
+   },
+   {
+    "part": "metric",
+    "name": "U",
+    "aggregation": "max",
+    "field": "cassandra.client.request.error.count",
+    "filter": "attributes.operation: RangeSlice AND attributes.status: Unavailable"
+   },
+   {
+    "part": "metric",
+    "name": "V",
+    "aggregation": "min",
+    "field": "cassandra.client.request.error.count",
+    "filter": "attributes.operation: RangeSlice AND attributes.status: Unavailable"
+   },
+   {
+    "part": "metric",
+    "name": "W",
+    "aggregation": "max",
+    "field": "cassandra.client.request.error.count",
+    "filter": "attributes.operation: RangeSlice AND attributes.status: Failure"
+   },
+   {
+    "part": "metric",
+    "name": "X",
+    "aggregation": "min",
+    "field": "cassandra.client.request.error.count",
+    "filter": "attributes.operation: RangeSlice AND attributes.status: Failure"
+   }
+  ],
+  "equations": {
+   "metric": "((A-B)+(C-D)+(E-F)-((G-H)+(I-J)+(K-L)+(M-N)+(O-P)+(Q-R)+(S-T)+(U-V)+(W-X)))/((A-B)+(C-D)+(E-F))"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "1m"
+  },
+  "group_by": [
+   "resource.attributes.server.address"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "resource.attributes.server.address",
+   "cassandra.client.request.count",
+   "attributes.operation",
+   "cassandra.client.request.error.count",
+   "attributes.status"
+  ],
+  "comparator": "GTE",
+  "threshold": 0.995
+ },
+ "cockroachdb_otel-admission-io-overload-99.5-Rolling30Days": {
+  "generators": [
+   "cockroachdb_otel"
+  ],
+  "package": "cockroachdb_otel",
+  "version": "0.3.0",
+  "id": "cockroachdb_otel-admission-io-overload-99.5-Rolling30Days",
+  "name": "[CockroachDB OTel] Admission IO overload under 1.0 99.5% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"cockroachdb.otel\" AND service.name: \"cockroachdb\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "cockroachdb.otel"
+   },
+   {
+    "field": "service.name",
+    "value": "cockroachdb"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "max",
+    "field": "admission_io_overload",
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "metric": "A"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "1m"
+  },
+  "group_by": [
+   "resource.attributes.host.name"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "service.name",
+   "resource.attributes.host.name",
+   "admission_io_overload"
+  ],
+  "comparator": "LT",
+  "threshold": 1
+ },
+ "cockroachdb_otel-sql-availability-99.5-Rolling30Days": {
+  "generators": [
+   "cockroachdb_otel"
+  ],
+  "package": "cockroachdb_otel",
+  "version": "0.3.0",
+  "id": "cockroachdb_otel-sql-availability-99.5-Rolling30Days",
+  "name": "[CockroachDB OTel] SQL statement success rate 99.5% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"cockroachdb.otel\" AND service.name: \"cockroachdb\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "cockroachdb.otel"
+   },
+   {
+    "field": "service.name",
+    "value": "cockroachdb"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "max",
+    "field": "sql_query_count",
+    "filter": ""
+   },
+   {
+    "part": "metric",
+    "name": "B",
+    "aggregation": "min",
+    "field": "sql_query_count",
+    "filter": ""
+   },
+   {
+    "part": "metric",
+    "name": "C",
+    "aggregation": "max",
+    "field": "sql_failure_count",
+    "filter": ""
+   },
+   {
+    "part": "metric",
+    "name": "D",
+    "aggregation": "min",
+    "field": "sql_failure_count",
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "metric": "((A-B)-(C-D))/(A-B)"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "1m"
+  },
+  "group_by": [
+   "resource.attributes.host.name"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "service.name",
+   "resource.attributes.host.name",
+   "sql_query_count",
+   "sql_failure_count"
+  ],
+  "comparator": "GTE",
+  "threshold": 0.995
+ },
+ "cockroachdb_otel-storage-capacity-60-Rolling30Days": {
+  "generators": [
+   "cockroachdb_otel"
+  ],
+  "package": "cockroachdb_otel",
+  "version": "0.3.0",
+  "id": "cockroachdb_otel-storage-capacity-60-Rolling30Days",
+  "name": "[CockroachDB OTel] Storage capacity utilization under 60% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"cockroachdb.otel\" AND service.name: \"cockroachdb\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "cockroachdb.otel"
+   },
+   {
+    "field": "service.name",
+    "value": "cockroachdb"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "sum",
+    "field": "capacity_used",
+    "filter": ""
+   },
+   {
+    "part": "metric",
+    "name": "B",
+    "aggregation": "sum",
+    "field": "capacity",
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "metric": "A/B"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "1m"
+  },
+  "group_by": [
+   "resource.attributes.host.name"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "service.name",
+   "resource.attributes.host.name",
+   "capacity_used",
+   "capacity"
+  ],
+  "comparator": "LT",
+  "threshold": 0.6
+ },
+ "couchdb_otel-avg-request-latency-99.5-Rolling30Days": {
+  "generators": [
+   "couchdb_otel"
+  ],
+  "package": "couchdb_otel",
+  "version": "0.3.1",
+  "id": "couchdb_otel-avg-request-latency-99.5-Rolling30Days",
+  "name": "[CouchDB OTel] Average request latency 99.5% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"couchdbreceiver.otel\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "couchdbreceiver.otel"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "last_value",
+    "field": "couchdb.average_request_time",
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "metric": "A"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "1m"
+  },
+  "group_by": [
+   "resource.attributes.couchdb.node.name"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "resource.attributes.couchdb.node.name",
+   "couchdb.average_request_time"
+  ],
+  "comparator": "LT",
+  "threshold": 200
+ },
+ "couchdb_otel-file-descriptor-headroom-99.5-Rolling30Days": {
+  "generators": [
+   "couchdb_otel"
+  ],
+  "package": "couchdb_otel",
+  "version": "0.3.1",
+  "id": "couchdb_otel-file-descriptor-headroom-99.5-Rolling30Days",
+  "name": "[CouchDB OTel] File descriptor headroom 99.5% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"couchdbreceiver.otel\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "couchdbreceiver.otel"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "last_value",
+    "field": "couchdb.file_descriptor.open",
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "metric": "A"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "1m"
+  },
+  "group_by": [
+   "resource.attributes.couchdb.node.name"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "resource.attributes.couchdb.node.name",
+   "couchdb.file_descriptor.open"
+  ],
+  "comparator": "LT",
+  "threshold": 1000
+ },
+ "envoyproxy_otel-downstream-request-availability-99.5-Rolling30Days": {
+  "generators": [
+   "envoyproxy_otel"
+  ],
+  "package": "envoyproxy_otel",
+  "version": "0.4.0",
+  "id": "envoyproxy_otel-downstream-request-availability-99.5-Rolling30Days",
+  "name": "[Envoy OTel] Downstream request availability 99.5% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"statsdreceiver\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "statsdreceiver"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "max",
+    "field": "envoy.http.ingress_http.downstream_rq_2xx",
+    "filter": ""
+   },
+   {
+    "part": "metric",
+    "name": "B",
+    "aggregation": "min",
+    "field": "envoy.http.ingress_http.downstream_rq_2xx",
+    "filter": ""
+   },
+   {
+    "part": "metric",
+    "name": "C",
+    "aggregation": "max",
+    "field": "envoy.http.ingress_http.downstream_rq_completed",
+    "filter": ""
+   },
+   {
+    "part": "metric",
+    "name": "D",
+    "aggregation": "min",
+    "field": "envoy.http.ingress_http.downstream_rq_completed",
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "metric": "(A-B)/(C-D)"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "1m"
+  },
+  "group_by": [],
+  "fields": [
+   "data_stream.dataset",
+   "envoy.http.ingress_http.downstream_rq_2xx",
+   "envoy.http.ingress_http.downstream_rq_completed"
+  ],
+  "comparator": "GTE",
+  "threshold": 0.995
+ },
+ "etcd_otel-proposal-success-rate-99.5-Rolling30Days": {
+  "generators": [
+   "etcd_otel"
+  ],
+  "package": "etcd_otel",
+  "version": "0.3.0",
+  "id": "etcd_otel-proposal-success-rate-99.5-Rolling30Days",
+  "name": "[etcd OTel] Proposal success rate 99.5% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"etcd.otel\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "etcd.otel"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "max",
+    "field": "etcd_server_proposals_committed_total",
+    "filter": ""
+   },
+   {
+    "part": "metric",
+    "name": "B",
+    "aggregation": "min",
+    "field": "etcd_server_proposals_committed_total",
+    "filter": ""
+   },
+   {
+    "part": "metric",
+    "name": "C",
+    "aggregation": "max",
+    "field": "etcd_server_proposals_failed_total",
+    "filter": ""
+   },
+   {
+    "part": "metric",
+    "name": "D",
+    "aggregation": "min",
+    "field": "etcd_server_proposals_failed_total",
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "metric": "(A-B)/((A-B)+(C-D))"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "1m"
+  },
+  "group_by": [
+   "resource.attributes.service.instance.id"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "resource.attributes.service.instance.id",
+   "etcd_server_proposals_committed_total",
+   "etcd_server_proposals_failed_total"
+  ],
+  "comparator": "GTE",
+  "threshold": 0.995
+ },
+ "etcd_otel-slow-apply-rate-99.5-Rolling30Days": {
+  "generators": [
+   "etcd_otel"
+  ],
+  "package": "etcd_otel",
+  "version": "0.3.0",
+  "id": "etcd_otel-slow-apply-rate-99.5-Rolling30Days",
+  "name": "[etcd OTel] Apply latency (non-slow) rate 99.5% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"etcd.otel\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "etcd.otel"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "max",
+    "field": "etcd_server_proposals_applied_total",
+    "filter": ""
+   },
+   {
+    "part": "metric",
+    "name": "B",
+    "aggregation": "min",
+    "field": "etcd_server_proposals_applied_total",
+    "filter": ""
+   },
+   {
+    "part": "metric",
+    "name": "C",
+    "aggregation": "max",
+    "field": "etcd_server_slow_apply_total",
+    "filter": ""
+   },
+   {
+    "part": "metric",
+    "name": "D",
+    "aggregation": "min",
+    "field": "etcd_server_slow_apply_total",
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "metric": "((A-B)-(C-D))/(A-B)"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "1m"
+  },
+  "group_by": [
+   "resource.attributes.service.instance.id"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "resource.attributes.service.instance.id",
+   "etcd_server_proposals_applied_total",
+   "etcd_server_slow_apply_total"
+  ],
+  "comparator": "GTE",
+  "threshold": 0.995
+ },
+ "haproxy_otel-backend-availability-99.5-Rolling30Days": {
+  "generators": [
+   "haproxy_otel"
+  ],
+  "package": "haproxy_otel",
+  "version": "0.3.1",
+  "id": "haproxy_otel-backend-availability-99.5-Rolling30Days",
+  "name": "[HAProxy OTel] Backend availability 99.5% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"haproxyreceiver.otel\" AND haproxy.service_name: \"BACKEND\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "haproxyreceiver.otel"
+   },
+   {
+    "field": "haproxy.service_name",
+    "value": "BACKEND"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "last_value",
+    "field": "haproxy.active",
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "metric": "A"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "1m"
+  },
+  "group_by": [
+   "resource.attributes.haproxy.addr",
+   "resource.attributes.haproxy.proxy_name"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "haproxy.service_name",
+   "resource.attributes.haproxy.addr",
+   "resource.attributes.haproxy.proxy_name",
+   "haproxy.active"
+  ],
+  "comparator": "GTE",
+  "threshold": 1
+ },
+ "haproxy_otel-request-success-rate-99.5-Rolling30Days": {
+  "generators": [
+   "haproxy_otel"
+  ],
+  "package": "haproxy_otel",
+  "version": "0.3.1",
+  "id": "haproxy_otel-request-success-rate-99.5-Rolling30Days",
+  "name": "[HAProxy OTel] Request success rate 99.5% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"haproxyreceiver.otel\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "haproxyreceiver.otel"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "max",
+    "field": "haproxy.requests.total",
+    "filter": "attributes.status_code: \"1xx\""
+   },
+   {
+    "part": "metric",
+    "name": "B",
+    "aggregation": "min",
+    "field": "haproxy.requests.total",
+    "filter": "attributes.status_code: \"1xx\""
+   },
+   {
+    "part": "metric",
+    "name": "C",
+    "aggregation": "max",
+    "field": "haproxy.requests.total",
+    "filter": "attributes.status_code: \"2xx\""
+   },
+   {
+    "part": "metric",
+    "name": "D",
+    "aggregation": "min",
+    "field": "haproxy.requests.total",
+    "filter": "attributes.status_code: \"2xx\""
+   },
+   {
+    "part": "metric",
+    "name": "E",
+    "aggregation": "max",
+    "field": "haproxy.requests.total",
+    "filter": "attributes.status_code: \"3xx\""
+   },
+   {
+    "part": "metric",
+    "name": "F",
+    "aggregation": "min",
+    "field": "haproxy.requests.total",
+    "filter": "attributes.status_code: \"3xx\""
+   },
+   {
+    "part": "metric",
+    "name": "G",
+    "aggregation": "max",
+    "field": "haproxy.requests.total",
+    "filter": "attributes.status_code: \"4xx\""
+   },
+   {
+    "part": "metric",
+    "name": "H",
+    "aggregation": "min",
+    "field": "haproxy.requests.total",
+    "filter": "attributes.status_code: \"4xx\""
+   },
+   {
+    "part": "metric",
+    "name": "I",
+    "aggregation": "max",
+    "field": "haproxy.requests.total",
+    "filter": "attributes.status_code: \"5xx\""
+   },
+   {
+    "part": "metric",
+    "name": "J",
+    "aggregation": "min",
+    "field": "haproxy.requests.total",
+    "filter": "attributes.status_code: \"5xx\""
+   },
+   {
+    "part": "metric",
+    "name": "K",
+    "aggregation": "max",
+    "field": "haproxy.requests.total",
+    "filter": "attributes.status_code: \"other\""
+   },
+   {
+    "part": "metric",
+    "name": "L",
+    "aggregation": "min",
+    "field": "haproxy.requests.total",
+    "filter": "attributes.status_code: \"other\""
+   }
+  ],
+  "equations": {
+   "metric": "((A-B)+(C-D)+(E-F)+(G-H)+(K-L))/((A-B)+(C-D)+(E-F)+(G-H)+(I-J)+(K-L))"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "1m"
+  },
+  "group_by": [
+   "resource.attributes.haproxy.addr"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "resource.attributes.haproxy.addr",
+   "haproxy.requests.total",
+   "attributes.status_code"
+  ],
+  "comparator": "GTE",
+  "threshold": 0.995
+ },
+ "haproxy_otel-response-time-latency-99.5-Rolling30Days": {
+  "generators": [
+   "haproxy_otel"
+  ],
+  "package": "haproxy_otel",
+  "version": "0.3.1",
+  "id": "haproxy_otel-response-time-latency-99.5-Rolling30Days",
+  "name": "[HAProxy OTel] Response time latency 99.5% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"haproxyreceiver.otel\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "haproxyreceiver.otel"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "avg",
+    "field": "haproxy.responses.average_time",
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "metric": "A"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "1m"
+  },
+  "group_by": [
+   "resource.attributes.haproxy.addr"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "resource.attributes.haproxy.addr",
+   "haproxy.responses.average_time"
+  ],
+  "comparator": "LT",
+  "threshold": 500
+ },
+ "ibmmq_otel-log-write-latency-99.5-Rolling30Days": {
+  "generators": [
+   "ibmmq_otel"
+  ],
+  "package": "ibmmq_otel",
+  "version": "0.3.1",
+  "id": "ibmmq_otel-log-write-latency-99.5-Rolling30Days",
+  "name": "[IBM MQ OTel] Log write latency 99.5% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"ibmmq.otel\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "ibmmq.otel"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "avg",
+    "field": "ibmmq_qmgr_log_write_latency_seconds",
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "metric": "A"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "1m"
+  },
+  "group_by": [
+   "attributes.qmgr"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "attributes.qmgr",
+   "ibmmq_qmgr_log_write_latency_seconds"
+  ],
+  "comparator": "LT",
+  "threshold": 0.005
+ },
+ "ibmmq_otel-message-put-availability-99.5-Rolling30Days": {
+  "generators": [
+   "ibmmq_otel"
+  ],
+  "package": "ibmmq_otel",
+  "version": "0.3.1",
+  "id": "ibmmq_otel-message-put-availability-99.5-Rolling30Days",
+  "name": "[IBM MQ OTel] Message put availability 99.5% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"ibmmq.otel\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "ibmmq.otel"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "max",
+    "field": "ibmmq_qmgr_mqput_mqput1_total",
+    "filter": ""
+   },
+   {
+    "part": "metric",
+    "name": "B",
+    "aggregation": "min",
+    "field": "ibmmq_qmgr_mqput_mqput1_total",
+    "filter": ""
+   },
+   {
+    "part": "metric",
+    "name": "C",
+    "aggregation": "max",
+    "field": "ibmmq_qmgr_failed_mqput_total",
+    "filter": ""
+   },
+   {
+    "part": "metric",
+    "name": "D",
+    "aggregation": "min",
+    "field": "ibmmq_qmgr_failed_mqput_total",
+    "filter": ""
+   },
+   {
+    "part": "metric",
+    "name": "E",
+    "aggregation": "max",
+    "field": "ibmmq_qmgr_failed_mqput1_total",
+    "filter": ""
+   },
+   {
+    "part": "metric",
+    "name": "F",
+    "aggregation": "min",
+    "field": "ibmmq_qmgr_failed_mqput1_total",
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "metric": "(A-B) / ((A-B) + (C-D) + (E-F))"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "1m"
+  },
+  "group_by": [
+   "attributes.qmgr"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "attributes.qmgr",
+   "ibmmq_qmgr_mqput_mqput1_total",
+   "ibmmq_qmgr_failed_mqput_total",
+   "ibmmq_qmgr_failed_mqput1_total"
+  ],
+  "comparator": "GTE",
+  "threshold": 0.995
+ },
+ "iis_otel-request-queue-age-99.5-Rolling30Days": {
+  "generators": [
+   "iis_otel"
+  ],
+  "package": "iis_otel",
+  "version": "0.5.2",
+  "id": "iis_otel-request-queue-age-99.5-Rolling30Days",
+  "name": "[IIS OTel] Request queue age 99.5% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"iisreceiver.otel\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "iisreceiver.otel"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "max",
+    "field": "iis.request.queue.age.max",
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "metric": "A"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "1m"
+  },
+  "group_by": [
+   "resource.attributes.iis.application_pool"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "resource.attributes.iis.application_pool",
+   "iis.request.queue.age.max"
+  ],
+  "comparator": "LT",
+  "threshold": 1000
+ },
+ "iis_otel-zero-request-rejections-99.5-Rolling30Days": {
+  "generators": [
+   "iis_otel"
+  ],
+  "package": "iis_otel",
+  "version": "0.5.2",
+  "id": "iis_otel-zero-request-rejections-99.5-Rolling30Days",
+  "name": "[IIS OTel] Zero request rejections 99.5% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"iisreceiver.otel\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "iisreceiver.otel"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "max",
+    "field": "iis.request.rejected",
+    "filter": ""
+   },
+   {
+    "part": "metric",
+    "name": "B",
+    "aggregation": "min",
+    "field": "iis.request.rejected",
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "metric": "A - B"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "1m"
+  },
+  "group_by": [
+   "resource.attributes.iis.application_pool"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "resource.attributes.iis.application_pool",
+   "iis.request.rejected"
+  ],
+  "comparator": "LT",
+  "threshold": 0.5
+ },
+ "influxdb_otel-http-api-latency-99.5-Rolling30Days": {
+  "generators": [
+   "influxdb_otel"
+  ],
+  "package": "influxdb_otel",
+  "version": "0.3.1",
+  "id": "influxdb_otel-http-api-latency-99.5-Rolling30Days",
+  "name": "[InfluxDB OTel] HTTP API request latency 99.5% rolling 30 days",
+  "indicator": "sli.histogram.custom",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"influxdb.otel\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "influxdb.otel"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "good",
+    "name": "good",
+    "aggregation": "range",
+    "field": "http_api_request_duration_seconds",
+    "filter": "",
+    "from": 0,
+    "to": 0.2
+   },
+   {
+    "part": "total",
+    "name": "total",
+    "aggregation": "value_count",
+    "field": "http_api_request_duration_seconds",
+    "filter": ""
+   }
+  ],
+  "equations": {},
+  "budgeting": "occurrences",
+  "objective": {
+   "target": 0.995
+  },
+  "group_by": [
+   "resource.attributes.host.name"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "resource.attributes.host.name",
+   "http_api_request_duration_seconds"
+  ]
+ },
+ "influxdb_otel-query-controller-latency-99.5-Rolling30Days": {
+  "generators": [
+   "influxdb_otel"
+  ],
+  "package": "influxdb_otel",
+  "version": "0.3.1",
+  "id": "influxdb_otel-query-controller-latency-99.5-Rolling30Days",
+  "name": "[InfluxDB OTel] Query controller execution latency 99.5% rolling 30 days",
+  "indicator": "sli.histogram.custom",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"influxdb.otel\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "influxdb.otel"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "good",
+    "name": "good",
+    "aggregation": "range",
+    "field": "qc_executing_duration_seconds",
+    "filter": "",
+    "from": 0,
+    "to": 5
+   },
+   {
+    "part": "total",
+    "name": "total",
+    "aggregation": "value_count",
+    "field": "qc_executing_duration_seconds",
+    "filter": ""
+   }
+  ],
+  "equations": {},
+  "budgeting": "occurrences",
+  "objective": {
+   "target": 0.995
+  },
+  "group_by": [
+   "resource.attributes.host.name"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "resource.attributes.host.name",
+   "qc_executing_duration_seconds"
+  ]
+ },
+ "kafka_otel-consumer-group-availability-99.5-Rolling30Days": {
+  "generators": [
+   "kafka_otel"
+  ],
+  "package": "kafka_otel",
+  "version": "0.3.1",
+  "id": "kafka_otel-consumer-group-availability-99.5-Rolling30Days",
+  "name": "[Kafka OTel] Consumer group availability 99.5% rolling 30 days",
+  "indicator": "sli.metric.custom",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"kafkametricsreceiver.otel\" AND kafka.consumer_group.members: *",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "kafkametricsreceiver.otel"
+   },
+   {
+    "field": "kafka.consumer_group.members",
+    "exists": true
+   }
+  ],
+  "metrics": [
+   {
+    "part": "good",
+    "name": "A",
+    "aggregation": "doc_count",
+    "field": null,
+    "filter": "kafka.consumer_group.members >= 1"
+   },
+   {
+    "part": "total",
+    "name": "B",
+    "aggregation": "doc_count",
+    "field": null,
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "good": "A",
+   "total": "B"
+  },
+  "budgeting": "occurrences",
+  "objective": {
+   "target": 0.995
+  },
+  "group_by": [],
+  "fields": [
+   "data_stream.dataset",
+   "kafka.consumer_group.members"
+  ]
+ },
+ "kafka_otel-consumer-lag-below-threshold-99.5-Rolling30Days": {
+  "generators": [
+   "kafka_otel"
+  ],
+  "package": "kafka_otel",
+  "version": "0.3.1",
+  "id": "kafka_otel-consumer-lag-below-threshold-99.5-Rolling30Days",
+  "name": "[Kafka OTel] Consumer lag below threshold 99.5% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"kafkametricsreceiver.otel\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "kafkametricsreceiver.otel"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "max",
+    "field": "kafka.consumer_group.lag_sum",
+    "filter": "kafka.consumer_group.lag_sum: *"
+   }
+  ],
+  "equations": {
+   "metric": "A"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "1m"
+  },
+  "group_by": [],
+  "fields": [
+   "data_stream.dataset",
+   "kafka.consumer_group.lag_sum"
+  ],
+  "comparator": "LT",
+  "threshold": 50000
+ },
+ "kafka_otel-replication-health-99.5-Rolling30Days": {
+  "generators": [
+   "kafka_otel"
+  ],
+  "package": "kafka_otel",
+  "version": "0.3.1",
+  "id": "kafka_otel-replication-health-99.5-Rolling30Days",
+  "name": "[Kafka OTel] Replication health 99.5% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"kafkametricsreceiver.otel\" AND kafka.partition.replicas: *",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "kafkametricsreceiver.otel"
+   },
+   {
+    "field": "kafka.partition.replicas",
+    "exists": true
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "sum",
+    "field": "kafka.partition.replicas_in_sync",
+    "filter": ""
+   },
+   {
+    "part": "metric",
+    "name": "B",
+    "aggregation": "sum",
+    "field": "kafka.partition.replicas",
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "metric": "A/B"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "1m"
+  },
+  "group_by": [],
+  "fields": [
+   "data_stream.dataset",
+   "kafka.partition.replicas",
+   "kafka.partition.replicas_in_sync"
+  ],
+  "comparator": "GTE",
+  "threshold": 1
+ },
+ "kubernetes_otel-daemonset-scheduling-availability-99.0-rolling30days": {
+  "generators": [
+   "kubernetes_otel"
+  ],
+  "package": "kubernetes_otel",
+  "version": "2.6.1",
+  "id": "kubernetes_otel-daemonset-scheduling-availability-99.0-rolling30days",
+  "name": "[Kubernetes OTel] DaemonSet Scheduling Availability 99.0% Rolling 30 Days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset : \"k8sclusterreceiver.otel\" AND k8s.daemonset.ready_nodes: * AND k8s.daemonset.desired_scheduled_nodes > 0",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "k8sclusterreceiver.otel"
+   },
+   {
+    "field": "k8s.daemonset.ready_nodes",
+    "exists": true
+   },
+   {
+    "field": "k8s.daemonset.desired_scheduled_nodes",
+    "range": [
+     ">",
+     0.0
+    ]
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "sum",
+    "field": "k8s.daemonset.ready_nodes",
+    "filter": ""
+   },
+   {
+    "part": "metric",
+    "name": "B",
+    "aggregation": "sum",
+    "field": "k8s.daemonset.desired_scheduled_nodes",
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "metric": "A / B"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.99,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "5m"
+  },
+  "group_by": [
+   "resource.attributes.k8s.namespace.name",
+   "resource.attributes.k8s.daemonset.name"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "k8s.daemonset.ready_nodes",
+   "k8s.daemonset.desired_scheduled_nodes",
+   "resource.attributes.k8s.namespace.name",
+   "resource.attributes.k8s.daemonset.name"
+  ],
+  "comparator": "GTE",
+  "threshold": 1
+ },
+ "kubernetes_otel-deployment-replica-availability-99.5-rolling30days": {
+  "generators": [
+   "kubernetes_otel"
+  ],
+  "package": "kubernetes_otel",
+  "version": "2.6.1",
+  "id": "kubernetes_otel-deployment-replica-availability-99.5-rolling30days",
+  "name": "[Kubernetes OTel] Deployment Replica Availability 99.5% Rolling 30 Days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset : \"k8sclusterreceiver.otel\"  AND k8s.deployment.available: * AND k8s.deployment.desired > 0 ",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "k8sclusterreceiver.otel"
+   },
+   {
+    "field": "k8s.deployment.available",
+    "exists": true
+   },
+   {
+    "field": "k8s.deployment.desired",
+    "range": [
+     ">",
+     0.0
+    ]
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "sum",
+    "field": "k8s.deployment.available",
+    "filter": ""
+   },
+   {
+    "part": "metric",
+    "name": "B",
+    "aggregation": "sum",
+    "field": "k8s.deployment.desired",
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "metric": "A / B"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "5m"
+  },
+  "group_by": [
+   "resource.attributes.k8s.namespace.name",
+   "resource.attributes.k8s.deployment.name"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "k8s.deployment.available",
+   "k8s.deployment.desired",
+   "resource.attributes.k8s.namespace.name",
+   "resource.attributes.k8s.deployment.name"
+  ],
+  "comparator": "GTE",
+  "threshold": 1
+ },
+ "kubernetes_otel-job-completion-success-rate-99.0-rolling30days": {
+  "generators": [
+   "kubernetes_otel"
+  ],
+  "package": "kubernetes_otel",
+  "version": "2.6.1",
+  "id": "kubernetes_otel-job-completion-success-rate-99.0-rolling30days",
+  "name": "[Kubernetes OTel] Job Completion Success Rate 99.0% Rolling 30 Days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"k8sclusterreceiver.otel\" AND k8s.job.failed_pods : *",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "k8sclusterreceiver.otel"
+   },
+   {
+    "field": "k8s.job.failed_pods",
+    "exists": true
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "max",
+    "field": "k8s.job.failed_pods",
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "metric": "A"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.99,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "5m"
+  },
+  "group_by": [
+   "resource.attributes.k8s.namespace.name",
+   "resource.attributes.k8s.job.name"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "k8s.job.failed_pods",
+   "resource.attributes.k8s.namespace.name",
+   "resource.attributes.k8s.job.name"
+  ],
+  "comparator": "LTE",
+  "threshold": 0
+ },
+ "kubernetes_otel-statefulset-replica-availability-99.5-rolling30days": {
+  "generators": [
+   "kubernetes_otel"
+  ],
+  "package": "kubernetes_otel",
+  "version": "2.6.1",
+  "id": "kubernetes_otel-statefulset-replica-availability-99.5-rolling30days",
+  "name": "[Kubernetes OTel] StatefulSet Replica Availability 99.5% Rolling 30 Days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset : \"k8sclusterreceiver.otel\" AND k8s.statefulset.ready_pods: * AND k8s.statefulset.desired_pods > 0",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "k8sclusterreceiver.otel"
+   },
+   {
+    "field": "k8s.statefulset.ready_pods",
+    "exists": true
+   },
+   {
+    "field": "k8s.statefulset.desired_pods",
+    "range": [
+     ">",
+     0.0
+    ]
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "sum",
+    "field": "k8s.statefulset.ready_pods",
+    "filter": ""
+   },
+   {
+    "part": "metric",
+    "name": "B",
+    "aggregation": "sum",
+    "field": "k8s.statefulset.desired_pods",
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "metric": "A / B"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "5m"
+  },
+  "group_by": [
+   "resource.attributes.k8s.namespace.name",
+   "resource.attributes.k8s.statefulset.name"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "k8s.statefulset.ready_pods",
+   "k8s.statefulset.desired_pods",
+   "resource.attributes.k8s.namespace.name",
+   "resource.attributes.k8s.statefulset.name"
+  ],
+  "comparator": "GTE",
+  "threshold": 1
+ },
+ "memcached_otel-get-hit-ratio-99.5-Rolling30Days": {
+  "generators": [
+   "memcached_otel"
+  ],
+  "package": "memcached_otel",
+  "version": "0.3.0",
+  "id": "memcached_otel-get-hit-ratio-99.5-Rolling30Days",
+  "name": "[Memcached OTel] Get hit ratio 99.5% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"memcachedreceiver.otel\" and (operation: \"get\" or attributes.operation: \"get\")",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "memcachedreceiver.otel"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "avg",
+    "field": "memcached.operation_hit_ratio",
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "metric": "A"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "1m"
+  },
+  "group_by": [
+   "resource.attributes.service.instance.id"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "operation",
+   "attributes.operation",
+   "resource.attributes.service.instance.id",
+   "memcached.operation_hit_ratio"
+  ],
+  "comparator": "LTE",
+  "threshold": 5
+ },
+ "microsoft_sqlserver_otel-blocked-processes-99.5-Rolling30Days": {
+  "generators": [
+   "microsoft_sqlserver_otel"
+  ],
+  "package": "microsoft_sqlserver_otel",
+  "version": "0.3.1",
+  "id": "microsoft_sqlserver_otel-blocked-processes-99.5-Rolling30Days",
+  "name": "[SQL Server OTel] Blocked processes 99.5% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"sqlserverreceiver.otel\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "sqlserverreceiver.otel"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "max",
+    "field": "sqlserver.processes.blocked",
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "metric": "A"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "1m"
+  },
+  "group_by": [
+   "resource.attributes.service.instance.id"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "resource.attributes.service.instance.id",
+   "sqlserver.processes.blocked"
+  ],
+  "comparator": "LTE",
+  "threshold": 0
+ },
+ "microsoft_sqlserver_otel-buffer-cache-hit-ratio-99.5-Rolling30Days": {
+  "generators": [
+   "microsoft_sqlserver_otel"
+  ],
+  "package": "microsoft_sqlserver_otel",
+  "version": "0.3.1",
+  "id": "microsoft_sqlserver_otel-buffer-cache-hit-ratio-99.5-Rolling30Days",
+  "name": "[SQL Server OTel] Buffer cache hit ratio 99.5% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"sqlserverreceiver.otel\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "sqlserverreceiver.otel"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "avg",
+    "field": "sqlserver.page.buffer_cache.hit_ratio",
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "metric": "A"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "1m"
+  },
+  "group_by": [
+   "resource.attributes.service.instance.id"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "resource.attributes.service.instance.id",
+   "sqlserver.page.buffer_cache.hit_ratio"
+  ],
+  "comparator": "GTE",
+  "threshold": 95
+ },
+ "microsoft_sqlserver_otel-deadlock-rate-99.5-Rolling30Days": {
+  "generators": [
+   "microsoft_sqlserver_otel"
+  ],
+  "package": "microsoft_sqlserver_otel",
+  "version": "0.3.1",
+  "id": "microsoft_sqlserver_otel-deadlock-rate-99.5-Rolling30Days",
+  "name": "[SQL Server OTel] Deadlock rate 99.5% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"sqlserverreceiver.otel\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "sqlserverreceiver.otel"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "max",
+    "field": "sqlserver.deadlock.rate",
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "metric": "A"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "1m"
+  },
+  "group_by": [
+   "resource.attributes.service.instance.id"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "resource.attributes.service.instance.id",
+   "sqlserver.deadlock.rate"
+  ],
+  "comparator": "LTE",
+  "threshold": 0
+ },
+ "microsoft_sqlserver_otel-memory-grants-pending-99.5-Rolling30Days": {
+  "generators": [
+   "microsoft_sqlserver_otel"
+  ],
+  "package": "microsoft_sqlserver_otel",
+  "version": "0.3.1",
+  "id": "microsoft_sqlserver_otel-memory-grants-pending-99.5-Rolling30Days",
+  "name": "[SQL Server OTel] Memory grants pending 99.5% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"sqlserverreceiver.otel\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "sqlserverreceiver.otel"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "max",
+    "field": "sqlserver.memory.grants.pending.count",
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "metric": "A"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "1m"
+  },
+  "group_by": [
+   "resource.attributes.service.instance.id"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "resource.attributes.service.instance.id",
+   "sqlserver.memory.grants.pending.count"
+  ],
+  "comparator": "LTE",
+  "threshold": 0
+ },
+ "microsoft_sqlserver_otel-page-life-expectancy-99.5-Rolling30Days": {
+  "generators": [
+   "microsoft_sqlserver_otel"
+  ],
+  "package": "microsoft_sqlserver_otel",
+  "version": "0.3.1",
+  "id": "microsoft_sqlserver_otel-page-life-expectancy-99.5-Rolling30Days",
+  "name": "[SQL Server OTel] Page life expectancy 99.5% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"sqlserverreceiver.otel\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "sqlserverreceiver.otel"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "min",
+    "field": "sqlserver.page.life_expectancy",
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "metric": "A"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "1m"
+  },
+  "group_by": [
+   "resource.attributes.service.instance.id"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "resource.attributes.service.instance.id",
+   "sqlserver.page.life_expectancy"
+  ],
+  "comparator": "GTE",
+  "threshold": 300
+ },
+ "mongodb_otel-avg-operation-latency-99.5-Rolling30Days": {
+  "generators": [
+   "mongodb_otel"
+  ],
+  "package": "mongodb_otel",
+  "version": "0.3.1",
+  "id": "mongodb_otel-avg-operation-latency-99.5-Rolling30Days",
+  "name": "[MongoDB OTel] Average operation latency 99.5% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"mongodbreceiver.otel\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "mongodbreceiver.otel"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "max",
+    "field": "metrics.mongodb.operation.time",
+    "filter": ""
+   },
+   {
+    "part": "metric",
+    "name": "B",
+    "aggregation": "min",
+    "field": "metrics.mongodb.operation.time",
+    "filter": ""
+   },
+   {
+    "part": "metric",
+    "name": "C",
+    "aggregation": "max",
+    "field": "metrics.mongodb.operation.count",
+    "filter": ""
+   },
+   {
+    "part": "metric",
+    "name": "D",
+    "aggregation": "min",
+    "field": "metrics.mongodb.operation.count",
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "metric": "(A-B)/(C-D)"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "1m"
+  },
+  "group_by": [
+   "resource.attributes.server.address"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "resource.attributes.server.address",
+   "metrics.mongodb.operation.time",
+   "metrics.mongodb.operation.count"
+  ],
+  "comparator": "LT",
+  "threshold": 200
+ },
+ "mongodb_otel-cache-hit-ratio-99.5-Rolling30Days": {
+  "generators": [
+   "mongodb_otel"
+  ],
+  "package": "mongodb_otel",
+  "version": "0.3.1",
+  "id": "mongodb_otel-cache-hit-ratio-99.5-Rolling30Days",
+  "name": "[MongoDB OTel] Cache hit ratio 99.5% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"mongodbreceiver.otel\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "mongodbreceiver.otel"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "max",
+    "field": "metrics.mongodb.cache.operations",
+    "filter": "attributes.type: \"hit\""
+   },
+   {
+    "part": "metric",
+    "name": "B",
+    "aggregation": "min",
+    "field": "metrics.mongodb.cache.operations",
+    "filter": "attributes.type: \"hit\""
+   },
+   {
+    "part": "metric",
+    "name": "C",
+    "aggregation": "max",
+    "field": "metrics.mongodb.cache.operations",
+    "filter": "attributes.type: \"miss\""
+   },
+   {
+    "part": "metric",
+    "name": "D",
+    "aggregation": "min",
+    "field": "metrics.mongodb.cache.operations",
+    "filter": "attributes.type: \"miss\""
+   }
+  ],
+  "equations": {
+   "metric": "(A-B)/((A-B)+(C-D))"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "1m"
+  },
+  "group_by": [
+   "resource.attributes.server.address"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "resource.attributes.server.address",
+   "metrics.mongodb.cache.operations",
+   "attributes.type"
+  ],
+  "comparator": "GT",
+  "threshold": 0.95
+ },
+ "mongodb_otel-connection-availability-99.5-Rolling30Days": {
+  "generators": [
+   "mongodb_otel"
+  ],
+  "package": "mongodb_otel",
+  "version": "0.3.1",
+  "id": "mongodb_otel-connection-availability-99.5-Rolling30Days",
+  "name": "[MongoDB OTel] Connection availability 99.5% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"mongodbreceiver.otel\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "mongodbreceiver.otel"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "sum",
+    "field": "metrics.mongodb.connection.count",
+    "filter": "attributes.type: \"available\""
+   },
+   {
+    "part": "metric",
+    "name": "B",
+    "aggregation": "sum",
+    "field": "metrics.mongodb.connection.count",
+    "filter": "attributes.type: \"current\""
+   }
+  ],
+  "equations": {
+   "metric": "A/(A+B)"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "1m"
+  },
+  "group_by": [
+   "resource.attributes.server.address"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "resource.attributes.server.address",
+   "metrics.mongodb.connection.count",
+   "attributes.type"
+  ],
+  "comparator": "GT",
+  "threshold": 0.1
+ },
+ "mysql_otel-connected-threads-99.0-Rolling30Days": {
+  "generators": [
+   "mysql_otel"
+  ],
+  "package": "mysql_otel",
+  "version": "0.6.1",
+  "id": "mysql_otel-connected-threads-99.0-Rolling30Days",
+  "name": "[MySQL OTel] Connected threads 99.0% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"mysqlreceiver.otel\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "mysqlreceiver.otel"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "last_value",
+    "field": "mysql.threads",
+    "filter": "attributes.kind: \"connected\""
+   }
+  ],
+  "equations": {
+   "metric": "A"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.99,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "1m"
+  },
+  "group_by": [
+   "resource.attributes.mysql.instance.endpoint"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "resource.attributes.mysql.instance.endpoint",
+   "mysql.threads",
+   "attributes.kind"
+  ],
+  "comparator": "LT",
+  "threshold": 800
+ },
+ "mysql_otel-connection-errors-99.0-Rolling30Days": {
+  "generators": [
+   "mysql_otel"
+  ],
+  "package": "mysql_otel",
+  "version": "0.6.1",
+  "id": "mysql_otel-connection-errors-99.0-Rolling30Days",
+  "name": "[MySQL OTel] Connection exhaustion errors 99.0% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"mysqlreceiver.otel\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "mysqlreceiver.otel"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "max",
+    "field": "mysql.connection.errors",
+    "filter": "attributes.error: \"max_connections\""
+   },
+   {
+    "part": "metric",
+    "name": "B",
+    "aggregation": "min",
+    "field": "mysql.connection.errors",
+    "filter": "attributes.error: \"max_connections\""
+   }
+  ],
+  "equations": {
+   "metric": "A - B"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.99,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "1m"
+  },
+  "group_by": [
+   "resource.attributes.mysql.instance.endpoint"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "resource.attributes.mysql.instance.endpoint",
+   "mysql.connection.errors",
+   "attributes.error"
+  ],
+  "comparator": "LT",
+  "threshold": 5
+ },
+ "mysql_otel-replication-lag-99.5-Rolling30Days": {
+  "generators": [
+   "mysql_otel"
+  ],
+  "package": "mysql_otel",
+  "version": "0.6.1",
+  "id": "mysql_otel-replication-lag-99.5-Rolling30Days",
+  "name": "[MySQL OTel] Replication lag 99.5% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"mysqlreceiver.otel\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "mysqlreceiver.otel"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "last_value",
+    "field": "mysql.replica.time_behind_source",
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "metric": "A"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "1m"
+  },
+  "group_by": [
+   "resource.attributes.mysql.instance.endpoint"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "resource.attributes.mysql.instance.endpoint",
+   "mysql.replica.time_behind_source"
+  ],
+  "comparator": "LT",
+  "threshold": 5
+ },
+ "mysql_otel-slow-queries-99.0-Rolling30Days": {
+  "generators": [
+   "mysql_otel"
+  ],
+  "package": "mysql_otel",
+  "version": "0.6.1",
+  "id": "mysql_otel-slow-queries-99.0-Rolling30Days",
+  "name": "[MySQL OTel] Slow queries 99.0% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"mysqlreceiver.otel\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "mysqlreceiver.otel"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "max",
+    "field": "mysql.query.slow.count",
+    "filter": ""
+   },
+   {
+    "part": "metric",
+    "name": "B",
+    "aggregation": "min",
+    "field": "mysql.query.slow.count",
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "metric": "A - B"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.99,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "1m"
+  },
+  "group_by": [
+   "resource.attributes.mysql.instance.endpoint"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "resource.attributes.mysql.instance.endpoint",
+   "mysql.query.slow.count"
+  ],
+  "comparator": "LT",
+  "threshold": 10
+ },
+ "nginx_otel-connection-drop-rate-99.5-Rolling30Days": {
+  "generators": [
+   "nginx_otel"
+  ],
+  "package": "nginx_otel",
+  "version": "0.9.0",
+  "id": "nginx_otel-connection-drop-rate-99.5-Rolling30Days",
+  "name": "[Nginx OTel] Connection handling rate 99.5% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"nginxreceiver.otel\" AND NOT attributes.state: *",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "nginxreceiver.otel"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "max",
+    "field": "nginx.connections_handled",
+    "filter": ""
+   },
+   {
+    "part": "metric",
+    "name": "B",
+    "aggregation": "min",
+    "field": "nginx.connections_handled",
+    "filter": ""
+   },
+   {
+    "part": "metric",
+    "name": "C",
+    "aggregation": "max",
+    "field": "nginx.connections_accepted",
+    "filter": ""
+   },
+   {
+    "part": "metric",
+    "name": "D",
+    "aggregation": "min",
+    "field": "nginx.connections_accepted",
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "metric": "(A-B)/(C-D)"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "1m"
+  },
+  "group_by": [
+   "host.name"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "attributes.state",
+   "host.name",
+   "nginx.connections_handled",
+   "nginx.connections_accepted"
+  ],
+  "comparator": "GTE",
+  "threshold": 1.0
+ },
+ "nginx_otel-request-availability-99-Rolling30Days": {
+  "generators": [
+   "nginx_otel"
+  ],
+  "package": "nginx_otel",
+  "version": "0.9.0",
+  "id": "nginx_otel-request-availability-99-Rolling30Days",
+  "name": "[Nginx OTel] Request availability 99% rolling 30 days",
+  "indicator": "sli.metric.custom",
+  "index": "logs-*",
+  "filter": "data_stream.dataset: \"nginx.access.otel\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "nginx.access.otel"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "good",
+    "name": "A",
+    "aggregation": "doc_count",
+    "field": null,
+    "filter": "NOT http.response.status_code >= 500"
+   },
+   {
+    "part": "total",
+    "name": "A",
+    "aggregation": "doc_count",
+    "field": null,
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "good": "A",
+   "total": "A"
+  },
+  "budgeting": "occurrences",
+  "objective": {
+   "target": 0.99
+  },
+  "group_by": [
+   "host.name"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "host.name",
+   "http.response.status_code"
+  ]
+ },
+ "nvidia_gpu_otel-gpu-temperature-below-threshold-99.5-Rolling30Days": {
+  "generators": [
+   "nvidia_gpu_otel"
+  ],
+  "package": "nvidia_gpu_otel",
+  "version": "0.3.0",
+  "id": "nvidia_gpu_otel-gpu-temperature-below-threshold-99.5-Rolling30Days",
+  "name": "[NVIDIA GPU OTel] GPU temperature below threshold 99.5% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"nvidia_gpu.otel\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "nvidia_gpu.otel"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "max",
+    "field": "DCGM_FI_DEV_GPU_TEMP",
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "metric": "A"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "5m"
+  },
+  "group_by": [
+   "resource.attributes.host.name"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "resource.attributes.host.name",
+   "DCGM_FI_DEV_GPU_TEMP"
+  ],
+  "comparator": "LT",
+  "threshold": 83
+ },
+ "oracle_otel-buffer-cache-hit-ratio-99.5-Rolling30Days": {
+  "generators": [
+   "oracle_otel"
+  ],
+  "package": "oracle_otel",
+  "version": "0.4.0",
+  "id": "oracle_otel-buffer-cache-hit-ratio-99.5-Rolling30Days",
+  "name": "[Oracle OTel] Buffer cache hit ratio 99.5% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"oracledbreceiver.otel\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "oracledbreceiver.otel"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "max",
+    "field": "oracledb.physical_reads",
+    "filter": ""
+   },
+   {
+    "part": "metric",
+    "name": "B",
+    "aggregation": "min",
+    "field": "oracledb.physical_reads",
+    "filter": ""
+   },
+   {
+    "part": "metric",
+    "name": "C",
+    "aggregation": "max",
+    "field": "oracledb.logical_reads",
+    "filter": ""
+   },
+   {
+    "part": "metric",
+    "name": "D",
+    "aggregation": "min",
+    "field": "oracledb.logical_reads",
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "metric": "(A-B)/(C-D)"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "1m"
+  },
+  "group_by": [
+   "oracledb.instance.name"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "oracledb.instance.name",
+   "oracledb.physical_reads",
+   "oracledb.logical_reads"
+  ],
+  "comparator": "LT",
+  "threshold": 0.05
+ },
+ "oracle_otel-hard-parse-ratio-99.5-Rolling30Days": {
+  "generators": [
+   "oracle_otel"
+  ],
+  "package": "oracle_otel",
+  "version": "0.4.0",
+  "id": "oracle_otel-hard-parse-ratio-99.5-Rolling30Days",
+  "name": "[Oracle OTel] Hard parse ratio 99.5% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"oracledbreceiver.otel\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "oracledbreceiver.otel"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "max",
+    "field": "oracledb.hard_parses",
+    "filter": ""
+   },
+   {
+    "part": "metric",
+    "name": "B",
+    "aggregation": "min",
+    "field": "oracledb.hard_parses",
+    "filter": ""
+   },
+   {
+    "part": "metric",
+    "name": "C",
+    "aggregation": "max",
+    "field": "oracledb.parse_calls",
+    "filter": ""
+   },
+   {
+    "part": "metric",
+    "name": "D",
+    "aggregation": "min",
+    "field": "oracledb.parse_calls",
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "metric": "(A-B)/(C-D)"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "1m"
+  },
+  "group_by": [
+   "oracledb.instance.name"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "oracledb.instance.name",
+   "oracledb.hard_parses",
+   "oracledb.parse_calls"
+  ],
+  "comparator": "LT",
+  "threshold": 0.1
+ },
+ "oracle_otel-process-utilisation-99.5-Rolling30Days": {
+  "generators": [
+   "oracle_otel"
+  ],
+  "package": "oracle_otel",
+  "version": "0.4.0",
+  "id": "oracle_otel-process-utilisation-99.5-Rolling30Days",
+  "name": "[Oracle OTel] Process utilisation 99.5% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"oracledbreceiver.otel\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "oracledbreceiver.otel"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "max",
+    "field": "oracledb.processes.usage",
+    "filter": ""
+   },
+   {
+    "part": "metric",
+    "name": "B",
+    "aggregation": "max",
+    "field": "oracledb.processes.limit",
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "metric": "A/B"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "1m"
+  },
+  "group_by": [
+   "oracledb.instance.name"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "oracledb.instance.name",
+   "oracledb.processes.usage",
+   "oracledb.processes.limit"
+  ],
+  "comparator": "LT",
+  "threshold": 0.85
+ },
+ "oracle_otel-rollback-ratio-99.5-Rolling30Days": {
+  "generators": [
+   "oracle_otel"
+  ],
+  "package": "oracle_otel",
+  "version": "0.4.0",
+  "id": "oracle_otel-rollback-ratio-99.5-Rolling30Days",
+  "name": "[Oracle OTel] Rollback-to-commit ratio 99.5% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"oracledbreceiver.otel\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "oracledbreceiver.otel"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "max",
+    "field": "oracledb.user_rollbacks",
+    "filter": ""
+   },
+   {
+    "part": "metric",
+    "name": "B",
+    "aggregation": "min",
+    "field": "oracledb.user_rollbacks",
+    "filter": ""
+   },
+   {
+    "part": "metric",
+    "name": "C",
+    "aggregation": "max",
+    "field": "oracledb.user_commits",
+    "filter": ""
+   },
+   {
+    "part": "metric",
+    "name": "D",
+    "aggregation": "min",
+    "field": "oracledb.user_commits",
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "metric": "(A-B)/((A-B)+(C-D))"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "1m"
+  },
+  "group_by": [
+   "oracledb.instance.name"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "oracledb.instance.name",
+   "oracledb.user_rollbacks",
+   "oracledb.user_commits"
+  ],
+  "comparator": "LT",
+  "threshold": 0.1
+ },
+ "oracle_otel-session-utilisation-99.5-Rolling30Days": {
+  "generators": [
+   "oracle_otel"
+  ],
+  "package": "oracle_otel",
+  "version": "0.4.0",
+  "id": "oracle_otel-session-utilisation-99.5-Rolling30Days",
+  "name": "[Oracle OTel] Session utilisation 99.5% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"oracledbreceiver.otel\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "oracledbreceiver.otel"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "max",
+    "field": "oracledb.sessions.usage",
+    "filter": ""
+   },
+   {
+    "part": "metric",
+    "name": "B",
+    "aggregation": "max",
+    "field": "oracledb.sessions.limit",
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "metric": "A/B"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "1m"
+  },
+  "group_by": [
+   "oracledb.instance.name"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "oracledb.instance.name",
+   "oracledb.sessions.usage",
+   "oracledb.sessions.limit"
+  ],
+  "comparator": "LT",
+  "threshold": 0.85
+ },
+ "oracle_otel-zero-deadlocks-99.5-Rolling30Days": {
+  "generators": [
+   "oracle_otel"
+  ],
+  "package": "oracle_otel",
+  "version": "0.4.0",
+  "id": "oracle_otel-zero-deadlocks-99.5-Rolling30Days",
+  "name": "[Oracle OTel] Zero enqueue deadlocks 99.5% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"oracledbreceiver.otel\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "oracledbreceiver.otel"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "max",
+    "field": "oracledb.enqueue_deadlocks",
+    "filter": ""
+   },
+   {
+    "part": "metric",
+    "name": "B",
+    "aggregation": "min",
+    "field": "oracledb.enqueue_deadlocks",
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "metric": "A-B"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "1m"
+  },
+  "group_by": [
+   "oracledb.instance.name"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "oracledb.instance.name",
+   "oracledb.enqueue_deadlocks"
+  ],
+  "comparator": "LTE",
+  "threshold": 0
+ },
+ "postgresql_otel-avg-query-latency-99.5-Rolling30Days": {
+  "generators": [
+   "postgresql_otel"
+  ],
+  "package": "postgresql_otel",
+  "version": "0.5.0",
+  "id": "postgresql_otel-avg-query-latency-99.5-Rolling30Days",
+  "name": "[PostgreSQL OTel] Average query latency 99.5% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "logs-*",
+  "filter": "data_stream.dataset: \"postgresqlreceiver.otel\" AND event_name: \"db.server.top_query\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "postgresqlreceiver.otel"
+   },
+   {
+    "field": "event_name",
+    "value": "db.server.top_query"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "sum",
+    "field": "attributes.postgresql.total_exec_time",
+    "filter": ""
+   },
+   {
+    "part": "metric",
+    "name": "B",
+    "aggregation": "sum",
+    "field": "attributes.postgresql.calls",
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "metric": "A/B"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "1m"
+  },
+  "group_by": [
+   "resource.attributes.service.instance.id"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "event_name",
+   "resource.attributes.service.instance.id",
+   "attributes.postgresql.total_exec_time",
+   "attributes.postgresql.calls"
+  ],
+  "comparator": "LT",
+  "threshold": 200
+ },
+ "postgresql_otel-buffer-hit-ratio-99.5-Rolling30Days": {
+  "generators": [
+   "postgresql_otel"
+  ],
+  "package": "postgresql_otel",
+  "version": "0.5.0",
+  "id": "postgresql_otel-buffer-hit-ratio-99.5-Rolling30Days",
+  "name": "[PostgreSQL OTel] Buffer cache hit ratio 99.5% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"postgresqlreceiver.otel\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "postgresqlreceiver.otel"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "max",
+    "field": "postgresql.blks_hit",
+    "filter": ""
+   },
+   {
+    "part": "metric",
+    "name": "B",
+    "aggregation": "min",
+    "field": "postgresql.blks_hit",
+    "filter": ""
+   },
+   {
+    "part": "metric",
+    "name": "C",
+    "aggregation": "max",
+    "field": "postgresql.blks_read",
+    "filter": ""
+   },
+   {
+    "part": "metric",
+    "name": "D",
+    "aggregation": "min",
+    "field": "postgresql.blks_read",
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "metric": "(A-B)/((A-B)+(C-D))"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "1m"
+  },
+  "group_by": [
+   "resource.attributes.postgresql.database.name"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "resource.attributes.postgresql.database.name",
+   "postgresql.blks_hit",
+   "postgresql.blks_read"
+  ],
+  "comparator": "GTE",
+  "threshold": 0.99
+ },
+ "postgresql_otel-connection-availability-99.5-Rolling30Days": {
+  "generators": [
+   "postgresql_otel"
+  ],
+  "package": "postgresql_otel",
+  "version": "0.5.0",
+  "id": "postgresql_otel-connection-availability-99.5-Rolling30Days",
+  "name": "[PostgreSQL OTel] Connection availability 99.5% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"postgresqlreceiver.otel\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "postgresqlreceiver.otel"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "sum",
+    "field": "postgresql.backends",
+    "filter": ""
+   },
+   {
+    "part": "metric",
+    "name": "B",
+    "aggregation": "max",
+    "field": "postgresql.connection.max",
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "metric": "A/B"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "1m"
+  },
+  "group_by": [
+   "resource.attributes.service.instance.id"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "resource.attributes.service.instance.id",
+   "postgresql.backends",
+   "postgresql.connection.max"
+  ],
+  "comparator": "LT",
+  "threshold": 0.8
+ },
+ "postgresql_otel-rollback-ratio-99.5-Rolling30Days": {
+  "generators": [
+   "postgresql_otel"
+  ],
+  "package": "postgresql_otel",
+  "version": "0.5.0",
+  "id": "postgresql_otel-rollback-ratio-99.5-Rolling30Days",
+  "name": "[PostgreSQL OTel] Transaction rollback ratio 99.5% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"postgresqlreceiver.otel\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "postgresqlreceiver.otel"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "max",
+    "field": "postgresql.rollbacks",
+    "filter": ""
+   },
+   {
+    "part": "metric",
+    "name": "B",
+    "aggregation": "min",
+    "field": "postgresql.rollbacks",
+    "filter": ""
+   },
+   {
+    "part": "metric",
+    "name": "C",
+    "aggregation": "max",
+    "field": "postgresql.commits",
+    "filter": ""
+   },
+   {
+    "part": "metric",
+    "name": "D",
+    "aggregation": "min",
+    "field": "postgresql.commits",
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "metric": "(A-B)/((A-B)+(C-D))"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "1m"
+  },
+  "group_by": [
+   "resource.attributes.postgresql.database.name"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "resource.attributes.postgresql.database.name",
+   "postgresql.rollbacks",
+   "postgresql.commits"
+  ],
+  "comparator": "LT",
+  "threshold": 0.01
+ },
+ "rabbitmq_otel-acknowledgment-rate-99.5-Rolling30Days": {
+  "generators": [
+   "rabbitmq_otel"
+  ],
+  "package": "rabbitmq_otel",
+  "version": "0.3.0",
+  "id": "rabbitmq_otel-acknowledgment-rate-99.5-Rolling30Days",
+  "name": "[RabbitMQ OTel] Message acknowledgment rate 99.5% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"rabbitmqreceiver.otel\" and resource.attributes.rabbitmq.queue.name: *",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "rabbitmqreceiver.otel"
+   },
+   {
+    "field": "resource.attributes.rabbitmq.queue.name",
+    "exists": true
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "max",
+    "field": "rabbitmq.message.acknowledged",
+    "filter": ""
+   },
+   {
+    "part": "metric",
+    "name": "B",
+    "aggregation": "min",
+    "field": "rabbitmq.message.acknowledged",
+    "filter": ""
+   },
+   {
+    "part": "metric",
+    "name": "C",
+    "aggregation": "max",
+    "field": "rabbitmq.message.delivered",
+    "filter": ""
+   },
+   {
+    "part": "metric",
+    "name": "D",
+    "aggregation": "min",
+    "field": "rabbitmq.message.delivered",
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "metric": "(A-B)/(C-D)"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "5m"
+  },
+  "group_by": [
+   "resource.attributes.rabbitmq.queue.name",
+   "resource.attributes.rabbitmq.vhost.name"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "resource.attributes.rabbitmq.queue.name",
+   "resource.attributes.rabbitmq.vhost.name",
+   "rabbitmq.message.acknowledged",
+   "rabbitmq.message.delivered"
+  ],
+  "comparator": "GTE",
+  "threshold": 0.995
+ },
+ "rabbitmq_otel-consumer-availability-99.5-Rolling30Days": {
+  "generators": [
+   "rabbitmq_otel"
+  ],
+  "package": "rabbitmq_otel",
+  "version": "0.3.0",
+  "id": "rabbitmq_otel-consumer-availability-99.5-Rolling30Days",
+  "name": "[RabbitMQ OTel] Consumer availability 99.5% rolling 30 days",
+  "indicator": "sli.metric.custom",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"rabbitmqreceiver.otel\" and resource.attributes.rabbitmq.queue.name: *",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "rabbitmqreceiver.otel"
+   },
+   {
+    "field": "resource.attributes.rabbitmq.queue.name",
+    "exists": true
+   }
+  ],
+  "metrics": [
+   {
+    "part": "good",
+    "name": "A",
+    "aggregation": "doc_count",
+    "field": null,
+    "filter": "rabbitmq.consumer.count >= 1"
+   },
+   {
+    "part": "total",
+    "name": "B",
+    "aggregation": "doc_count",
+    "field": null,
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "good": "A",
+   "total": "B"
+  },
+  "budgeting": "occurrences",
+  "objective": {
+   "target": 0.995
+  },
+  "group_by": [
+   "resource.attributes.rabbitmq.queue.name",
+   "resource.attributes.rabbitmq.vhost.name"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "resource.attributes.rabbitmq.queue.name",
+   "resource.attributes.rabbitmq.vhost.name",
+   "rabbitmq.consumer.count"
+  ]
+ },
+ "redis_otel-connection-availability-99.5-Rolling30Days": {
+  "generators": [
+   "redis_otel"
+  ],
+  "package": "redis_otel",
+  "version": "0.3.2",
+  "id": "redis_otel-connection-availability-99.5-Rolling30Days",
+  "name": "[Redis OTel] Connection availability 99.5% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"redisreceiver.otel\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "redisreceiver.otel"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "max",
+    "field": "redis.connections.received",
+    "filter": ""
+   },
+   {
+    "part": "metric",
+    "name": "B",
+    "aggregation": "min",
+    "field": "redis.connections.received",
+    "filter": ""
+   },
+   {
+    "part": "metric",
+    "name": "C",
+    "aggregation": "max",
+    "field": "redis.connections.rejected",
+    "filter": ""
+   },
+   {
+    "part": "metric",
+    "name": "D",
+    "aggregation": "min",
+    "field": "redis.connections.rejected",
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "metric": "(A-B-C+D)/(A-B)"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "1m"
+  },
+  "group_by": [
+   "resource.attributes.server.address",
+   "resource.attributes.server.port"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "resource.attributes.server.address",
+   "resource.attributes.server.port",
+   "redis.connections.received",
+   "redis.connections.rejected"
+  ],
+  "comparator": "GTE",
+  "threshold": 0.995
+ },
+ "redis_otel-fork-duration-99.5-Rolling30Days": {
+  "generators": [
+   "redis_otel"
+  ],
+  "package": "redis_otel",
+  "version": "0.3.2",
+  "id": "redis_otel-fork-duration-99.5-Rolling30Days",
+  "name": "[Redis OTel] Fork duration 99.5% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"redisreceiver.otel\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "redisreceiver.otel"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "max",
+    "field": "redis.latest_fork",
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "metric": "A"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "1m"
+  },
+  "group_by": [
+   "resource.attributes.server.address",
+   "resource.attributes.server.port"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "resource.attributes.server.address",
+   "resource.attributes.server.port",
+   "redis.latest_fork"
+  ],
+  "comparator": "LT",
+  "threshold": 100000
+ },
+ "redis_otel-p99-command-latency-99.5-Rolling30Days": {
+  "generators": [
+   "redis_otel"
+  ],
+  "package": "redis_otel",
+  "version": "0.3.2",
+  "id": "redis_otel-p99-command-latency-99.5-Rolling30Days",
+  "name": "[Redis OTel] P99 command latency 99.5% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"redisreceiver.otel\" and attributes.percentile: \"p99\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "redisreceiver.otel"
+   },
+   {
+    "field": "attributes.percentile",
+    "value": "p99"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "max",
+    "field": "redis.cmd.latency",
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "metric": "A"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "1m"
+  },
+  "group_by": [
+   "resource.attributes.server.address",
+   "resource.attributes.server.port"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "attributes.percentile",
+   "resource.attributes.server.address",
+   "resource.attributes.server.port",
+   "redis.cmd.latency"
+  ],
+  "comparator": "LT",
+  "threshold": 0.01
+ },
+ "redisenterprise_otel-avg-database-latency-99.5-Rolling30Days": {
+  "generators": [
+   "redisenterprise_otel"
+  ],
+  "package": "redisenterprise_otel",
+  "version": "0.3.2",
+  "id": "redisenterprise_otel-avg-database-latency-99.5-Rolling30Days",
+  "name": "[Redis Enterprise OTel] Average database request latency 99.5% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"redisenterprise.otel\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "redisenterprise.otel"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "avg",
+    "field": "bdb_avg_latency",
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "metric": "A"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "1m"
+  },
+  "group_by": [
+   "bdb"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "bdb",
+   "bdb_avg_latency"
+  ],
+  "comparator": "LT",
+  "threshold": 0.005
+ },
+ "redisenterprise_otel-database-availability-99.5-Rolling30Days": {
+  "generators": [
+   "redisenterprise_otel"
+  ],
+  "package": "redisenterprise_otel",
+  "version": "0.3.2",
+  "id": "redisenterprise_otel-database-availability-99.5-Rolling30Days",
+  "name": "[Redis Enterprise OTel] Database availability 99.5% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"redisenterprise.otel\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "redisenterprise.otel"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "min",
+    "field": "bdb_up",
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "metric": "A"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "1m"
+  },
+  "group_by": [
+   "bdb"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "bdb",
+   "bdb_up"
+  ],
+  "comparator": "GTE",
+  "threshold": 1
+ },
+ "redisenterprise_otel-database-memory-utilization-99.5-Rolling30Days": {
+  "generators": [
+   "redisenterprise_otel"
+  ],
+  "package": "redisenterprise_otel",
+  "version": "0.3.2",
+  "id": "redisenterprise_otel-database-memory-utilization-99.5-Rolling30Days",
+  "name": "[Redis Enterprise OTel] Database memory utilization 99.5% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"redisenterprise.otel\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "redisenterprise.otel"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "avg",
+    "field": "bdb_used_memory",
+    "filter": ""
+   },
+   {
+    "part": "metric",
+    "name": "B",
+    "aggregation": "avg",
+    "field": "bdb_memory_limit",
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "metric": "A/B"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "1m"
+  },
+  "group_by": [
+   "bdb"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "bdb",
+   "bdb_used_memory",
+   "bdb_memory_limit"
+  ],
+  "comparator": "LT",
+  "threshold": 0.9
+ },
+ "supabase_otel-database-availability-99.5-Rolling30Days": {
+  "generators": [
+   "supabase_otel"
+  ],
+  "package": "supabase_otel",
+  "version": "0.4.0",
+  "id": "supabase_otel-database-availability-99.5-Rolling30Days",
+  "name": "[Supabase OTel] Database availability 99.5% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"supabase.metrics.otel\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "supabase.metrics.otel"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "min",
+    "field": "pg_up",
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "metric": "A"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "5m"
+  },
+  "group_by": [
+   "resource.attributes.supabase_project_ref"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "resource.attributes.supabase_project_ref",
+   "pg_up"
+  ],
+  "comparator": "GTE",
+  "threshold": 1
+ },
+ "supabase_otel-mean-query-latency-99.5-Rolling30Days": {
+  "generators": [
+   "supabase_otel"
+  ],
+  "package": "supabase_otel",
+  "version": "0.4.0",
+  "id": "supabase_otel-mean-query-latency-99.5-Rolling30Days",
+  "name": "[Supabase OTel] Mean database query latency 99.5% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"supabase.metrics.otel\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "supabase.metrics.otel"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "max",
+    "field": "pg_stat_statements_total_time_seconds",
+    "filter": ""
+   },
+   {
+    "part": "metric",
+    "name": "B",
+    "aggregation": "min",
+    "field": "pg_stat_statements_total_time_seconds",
+    "filter": ""
+   },
+   {
+    "part": "metric",
+    "name": "C",
+    "aggregation": "max",
+    "field": "pg_stat_statements_total_queries",
+    "filter": ""
+   },
+   {
+    "part": "metric",
+    "name": "D",
+    "aggregation": "min",
+    "field": "pg_stat_statements_total_queries",
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "metric": "1000 * (A-B) / (C-D)"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "5m"
+  },
+  "group_by": [
+   "resource.attributes.supabase_project_ref"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "resource.attributes.supabase_project_ref",
+   "pg_stat_statements_total_time_seconds",
+   "pg_stat_statements_total_queries"
+  ],
+  "comparator": "LTE",
+  "threshold": 50
+ },
+ "supabase_otel-rest-api-pool-timeout-free-99.5-Rolling30Days": {
+  "generators": [
+   "supabase_otel"
+  ],
+  "package": "supabase_otel",
+  "version": "0.4.0",
+  "id": "supabase_otel-rest-api-pool-timeout-free-99.5-Rolling30Days",
+  "name": "[Supabase OTel] REST API requests free of connection pool timeouts 99.5% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"supabase.metrics.otel\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "supabase.metrics.otel"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "max",
+    "field": "pgrst_db_pool_timeouts_total",
+    "filter": ""
+   },
+   {
+    "part": "metric",
+    "name": "B",
+    "aggregation": "min",
+    "field": "pgrst_db_pool_timeouts_total",
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "metric": "A-B"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "5m"
+  },
+  "group_by": [
+   "resource.attributes.supabase_project_ref"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "resource.attributes.supabase_project_ref",
+   "pgrst_db_pool_timeouts_total"
+  ],
+  "comparator": "LT",
+  "threshold": 1
+ },
+ "supabase_otel-transaction-commit-ratio-99.5-Rolling30Days": {
+  "generators": [
+   "supabase_otel"
+  ],
+  "package": "supabase_otel",
+  "version": "0.4.0",
+  "id": "supabase_otel-transaction-commit-ratio-99.5-Rolling30Days",
+  "name": "[Supabase OTel] Database transaction commit ratio 99.5% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"supabase.metrics.otel\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "supabase.metrics.otel"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "max",
+    "field": "pg_stat_database_xact_commit_total",
+    "filter": ""
+   },
+   {
+    "part": "metric",
+    "name": "B",
+    "aggregation": "min",
+    "field": "pg_stat_database_xact_commit_total",
+    "filter": ""
+   },
+   {
+    "part": "metric",
+    "name": "C",
+    "aggregation": "max",
+    "field": "pg_stat_database_xact_rollback_total",
+    "filter": ""
+   },
+   {
+    "part": "metric",
+    "name": "D",
+    "aggregation": "min",
+    "field": "pg_stat_database_xact_rollback_total",
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "metric": "(C-D) / ((A-B) + (C-D))"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "5m"
+  },
+  "group_by": [
+   "resource.attributes.supabase_project_ref"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "resource.attributes.supabase_project_ref",
+   "pg_stat_database_xact_commit_total",
+   "pg_stat_database_xact_rollback_total"
+  ],
+  "comparator": "LTE",
+  "threshold": 0.05
+ },
+ "temporal_otel-service-latency-p99-99-Rolling30Days": {
+  "generators": [
+   "temporal_otel"
+  ],
+  "package": "temporal_otel",
+  "version": "1.0.0",
+  "id": "temporal_otel-service-latency-p99-99-Rolling30Days",
+  "name": "[Temporal OTel] Service latency p99 below 100ms 99% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"temporal.cloud_metrics.otel\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "temporal.cloud_metrics.otel"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "max",
+    "field": "metrics.temporal_cloud_v1_service_latency_p99",
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "metric": "A"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.99,
+   "timesliceTarget": 0.99,
+   "timesliceWindow": "1m"
+  },
+  "group_by": [
+   "attributes.temporal_namespace",
+   "attributes.operation"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "attributes.temporal_namespace",
+   "attributes.operation",
+   "metrics.temporal_cloud_v1_service_latency_p99"
+  ],
+  "comparator": "LT",
+  "threshold": 0.1
+ },
+ "temporal_otel-task-queue-backlog-99-Rolling30Days": {
+  "generators": [
+   "temporal_otel"
+  ],
+  "package": "temporal_otel",
+  "version": "1.0.0",
+  "id": "temporal_otel-task-queue-backlog-99-Rolling30Days",
+  "name": "[Temporal OTel] Task queue backlog below threshold 99% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"temporal.cloud_metrics.otel\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "temporal.cloud_metrics.otel"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "max",
+    "field": "metrics.temporal_cloud_v1_approximate_backlog_count",
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "metric": "A"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.99,
+   "timesliceTarget": 0.99,
+   "timesliceWindow": "5m"
+  },
+  "group_by": [
+   "attributes.temporal_namespace",
+   "attributes.temporal_task_queue"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "attributes.temporal_namespace",
+   "attributes.temporal_task_queue",
+   "metrics.temporal_cloud_v1_approximate_backlog_count"
+  ],
+  "comparator": "LT",
+  "threshold": 1000
+ },
+ "temporal_otel-workflow-success-rate-99.5-Rolling30Days": {
+  "generators": [
+   "temporal_otel"
+  ],
+  "package": "temporal_otel",
+  "version": "1.0.0",
+  "id": "temporal_otel-workflow-success-rate-99.5-Rolling30Days",
+  "name": "[Temporal OTel] Workflow success rate 99.5% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"temporal.cloud_metrics.otel\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "temporal.cloud_metrics.otel"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "avg",
+    "field": "metrics.temporal_cloud_v1_workflow_success_count",
+    "filter": ""
+   },
+   {
+    "part": "metric",
+    "name": "B",
+    "aggregation": "avg",
+    "field": "metrics.temporal_cloud_v1_workflow_failed_count",
+    "filter": ""
+   },
+   {
+    "part": "metric",
+    "name": "C",
+    "aggregation": "avg",
+    "field": "metrics.temporal_cloud_v1_workflow_timeout_count",
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "metric": "A/(A+B+C)"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "1m"
+  },
+  "group_by": [
+   "attributes.temporal_namespace"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "attributes.temporal_namespace",
+   "metrics.temporal_cloud_v1_workflow_success_count",
+   "metrics.temporal_cloud_v1_workflow_failed_count",
+   "metrics.temporal_cloud_v1_workflow_timeout_count"
+  ],
+  "comparator": "GT",
+  "threshold": 0.95
+ },
+ "traefik_otel-service-availability-99.5-Rolling30Days": {
+  "generators": [
+   "traefik_otel"
+  ],
+  "package": "traefik_otel",
+  "version": "0.3.1",
+  "id": "traefik_otel-service-availability-99.5-Rolling30Days",
+  "name": "[Traefik OTel] Service availability 99.5% rolling 30 days",
+  "indicator": "sli.metric.custom",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"traefik.otel\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "traefik.otel"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "good",
+    "name": "A",
+    "aggregation": "sum",
+    "field": "traefik_service_requests_total",
+    "filter": "not attributes.code: 5*"
+   },
+   {
+    "part": "total",
+    "name": "B",
+    "aggregation": "sum",
+    "field": "traefik_service_requests_total",
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "good": "A",
+   "total": "B"
+  },
+  "budgeting": "occurrences",
+  "objective": {
+   "target": 0.995
+  },
+  "group_by": [
+   "resource.attributes.host.name"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "resource.attributes.host.name",
+   "traefik_service_requests_total",
+   "attributes.code"
+  ]
+ },
+ "traefik_otel-service-latency-under-200ms-99.5-Rolling30Days": {
+  "generators": [
+   "traefik_otel"
+  ],
+  "package": "traefik_otel",
+  "version": "0.3.1",
+  "id": "traefik_otel-service-latency-under-200ms-99.5-Rolling30Days",
+  "name": "[Traefik OTel] Service latency under 200 ms 99.5% rolling 30 days",
+  "indicator": "sli.histogram.custom",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"traefik.otel\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "traefik.otel"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "good",
+    "name": "good",
+    "aggregation": "range",
+    "field": "traefik_service_request_duration_seconds",
+    "filter": "",
+    "from": 0,
+    "to": 0.2
+   },
+   {
+    "part": "total",
+    "name": "total",
+    "aggregation": "value_count",
+    "field": "traefik_service_request_duration_seconds",
+    "filter": ""
+   }
+  ],
+  "equations": {},
+  "budgeting": "occurrences",
+  "objective": {
+   "target": 0.995
+  },
+  "group_by": [
+   "resource.attributes.host.name"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "resource.attributes.host.name",
+   "traefik_service_request_duration_seconds"
+  ]
+ },
+ "vercel_otel-cls-p75-99.5-Rolling30Days": {
+  "generators": [
+   "vercel_otel"
+  ],
+  "package": "vercel_otel",
+  "version": "0.4.1",
+  "id": "vercel_otel-cls-p75-99.5-Rolling30Days",
+  "name": "[Vercel OTel] Cumulative layout shift p75 99.5% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"vercel.speedinsights.v1.otel\" and deployment.environment.name: \"production\" and metrics.CLS: *",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "vercel.speedinsights.v1.otel"
+   },
+   {
+    "field": "deployment.environment.name",
+    "value": "production"
+   },
+   {
+    "field": "metrics.CLS",
+    "exists": true
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "percentile",
+    "field": "metrics.CLS",
+    "filter": "",
+    "percentile": 75
+   }
+  ],
+  "equations": {
+   "metric": "A"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "1h"
+  },
+  "group_by": [
+   "vercel.project.id"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "deployment.environment.name",
+   "metrics.CLS",
+   "vercel.project.id"
+  ],
+  "comparator": "LT",
+  "threshold": 0.1
+ },
+ "vercel_otel-inp-p75-99.5-Rolling30Days": {
+  "generators": [
+   "vercel_otel"
+  ],
+  "package": "vercel_otel",
+  "version": "0.4.1",
+  "id": "vercel_otel-inp-p75-99.5-Rolling30Days",
+  "name": "[Vercel OTel] Interaction to next paint p75 99.5% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"vercel.speedinsights.v1.otel\" and deployment.environment.name: \"production\" and metrics.INP: *",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "vercel.speedinsights.v1.otel"
+   },
+   {
+    "field": "deployment.environment.name",
+    "value": "production"
+   },
+   {
+    "field": "metrics.INP",
+    "exists": true
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "percentile",
+    "field": "metrics.INP",
+    "filter": "",
+    "percentile": 75
+   }
+  ],
+  "equations": {
+   "metric": "A"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "1h"
+  },
+  "group_by": [
+   "vercel.project.id"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "deployment.environment.name",
+   "metrics.INP",
+   "vercel.project.id"
+  ],
+  "comparator": "LT",
+  "threshold": 200
+ },
+ "vercel_otel-lcp-p75-99.5-Rolling30Days": {
+  "generators": [
+   "vercel_otel"
+  ],
+  "package": "vercel_otel",
+  "version": "0.4.1",
+  "id": "vercel_otel-lcp-p75-99.5-Rolling30Days",
+  "name": "[Vercel OTel] Largest contentful paint p75 99.5% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"vercel.speedinsights.v1.otel\" and deployment.environment.name: \"production\" and metrics.LCP: *",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "vercel.speedinsights.v1.otel"
+   },
+   {
+    "field": "deployment.environment.name",
+    "value": "production"
+   },
+   {
+    "field": "metrics.LCP",
+    "exists": true
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "percentile",
+    "field": "metrics.LCP",
+    "filter": "",
+    "percentile": 75
+   }
+  ],
+  "equations": {
+   "metric": "A"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "1h"
+  },
+  "group_by": [
+   "vercel.project.id"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "deployment.environment.name",
+   "metrics.LCP",
+   "vercel.project.id"
+  ],
+  "comparator": "LT",
+  "threshold": 2500
+ },
+ "vercel_otel-server-error-rate-99-Rolling30Days": {
+  "generators": [
+   "vercel_otel"
+  ],
+  "package": "vercel_otel",
+  "version": "0.4.1",
+  "id": "vercel_otel-server-error-rate-99-Rolling30Days",
+  "name": "[Vercel OTel] Server-side error rate 99% rolling 30 days",
+  "indicator": "sli.metric.custom",
+  "index": "logs-*",
+  "filter": "data_stream.dataset: \"vercel.logs.otel\" and vercel.log.source: (\"lambda\" or \"edge\") and deployment.environment.name: \"production\" and http.response.status_code >= 0",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "vercel.logs.otel"
+   },
+   {
+    "field": "vercel.log.source",
+    "any": [
+     "lambda",
+     "edge"
+    ]
+   },
+   {
+    "field": "deployment.environment.name",
+    "value": "production"
+   },
+   {
+    "field": "http.response.status_code",
+    "range": [
+     ">=",
+     0.0
+    ]
+   }
+  ],
+  "metrics": [
+   {
+    "part": "good",
+    "name": "A",
+    "aggregation": "doc_count",
+    "field": null,
+    "filter": "NOT http.response.status_code >= 500"
+   },
+   {
+    "part": "total",
+    "name": "A",
+    "aggregation": "doc_count",
+    "field": null,
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "good": "A",
+   "total": "A"
+  },
+  "budgeting": "occurrences",
+  "objective": {
+   "target": 0.99
+  },
+  "group_by": [
+   "vercel.project.id"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "vercel.log.source",
+   "deployment.environment.name",
+   "http.response.status_code",
+   "vercel.project.id"
+  ]
+ },
+ "vercel_otel-ttfb-p75-99.5-Rolling30Days": {
+  "generators": [
+   "vercel_otel"
+  ],
+  "package": "vercel_otel",
+  "version": "0.4.1",
+  "id": "vercel_otel-ttfb-p75-99.5-Rolling30Days",
+  "name": "[Vercel OTel] Time to first byte p75 99.5% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"vercel.speedinsights.v1.otel\" and deployment.environment.name: \"production\" and metrics.TTFB: *",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "vercel.speedinsights.v1.otel"
+   },
+   {
+    "field": "deployment.environment.name",
+    "value": "production"
+   },
+   {
+    "field": "metrics.TTFB",
+    "exists": true
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "percentile",
+    "field": "metrics.TTFB",
+    "filter": "",
+    "percentile": 75
+   }
+  ],
+  "equations": {
+   "metric": "A"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "1h"
+  },
+  "group_by": [
+   "vercel.project.id"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "deployment.environment.name",
+   "metrics.TTFB",
+   "vercel.project.id"
+  ],
+  "comparator": "LT",
+  "threshold": 800
+ },
+ "vsphere_otel-host-disk-latency-99.5-Rolling30Days": {
+  "generators": [
+   "vsphere_otel"
+  ],
+  "package": "vsphere_otel",
+  "version": "0.3.0",
+  "id": "vsphere_otel-host-disk-latency-99.5-Rolling30Days",
+  "name": "[vSphere OTel] Average host disk latency below 15 ms 99.5% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"vcenterreceiver.otel\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "vcenterreceiver.otel"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "avg",
+    "field": "vcenter.host.disk.latency.max",
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "metric": "A"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "1m"
+  },
+  "group_by": [
+   "resource.attributes.vcenter.host.name"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "resource.attributes.vcenter.host.name",
+   "vcenter.host.disk.latency.max"
+  ],
+  "comparator": "LT",
+  "threshold": 15
+ },
+ "vsphere_otel-vm-cpu-readiness-99.5-Rolling30Days": {
+  "generators": [
+   "vsphere_otel"
+  ],
+  "package": "vsphere_otel",
+  "version": "0.3.0",
+  "id": "vsphere_otel-vm-cpu-readiness-99.5-Rolling30Days",
+  "name": "[vSphere OTel] VM CPU readiness below 5% 99.5% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"vcenterreceiver.otel\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "vcenterreceiver.otel"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "avg",
+    "field": "vcenter.vm.cpu.readiness",
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "metric": "A"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "1m"
+  },
+  "group_by": [
+   "resource.attributes.vcenter.vm.name"
+  ],
+  "fields": [
+   "data_stream.dataset",
+   "resource.attributes.vcenter.vm.name",
+   "vcenter.vm.cpu.readiness"
+  ],
+  "comparator": "LT",
+  "threshold": 5
+ },
+ "zookeeper_otel-avg-request-latency-99.5-Rolling30Days": {
+  "generators": [
+   "zookeeper_otel"
+  ],
+  "package": "zookeeper_otel",
+  "version": "0.3.0",
+  "id": "zookeeper_otel-avg-request-latency-99.5-Rolling30Days",
+  "name": "[ZooKeeper OTel] Average request latency 99.5% rolling 30 days",
+  "indicator": "sli.metric.timeslice",
+  "index": "metrics-*",
+  "filter": "data_stream.dataset: \"generic.otel\"",
+  "required_terms": [
+   {
+    "field": "data_stream.dataset",
+    "value": "generic.otel"
+   }
+  ],
+  "metrics": [
+   {
+    "part": "metric",
+    "name": "A",
+    "aggregation": "avg",
+    "field": "metrics.zookeeper.latency.avg",
+    "filter": ""
+   }
+  ],
+  "equations": {
+   "metric": "A"
+  },
+  "budgeting": "timeslices",
+  "objective": {
+   "target": 0.995,
+   "timesliceTarget": 0.95,
+   "timesliceWindow": "1m"
+  },
+  "group_by": [],
+  "fields": [
+   "data_stream.dataset",
+   "metrics.zookeeper.latency.avg"
+  ],
+  "comparator": "LT",
+  "threshold": 100
+ }
+}

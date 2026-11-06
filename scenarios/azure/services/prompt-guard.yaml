@@ -1,0 +1,138 @@
+service: prompt-guard
+sort_order: 4
+cloud_provider: azure
+cloud_region: eastus2
+cloud_platform: azure_vm
+cloud_availability_zone: eastus2-1
+subsystem: safety
+language: go
+
+# Topology: [downstream-service, endpoint, METHOD]
+topology: []
+
+db_operations: []
+
+emit_fault_logs: true
+kpi_emitter: false
+
+constants: {}
+
+state:
+  _screened_count:
+    init: 0
+  _last_summary:
+    init: now
+
+steps:
+  - sample:
+      screen_stage:
+        choice: [user_prompt, user_prompt, user_prompt, retrieved_passage, model_output]
+      policy_profile:
+        choice: [customer-support-strict, customer-support-strict, general-assistant, internal-kb]
+      hate_score:
+        uniform: [0.0, 0.08]
+        round: 3
+      violence_score:
+        uniform: [0.0, 0.06]
+        round: 3
+      self_harm_score:
+        uniform: [0.0, 0.04]
+        round: 3
+      injection_score:
+        if_active:
+          uniform: [0.62, 0.97]
+          round: 3
+        else:
+          uniform: [0.01, 0.22]
+          round: 3
+      filter_latency_ms:
+        if_active:
+          uniform: [450.0, 2800.0]
+          round: 1
+        else:
+          uniform: [12.0, 85.0]
+          round: 1
+      batch_allowed:
+        randint: [180, 260]
+      batch_blocked:
+        if_active:
+          randint: [45, 140]
+        else:
+          randint: [1, 6]
+  - counter:
+      state_key: _screened_count
+      by: 1
+  - log:
+      level: INFO
+      message: '[PROMPT_GUARD] screen_complete stage={screen_stage} profile={policy_profile} verdict=ALLOW hate={hate_score} violence={violence_score} self_harm={self_harm_score} injection={injection_score} latency={filter_latency_ms}ms'
+      attrs:
+        operation: screen_complete
+        guard.stage:
+          var: screen_stage
+        guard.policy_profile:
+          var: policy_profile
+        guard.verdict: ALLOW
+        guard.injection_score:
+          var: injection_score
+        guard.latency_ms:
+          var: filter_latency_ms
+  - log:
+      level: INFO
+      message: '[PROMPT_GUARD] window_totals allowed={batch_allowed} blocked={batch_blocked} jailbreak_detector=prompt-shield content_safety=azure-ai-content-safety status=NORMAL'
+      attrs:
+        operation: window_totals
+        guard.allowed:
+          var: batch_allowed
+        guard.blocked:
+          var: batch_blocked
+  - every:
+      seconds: 10
+      state_key: _last_summary
+      steps:
+        - log:
+            level: INFO
+            message: '[PROMPT_GUARD] guard_summary screened_total={_screened_count} policy_version=2026.10.2 block_rate_target<3% status=NORMAL'
+            attrs:
+              operation: guard_summary
+              guard.screened_total:
+                var: _screened_count
+  - metric:
+      name: prompt_guard.filter_latency_ms
+      value:
+        var: filter_latency_ms
+      unit: ms
+  - metric:
+      name: prompt_guard.requests_allowed
+      value:
+        var: batch_allowed
+      unit: '{requests}'
+  - metric:
+      name: prompt_guard.requests_blocked
+      value:
+        var: batch_blocked
+      unit: '{requests}'
+  - metric:
+      name: prompt_guard.block_rate_pct
+      value:
+        expr: round(batch_blocked / (batch_allowed + batch_blocked) * 100, 2)
+      unit: '%'
+  - metric:
+      name: prompt_guard.injection_score
+      value:
+        var: injection_score
+      unit: '1'
+  - metric:
+      name: prompt_guard.category_score.hate
+      value:
+        var: hate_score
+      unit: '1'
+  - metric:
+      name: prompt_guard.category_score.violence
+      value:
+        var: violence_score
+      unit: '1'
+  - metric:
+      name: prompt_guard.category_score.self_harm
+      value:
+        var: self_harm_score
+      unit: '1'

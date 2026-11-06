@@ -1,0 +1,37 @@
+name: "GT profilingmetrics_otel: cpu_hotspot_multiplier"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-PROFILINGMETRICS-CPU-HOTSPOT-MULTIPLIER
+sensor_type: impact_key_probe
+affected_services:
+  - gt-profilingmetrics-azure-svc-1
+cascade_services:
+  - gt-profilingmetrics-azure-svc-2
+description: "Tests impact_key cpu_hotspot_multiplier on generator profilingmetrics_otel."
+investigation_notes: |-
+  1. Verify profilingmetrics_otel is active and reporting metrics.
+  2. Check that the cpu_hotspot_multiplier metric has reached the trigger value (6.0).
+  3. Confirm generator_impact for profilingmetrics_otel.cpu_hotspot_multiplier is set to 6.0.
+  4. Look for correlated changes in service gt-profilingmetrics-azure-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_cpu_hotspot_multiplier_baseline
+error_message: "GT-PROBE: gen=profilingmetrics_otel key=cpu_hotspot_multiplier value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=profilingmetrics_otel
+  impact_key: cpu_hotspot_multiplier
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 6.0
+  svc_name: gt-profilingmetrics-azure-svc-1
+rca_clues:
+  gt-profilingmetrics-azure-svc-1:
+    probe.generator: profilingmetrics_otel
+    probe.impact_key: cpu_hotspot_multiplier
+    probe.trigger_value: 6.0
+  gt-profilingmetrics-azure-svc-2:
+    probe.upstream_generator: profilingmetrics_otel
+    probe.upstream_key: cpu_hotspot_multiplier
+generator_impact:
+  profilingmetrics_otel:
+    cpu_hotspot_multiplier: 6.0

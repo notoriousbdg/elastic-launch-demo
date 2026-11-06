@@ -9,7 +9,7 @@ schema_version: "1.2"
 nominal_label: NORMAL
 hosts:
 - host.name: banking-aws-host-01
-  host.id: i-0a1b2c3d4e5f67890
+  host.id: i-2789072216007ecee
   host.arch: amd64
   host.type: r6i.2xlarge
   host.image.id: ami-0abcdef1234567890
@@ -31,13 +31,13 @@ hosts:
   cloud.platform: aws_ec2
   cloud.region: us-east-1
   cloud.availability_zone: us-east-1a
-  cloud.account.id: '112233445566'
-  cloud.instance.id: i-0a1b2c3d4e5f67890
+  cloud.account.id: '519536221650'
+  cloud.instance.id: i-2789072216007ecee
   cpu_count: 8
   memory_total_bytes: 68719476736
   disk_total_bytes: 536870912000
 - host.name: banking-gcp-host-01
-  host.id: '4567890123456789012'
+  host.id: '4811907286153260'
   host.arch: amd64
   host.type: n2-standard-8
   host.image.id: projects/ubuntu-os-cloud/global/images/ubuntu-2204-jammy-v20250115
@@ -59,13 +59,13 @@ hosts:
   cloud.platform: gcp_compute_engine
   cloud.region: us-central1
   cloud.availability_zone: us-central1-a
-  cloud.account.id: banking-member-services-prod
-  cloud.instance.id: '4567890123456789012'
+  cloud.account.id: banking-project
+  cloud.instance.id: '4811907286153260'
   cpu_count: 8
   memory_total_bytes: 34359738368
   disk_total_bytes: 274877906944
 - host.name: banking-azure-host-01
-  host.id: /subscriptions/abc-123/resourceGroups/banking-rg/providers/Microsoft.Compute/virtualMachines/banking-vm-01
+  host.id: /subscriptions/ec4c99bc-183f-51d6-998b-6e9dcf68c571/resourceGroups/banking-rg/providers/Microsoft.Compute/virtualMachines/banking-vm-01
   host.arch: amd64
   host.type: Standard_D8s_v5
   host.image.id: Canonical:0001-com-ubuntu-server-jammy:22_04-lts-gen2:latest
@@ -87,7 +87,7 @@ hosts:
   cloud.platform: azure_vm
   cloud.region: eastus
   cloud.availability_zone: eastus-1
-  cloud.account.id: abc-123-def-456
+  cloud.account.id: ec4c99bc-183f-51d6-998b-6e9dcf68c571
   cloud.instance.id: banking-vm-01
   cpu_count: 8
   memory_total_bytes: 34359738368
@@ -236,39 +236,50 @@ executive_trend_charts:
   y_label: index
 executive_kpi_emissions:
 - name: business.net_interest_income_usd_per_min
+  better: higher
   value: {uniform: [180000.0, 850000.0], round: 1}
   unit: USD/min
 - name: business.fee_revenue_usd_per_min
+  better: higher
   value: {uniform: [12000.0, 95000.0], round: 1}
   unit: USD/min
 - name: business.loan_origination_usd_per_min
+  better: higher
   value: {uniform: [280000.0, 2100000.0], round: 1}
   unit: USD/min
 - name: business.card_interchange_usd_per_min
+  better: higher
   value: {uniform: [8000.0, 72000.0], round: 1}
   unit: USD/min
 - name: business.wealth_aum_delta_usd_per_min
   value: {uniform: [-45000.0, 180000.0], round: 1}
   unit: USD/min
 - name: business.deposit_growth_usd_per_min
+  better: higher
   value: {uniform: [25000.0, 320000.0], round: 1}
   unit: USD/min
 - name: business.active_digital_sessions
+  better: higher
   value: {randint: [12000, 180000]}
   unit: sessions
 - name: business.mobile_logins_per_min
+  better: higher
   value: {randint: [400, 8500]}
   unit: logins/min
 - name: business.digital_transaction_pct
+  better: higher
   value: {uniform: [62.0, 94.0], round: 2}
   unit: '%'
 - name: business.self_service_deflection_pct
+  better: higher
   value: {uniform: [45.0, 88.0], round: 2}
   unit: '%'
 - name: business.app_session_duration_sec
+  better: higher
   value: {uniform: [95.0, 420.0], round: 1}
   unit: s
 - name: business.api_calls_per_min
+  better: higher
   value: {randint: [22000, 380000]}
   unit: calls/min
 - name: business.fraud_detection_rate_pct
@@ -278,33 +289,42 @@ executive_kpi_emissions:
   value: {uniform: [0.1, 3.8], round: 2}
   unit: alerts/min
 - name: business.aml_flags_per_min
+  better: lower
   value: {uniform: [0.05, 1.2], round: 3}
   unit: flags/min
 - name: business.failed_auth_attempts_per_min
+  better: lower
   value: {randint: [12, 280]}
   unit: attempts/min
 - name: business.chargeback_rate_pct
+  better: lower
   value: {uniform: [0.04, 0.38], round: 3}
   unit: '%'
 - name: business.regulatory_breach_count
+  better: lower
   value: {randint: [0, 2]}
   unit: count
 - name: business.net_satisfaction_proxy_nps
+  better: higher
   value: {uniform: [22.0, 68.0], round: 1}
   unit: score
 - name: business.account_openings_per_min
+  better: higher
   value: {uniform: [0.8, 12.0], round: 2}
   unit: openings/min
 - name: business.account_closures_per_min
   value: {uniform: [0.1, 2.8], round: 2}
   unit: closures/min
 - name: business.churn_risk_index_0_100
+  better: lower
   value: {uniform: [8.0, 35.0], round: 1}
   unit: index
 - name: business.complaint_tickets_per_min
+  better: lower
   value: {uniform: [0.2, 4.5], round: 2}
   unit: tickets/min
 - name: business.csat_score_0_5
+  better: higher
   value: {uniform: [3.2, 4.8], round: 2}
   unit: score
 raw_log_profile:
@@ -392,3 +412,7 @@ trace_attributes:
       document.classification: {choice: [PII, PHI, financial, military_record, general]}
       document.storage_tier: {choice: [hot, warm, archive, compliance_hold]}
       document.encryption_status: {choice: [AES256_KMS, AES256_SSE, client_side_encrypted]}
+
+generators:
+  redis_otel: true
+  kafka_otel: true

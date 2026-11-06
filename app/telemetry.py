@@ -64,6 +64,25 @@ def _now_ns() -> str:
     return str(int(time.time() * 1_000_000_000))
 
 
+def _make_client(headers: dict[str, str]) -> httpx.Client:
+    """Build the shared sync client: an HTTP/1.1 connection pool.
+
+    One sync ``httpx.Client`` is shared by every service and generator thread.
+    With HTTP/2 the threads would write into the same connection at once;
+    httpcore does not lock the h2 state for that, so the connection is corrupted
+    and the server closes it (GOAWAY PROTOCOL_ERROR / COMPRESSION_ERROR), which
+    fails every request in flight on it. HTTP/1.1 gives each thread its own
+    pooled connection, so no lock around the network call is needed.
+
+    ``http2`` and ``limits`` go on the transport: httpx ignores the Client's own
+    arguments for them once a ``transport`` is passed. ``retries=1`` only retries
+    connection failures, never a request that was already sent.
+    """
+    limits = httpx.Limits(max_connections=32, max_keepalive_connections=32, keepalive_expiry=30)
+    transport = httpx.HTTPTransport(http2=False, limits=limits, retries=1)
+    return httpx.Client(headers=headers, timeout=10, transport=transport)
+
+
 class OTLPClient:
     """Sends OTLP/HTTP payloads to Elastic Cloud Managed OTLP or a collector."""
 
@@ -72,37 +91,46 @@ class OTLPClient:
         endpoint: str | None = None,
         api_key: str | None = None,
         auth_type: str | None = None,
+        elastic_url: str | None = None,
     ):
         self.endpoint = (endpoint or OTLP_ENDPOINT).rstrip("/")
         self.api_key = api_key or OTLP_API_KEY
         self.auth_type = auth_type or OTLP_AUTH_TYPE
+        # This deployment's Elasticsearch URL, for the native /_otlp/v1/metrics
+        # path; falls back to the process environment when unset.
+        self.elastic_url = (elastic_url or "").strip()
 
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"{self.auth_type} {self.api_key}"
 
-        self.client = httpx.Client(headers=headers, http2=True, timeout=10)
+        self.client = _make_client(headers)
         self._send_lock = threading.Lock()
         self.consecutive_failures = 0
         self.max_failures_before_backoff = 5
 
-    def reconfigure(self, endpoint: str, api_key: str, auth_type: str = "ApiKey"):
-        """Update endpoint and auth for a running client."""
+    def reconfigure(self, endpoint: str, api_key: str, auth_type: str | None = None):
+        """Update endpoint and auth for a running client.
+
+        ``auth_type`` keeps the current value (from ``OTLP_AUTH_TYPE``) when omitted.
+        """
         self.endpoint = endpoint.rstrip("/")
         self.api_key = api_key
-        self.auth_type = auth_type
+        self.auth_type = auth_type or self.auth_type
         self.consecutive_failures = 0
 
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"{self.auth_type} {self.api_key}"
-        # Close old client, create new one
-        if self.client:
+        # Swap in the new client first, then close the old one, so threads that
+        # are mid-request never see a closed client.
+        old_client = self.client
+        self.client = _make_client(headers)
+        if old_client:
             try:
-                self.client.close()
+                old_client.close()
             except Exception:
                 pass
-        self.client = httpx.Client(headers=headers, http2=True, timeout=10)
         logger.info("OTLPClient reconfigured → %s", self.endpoint)
 
     # ── Resource helpers ───────────────────────────────────────────────
@@ -200,11 +228,17 @@ class OTLPClient:
     ) -> dict[str, Any]:
         """Build a single OTLP log record."""
         ts = _now_ns()
+        # Preserve caller case for severityText — OOTB ESQL often filters
+        # ECS-style lowercase (e.g. nginx ``log.level IN ("error", "crit")``
+        # via alias → severity_text). severityNumber still uses UPPER keys.
+        sev_key = severity.upper()
+        if sev_key in ("CRIT", "ALERT", "EMERG"):
+            sev_key = "FATAL"
         record: dict[str, Any] = {
             "timeUnixNano": ts,
             "observedTimeUnixNano": ts,
-            "severityText": severity.upper(),
-            "severityNumber": SEVERITY_MAP.get(severity.upper(), 9),
+            "severityText": severity,
+            "severityNumber": SEVERITY_MAP.get(sev_key, 9),
             "body": {"stringValue": body},
         }
         if trace_id:
@@ -216,6 +250,57 @@ class OTLPClient:
         if attributes:
             record["attributes"] = _format_attributes(attributes)
         return record
+
+    def send_logs_scoped(
+        self,
+        resource: dict[str, Any],
+        scope: dict[str, Any],
+        log_records: list[dict[str, Any]],
+    ) -> None:
+        """Send a batch of log records with an explicit OTel scope.
+
+        Use instead of :meth:`send_logs` when the generator must declare a
+        specific receiver scope (``name`` + ``version``), for example
+        ``github.com/open-telemetry/opentelemetry-collector-contrib/receiver/mysqlreceiver``.
+        Prefer this over calling the private ``_send`` directly.
+        """
+        if not log_records:
+            return
+        payload = {
+            "resourceLogs": [{
+                "resource": resource,
+                "scopeLogs": [{
+                    "scope": scope,
+                    "logRecords": log_records,
+                }],
+            }]
+        }
+        self._send(f"{self.endpoint}/v1/logs", payload, "logs-scoped")
+
+    def send_metrics_scoped(
+        self,
+        resource: dict[str, Any],
+        scope: dict[str, Any],
+        metrics: list[dict[str, Any]],
+    ) -> None:
+        """Send a batch of metrics with an explicit OTel scope.
+
+        Use instead of :meth:`send_metrics` when the generator must declare a
+        specific receiver scope, for example the MySQL or PostgreSQL receiver.
+        Prefer this over calling the private ``_send`` directly.
+        """
+        if not metrics:
+            return
+        payload = {
+            "resourceMetrics": [{
+                "resource": resource,
+                "scopeMetrics": [{
+                    "scope": scope,
+                    "metrics": metrics,
+                }],
+            }]
+        }
+        self._send(f"{self.endpoint}/v1/metrics", payload, "metrics-scoped")
 
     # ── Metric sending ─────────────────────────────────────────────────
     def send_metrics(
@@ -389,11 +474,11 @@ class OTLPClient:
             return msg.SerializeToString(), {"Content-Type": "application/x-protobuf"}
         return json.dumps(payload).encode(), {}
 
-    @staticmethod
-    def _metrics_otlp_url() -> str | None:
+    def _metrics_otlp_url(self) -> str | None:
         """ES native OTLP metrics path, or None if Elasticsearch is not configured."""
         es = (
-            (ELASTIC_URL or "").strip()
+            self.elastic_url
+            or (ELASTIC_URL or "").strip()
             or os.getenv("ELASTICSEARCH_URL", "").strip()
         ).rstrip("/")
         return f"{es}/_otlp/v1/metrics" if es else None
@@ -409,13 +494,15 @@ class OTLPClient:
             if time.time() % backoff > 1:
                 return
 
-        # httpx.Client is thread-safe and multiplexes concurrent requests over
-        # HTTP/2, so the network call itself is intentionally NOT serialized —
-        # holding a lock around it would force every service thread in the
-        # process through one request at a time, starving whichever threads
-        # lose the race (observed: some services stalled 80-240s between
-        # emissions despite a 1.5-3s tick loop). The lock is only used below
-        # to keep the failure counter's read-modify-write atomic.
+        # The client is an HTTP/1.1 connection pool (see _make_client), so each
+        # thread posts on its own connection and the network call is
+        # intentionally NOT serialized — holding a lock around it would force
+        # every service thread in the process through one request at a time,
+        # starving whichever threads lose the race (observed: some services
+        # stalled 80-240s between emissions despite a 1.5-3s tick loop). Do not
+        # go back to HTTP/2 on this shared client: threads writing into one h2
+        # connection corrupt it. The lock is only used below to keep the failure
+        # counter's read-modify-write atomic.
         try:
             body, extra_headers = self._encode_otlp(payload)
             # mOTLP /v1/metrics acks then drops; ES native OTLP indexes protobuf.
@@ -475,7 +562,7 @@ class ESBulkClient:
         headers = {"Content-Type": "application/x-ndjson"}
         if self.api_key:
             headers["Authorization"] = f"ApiKey {self.api_key}"
-        self.client = httpx.Client(headers=headers, http2=True, timeout=10)
+        self.client = _make_client(headers)
         self.consecutive_failures = 0
         self.max_failures_before_backoff = 5
 
@@ -483,23 +570,31 @@ class ESBulkClient:
     def configured(self) -> bool:
         return bool(self.elastic_url and self.api_key)
 
-    def reconfigure(self, elastic_url: str, api_key: str) -> None:
-        self.elastic_url = elastic_url.strip().rstrip("/")
-        self.api_key = api_key.strip()
-        self.consecutive_failures = 0
-        headers = {"Content-Type": "application/x-ndjson"}
-        if self.api_key:
-            headers["Authorization"] = f"ApiKey {self.api_key}"
-        if self.client:
-            try:
-                self.client.close()
-            except Exception:
-                pass
-        self.client = httpx.Client(headers=headers, http2=True, timeout=10)
-        logger.info("ESBulkClient reconfigured -> %s", self.elastic_url)
-
-    def send_bulk(self, data_stream: str, docs: list[dict[str, Any]]) -> int:
+    def send_bulk(
+        self,
+        data_stream: str,
+        docs: list[dict[str, Any]],
+        *,
+        params: dict[str, str] | None = None,
+        dynamic_templates: dict[str, str] | None = None,
+    ) -> int:
         """POST docs to {elastic_url}/{data_stream}/_bulk using `create` actions.
+
+        Parameters
+        ----------
+        data_stream:
+            Target data stream name, for example ``"logs-aws_bedrock.invocation-banking"``.
+        docs:
+            List of document dicts to index.
+        params:
+            Optional query-string parameters appended to the URL.  Pass
+            ``{"pipeline": "_none"}`` to bypass the package ``default_pipeline``
+            when writing pre-shaped documents for provider-native integrations.
+        dynamic_templates:
+            Optional per-document bulk ``dynamic_templates`` map (field path →
+            template name).  Required for OTel metrics co-located via bulk so
+            counters map as ``counter_long`` (not plain ``long``) — same
+            mechanism the elasticsearch exporter uses for OTLP intake.
 
         Returns the number of docs the server reports as indexed (0 if request failed).
         """
@@ -512,13 +607,23 @@ class ESBulkClient:
             if time.time() % backoff > 1:
                 return 0
 
+        create_action: dict[str, Any] = {}
+        if dynamic_templates:
+            create_action["dynamic_templates"] = dynamic_templates
+        create_line = json.dumps({"create": create_action}, separators=(",", ":"))
+
         lines: list[str] = []
         for doc in docs:
-            lines.append('{"create":{}}')
+            lines.append(create_line)
             lines.append(json.dumps(doc, separators=(",", ":")))
         body = "\n".join(lines) + "\n"
 
-        url = f"{self.elastic_url}/{data_stream}/_bulk"
+        base_url = f"{self.elastic_url}/{data_stream}/_bulk"
+        if params:
+            qs = "&".join(f"{k}={v}" for k, v in params.items())
+            url = f"{base_url}?{qs}"
+        else:
+            url = base_url
         try:
             resp = self.client.post(url, content=body)
             resp.raise_for_status()
@@ -536,6 +641,12 @@ class ESBulkClient:
                 )
                 if first:
                     logger.warning("ESBulk %s partial failure: %s", data_stream, first)
+                ok = sum(
+                    1
+                    for it in data.get("items", [])
+                    if it.get("create", {}).get("status") in (200, 201)
+                )
+                return ok
             return len(docs)
         except httpx.RequestError as exc:
             self.consecutive_failures += 1

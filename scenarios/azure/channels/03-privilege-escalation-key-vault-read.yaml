@@ -1,0 +1,56 @@
+name: Privilege Escalation Key Vault Read
+subsystem: identity
+vehicle_section: identity_pipeline
+error_type: IAM-PRIV-ESC-KEYVAULT-READ
+sensor_type: health_check
+affected_services: [identity-broker, chat-orchestrator]
+cascade_services: []
+description: The Activity Log shows a role assignment write granting broad rights to a service principal, followed by Key Vault secret reads by identity-broker's principal that need security review.
+investigation_notes: |-
+  1. Search body.text for *IAM-PRIV-ESC-KEYVAULT-READ* and pull Activity Log operation Microsoft.Authorization/roleAssignments/write for principal {principal_name}.
+  2. Check the granted role {role_name} at scope {role_scope}; role_assignment_write_privilege_escalation fires when a broad role such as Owner or Contributor is assigned.
+  3. Correlate the write with Key Vault data-plane reads: {secret_read_count} SecretGet calls against {key_vault_name} from caller_ip={caller_ip} within {minutes_after_grant} minutes (sensitive_key_access).
+  4. Identify who performed the write (initiator={initiator_upn}) and whether a change ticket or PIM activation exists for it.
+  5. Review chat-orchestrator for token-exchange calls using credentials from the read secrets, then revoke the role assignment and rotate the exposed secrets.
+remediation_action: revoke_role_assignment
+error_message: '[IdentityBroker] IAM-PRIV-ESC-KEYVAULT-READ: principal={principal_name} granted role={role_name} scope={role_scope} initiator={initiator_upn} secret_reads={secret_read_count} vault={key_vault_name}'
+stack_trace: |-
+  PrivilegeEscalationDetectedException: IAM-PRIV-ESC-KEYVAULT-READ
+    at IdentityBroker.auditRoleAssignment(principal={principal_name})
+    at KeyVaultAccessMonitor.flagSecretRead(vault={key_vault_name})
+  Role granted:    {role_name}
+  Scope:           {role_scope}
+  Initiator:       {initiator_upn}
+  Secret reads:    {secret_read_count} within {minutes_after_grant} min
+  Caller IP:       {caller_ip}
+correlation_attr:
+  key: azure.role_assignment_id
+  value: 7c1e5d2a-93b4-4f0e-a6d8-2b9f41c0e6a3
+fault_params:
+  principal_name: {choice: [sp-identity-broker-prod, sp-genai-automation, sp-assistant-deploy]}
+  role_name: {choice: [Owner, Contributor, User Access Administrator]}
+  role_scope: {choice: [/subscriptions/38514ecc-371c-5d0a-9c14-ab99a396027d, /subscriptions/38514ecc-371c-5d0a-9c14-ab99a396027d/resourceGroups/azureai-rg]}
+  initiator_upn: {choice: [dev.contractor@contoso-demo.onmicrosoft.com, ops.temp@contoso-demo.onmicrosoft.com]}
+  key_vault_name: {choice: [kv-azureai-prod-weu, kv-azureai-secrets-weu]}
+  secret_read_count: {randint: [18, 140]}
+  minutes_after_grant: {randint: [2, 15]}
+  caller_ip: {format: "203.0.113.{n}", n: {randint: [10, 240]}}
+rca_clues:
+  identity-broker:
+    iam.role_assignment_writes_last_hour: {randint: [1, 4]}
+    iam.keyvault_secret_gets: {randint: [18, 140]}
+    iam.pim_activation_found: false
+  chat-orchestrator:
+    orchestrator.unexpected_token_exchanges: {randint: [5, 60]}
+    orchestrator.credential_source: broker_key_vault
+business_impact:
+  - kpi: business.error_rate_pct
+    value: {uniform: [5.46, 6.29], round: 2}
+  - kpi: business.availability_pct
+    factor: {uniform: [0.92, 0.98]}
+  - kpi: business.conversations_per_min
+    value: {uniform: [74.4, 85.6], round: 0}
+generator_impact:
+  azure_activity_otel:
+    role_assignment_write_privilege_escalation: 1.0
+    sensitive_key_access: 1.0

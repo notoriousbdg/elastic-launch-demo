@@ -1,0 +1,37 @@
+name: "GT gcp_cloudstorage_otel: error_5xx_rate"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-GCPCLOUDSTORAGE-ERROR-5XX-RATE
+sensor_type: impact_key_probe
+affected_services:
+  - gt-gcpcloudstorage-gcp-svc-1
+cascade_services:
+  - gt-gcpcloudstorage-gcp-svc-2
+description: "Tests impact_key error_5xx_rate on generator gcp_cloudstorage_otel."
+investigation_notes: |-
+  1. Verify gcp_cloudstorage_otel is active and reporting metrics.
+  2. Check that the error_5xx_rate metric has reached the trigger value (0.2).
+  3. Confirm generator_impact for gcp_cloudstorage_otel.error_5xx_rate is set to 0.2.
+  4. Look for correlated changes in service gt-gcpcloudstorage-gcp-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_error_5xx_rate_baseline
+error_message: "GT-PROBE: gen=gcp_cloudstorage_otel key=error_5xx_rate value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=gcp_cloudstorage_otel
+  impact_key: error_5xx_rate
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 0.2
+  svc_name: gt-gcpcloudstorage-gcp-svc-1
+rca_clues:
+  gt-gcpcloudstorage-gcp-svc-1:
+    probe.generator: gcp_cloudstorage_otel
+    probe.impact_key: error_5xx_rate
+    probe.trigger_value: 0.2
+  gt-gcpcloudstorage-gcp-svc-2:
+    probe.upstream_generator: gcp_cloudstorage_otel
+    probe.upstream_key: error_5xx_rate
+generator_impact:
+  gcp_cloudstorage_otel:
+    error_5xx_rate: 0.2

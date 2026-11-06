@@ -1,0 +1,100 @@
+service: storefront-web
+sort_order: 1
+cloud_provider: aws
+cloud_region: us-east-1
+cloud_platform: aws_ec2
+cloud_availability_zone: us-east-1a
+subsystem: storefront
+language: dotnet
+
+topology:
+  - [orders-gateway, /api/v1/orders, POST]
+  - [recommendation-service, /api/v1/recommendations, GET]
+  - [support-assistant, /api/v1/support/chat, POST]
+
+entry_endpoints:
+  - [/api/v1/catalog/search, GET]
+  - [/api/v1/cart, GET]
+  - [/api/v1/cart/items, POST]
+  - [/api/v1/orders, POST]
+  - [/api/v1/recommendations, GET]
+  - [/api/v1/support/chat, POST]
+
+db_operations: []
+
+emit_fault_logs: true
+kpi_emitter: false
+
+constants:
+  PAGES: [home, search, product_detail, cart, checkout, order_confirmation]
+  ALB_TARGET_GROUPS: [tg-storefront-web-80, tg-storefront-web-443]
+
+state:
+  _page_views: {init: 0}
+  _last_summary: {init: now}
+
+steps:
+  - sample:
+      page: {choice: PAGES}
+      tg: {choice: ALB_TARGET_GROUPS}
+      render_ms:
+        if_active: {uniform: [900.0, 4200.0], round: 1}
+        else: {uniform: [35.0, 180.0], round: 1}
+      active_sessions: {randint: [850, 4200]}
+      cart_adds_per_min: {randint: [120, 640]}
+      checkout_starts_per_min: {randint: [40, 260]}
+      http_5xx_pct:
+        if_active: {uniform: [4.0, 18.0], round: 2}
+        else: {uniform: [0.0, 0.4], round: 2}
+      cpu_credit_balance:
+        if_active: {uniform: [0.0, 12.0], round: 1}
+        else: {uniform: [120.0, 576.0], round: 1}
+      cart_id: {format: "cart-{n}", n: {randint: [100000, 999999]}}
+  - counter:
+      state_key: _page_views
+      by: 1
+  - metric:
+      name: storefront.page_render_ms
+      value: {var: render_ms}
+      unit: ms
+  - metric:
+      name: storefront.active_sessions
+      value: {var: active_sessions}
+      unit: '{sessions}'
+  - metric:
+      name: storefront.cart_adds_per_min
+      value: {var: cart_adds_per_min}
+      unit: '{adds}/min'
+  - metric:
+      name: storefront.checkout_starts_per_min
+      value: {var: checkout_starts_per_min}
+      unit: '{checkouts}/min'
+  - metric:
+      name: storefront.http_5xx_pct
+      value: {var: http_5xx_pct}
+      unit: '%'
+  - metric:
+      name: storefront.ec2_cpu_credit_balance
+      value: {var: cpu_credit_balance}
+      unit: '{credits}'
+  - log:
+      level: INFO
+      message: "[storefront] page={page} render={render_ms}ms cart={cart_id} alb_target_group={tg} sessions={active_sessions}"
+      attrs:
+        operation: page_render
+        storefront.page: {var: page}
+        storefront.render_ms: {var: render_ms}
+        storefront.cart_id: {var: cart_id}
+        aws.elb.target_group: {var: tg}
+  - every:
+      seconds: 30
+      state_key: _last_summary
+      steps:
+        - log:
+            level: INFO
+            message: "[storefront] summary page_views={_page_views} checkout_starts_per_min={checkout_starts_per_min} cart_adds_per_min={cart_adds_per_min} http_5xx_pct={http_5xx_pct}% ec2_cpu_credit_balance={cpu_credit_balance}"
+            attrs:
+              operation: summary
+              storefront.page_views: {var: _page_views}
+              storefront.http_5xx_pct: {var: http_5xx_pct}
+              aws.ec2.cpu_credit_balance: {var: cpu_credit_balance}

@@ -53,7 +53,15 @@ Brief YAML format
         error_type: ORD-ROUTING-FAIL     # UPPER-KEBAB-CASE; unique per channel
         affected_services: [order-intake]
         cascade_services: [storefront-gateway]
+        generator: redis_otel            # optional: makes this channel the ONE dedicated
+                                          # generator_impact channel for redis_otel — id
+                                          # must also appear in the top-level generators: list
       # ... 19 more channels (20 total) ...
+
+    # Optional: non-core generators/integrations to enable (see
+    # `python3 -m generator_engine.registry --list`). Each id here must be tagged
+    # via `generator: <id>` on exactly one channel above, so its alert can fire.
+    generators: [redis_otel]
 
     # Optional overrides
     apm_ml_bucket_span: 1m              # default: 1m
@@ -65,7 +73,7 @@ from __future__ import annotations
 
 import sys
 import textwrap
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -74,6 +82,8 @@ sys.path.insert(0, str(REPO_ROOT))
 
 import yaml  # noqa: E402  (after sys.path modification)
 from scenario_engine.schema_version import CURRENT_SCHEMA_VERSION as _CURRENT_SCHEMA_VERSION  # noqa: E402
+from generator_engine.identity import apply_host_identity  # noqa: E402
+from generator_engine.registry import GENERATORS  # noqa: E402
 
 
 def _current_schema_version() -> str:
@@ -161,6 +171,24 @@ _KPI_RANGE_BY_SUFFIX: dict[str, tuple[list[float], int]] = {
 }
 _KPI_RANGE_DEFAULT: tuple[list[float], int] = ([100.0, 1000.0], 1)
 
+# Explicit direction per scaffolded KPI (`better:` on the emission entry).  The
+# executive dashboard colours tiles from this; without it the colour falls back
+# to a name-keyword guess.
+_KPI_BETTER_BY_SUFFIX: dict[str, str] = {
+    "error_rate_pct": "lower",
+    "latency_p99_ms": "lower",
+}
+_KPI_BETTER_DEFAULT = "higher"
+
+_KPI_SECTION_FIELD_PAIRS = [
+    ("Primary KPI (unit)", "metrics.business.primary_kpi"),
+    ("Secondary KPI (unit)", "metrics.business.secondary_kpi"),
+    ("Throughput (req/min)", "metrics.business.throughput_rpm"),
+    ("Error Rate (%)", "metrics.business.error_rate_pct"),
+    ("P99 Latency (ms)", "metrics.business.latency_p99_ms"),
+    ("Availability (%)", "metrics.business.availability_pct"),
+]
+
 
 # ---------------------------------------------------------------------------
 # YAML dump helpers — produce clean, readable output
@@ -217,27 +245,18 @@ def _build_hosts(services: list[dict], namespace: str) -> list[dict]:
         tmpl = _HOST_TEMPLATES.get(provider, _HOST_TEMPLATES["aws"])
 
         if provider == "aws":
-            host_id = f"i-0{'a1b2c3d4e5f6789' + str(idx)[:1]}"
-            account_id = "123456789012"
-            instance_id = host_id
             host_ip = ["10.0.1.10", "172.16.0.10"]
             host_mac = ["0a:1b:2c:3d:4e:5f", "0a:1b:2c:3d:4e:60"]
         elif provider == "gcp":
-            host_id = str(1234567890123456789 + idx)
-            account_id = "my-gcp-project"
-            instance_id = host_id
             host_ip = ["10.128.0.10", "10.128.0.11"]
             host_mac = ["42:01:0a:80:00:0a", "42:01:0a:80:00:0b"]
         else:  # azure
-            host_id = f"/subscriptions/sub-{idx:03d}/resourceGroups/rg/providers/Microsoft.Compute/virtualMachines/vm-01"
-            account_id = f"sub-{idx:03d}"
-            instance_id = f"vm-01-{idx:03d}"
             host_ip = ["10.0.2.10", "10.0.2.11"]
             host_mac = ["00:0d:3a:1b:2c:3d", "00:0d:3a:1b:2c:3e"]
 
         host: dict[str, Any] = {
             "host.name": f"{namespace}-{provider}-host-{idx:02d}",
-            "host.id": host_id,
+            "host.id": "pending",
             **{k: v for k, v in tmpl.items() if k.startswith("host.")},
             "host.ip": host_ip,
             "host.mac": host_mac,
@@ -246,15 +265,15 @@ def _build_hosts(services: list[dict], namespace: str) -> list[dict]:
             "cloud.platform": _CLOUD_PLATFORM_MAP.get(provider, provider),
             "cloud.region": region,
             "cloud.availability_zone": az,
-            "cloud.account.id": account_id,
-            "cloud.instance.id": instance_id,
+            "cloud.account.id": "pending",
+            "cloud.instance.id": "pending",
             **{k: v for k, v in tmpl.items()
                if not k.startswith("host.") and not k.startswith("os.")},
         }
         hosts.append(host)
         idx += 1
 
-    return hosts
+    return apply_host_identity(hosts, namespace)
 
 
 # ---------------------------------------------------------------------------
@@ -351,8 +370,12 @@ def _build_service_yaml(svc: dict, sort_order: int) -> str:
     lines.append("# Topology: [downstream-service, endpoint, METHOD]")
     lines.append("topology: []")
     lines.append("")
-    if svc.get("entry_service"):
-        lines.append("# Required: entry_endpoints for the sort_order:1 service")
+    traced = svc.get("generates_traces", True) and svc.get("subsystem") != "database"
+    if svc.get("entry_service") or traced:
+        lines.append("# entry_endpoints make a service a trace entry point.  The sort_order:1 service")
+        lines.append("# needs them (4x weighting); EVERY traced service gets them so any fault channel")
+        lines.append("# can list it in affected_services and turn its ops-dashboard tile red")
+        lines.append("# (verify Check 31 requires an entry service in each channel's affected_services).")
         lines.append("# Format: [[/path, METHOD], ...]")
         lines.append("entry_endpoints:")
         lines.append(f"  - [/api/v1/{svc['name']}/health, GET]")
@@ -379,6 +402,72 @@ def _build_service_yaml(svc: dict, sort_order: int) -> str:
 # ---------------------------------------------------------------------------
 # channel YAML generation
 # ---------------------------------------------------------------------------
+
+def _breach_value(meta: dict) -> Any:
+    """Return a value for an impact_key that lies in breach territory.
+
+    Every impact_key's healthy value sits at one end of its range (equal to
+    `default`); breaching the alert means moving toward the other end. We land
+    80% of the way there rather than at the extreme, so the stubbed value reads
+    as a plausible incident rather than a worst-case edge case.
+    """
+    if meta.get("type") == "bool":
+        return not meta.get("default")
+    lo, hi = meta["range"]
+    default = meta.get("default", lo)
+    target = hi if default == lo else lo
+    value = default + 0.8 * (target - default)
+    if meta.get("type") == "int":
+        return int(round(value))
+    return round(value, 1)
+
+
+def _load_retune():
+    """Load scripts/retune_business_impact.py (shared band / target maths)."""
+    import importlib.util
+
+    path = Path(__file__).resolve().parent / "retune_business_impact.py"
+    spec = importlib.util.spec_from_file_location("retune_business_impact", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _scaffold_emissions() -> dict[str, dict]:
+    """name -> executive_kpi_emissions entry for the scaffolded KPI set."""
+    out = {}
+    for _, field in _KPI_SECTION_FIELD_PAIRS:
+        suffix = field.split(".")[-1]
+        kpi_range, kpi_round = _KPI_RANGE_BY_SUFFIX.get(suffix, _KPI_RANGE_DEFAULT)
+        name = field.replace("metrics.", "")
+        out[name] = {
+            "name": name,
+            "value": {"uniform": kpi_range, "round": kpi_round},
+            "better": _KPI_BETTER_BY_SUFFIX.get(suffix, _KPI_BETTER_DEFAULT),
+        }
+    return out
+
+
+def _scaffold_business_impact(ch: dict) -> list[str]:
+    """business_impact lines sized to the channel's scope tier.
+
+    Red / yellow quotas come from ``verify_yaml_scenarios.SCOPE_TIERS`` and the
+    values from the same palette bands the executive dashboard uses, so the
+    scaffolded channel already passes verifier Check 32.
+    """
+    mod = _load_retune()
+    emissions = _scaffold_emissions()
+    _, _, need_non_green, need_red = mod.verify.scope_tier(ch)
+    # most impact-worthy KPIs first (errors, availability, throughput, latency, ...)
+    order = [
+        "business.error_rate_pct", "business.availability_pct", "business.throughput_rpm",
+        "business.latency_p99_ms", "business.primary_kpi", "business.secondary_kpi",
+    ]
+    entries = []
+    for i, kpi in enumerate(order[:need_non_green]):
+        entries.append(mod._impact_entry(kpi, emissions[kpi], "red" if i < need_red else "yellow"))
+    return mod._entry_lines(entries)
+
 
 def _build_channel_yaml(ch_num: int, ch: dict) -> str:
     """Return the YAML string for a single channel file."""
@@ -430,7 +519,29 @@ def _build_channel_yaml(ch_num: int, ch: dict) -> str:
         "  error_detail: {choice: [timeout, connection_refused, internal_error]}",
         "",
         "rca_clues: {}",
-    ])
+        "",
+        "# business_impact: retarget to the final executive_kpi_emissions names and the KPIs this",
+        "# fault would realistically move.  Bigger faults (more affected/cascade services) must",
+        "# turn MORE tiles yellow/red: minor >= 2 non-green (1 red), moderate >= 3 (2 red),",
+        "# major >= 4 (3 red).  Use `value:` ranges inside the red/yellow band of each KPI's",
+        "# `better:` direction; verify_yaml_scenarios.py (Check 32) enforces this.",
+    ] + _scaffold_business_impact({"affected_services": affected, "cascade_services": cascade}))
+
+    gen_id = ch.get("generator")
+    if gen_id:
+        spec = GENERATORS[gen_id]
+        lines.extend([
+            "",
+            f"# generator_impact: dedicated breach block for '{gen_id}' — TODO: prune to",
+            "# the 1-3 keys most relevant to this fault's narrative and delete the rest.",
+            "generator_impact:",
+            f"  {gen_id}:",
+        ])
+        for key, meta in spec.impact_keys.items():
+            value = _breach_value(meta)
+            value_yaml = "true" if value is True else "false" if value is False else value
+            doc = meta.get("doc", "")
+            lines.append(f"    {key}: {value_yaml}  # {doc}")
 
     return "\n".join(lines) + "\n"
 
@@ -514,14 +625,7 @@ def _build_scenario_yaml(brief: dict, services: list[dict]) -> str:
     k8s_clusters = _build_k8s_clusters(services, namespace)
 
     # Scaffold KPI sections/emissions/charts in sync
-    kpi_section_field_pairs = [
-        ("Primary KPI (unit)", f"metrics.business.primary_kpi"),
-        ("Secondary KPI (unit)", f"metrics.business.secondary_kpi"),
-        ("Throughput (req/min)", f"metrics.business.throughput_rpm"),
-        ("Error Rate (%)", f"metrics.business.error_rate_pct"),
-        ("P99 Latency (ms)", f"metrics.business.latency_p99_ms"),
-        ("Availability (%)", f"metrics.business.availability_pct"),
-    ]
+    kpi_section_field_pairs = _KPI_SECTION_FIELD_PAIRS
     executive_kpi_sections = [
         {
             "header": "**Performance** — TODO: rename to match your vertical",
@@ -535,6 +639,7 @@ def _build_scenario_yaml(brief: dict, services: list[dict]) -> str:
         executive_kpi_emissions.append({
             "name": field.replace("metrics.", ""),
             "value": {"uniform": kpi_range, "round": kpi_round},
+            "better": _KPI_BETTER_BY_SUFFIX.get(suffix, _KPI_BETTER_DEFAULT),
             "unit": "TODO",
         })
     executive_trend_charts = [
@@ -563,6 +668,7 @@ def _build_scenario_yaml(brief: dict, services: list[dict]) -> str:
         "nominal_label": brief.get("nominal_label", "NORMAL"),
         "schema_version": _current_schema_version(),
         "apm_ml_bucket_span": brief.get("apm_ml_bucket_span", "1m"),
+        **({"generators": {gid: True for gid in brief["generators"]}} if brief.get("generators") else {}),
         "hosts": hosts,
         "k8s_clusters": k8s_clusters,
         "agent_config": {
@@ -714,10 +820,54 @@ def _validate_brief(brief: dict) -> None:
                     f"Channel #{i + 1} ('{ch.get('slug', '?')}') is missing key: '{key}'"
                 )
 
+    traced_names = {
+        s["name"] for s in services
+        if s.get("generates_traces", True) and s.get("subsystem") != "database"
+    }
+    for ch in channels:
+        if not set(ch["affected_services"]) & traced_names:
+            raise ValueError(
+                f"Channel '{ch['slug']}': affected_services {ch['affected_services']} has no traced, "
+                f"non-database service — the ops dashboard would not react (list at least one "
+                f"service that handles requests, e.g. an API/worker, alongside the database)"
+            )
+
     error_types = [ch["error_type"] for ch in channels]
     dupes = [et for et in error_types if error_types.count(et) > 1]
     if dupes:
         raise ValueError(f"Duplicate error_types in channels: {sorted(set(dupes))}")
+
+    generator_ids = brief.get("generators", [])
+    if not isinstance(generator_ids, list):
+        raise ValueError("Brief 'generators' must be a list of generator ids")
+    unknown = [g for g in generator_ids if g not in GENERATORS]
+    if unknown:
+        raise ValueError(
+            f"Brief 'generators' references unknown generator id(s): {sorted(unknown)} "
+            f"(run python3 -m generator_engine.registry --list)"
+        )
+
+    tagged = [ch["generator"] for ch in channels if ch.get("generator")]
+    untagged_ids = [g for g in tagged if g not in generator_ids]
+    if untagged_ids:
+        raise ValueError(
+            f"Channel(s) tag generator id(s) missing from the brief's top-level "
+            f"'generators' list: {sorted(set(untagged_ids))}"
+        )
+
+    tag_counts = Counter(tagged)
+    missing_tag = [g for g in generator_ids if tag_counts.get(g, 0) == 0]
+    if missing_tag:
+        raise ValueError(
+            f"Brief 'generators' list includes id(s) with no dedicated channel — "
+            f"add 'generator: <id>' to exactly one channel entry for: {sorted(missing_tag)}"
+        )
+    multi_tag = sorted(g for g, c in tag_counts.items() if c > 1)
+    if multi_tag:
+        raise ValueError(
+            f"Generator id(s) tagged by more than one channel — pick exactly one "
+            f"dedicated channel per generator: {multi_tag}"
+        )
 
 
 # ---------------------------------------------------------------------------

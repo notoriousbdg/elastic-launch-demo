@@ -1,0 +1,37 @@
+name: "GT aws_sqs_otel: dlq_has_messages"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-AWSSQS-DLQ-HAS-MESSAGES
+sensor_type: impact_key_probe
+affected_services:
+  - gt-awssqs-aws-svc-1
+cascade_services:
+  - gt-awssqs-aws-svc-2
+description: "Tests impact_key dlq_has_messages on generator aws_sqs_otel."
+investigation_notes: |-
+  1. Verify aws_sqs_otel is active and reporting metrics.
+  2. Check that the dlq_has_messages metric has reached the trigger value (50.0).
+  3. Confirm generator_impact for aws_sqs_otel.dlq_has_messages is set to 50.0.
+  4. Look for correlated changes in service gt-awssqs-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_dlq_has_messages_baseline
+error_message: "GT-PROBE: gen=aws_sqs_otel key=dlq_has_messages value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=aws_sqs_otel
+  impact_key: dlq_has_messages
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 50.0
+  svc_name: gt-awssqs-aws-svc-1
+rca_clues:
+  gt-awssqs-aws-svc-1:
+    probe.generator: aws_sqs_otel
+    probe.impact_key: dlq_has_messages
+    probe.trigger_value: 50.0
+  gt-awssqs-aws-svc-2:
+    probe.upstream_generator: aws_sqs_otel
+    probe.upstream_key: dlq_has_messages
+generator_impact:
+  aws_sqs_otel:
+    dlq_has_messages: 50.0

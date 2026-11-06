@@ -1,0 +1,62 @@
+name: Dynamodb Hot Partition
+subsystem: database
+vehicle_section: database_pipeline
+error_type: INV-DDB-HOT-PARTITION
+sensor_type: health_check
+affected_services: [inventory-service]
+cascade_services: [orders-service]
+
+description: >
+  A flash-sale SKU concentrates stock-counter writes on one DynamoDB partition key, causing ProvisionedThroughputExceededException and throttled inventory reserves while the table-level capacity stays mostly idle.
+
+investigation_notes: |
+  1. Search body.text for *INV-DDB-HOT-PARTITION* and group by sku to confirm a single partition key dominates the {throttled_requests} throttled reserves.
+  2. In CloudWatch, compare WriteThrottleEvents on table {table_name} with ConsumedWriteCapacityUnits; a high throttle count with consumed capacity far below provisioned ({consumed_wcu} of {provisioned_wcu} WCU) points to a hot partition rather than an undersized table.
+  3. Check CloudWatch Contributor Insights for the table: the top contributor should be sku={hot_sku} with roughly {hot_key_share_pct}% of write traffic.
+  4. Trace the cascade: orders-service reserve calls to inventory-service exceed the {reserve_timeout_ms}ms timeout, so checkout returns stock-unavailable even though stock exists.
+  5. Correlate with the marketing calendar or a recent promotion on the hot SKU (infra.ddb_table_config shows one un-sharded counter item per SKU; adaptive capacity cannot spread writes to a single item past the per-partition limit).
+  6. After approval, write-shard the counter key (sku#shard-N) so writes for {hot_sku} spread across partitions. Adaptive capacity is already on and on-demand mode does not lift the per-partition limit. Confirm WriteThrottleEvents returns to 0.
+
+remediation_action: shard_hot_partition_key
+
+error_message: |
+  INV-DDB-HOT-PARTITION: table={table_name} sku={hot_sku} error=ProvisionedThroughputExceededException throttled_requests={throttled_requests} consumed_wcu={consumed_wcu} provisioned_wcu={provisioned_wcu}
+
+stack_trace: |
+  Amazon.DynamoDBv2.Model.ProvisionedThroughputExceededException: The level of configured provisioned throughput for one or more partitions was exceeded.
+    at InventoryService.StockCounterStore.UpdateItemAsync(String sku, Int32 qty) in /src/InventoryService/StockCounterStore.cs:line 142
+    at InventoryService.ReserveHandler.Reserve(ReserveRequest req) in /src/InventoryService/ReserveHandler.cs:line 77
+    table={table_name}  partition_key=sku  hot_key={hot_sku}
+    hot_key_share_pct={hot_key_share_pct}  consumed_wcu={consumed_wcu}  provisioned_wcu={provisioned_wcu}
+    sdk_retries_exhausted=true  reserve_timeout_ms={reserve_timeout_ms}
+
+correlation_attr:
+  key: infra.ddb_table_config
+  value: inventory-stock-counters-provisioned-500wcu-single-sku-partition-key
+
+fault_params:
+  table_name: inventory-stock-counters
+  hot_sku: {format: "SKU-{n}", n: {randint: [10000, 99999]}}
+  throttled_requests: {randint: [800, 12000]}
+  consumed_wcu: {randint: [90, 220]}
+  provisioned_wcu: 500
+  hot_key_share_pct: {randint: [62, 91]}
+  reserve_timeout_ms: {choice: [1500, 2000, 3000]}
+
+rca_clues:
+  inventory-service:
+    ddb.write_throttle_events: {randint: [800, 12000]}
+    ddb.hot_key_share_pct: {randint: [62, 91]}
+    ddb.table_capacity_mode: provisioned
+    ddb.consumed_wcu: {randint: [90, 220]}
+  orders-service:
+    reserve.timeout_count: {randint: [100, 900]}
+    reserve.stock_unavailable_false_positive: true
+
+business_impact:
+  - kpi: business.throughput_rpm
+    factor: {uniform: [0.35, 0.65]}
+  - kpi: business.error_rate_pct
+    factor: {uniform: [3.0, 6.0]}
+  - kpi: business.latency_p99_ms
+    factor: {uniform: [2.0, 4.0]}

@@ -1,0 +1,34 @@
+service: gt-apache-gcp-svc-3
+sort_order: 6
+cloud_provider: gcp
+cloud_region: us-central1
+cloud_platform: gcp_compute_engine
+cloud_availability_zone: us-central1-a
+subsystem: platform
+language: go
+
+# Topology: [downstream-service, endpoint, METHOD]
+topology: []
+
+db_operations: []
+
+emit_fault_logs: true
+kpi_emitter: false
+
+constants: {}
+
+steps:
+  - sample:
+      latency_ms:
+        if_active: {uniform: [500.0, 3000.0], round: 1}
+        else: {uniform: [20.0, 150.0], round: 1}
+  - metric:
+      name: gt_apache_gcp_svc_3.latency_ms
+      value: {var: latency_ms}
+      unit: ms
+  - log:
+      level: INFO
+      message: '[gt_apache_gcp_svc_3] health_check latency={latency_ms}ms status=OK'
+      attrs:
+        operation: health_check
+        svc.latency_ms: {var: latency_ms}

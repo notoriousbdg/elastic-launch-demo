@@ -9,15 +9,15 @@ affected_services:
 cascade_services:
 - analytics-pipeline
 - chat-service
-description: Game server tick rate drops below target causing gameplay lag, hit registration failures, and desync cascades
+description: Game server tick rate drops below target as CPU-throttled game-server pods run out of frame budget, causing gameplay lag, hit registration failures, and desync cascades
 investigation_notes: |-
-  Root cause: the game loop frame budget (15.6ms for 64Hz) is being exceeded because the physics system consumes 54% of tick time at 8.4ms. Combined with net_serialize at 27%, the server has no headroom and tick rate degrades under load.
-  1. Profile per-system costs: physics at 8.4ms with 4,201 entities is the bottleneck — check if entity_count spiked due to spawned projectiles or dropped items not being GC'd.
-  2. Review CPU metrics: 97.2% CPU means the server is saturated — verify no co-located processes are stealing cycles with `ps aux --sort=-%cpu | head -20`.
-  3. Check memory: 84.1% memory usage may be causing swap pressure — verify with `vmstat 1 5` for si/so columns indicating swap activity.
+  Root cause: the game loop frame budget (15.6ms for 64Hz) is being exceeded because the physics system consumes 54% of every tick (about 12-45ms, versus a 15.6ms budget for the whole frame). Combined with net_serialize at 27%, the server has no headroom and tick rate degrades under load.
+  1. Profile per-system costs: physics at 54% of the frame with {entity_count} entities (cap 2,000) is the bottleneck — check if entity_count spiked due to spawned projectiles or dropped items not being GC'd.
+  2. Review CPU metrics: 97.2% CPU means the server is saturated — verify no co-located processes are stealing cycles with `ps aux --sort=-%cpu | head -20` (none are; the voice server is not co-located).
+  3. Check memory: 84.1% memory usage may be causing swap pressure — verify with `vmstat 1 5` — non-zero si/so would indicate swap activity; it stays at 0, so memory is not the cause.
   4. Remediate: issue `reduce_entity_budget` to cap active entities at 2,000 and force garbage collection of expired objects; disable non-essential AI to reclaim tick budget.
   5. Long-term: implement server-side LOD (level of detail) that reduces physics fidelity for distant entities and pauses AI updates for out-of-range NPCs.
-remediation_action: resync_world_state
+remediation_action: reduce_entity_budget
 error_message: '[Engine] ENGINE-TICKRATE-DEGRAD: server={server_id} tickrate={tick_rate}Hz target={target_tick_rate}Hz frame_time={frame_time_ms}ms
   players={active_players} match={match_id}'
 stack_trace: |-
@@ -26,24 +26,24 @@ stack_trace: |-
   ----------- tick timing -------------
     tick_rate    = {tick_rate}Hz (target {target_tick_rate}Hz)
     frame_time   = {frame_time_ms}ms (budget 15.6ms)
-    frame_budget  = EXCEEDED by {frame_time_ms}ms
+    frame_budget  = EXCEEDED ({frame_time_ms}ms vs 15.6ms)
   ----------- per-system tick time ----
-    physics        = 8.4ms  (54%)
-    net_serialize  = 4.2ms  (27%)
-    ai_update      = 1.8ms  (12%)
-    game_logic     = 0.7ms  (4%)
-    gc_pause       = 0.4ms  (3%)
+    physics        = 54% of frame
+    net_serialize  = 27% of frame
+    ai_update      = 12% of frame
+    game_logic     = 4% of frame
+    gc_pause       = 3% of frame
   ----------- resource usage ----------
     cpu_pct      = 97.2%
     memory_pct   = 84.1%
-    entity_count = 4,201
+    entity_count = {entity_count}
     net_bandwidth = 128Mbps (cap 200Mbps)
   ----------- action ------------------
     REDUCE entity_budget  DISABLE non-essential AI  WARN players
   ENGINE-TICKRATE-DEGRAD: server {server_id} at {tick_rate}Hz, target {target_tick_rate}Hz
 correlation_attr:
-  key: network.routing_policy
-  value: ecmp-4path-asymmetric
+  key: deployment.entity_lifecycle_config
+  value: despawn-v5.2-timer-disabled
 fault_params:
   server_id:
     format: "GS-{region}-{n:02d}"
@@ -53,6 +53,7 @@ fault_params:
   target_tick_rate: 64
   frame_time_ms: {uniform: [22.0, 83.0], round: 1}
   active_players: {randint: [10, 100]}
+  entity_count: {randint: [3000, 6000]}
   match_id:
     format: "MATCH-{n}"
     n: {randint: [100000, 999999]}
@@ -60,20 +61,24 @@ rca_clues:
   game-server:
     game.physics_tick_budget_pct: {uniform: [45.0, 65.0], round: 1}
     game.entity_count: {randint: [3000, 6000]}
+    game.swap_pages_per_s: 0
   matchmaking-engine:
     matchmaking.server_health_score: {uniform: [0.2, 0.5], round: 2}
     matchmaking.rebalance_triggered: true
   analytics-pipeline:
     analytics.perf_alert_count: {randint: [50, 200]}
   chat-service:
-    chat.voice_server_colocated: true
-    chat.voice_quality_impacted: true
+    chat.voice_server_colocated: false
+    chat.voice_quality_impacted: false
 business_impact:
   - kpi: business.matches_played_per_min
-    factor: {uniform: [0.15, 0.40]}
+    value: {uniform: [229.71, 264.29]}
   - kpi: business.server_tick_lag_ms
     factor: {uniform: [3.0, 6.0]}
   - kpi: business.crash_rate_pct
     factor: {uniform: [2.5, 5.0]}
   - kpi: business.net_satisfaction_proxy_nps
-    factor: {uniform: [0.15, 0.40]}
+    value: {uniform: [9.3, 10.7], round: 1}
+generator_impact:
+  kubernetes_otel:
+    container_cpu_throttling: 0.97

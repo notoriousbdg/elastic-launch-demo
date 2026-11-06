@@ -10,9 +10,9 @@ cascade_services:
 - patient-monitor
 - billing-processor
 - lab-integration
-description: ADT (Admit-Discharge-Transfer) event feed falls behind, causing stale patient location data
+description: ADT (Admit-Discharge-Transfer) event feed consumer falls behind on the ADT Kafka topic, causing stale patient location data
 investigation_notes: |-
-  Root Cause: ADT feed synchronization gaps occur when the HL7 ADT event processor cannot keep pace with admission/discharge/transfer volume — common during high-census periods, mass casualty events, or when the receiving interface engine (Mirth/Rhapsody) has a thread pool exhaustion issue.
+  Root Cause: ADT feed synchronization gaps occur when the HL7 ADT event processor cannot keep pace with admission/discharge/transfer volume — common during high-census periods, mass casualty events, or when the receiving interface engine (Mirth/Rhapsody) has a thread pool exhaustion issue. A drain rate below 1 event/s while inbound volume stays at the normal 2-6 events/s, with processor threads exhausted, points to thread pool exhaustion in the interface engine rather than a census or mass-casualty volume surge.
   Remediation: 1) Restart the ADT feed processor: `adt-admin restart-feed --feed {feed_id}`. 2) Check the ADT event queue depth and drain rate: `adt-admin queue-status --feed {feed_id} --verbose`. 3) Run a patient index reconciliation against the ADT master: `adt-admin reconcile --feed {feed_id} --source ADT-MASTER --mode FULL`. 4) Flush the dead-letter queue for unprocessable events: `adt-admin flush-dlq --feed {feed_id} --requeue-valid`. 5) Verify downstream consumers (bed board, billing, lab) are receiving events: `adt-admin subscriber-status`. 6) Scale the ADT processor thread pool: `adt-admin scale-threads --feed {feed_id} --count 8`.
 remediation_action: restart_adt_feed
 error_message: '[EHR] ADT-SYNC-FAIL: feed={feed_id} lag={gap_seconds}s queue_depth={queue_depth} patient={patient_id} event={adt_event_type}'
@@ -44,7 +44,8 @@ fault_params:
 rca_clues:
   ehr-system:
     adt.feed_processor_threads_exhausted: true
-    adt.queue_drain_rate_per_s: {uniform: [0.5, 3.0], round: 1}
+    adt.queue_drain_rate_per_s: {uniform: [0.2, 0.8], round: 1}
+    adt.inbound_event_rate_per_s: {uniform: [2.0, 6.0], round: 1}
   scheduling-api:
     sched.patient_location_stale: true
     sched.bed_board_accuracy_pct: {uniform: [60, 85], round: 1}
@@ -58,10 +59,13 @@ rca_clues:
     lis.misrouted_results: {randint: [2, 10]}
 business_impact:
   - kpi: business.admits_per_min
-    factor: {uniform: [0.20, 0.50]}
+    value: {uniform: [0.3, 0.34], round: 2}
   - kpi: business.discharges_per_min
-    factor: {uniform: [0.20, 0.50]}
+    value: {uniform: [0.22, 0.26], round: 2}
   - kpi: business.hl7_messages_per_min
-    factor: {uniform: [0.20, 0.45]}
+    value: {uniform: [513.83, 591.18]}
   - kpi: business.unbilled_charges_usd_per_min
     factor: {uniform: [1.8, 3.5]}
+generator_impact:
+  kafka_otel:
+    high_consumer_lag_by_topic: 75000.0

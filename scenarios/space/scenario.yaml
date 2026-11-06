@@ -9,7 +9,7 @@ schema_version: "1.2"
 nominal_label: NOMINAL
 hosts:
 - host.name: nova7-aws-host-01
-  host.id: i-0a1b2c3d4e5f67890
+  host.id: i-5ecbb64716598189d
   host.arch: amd64
   host.type: m5.xlarge
   host.image.id: ami-0abcdef1234567890
@@ -31,13 +31,13 @@ hosts:
   cloud.platform: aws_ec2
   cloud.region: us-east-1
   cloud.availability_zone: us-east-1a
-  cloud.account.id: '123456789012'
-  cloud.instance.id: i-0a1b2c3d4e5f67890
+  cloud.account.id: '453319023501'
+  cloud.instance.id: i-5ecbb64716598189d
   cpu_count: 4
   memory_total_bytes: 17179869184
   disk_total_bytes: 214748364800
 - host.name: nova7-gcp-host-01
-  host.id: '5649812345678901234'
+  host.id: '2446452110307462'
   host.arch: amd64
   host.type: e2-standard-4
   host.image.id: projects/debian-cloud/global/images/debian-12-bookworm-v20250115
@@ -59,13 +59,13 @@ hosts:
   cloud.platform: gcp_compute_engine
   cloud.region: us-central1
   cloud.availability_zone: us-central1-a
-  cloud.account.id: nova7-project-prod
-  cloud.instance.id: '5649812345678901234'
+  cloud.account.id: nova7-project
+  cloud.instance.id: '2446452110307462'
   cpu_count: 4
   memory_total_bytes: 17179869184
   disk_total_bytes: 107374182400
 - host.name: nova7-azure-host-01
-  host.id: /subscriptions/abc-def/resourceGroups/nova7-rg/providers/Microsoft.Compute/virtualMachines/nova7-vm-01
+  host.id: /subscriptions/b4291cba-a491-5343-a640-7fb2876d042e/resourceGroups/nova7-rg/providers/Microsoft.Compute/virtualMachines/nova7-vm-01
   host.arch: amd64
   host.type: Standard_D4s_v3
   host.image.id: Canonical:0001-com-ubuntu-server-jammy:22_04-lts-gen2:latest
@@ -87,7 +87,7 @@ hosts:
   cloud.platform: azure_vm
   cloud.region: eastus
   cloud.availability_zone: eastus-1
-  cloud.account.id: abc-def-ghi-jkl
+  cloud.account.id: b4291cba-a491-5343-a640-7fb2876d042e
   cloud.instance.id: nova7-vm-01
   cpu_count: 4
   memory_total_bytes: 17179869184
@@ -232,75 +232,98 @@ executive_trend_charts:
   y_label: events/min
 executive_kpi_emissions:
 - name: business.mission_success_probability_pct
+  better: higher
   value: {uniform: [92.0, 99.8], round: 2}
   unit: "%"
 - name: business.critical_system_uptime_pct
+  better: higher
   value: {uniform: [99.2, 99.999], round: 4}
   unit: "%"
 - name: business.fault_events_per_min
+  better: lower
   value: {uniform: [0.01, 2.8], round: 3}
   unit: events/min
 - name: business.autonomous_recovery_rate_pct
+  better: higher
   value: {uniform: [82.0, 99.0], round: 2}
   unit: "%"
 - name: business.telemetry_coverage_pct
+  better: higher
   value: {uniform: [88.0, 99.4], round: 2}
   unit: "%"
 - name: business.spacecraft_health_index_0_100
+  better: higher
   value: {uniform: [72.0, 99.0], round: 1}
   unit: index
 - name: business.trajectory_deviation_meters
+  better: lower
   value: {uniform: [0.1, 850.0], round: 1}
   unit: m
 - name: business.delta_v_budget_remaining_mps
+  better: higher
   value: {uniform: [12.0, 285.0], round: 1}
   unit: m/s
 - name: business.orbital_period_drift_ms
+  better: lower
   value: {uniform: [0.0, 18.4], round: 2}
   unit: ms
 - name: business.maneuver_accuracy_pct
+  better: higher
   value: {uniform: [96.0, 99.98], round: 3}
   unit: "%"
 - name: business.station_keeping_fuel_remaining_pct
+  better: higher
   value: {uniform: [28.0, 92.0], round: 2}
   unit: "%"
 - name: business.perigee_altitude_km
   value: {uniform: [380.0, 420.0], round: 1}
   unit: km
 - name: business.downlink_data_rate_mbps
+  better: higher
   value: {uniform: [125.0, 1200.0], round: 1}
   unit: Mbps
 - name: business.uplink_latency_ms
+  better: lower
   value: {uniform: [28.0, 450.0], round: 1}
   unit: ms
 - name: business.contact_window_utilization_pct
+  better: higher
   value: {uniform: [72.0, 98.0], round: 2}
   unit: "%"
 - name: business.packet_loss_rate_pct
+  better: lower
   value: {uniform: [0.01, 1.2], round: 3}
   unit: "%"
 - name: business.command_acceptance_rate_pct
+  better: higher
   value: {uniform: [98.5, 99.99], round: 3}
   unit: "%"
 - name: business.ground_station_availability_pct
+  better: higher
   value: {uniform: [92.0, 99.8], round: 2}
   unit: "%"
 - name: business.schedule_variance_days
+  better: lower
   value: {uniform: [-8.0, 18.0], round: 1}
   unit: days
 - name: business.launch_readiness_index_0_100
+  better: higher
   value: {uniform: [72.0, 98.0], round: 1}
   unit: index
 - name: business.contractor_sla_compliance_pct
+  better: higher
   value: {uniform: [88.0, 99.2], round: 2}
   unit: "%"
 - name: business.cost_variance_pct
+  better: lower
   value: {uniform: [-4.8, 12.4], round: 2}
   unit: "%"
 - name: business.risk_burn_down_rate
+  better: higher
   value: {uniform: [0.8, 4.8], round: 2}
   unit: rate
 - name: business.program_net_satisfaction_proxy_nps
+  better: higher
   value: {uniform: [32.0, 85.0], round: 1}
   unit: score
 raw_log_profile:
@@ -386,3 +409,8 @@ trace_attributes:
       safety.tracking_radars_active: {randint: [2, 3]}
       safety.trajectory_status: {choice: [nominal, off_nominal, impact_zone_clear, corrective_action]}
       safety.self_destruct_inhibit: {choice: [armed, inhibited, safe]}
+
+generators:
+  azure_billing: true
+  kafka_otel: true
+  influxdb_otel: true

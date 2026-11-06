@@ -1,7 +1,7 @@
 name: Settlement Timeout
 subsystem: settlement
 vehicle_section: settlement_engine
-error_type: SETTLE-T2-TIMEOUT
+error_type: SETTLE-T1-TIMEOUT
 sensor_type: settlement_timer
 affected_services:
 - settlement-processor
@@ -9,30 +9,30 @@ affected_services:
 cascade_services:
 - risk-calculator
 - compliance-monitor
-description: Trade settlement fails to complete within T+2 SLA window
+description: Trade settlement fails to complete within T+1 SLA window (SEC Rule 15c6-1)
 investigation_notes: |-
-  1. Check settlement-processor logs for SETTLE-T2-TIMEOUT — note trade_id, settlement_id, counterparty, and pending_hours vs sla_hours.
-  2. Query FROM logs.otel.financial.* | WHERE body.text LIKE "*SETTLE-T2-TIMEOUT*" | STATS count() BY counterparty to identify if one counterparty is blocking multiple settlements.
+  1. Check settlement-processor logs for SETTLE-T1-TIMEOUT — note trade_id, settlement_id, counterparty, and pending_hours vs sla_hours.
+  2. Query FROM logs.otel.financial.* | WHERE body.text LIKE "*SETTLE-T1-TIMEOUT*" | STATS count() BY counterparty to identify if one counterparty is blocking multiple settlements.
   3. Inspect NSCC CNS match status — if NSCC_CNS_match=PENDING the instruction may have been rejected by the depository; check DTC delivery leg.
   4. Check audit-logger for the full settlement lifecycle trail — confirm affirmation and netting completed before the DTCC submission cutoff.
-  5. Escalate to counterparty operations and file a SEC-15c6 exception report; if DTC delivery can be recycled, do so before the next business day cutoff.
+  5. Escalate to counterparty operations and track the fail-to-deliver for Reg SHO Rule 204 close-out; if DTC delivery can be recycled, do so before the next business day cutoff.
 remediation_action: recycle_settlement_instruction
-error_message: '[SETTLE] SETTLE-T2-TIMEOUT: trade={trade_id} settlement={settlement_id} pending_hours={pending_hours}h sla={sla_hours}h
+error_message: '[SETTLE] SETTLE-T1-TIMEOUT: trade={trade_id} settlement={settlement_id} pending_hours={pending_hours}h sla={sla_hours}h
   counterparty={counterparty}'
 stack_trace: |-
   === SETTLEMENT LIFECYCLE ===
   trade={trade_id}  settlement={settlement_id}  counterparty={counterparty}
   PHASE               STATUS      TIMESTAMP
-  trade_capture       COMPLETE    2026-02-14T14:32:07Z
-  affirmation         COMPLETE    2026-02-14T15:01:22Z
-  netting             COMPLETE    2026-02-14T18:00:00Z
-  DTCC_submission     COMPLETE    2026-02-14T20:15:33Z
+  trade_capture       COMPLETE    2026-02-12T14:32:07Z
+  affirmation         COMPLETE    2026-02-12T15:01:22Z
+  netting             COMPLETE    2026-02-12T18:00:00Z
+  DTCC_submission     COMPLETE    2026-02-12T20:15:33Z
   NSCC_CNS_match      PENDING     ---  <<< STALLED
   DTC_delivery        WAITING     ---
   funds_transfer      WAITING     ---
   elapsed={pending_hours}h  sla={sla_hours}h  breach=true
   depository=DTC  clearing=NSCC  method=DVP
-  ACTION: escalate_counterparty=true  reg_report=SEC-15c6  alert=SETTLE-T2-TIMEOUT
+  ACTION: escalate_counterparty=true  reg_obligation=REG-SHO-204  alert=SETTLE-T1-TIMEOUT
 correlation_attr: {}
 fault_params:
   trade_id:
@@ -41,16 +41,17 @@ fault_params:
   settlement_id:
     format: "STL-{n}"
     n: {randint: [100000, 999999]}
-  pending_hours: {uniform: [48.5, 96.0], round: 1}
-  sla_hours: 48
-  counterparty: {choice: [Goldman Sachs, Morgan Stanley, JP Morgan, Citadel Securities, Virtu Financial, Jane Street]}
+  pending_hours: {uniform: [24.5, 72.0], round: 1}
+  sla_hours: 24
+  counterparty: Virtu Financial
 rca_clues:
   settlement-processor:
     settlement.t2_breach_hours: {uniform: [0.5, 48.0], round: 1}
     settlement.nscc_match_pending_count: {randint: [1, 50]}
+    settlement.stalled_counterparty: Virtu Financial
   audit-logger:
-    audit.settlement_lifecycle_gaps: {randint: [0, 5]}
-    audit.dtc_delivery_events_missing: {randint: [0, 3]}
+    audit.settlement_lifecycle_gaps: 0
+    audit.dtc_delivery_events_missing: {randint: [1, 3]}
   risk-calculator:
     risk.failed_settlement_exposure_usd: {randint: [500000, 20000000]}
     risk.counterparty_credit_hold: true

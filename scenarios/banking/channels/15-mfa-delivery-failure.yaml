@@ -41,11 +41,11 @@ correlation_attr:
   key: infra.sms_gateway_config
   value: twilio-gw-v4.8.0-hotfix
 fault_params:
-  mfa_channel: {choice: [SMS, EMAIL, PUSH, TOTP]}
+  mfa_channel: SMS
   mfa_delivery_rate: {uniform: [50.0, 80.0], round: 1}
   member_id: {format: "M-{n}", n: {randint: [1000000, 9999999]}}
-  mfa_provider: {choice: [Twilio, AWS_SNS, SendGrid, Firebase_Cloud_Messaging]}
-  mfa_error: {choice: [CARRIER_BLOCKED, RATE_LIMIT_EXCEEDED, INVALID_NUMBER, PROVIDER_TIMEOUT, SHORT_CODE_FILTERED]}
+  mfa_provider: Twilio
+  mfa_error: CARRIER_BLOCKED
 rca_clues:
   auth-gateway:
     auth.sms_delivery_rate_pct: {uniform: [60, 78], round: 1}
@@ -61,10 +61,10 @@ rca_clues:
     payment.step_up_auth_failures: {randint: [100, 500]}
 business_impact:
   - kpi: business.mobile_logins_per_min
-    factor: {uniform: [0.20, 0.50]}
+    value: {uniform: [148.8, 171.2]}
   - kpi: business.active_digital_sessions
-    factor: {uniform: [0.30, 0.60]}
+    value: {uniform: [7254.0, 8346.0]}
   - kpi: business.failed_auth_attempts_per_min
     factor: {uniform: [3.0, 6.0]}
   - kpi: business.digital_transaction_pct
-    factor: {uniform: [0.40, 0.65]}
+    factor: {uniform: [0.4, 0.65]}

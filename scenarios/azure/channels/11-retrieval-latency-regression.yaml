@@ -1,0 +1,69 @@
+name: Retrieval Latency Regression
+subsystem: retrieval
+vehicle_section: retrieval_pipeline
+error_type: RAG-LATENCY-REGRESSION
+sensor_type: response_latency
+affected_services: [retrieval-service]
+cascade_services: [chat-orchestrator, assistant-web]
+
+description: An Azure AI Search ranker/query configuration change (vector k raised to 200 with exhaustive kNN) pushes retrieval query latency far above baseline and slows every chat turn.
+
+investigation_notes: |
+  1. Search body.text LIKE *RAG-LATENCY-REGRESSION* and compare query_p95_ms={query_p95_ms} against the baseline of {baseline_p95_ms} ms.
+  2. Check the Activity Log for a recent write on the search service "{search_service}" and look for the new ranker config in search.ranker_config_version={ranker_config}.
+  3. The new ranker config raises the hybrid query's vector k to {rerank_candidates} with exhaustive=true (previously k={baseline_candidates} on HNSW), so every query does a brute-force vector scan before fusion and semantic re-ranking (which itself only re-scores the top 50).
+  4. Follow the latency up the call chain: chat-orchestrator time-to-first-token and assistant-web response time rise only after retrieval p95 breaches.
+  5. Confirm no replica or partition shortage by checking search_replicas={replica_count} (unchanged) and throttled query counts on the index (zero rules out capacity).
+  6. Get operator approval, then revert the ranker config to the last known-good version and verify p95 returns to {baseline_p95_ms} ms.
+
+remediation_action: revert_search_ranker_config
+
+error_message: |
+  [RetrievalService] RAG-LATENCY-REGRESSION: index={index_name} query_p95_ms={query_p95_ms} (baseline {baseline_p95_ms}ms) ranker_config={ranker_config} rerank_candidates={rerank_candidates}
+
+stack_trace: |
+  SearchLatencyRegressionException: RAG-LATENCY-REGRESSION
+    at AzureAISearchClient.query(index={index_name}, service={search_service})
+    at RetrievalService.retrievePassages(top_k={top_k})
+  Query p95:           {query_p95_ms}ms (baseline: {baseline_p95_ms}ms)
+  Ranker config:       {ranker_config}
+  Vector k:            {rerank_candidates} exhaustive (baseline: {baseline_candidates} HNSW)
+  Replicas:            {replica_count}
+  Search service:      {search_service}
+
+correlation_attr:
+  key: search.ranker_config_version
+  value: semantic-ranker-v3-rerank200-2026-10-20
+
+fault_params:
+  index_name: {choice: [kb-passages-prod, support-docs-v7, product-manuals-v4]}
+  search_service: {choice: [azureai-search-eus, azureai-search-eus2]}
+  query_p95_ms: {randint: [1800, 6500]}
+  baseline_p95_ms: 240
+  ranker_config: semantic-ranker-v3-rerank200
+  rerank_candidates: 200
+  baseline_candidates: 50
+  top_k: {choice: [8, 10, 12]}
+  replica_count: 3
+
+rca_clues:
+  retrieval-service:
+    search.query_p95_ms: {randint: [1800, 6500]}
+    search.vector_k: 200
+    search.vector_exhaustive_knn: true
+    search.ranker_config_changed: true
+    search.throttled_query_count: 0
+  chat-orchestrator:
+    orchestrator.retrieval_wait_ms: {randint: [1500, 6000]}
+    orchestrator.time_to_first_token_ms: {randint: [2500, 9000]}
+  assistant-web:
+    web.chat_turn_p95_ms: {randint: [4000, 12000]}
+    web.user_abandon_rate_pct: {uniform: [8, 25], round: 1}
+
+business_impact:
+  - kpi: business.latency_p99_ms
+    factor: {uniform: [3.0, 6.0]}
+  - kpi: business.throughput_rpm
+    value: {uniform: [372.0, 428.0], round: 0}
+  - kpi: business.conversations_per_min
+    value: {uniform: [120.9, 139.1], round: 0}

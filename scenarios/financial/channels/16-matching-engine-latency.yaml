@@ -14,8 +14,8 @@ investigation_notes: |-
   1. Check matching-engine logs for ME-LATENCY-SLA — note order_id, partition_id, latency_us vs sla_us, and which pipeline phase is the bottleneck.
   2. Query FROM logs.otel.financial.* | WHERE body.text LIKE "*ME-LATENCY-SLA*" | STATS avg(latency_us), count() BY partition_id to identify hot partitions.
   3. Inspect the price_time_match phase elapsed_us — if it exceeds 10000us the book has excessive queue_depth; check lock_contention_ns for spinlock contention.
-  4. Check order-gateway for order submission rate — a sudden burst (e.g. algorithmic wash trading) drives queue_depth > 10000 and locks the matching thread.
-  5. Throttle inbound order rate at order-gateway for the affected partition; if CPU affinity shows a single core saturated, re-balance partitions across cores.
+  4. Check order-gateway for order submission rate — a sudden burst (e.g. a runaway algo or quote-stuffing burst) drives queue_depth > 10000 and locks the matching thread (above 20,000 orders/s is a burst).
+  5. Throttle inbound order rate at order-gateway for the affected partition; if CPU affinity shows a single core saturated and the matching-engine container is CPU throttled at its limit (above 20%), re-balance partitions across cores.
 remediation_action: throttle_inbound_and_rebalance_partitions
 error_message: '[ME] ME-LATENCY-SLA: order={order_id} latency_us={latency_us} sla_us={sla_us} partition={partition_id}'
 stack_trace: |-
@@ -29,24 +29,24 @@ stack_trace: |-
   fill_generation      310         2.5%
   post_trade_pub       650         5.1%
   TOTAL             {latency_us}us  SLA={sla_us}us  BREACH=true
-  queue_depth=14832  lock_contention_ns=8420  cpu_affinity=core-7
+  queue_depth={queue_depth}  lock_contention_ns=8420  cpu_affinity=core-7
   ACTION: throttle_inbound=true  alert=ME-LATENCY-SLA
 correlation_attr: {}
 fault_params:
   order_id:
     format: "ORD-{n}"
     n: {randint: [100000, 999999]}
-  latency_us: {randint: [500, 50000]}
+  latency_us: {randint: [12700, 50000]}
+  queue_depth: {randint: [10500, 30000]}
   sla_us: 200
-  partition_id:
-    format: "P-{n}"
-    n: {randint: [0, 15]}
+  partition_id: P-7
 rca_clues:
   matching-engine:
-    engine.match_latency_us: {randint: [500, 50000]}
-    engine.queue_depth: {randint: [5000, 30000]}
+    engine.match_latency_us: {randint: [12700, 50000]}
+    engine.queue_depth: {randint: [10500, 30000]}
+    engine.container_cpu_throttled_pct: {uniform: [0.0, 2.0], round: 1}
   order-gateway:
-    oms.order_submission_rate_per_s: {randint: [1000, 50000]}
+    oms.order_submission_rate_per_s: {randint: [20000, 50000]}
     oms.latency_sla_breach_pct: {uniform: [1.0, 25.0], round: 1}
   risk-calculator:
     risk.latency_impacted_orders: {randint: [10, 1000]}
@@ -58,8 +58,10 @@ business_impact:
   - kpi: business.latency_sla_breach_rate_pct
     factor: {uniform: [5.0, 15.0]}
   - kpi: business.executed_trades_per_min
-    factor: {uniform: [0.20, 0.50]}
+    value: {uniform: [374.79, 431.21]}
   - kpi: business.fill_rate_pct
-    factor: {uniform: [0.30, 0.60]}
+    factor: {uniform: [0.3, 0.6]}
   - kpi: business.best_execution_pct
     factor: {uniform: [0.65, 0.85]}
+
+

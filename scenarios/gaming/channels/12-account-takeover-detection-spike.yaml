@@ -14,8 +14,8 @@ description: Anomaly detection system flags a surge in credential stuffing attem
 investigation_notes: |-
   Root cause: a leaked credential database from another service is being replayed against the gaming platform. 94.2% of attempts come through VPN/proxy with low user-agent entropy, confirming automated credential stuffing tooling.
   1. Check the attack surface: 87% known-bad IP reputation with 12 Tor exit nodes — enable GeoIP blocking for the primary attack region via WAF rules.
-  2. Review 0.3% success rate: even this low rate means ~30 accounts may be compromised per 10,000 attempts — immediately force password resets for successfully authenticated IPs in the attack window.
-  3. Inspect request patterns: 0.8ms avg interval between requests is clearly automated; deploy progressive rate limiting (CAPTCHA after 3 failures, block after 10).
+  2. Review 0.3% success rate: even this low rate means ~30 accounts may be compromised per 10,000 attempts — immediately force password resets for accounts that successfully authenticated from attack IPs in the window.
+  3. Inspect request patterns: a fixed ~2s per-IP interval with low variance is clearly automated; deploy progressive rate limiting (CAPTCHA after 3 failures, block after 10).
   4. Remediate: issue `block_attack_ips` to immediately blacklist the {blocked_ips} flagged IPs and `enable_captcha_enforcement` globally for login endpoints.
   5. Notify affected players, enable mandatory 2FA for accounts accessed from new IPs, and submit the attack IPs to threat intelligence feeds.
 remediation_action: block_attack_ips
@@ -27,7 +27,7 @@ stack_trace: |-
   ----------- attempt metrics ---------
     total_attempts  = {ato_attempts}
     unique_ips      = {blocked_ips}
-    credential_pairs = 12,401
+    credential_pairs = {ato_attempts} (no pair retried)
     success_rate    = 0.3% (credential stuffing pattern)
     risk_score      = {risk_score}
   ----------- geo analysis ------------
@@ -39,7 +39,7 @@ stack_trace: |-
     type            = CREDENTIAL_STUFFING
     rate            = {ato_attempts} / {window_seconds}s
     user_agent_entropy = LOW (bot signature)
-    request_interval   = 0.8ms avg (automated)
+    per_ip_interval    = 2.0s avg, low variance (automated)
   ----------- action ------------------
     BLOCK {blocked_ips} IPs  ENABLE captcha  NOTIFY security team
   AUTH-TAKEOVER-DETECT: {ato_attempts} attempts from {blocked_ips} IPs, risk {risk_score}
@@ -65,10 +65,10 @@ rca_clues:
     analytics.security_event_surge: true
 business_impact:
   - kpi: business.revenue_usd_per_min
-    factor: {uniform: [0.25, 0.55]}
+    value: {uniform: [4464.0, 5136.0], round: 1}
   - kpi: business.in_app_purchases_per_min
-    factor: {uniform: [0.20, 0.50]}
+    value: {uniform: [31.62, 36.38]}
   - kpi: business.churn_risk_index_0_100
     factor: {uniform: [2.0, 4.5]}
   - kpi: business.new_registrations_per_min
-    factor: {uniform: [0.30, 0.60]}
+    value: {uniform: [7.25, 8.35]}

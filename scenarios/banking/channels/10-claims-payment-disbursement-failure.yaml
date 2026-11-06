@@ -11,7 +11,7 @@ cascade_services:
 - document-vault
 description: Claims settlement payment failing to disburse to member account or body shop
 investigation_notes: |-
-  1. Check the disbursement error type: PAYEE_ACCOUNT_MISMATCH means the body shop's banking details changed — verify with DRP (Direct Repair Program) network coordinator. DAILY_LIMIT_EXCEEDED requires treasury approval for limit override.
+  1. Check the disbursement error type: PAYEE_ACCOUNT_MISMATCH means the body shop's banking details changed — verify with DRP (Direct Repair Program) network coordinator. Do not resubmit the same entry: an R03 return cannot be reinitiated until the account details are corrected. DAILY_LIMIT_EXCEEDED requires treasury approval for limit override.
   2. For ROUTING_VALIDATION_FAIL, the payee's routing number failed ABA validation — cross-reference with the Federal Reserve's E-Payments routing directory: https://www.frbservices.org/EPaymentsDirectory.
   3. FRAUD_HOLD_ACTIVE means fraud-sentinel flagged the disbursement — review the fraud alert and determine if the hold is legitimate or a false positive from the claims payment pattern.
   4. Member impact: 12 days since loss with rental_extension=REQUIRED means the member's rental car coverage is expiring. Approve rental extension while disbursement is resolved to avoid out-of-pocket.
@@ -29,7 +29,7 @@ stack_trace: |-
     claim_approved      COMPLETE    adjuster_id=ADJ-4827
     amount_verified     COMPLETE    estimate=${claim_amount} deductible=$500
     payee_validated     COMPLETE    {claim_payee}
-    funds_transfer      FAILED      {disbursement_error}  <<< BLOCKED
+    funds_transfer      FAILED      {disbursement_error} (ACH return R03: account does not match payee)  <<< BLOCKED
     1099_generation     SKIPPED     ---
   --- PAYEE INFO ---
     type=BODY_SHOP  routing={routing_number}  acct=****{acct_last4}
@@ -42,14 +42,14 @@ correlation_attr:
 fault_params:
   claim_id: {format: "CLM-{n}", n: {randint: [100000, 999999]}}
   claim_amount: {uniform: [500.0, 50000.0], round: 2}
-  claim_payee: {choice: [Caliber Collision, Service King, ABRA Auto Body, Gerber Collision, Maaco, Member Direct Deposit]}
-  disbursement_method: {choice: [ACH_CREDIT, CHECK_MAIL, VIRTUAL_CARD, WIRE]}
-  disbursement_error: {choice: [PAYEE_ACCOUNT_MISMATCH, DAILY_LIMIT_EXCEEDED, ROUTING_VALIDATION_FAIL, FRAUD_HOLD_ACTIVE]}
+  claim_payee: {choice: [Caliber Collision, Crash Champions, ABRA Auto Body, Gerber Collision, Maaco]}
+  disbursement_method: ACH_CREDIT
+  disbursement_error: PAYEE_ACCOUNT_MISMATCH
   routing_number: {format: "{n}", n: {randint: [100000000, 999999999]}}
   acct_last4: {format: "{n}", n: {randint: [1000, 9999]}}
 rca_clues:
   claims-processor:
-    claims.disbursement_error_type: {choice: [PAYEE_ACCOUNT_MISMATCH, ROUTING_VALIDATION_FAIL, DAILY_LIMIT_EXCEEDED]}
+    claims.disbursement_error_type: PAYEE_ACCOUNT_MISMATCH
     claims.days_since_loss: {randint: [5, 30]}
   payment-engine:
     payment.disbursement_retry_count: 3
@@ -58,13 +58,13 @@ rca_clues:
     portal.rental_extension_needed: true
     portal.member_outreach_status: PENDING
   document-vault:
-    document.w9_on_file: {choice: [true, false]}
+    document.w9_on_file: true
     document.tax_1099_status: BLOCKED
 business_impact:
   - kpi: business.fee_revenue_usd_per_min
-    factor: {uniform: [0.35, 0.65]}
+    value: {uniform: [4464.0, 5136.0], round: 1}
   - kpi: business.net_satisfaction_proxy_nps
-    factor: {uniform: [0.30, 0.60]}
+    value: {uniform: [14.28, 16.42], round: 1}
   - kpi: business.complaint_tickets_per_min
     factor: {uniform: [2.5, 5.0]}
   - kpi: business.churn_risk_index_0_100

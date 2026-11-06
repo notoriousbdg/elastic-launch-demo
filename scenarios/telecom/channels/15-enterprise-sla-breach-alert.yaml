@@ -27,14 +27,14 @@ stack_trace: |
     availability            99.1%       99.5%        BREACH
   --- BREACH TIMELINE ---
     breach_start={breach_start_time}  duration={sla_breach_min}min
-    credit_tier={sla_credit_tier}  estimated_credit=${sla_credit_amount}
+    credit_tier={sla_credit_tier}  estimated_credit=EUR {sla_credit_amount}
   --- ESCALATION ---
     enterprise_accounts_affected={enterprise_affected}
     mvno_partners_affected={mvno_affected}
     rca_due_date=48h_from_breach  notifications_sent={notifications_sent}
   ACTION: escalate_enterprise=true  calculate_credits=true  alert=BSS-SLA-BREACH
 infrastructure_events:
-- body: '[AzureMonitor] EnterpriseSLABreach: customer_segment=Enterprise activation_success_rate=89.2% sla_threshold=99.5% penalty_risk=EUR_250000 region=westeurope'
+- body: '[AzureMonitor] EnterpriseSLABreach: customer_segment=Enterprise activation_success_rate=95.4% sla_threshold=99.5% penalty_risk=EUR_250000 region=westeurope'
   severity: ERROR
   event_name: azure.monitor.EnterpriseSLABreach
   service: bss-billing
@@ -47,11 +47,11 @@ correlation_attr:
   key: billing.sla_monitor_config
   value: sla-monitor-v2.1.0-patch
 fault_params:
-  sla_segment: {choice: [Enterprise, MVNO]}
+  sla_segment: Enterprise
   sla_success_rate: {uniform: [92.0, 98.5], round: 1}
   sla_target: 99.5
-  sla_breach_min: {randint: [5, 60]}
-  sla_credit_tier: {choice: [WARNING, 5_PCT_CREDIT, 10_PCT_CREDIT, 20_PCT_CREDIT]}
+  sla_breach_min: {randint: [31, 59]}
+  sla_credit_tier: 10_PCT_CREDIT
   sla_activation_time_s: {randint: [35, 120]}
   breach_start_time: 2026-03-08T07:12:00Z
   sla_credit_amount: {uniform: [5000.0, 50000.0], round: 0}
@@ -60,11 +60,11 @@ fault_params:
   notifications_sent: {randint: [3, 15]}
 rca_clues:
   bss-billing:
-    billing.sla_success_rate_pct: {uniform: [92.0, 98.0], round: 1}
-    billing.breach_duration_min: {randint: [5, 60]}
+    billing.sla_success_rate_pct: {uniform: [92.0, 98.5], round: 1}
+    billing.breach_duration_min: {randint: [31, 59]}
   notification-service:
     notification.sla_alerts_sent: {randint: [1, 10]}
-    notification.escalation_level: {choice: [P1, P2]}
+    notification.escalation_level: P1
   api-gateway:
     gateway.enterprise_error_rate: {uniform: [0.03, 0.15], round: 2}
     gateway.mvno_error_rate: {uniform: [0.02, 0.1], round: 2}

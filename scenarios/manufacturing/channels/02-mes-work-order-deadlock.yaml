@@ -9,10 +9,10 @@ cascade_services:
 - oee-analytics
 - shopfloor-portal
 - scada-gateway
-description: MES routing engine deadlocks; work orders stuck in IN_PROGRESS, blocking line releases
+description: MES routing engine deadlocks in the MES SQL Server database; work orders stuck in IN_PROGRESS, blocking line releases
 investigation_notes: |-
-  Root Cause: Routing-engine deadlocks happen when concurrent work-order state transitions take shared row locks on the same equipment-resource record in a different order than the line-release transaction takes them, producing a cycle in the lock graph. Common after deploying a new routing ruleset or when the changeover transaction includes a cross-line resource swap.
-  Remediation: 1) Inspect the deadlock graph: `mes-admin deadlock-report --since 5m`. 2) Identify the offending transaction and abort the lower-priority side: `mes-admin abort-tx --tx-id {tx_id}`. 3) Restart the work-order engine to clear orphan locks: `systemctl restart mes-workorder-engine`. 4) Verify queue depth recovers: `mes-admin queue-depth --line {line_id}`. 5) If recurrence: revert the routing ruleset deploy and re-test in staging.
+  Root Cause: Routing-engine deadlocks happen when concurrent work-order state transitions take exclusive row locks on the equipment_state and work_order rows in the opposite order from the line-release transaction, producing a cycle in the lock graph. Common after deploying a new routing ruleset or when the changeover transaction includes a cross-line resource swap. The routing ruleset version on the spans identifies a ruleset deploy; mes.cross_line_swap_in_changeover false rules out the swap.
+  Remediation: 1) Inspect the deadlock graph: `mes-admin deadlock-report --since 5m`. 2) Identify the deadlock victim (Msg 1205) and its rolled-back transition: `mes-admin tx-status --tx-id {tx_id}`. 3) Restart the work-order engine so it re-drives work orders left IN_PROGRESS by rolled-back transitions: `systemctl restart mes-workorder-engine`. 4) Verify queue depth recovers: `mes-admin queue-depth --line {line_id}`. 5) If recurrence: revert the routing ruleset deploy and re-test in staging.
 remediation_action: restart_workorder_engine
 error_message: '[MES] MES-WORK-ORDER-DEADLOCK: line={line_id} wo={work_order_id} tx={tx_id} queue_depth={queue_depth} stuck_for_s={stuck_seconds}'
 stack_trace: |-
@@ -26,6 +26,7 @@ stack_trace: |-
   TX-OTHER-A     | wo_state_transition     | WAIT      | equipment_state[{line_id}]
   {tx_id}        | line_release            | WAIT      | work_order[{work_order_id}]
   ------------------------------------------------------------------------
+  SQL Server chose {tx_id} as deadlock victim (Msg 1205); wo_state_transition rolled back and not retried; WO left IN_PROGRESS
   MES-WORK-ORDER-DEADLOCK: cycle detected; queue_depth={queue_depth}; stuck for {stuck_seconds}s
 correlation_attr:
   key: deployment.mes_routing_ruleset
@@ -44,6 +45,7 @@ rca_clues:
   mes-controller:
     mes.deadlock_tx_count: {randint: [2, 12]}
     mes.routing_ruleset_version: v3.4.1-beta
+    mes.cross_line_swap_in_changeover: false
   oee-analytics:
     oee.line_stalled_min: {randint: [5, 35]}
   shopfloor-portal:
@@ -57,3 +59,8 @@ business_impact:
     factor: {uniform: [0.35, 0.65]}
   - kpi: business.unplanned_downtime_min_per_shift
     factor: {uniform: [2.0, 4.5]}
+generator_impact:
+  microsoft_sqlserver_otel:
+    deadlocks_detected: 5.0
+    blocked_processes: 8.0
+    lock_wait_rate_high: 20.0

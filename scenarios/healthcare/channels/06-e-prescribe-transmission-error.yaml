@@ -11,23 +11,28 @@ cascade_services:
 - billing-processor
 description: Electronic prescription transmission to external pharmacy via NCPDP SCRIPT fails
 investigation_notes: |-
-  Root Cause: NCPDP SCRIPT 10.6 NEWRX transmission failures are typically caused by pharmacy NPI validation errors at the Surescripts network, expired DEA registrations for controlled substances, or SCRIPT message formatting issues in the UIB/UIH envelope segments.
-  Remediation: 1) Verify the pharmacy NPI against the NPPES registry: `ncpdp-admin npi-lookup --npi {pharmacy_npi}`. 2) Check the Surescripts connection status: `ncpdp-admin connection-test --endpoint surescripts-prod`. 3) Restart the pharmacy transmission queue: `systemctl restart eprescribe-gateway`. 4) Review the NCPDP STATUS response codes — 000=accepted, 600=rejected, 900=system error. 5) For controlled substances (Schedule II-V), verify EPCS two-factor authentication tokens are valid. 6) Resubmit failed prescriptions: `ncpdp-admin resubmit --rx {prescription_id} --force-npi-refresh`.
+  Root Cause: NCPDP SCRIPT 2017071 NewRx transmission failures are typically caused by pharmacy NPI validation errors at the Surescripts network, expired DEA registrations for controlled substances, or SCRIPT message formatting issues in the XML Header (To/From/MessageID). A 900 (transaction rejected) ERROR with the Surescripts link connected, the DEA registration active and the message Header passing schema validation isolates the failure to pharmacy NPI validation.
+  Remediation: 1) Verify the pharmacy NPI against the NPPES registry: `ncpdp-admin npi-lookup --npi {pharmacy_npi}`. 2) Check the Surescripts connection status: `ncpdp-admin connection-test --endpoint surescripts-prod`. 3) Restart the pharmacy transmission queue: `systemctl restart eprescribe-gateway`. 4) Review the NCPDP response codes — STATUS 000/010=accepted; ERROR 600=communication problem (retry), 601/602=receiver unable to process/receiver system error, 900=transaction rejected. 5) For controlled substances (Schedule II-V), verify EPCS two-factor authentication tokens are valid. 6) Resubmit failed prescriptions: `ncpdp-admin resubmit --rx {prescription_id} --force-npi-refresh`.
 remediation_action: restart_pharmacy_queue
 error_message: '[PHARM] NCPDP-SCRIPT-FAIL: rx={prescription_id} patient={patient_id} pharmacy_npi={pharmacy_npi} ncpdp_status={ncpdp_status}'
 stack_trace: |-
-  --- NCPDP SCRIPT 10.6 MESSAGE TRACE ---
-  >>> NEWRX Request
-    UIB+UNOA:0++{prescription_id}+{pharmacy_npi}:D+20260217143052
-    UIH+SCRIPT:010:006:NEWRX+{prescription_id}:P
-    PVD+PC+{pharmacy_npi}:HPI+++COMMUNITY PHARMACY
-    PTT+1+{patient_id}+DOE:JANE+19650315:F
-    DRU+P:MEDICATION:{medication_id}+85+EA+++1
-    UIT+{prescription_id}+7
-    UIZ++1
-  <<< STATUS Response
-    STS+{ncpdp_status}:NCPDP-SCRIPT-FAIL
-    FreeText: Transmission rejected — pharmacy NPI {pharmacy_npi} validation failed
+  --- NCPDP SCRIPT 2017071 MESSAGE TRACE ---
+  >>> NewRx Request
+    <Message DatatypesVersion="2017071" TransportVersion="2017071" TransactionDomain="SCRIPT" TransactionVersion="2017071" StructuresVersion="2017071" ECLVersion="2017071">
+      <Header>
+        <To Qualifier="P">{pharmacy_npi}</To>
+        <MessageID>{prescription_id}</MessageID>
+        <SentTime>2026-02-17T14:30:52Z</SentTime>
+      </Header>
+      <Body><NewRx>
+        <Patient><HumanPatient><Identification><MedicalRecordIdentificationNumberEHR>{patient_id}</MedicalRecordIdentificationNumberEHR></Identification></HumanPatient></Patient>
+        <Pharmacy><Identification><NPI>{pharmacy_npi}</NPI></Identification><BusinessName>COMMUNITY PHARMACY</BusinessName></Pharmacy>
+        <MedicationPrescribed><DrugDescription>{medication_id}</DrugDescription><Quantity><Value>85</Value></Quantity></MedicationPrescribed>
+      </NewRx></Body>
+    </Message>
+  <<< Error Response
+    <Error><Code>{ncpdp_status}</Code>
+      <Description>Transaction rejected: pharmacy NPI {pharmacy_npi} validation failed</Description></Error>
     Rx {prescription_id} for patient {patient_id}: queued for retry
 correlation_attr:
   key: infra.ncpdp_gateway_version
@@ -39,18 +44,20 @@ fault_params:
   patient_id:
     format: "PT-{n}"
     n: {randint: [100000, 999999]}
-  pharmacy_npi: {randint: [1000000000, 9999999999]}
-  ncpdp_status: {choice: ["000", "600", "900", "510", "210"]}
+  pharmacy_npi: {randint: [1000000000, 2999999999]}
+  ncpdp_status: "900"
   medication_id:
     format: "MED-{n}"
     n: {randint: [10000, 99999]}
 rca_clues:
   pharmacy-system:
     ncpdp.npi_validation_status: failed
-    ncpdp.script_version: "10.6"
+    ncpdp.script_version: "2017071"
+    ncpdp.dea_registration_status: active
+    ncpdp.envelope_validation: pass
   ehr-system:
     ehr.pending_erx_count: {randint: [5, 30]}
-    ehr.surescripts_link: degraded
+    ehr.surescripts_link: connected
   clinical-alerts:
     alerts.erx_failure_count: {randint: [3, 15]}
   billing-processor:
@@ -58,10 +65,10 @@ rca_clues:
     billing.ncpdp_d0_queue: {randint: [10, 50]}
 business_impact:
   - kpi: business.medication_reconciliation_rate_pct
-    factor: {uniform: [0.20, 0.50]}
+    factor: {uniform: [0.2, 0.5]}
   - kpi: business.claims_submitted_per_min
-    factor: {uniform: [0.30, 0.60]}
+    value: {uniform: [4.46, 5.14]}
   - kpi: business.patient_safety_events_per_min
-    factor: {uniform: [1.5, 3.0]}
+    value: {uniform: [0.68, 0.79], round: 3}
   - kpi: business.collections_usd_per_min
-    factor: {uniform: [0.25, 0.55]}
+    value: {uniform: [10881.0, 12519.0], round: 1}

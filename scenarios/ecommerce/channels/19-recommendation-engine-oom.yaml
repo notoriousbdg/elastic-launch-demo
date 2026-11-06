@@ -8,36 +8,48 @@ affected_services:
 cascade_services:
 - storefront-gateway
 - product-catalog
-description: Recommendation model inference process running out of heap memory, crashing and causing fallback to non-personalized
+description: Recommendation model inference process running out of heap memory, so the pod is OOMKilled and recommendations fall back to non-personalized
   results
 investigation_notes: |-
   1. Check recommendation-engine logs for RECO-ENGINE-OOM — heap_used_mb={heap_used_mb} vs heap_max_mb={heap_max_mb} gives the margin.
-  2. The model embedding cache is likely bloated — check cache_size_mb metric. A cold-start after a pod restart causes aggressive cache backfill.
-  3. Review the model version: v{model_version} may have a larger embedding dimension than the previous version, requiring more heap.
-  4. Check GC log — G1GC full GC pauses above 2s indicate the heap is too small for current traffic; target 75% heap utilization.
+  2. The model embedding cache is likely bloated — check cache_size_mb metric (a cache above 6,144MB, 60% of the 10,240MB heap, indicates cache bloat). A cold-start after a pod restart causes aggressive cache backfill.
+  3. Review the model version: v{model_version} may have a larger embedding dimension than the previous version, requiring more heap (an embedding_dim_delta of 0 against the previous version rules this out).
+  4. Check GC pause metrics — CPython generation-2 collections above 2s over the multi-GB embedding object graph indicate the memory limit is too small for current traffic; target 75% memory utilization.
   5. Immediate mitigation: reduce batch_size from {batch_size} to half — this trades throughput for stability under memory pressure.
   6. Scale the recommendation-engine horizontally (add pods) and reduce per-instance model cache size to distribute memory load.
 remediation_action: scale_recommendation_engine
 error_message: '[RecommendationEngine] RECO-ENGINE-OOM: heap_used={heap_used_mb}MB heap_max={heap_max_mb}MB model_version=v{model_version}
   batch_size={batch_size} cache_size={cache_size_mb}MB gc_pause_ms={gc_pause_ms}'
-stack_trace: "java.lang.OutOfMemoryError: RECO-ENGINE-OOM Java heap space\n\tat com.ecommerce.reco.EmbeddingCache.load(EmbeddingCache.java:178)\n\
-  \tat com.ecommerce.reco.ModelInference.predict(ModelInference.java:234)\n\tat com.ecommerce.reco.RecommendationService.getRecs(RecommendationService.java:112)\n\
-  Heap used:    {heap_used_mb}MB / {heap_max_mb}MB\nModel:        v{model_version}\nBatch size:   {batch_size}\nCache size:\
-  \   {cache_size_mb}MB\nGC pause:     {gc_pause_ms}ms"
+stack_trace: |-
+  Traceback (most recent call last):
+    File "/app/reco/service.py", line 112, in get_recs
+      scores = self.inference.predict(batch)
+    File "/app/reco/inference.py", line 234, in predict
+      vectors = self.embedding_cache.load(item_ids)
+    File "/app/reco/embedding_cache.py", line 178, in load
+      block = np.empty((len(item_ids), self.dim), dtype=np.float32)
+  MemoryError: RECO-ENGINE-OOM: unable to allocate embedding block
+  Memory used:  {heap_used_mb}MB / {heap_max_mb}MB
+  Model:        v{model_version}
+  Batch size:   {batch_size}
+  Cache size:   {cache_size_mb}MB
+  GC pause:     {gc_pause_ms}ms
 correlation_attr:
   key: reco.engine_degraded
   value: true
 fault_params:
-  heap_used_mb: {randint: [7500, 9800]}
+  heap_used_mb: {randint: [9250, 10140]}
   heap_max_mb: 10240
   model_version: {randint: [7, 10]}
   batch_size: {randint: [64, 512]}
-  cache_size_mb: {randint: [4000, 8000]}
+  cache_size_mb: {randint: [6500, 8000]}
   gc_pause_ms: {randint: [2000, 8000]}
 rca_clues:
   recommendation-engine:
     reco.heap_utilization_pct: {uniform: [90, 99], round: 1}
     reco.gc_pause_ms: {randint: [2000, 8000]}
+    reco.embedding_cache_mb: {randint: [6500, 8000]}
+    reco.embedding_dim_delta: 0
     reco.serving_fallback: trending
   storefront-gateway:
     storefront.personalization_disabled: true
@@ -47,10 +59,15 @@ rca_clues:
     catalog.featured_fallback_active: true
 business_impact:
   - kpi: business.conversion_rate_pct
-    factor: {uniform: [0.30, 0.55]}
+    value: {uniform: [0.67, 0.77], round: 2}
   - kpi: business.page_views_per_min
-    factor: {uniform: [0.35, 0.60]}
+    value: {uniform: [3162.0, 3638.0]}
   - kpi: business.cart_adds_per_min
-    factor: {uniform: [0.25, 0.50]}
+    value: {uniform: [229.71, 264.29]}
   - kpi: business.sessions_per_min
-    factor: {uniform: [0.35, 0.60]}
+    factor: {uniform: [0.35, 0.6]}
+
+generator_impact:
+  kubernetes_otel:
+    oomkilled_containers: 0.8
+    container_memory_near_limit: 0.97

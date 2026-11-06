@@ -1,0 +1,113 @@
+service: support-assistant
+sort_order: 8
+cloud_provider: aws
+cloud_region: eu-west-1
+cloud_platform: aws_ec2
+cloud_availability_zone: eu-west-1a
+subsystem: genai_support
+language: python
+
+# Topology: [downstream-service, endpoint, METHOD]
+# Tool calls go through the AgentCore Gateway (managed), not other services.
+topology: []
+
+entry_endpoints:
+  - [/api/v1/support/chat, POST]
+
+db_operations: []
+
+emit_fault_logs: true
+kpi_emitter: false
+
+constants:
+  TOOLS: [lookup_order_status, get_shipment_tracking, initiate_return, check_refund_eligibility]
+  INTENTS: [order_status, delivery_delay, return_request, refund_status, address_change]
+
+state:
+  _sessions: {init: 0}
+  _last_summary: {init: now}
+
+steps:
+  - sample:
+      tool: {choice: TOOLS}
+      intent: {choice: INTENTS}
+      session_id: {format: "sess-{n}", n: {randint: [100000, 999999]}}
+      agent_latency_ms:
+        if_active: {uniform: [6500.0, 24000.0], round: 1}
+        else: {uniform: [900.0, 3200.0], round: 1}
+      gateway_tool_latency_ms:
+        if_active: {uniform: [3000.0, 15000.0], round: 1}
+        else: {uniform: [80.0, 450.0], round: 1}
+      memory_retrieval_ms:
+        if_active: {uniform: [150.0, 900.0], round: 1}
+        else: {uniform: [12.0, 60.0], round: 1}
+      gateway_errors:
+        if_active: {randint: [8, 60]}
+        else: {randint: [0, 1]}
+      tool_success_rate_pct:
+        if_active: {uniform: [38.0, 74.0], round: 2}
+        else: {uniform: [97.5, 99.8], round: 2}
+      memory_events: {randint: [3, 28]}
+      input_tokens: {randint: [640, 2400]}
+      output_tokens: {randint: [90, 520]}
+  - counter:
+      state_key: _sessions
+      by: 1
+  - metric:
+      name: support_assistant.agent_runtime_latency_ms
+      value: {var: agent_latency_ms}
+      unit: ms
+  - metric:
+      name: support_assistant.gateway_tool_latency_ms
+      value: {var: gateway_tool_latency_ms}
+      unit: ms
+  - metric:
+      name: support_assistant.gateway_tool_errors
+      value: {var: gateway_errors}
+      unit: '{error}'
+  - metric:
+      name: support_assistant.tool_success_rate_pct
+      value: {var: tool_success_rate_pct}
+      unit: '%'
+  - metric:
+      name: support_assistant.memory_retrieval_ms
+      value: {var: memory_retrieval_ms}
+      unit: ms
+  - log:
+      level: INFO
+      message: 'support.chat session={session_id} intent={intent} agent_runtime_latency={agent_latency_ms}ms input_tokens={input_tokens} output_tokens={output_tokens} status=OK'
+      attrs:
+        operation: agent_invoke
+        support.session_id: {var: session_id}
+        support.intent: {var: intent}
+        aws.bedrock.agentcore.runtime_latency_ms: {var: agent_latency_ms}
+        gen_ai.usage.input_tokens: {var: input_tokens}
+        gen_ai.usage.output_tokens: {var: output_tokens}
+  - log:
+      level: INFO
+      message: 'support.gateway_tool_call session={session_id} tool={tool} latency={gateway_tool_latency_ms}ms success_rate={tool_success_rate_pct}% gateway_errors={gateway_errors}'
+      attrs:
+        operation: gateway_tool_call
+        support.session_id: {var: session_id}
+        aws.bedrock.agentcore.gateway.tool: {var: tool}
+        aws.bedrock.agentcore.gateway.latency_ms: {var: gateway_tool_latency_ms}
+        aws.bedrock.agentcore.gateway.errors: {var: gateway_errors}
+  - log:
+      level: INFO
+      message: 'support.memory_retrieve session={session_id} events={memory_events} latency={memory_retrieval_ms}ms'
+      attrs:
+        operation: session_memory_retrieve
+        support.session_id: {var: session_id}
+        aws.bedrock.agentcore.memory.events: {var: memory_events}
+        aws.bedrock.agentcore.memory.latency_ms: {var: memory_retrieval_ms}
+  - every:
+      seconds: 30
+      state_key: _last_summary
+      steps:
+        - log:
+            level: INFO
+            message: 'support.summary sessions={_sessions} tool_success_rate={tool_success_rate_pct}% status=NOMINAL'
+            attrs:
+              operation: support_summary
+              support.total_sessions: {var: _sessions}
+              support.tool_success_rate_pct: {var: tool_success_rate_pct}

@@ -12,16 +12,16 @@ description: Product price updates failing to propagate from pricing engine to c
   customer disputes
 investigation_notes: |-
   1. Check product-catalog logs for CATALOG-PRICE-SYNC — failed_updates={failed_price_updates}/{total_price_updates} shows scope.
-  2. Check the pricing event stream consumer: if the consumer is behind by {price_lag_events} events, prices are stale by {price_lag_min}min.
-  3. Verify no schema mismatch in the pricing event format — a recently deployed pricing service may be emitting events in a new format.
+  2. Check the pricing events Kafka topic consumer group: if the consumer is behind by {price_lag_events} events, prices are stale by {price_lag_min}min.
+  3. Verify no schema mismatch in the pricing event format — a recently deployed pricing service may be emitting events in a new format (a price_schema_errors count above 0 confirms a format change).
   4. Cross-check: if displayed price differs from order-confirmed price by >{price_delta_threshold_pct}%, customer dispute risk is high.
   5. Run a forced sync: `catalog-cli sync-prices --source pricing-engine --batch-size 1000` to drain the backlog.
   6. Enable price validation at checkout: compare display price to real-time pricing API call — reject if delta exceeds tolerance.
 remediation_action: resync_catalog_prices
 error_message: '[ProductCatalog] CATALOG-PRICE-SYNC: failed_updates={failed_price_updates}/{total_price_updates} price_lag={price_lag_min}min
   consumer_lag={price_lag_events} affected_skus={affected_price_skus}'
-stack_trace: "com.ecommerce.catalog.PriceSyncException: CATALOG-PRICE-SYNC\n\tat com.ecommerce.catalog.PriceConsumer.applyUpdate(sku={sku_id})\n\
-  \tat com.ecommerce.catalog.CatalogService.syncPrices(batch={price_batch_id})\nFailed updates:    {failed_price_updates}/{total_price_updates}\n\
+stack_trace: "com.ecommerce.catalog.PriceSyncException: CATALOG-PRICE-SYNC\n\tat com.ecommerce.catalog.PriceConsumer.applyUpdate(PriceConsumer.java:156)\n\
+  \tat com.ecommerce.catalog.CatalogService.syncPrices(CatalogService.java:298)\nSKU:               {sku_id}\nBatch:             {price_batch_id}\nFailed updates:    {failed_price_updates}/{total_price_updates}\n\
   Price lag:         {price_lag_min}min\nConsumer lag:      {price_lag_events} events\nAffected SKUs:     {affected_price_skus}"
 correlation_attr:
   key: catalog.prices_stale
@@ -30,7 +30,7 @@ fault_params:
   failed_price_updates: {randint: [100, 5000]}
   total_price_updates: {randint: [5000, 50000]}
   price_lag_min: {randint: [5, 120]}
-  price_lag_events: {randint: [1000, 50000]}
+  price_lag_events: {randint: [50000, 120000]}
   affected_price_skus: {randint: [100, 10000]}
   sku_id: {format: "SKU-{n}", n: {randint: [100000, 999999]}}
   price_batch_id: {format: "PRICE-BATCH-{n}", n: {randint: [1000, 9999]}}
@@ -39,6 +39,8 @@ rca_clues:
   product-catalog:
     catalog.stale_price_skus: {randint: [100, 10000]}
     catalog.price_lag_min: {randint: [5, 120]}
+    catalog.price_consumer_lag_events: {randint: [50000, 120000]}
+    catalog.price_schema_errors: 0
   inventory-service:
     inventory.price_mismatch_count: {randint: [50, 5000]}
     inventory.sync_consumer_behind: true
@@ -47,10 +49,14 @@ rca_clues:
     order.price_validation_failures: {randint: [5, 100]}
 business_impact:
   - kpi: business.conversion_rate_pct
-    factor: {uniform: [0.30, 0.55]}
+    value: {uniform: [1.15, 1.32], round: 2}
   - kpi: business.orders_placed_per_min
-    factor: {uniform: [0.30, 0.55]}
+    factor: {uniform: [0.3, 0.55]}
   - kpi: business.cancel_rate_pct
     factor: {uniform: [2.0, 4.0]}
   - kpi: business.csat_score_0_5
-    factor: {uniform: [0.35, 0.60]}
+    factor: {uniform: [0.35, 0.6]}
+
+generator_impact:
+  kafka_otel:
+    high_consumer_lag_by_topic: 60000.0

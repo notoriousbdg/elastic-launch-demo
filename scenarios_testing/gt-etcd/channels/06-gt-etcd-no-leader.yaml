@@ -1,0 +1,37 @@
+name: "GT etcd_otel: no_leader"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-ETCD-NO-LEADER
+sensor_type: impact_key_probe
+affected_services:
+  - gt-etcd-aws-svc-1
+cascade_services:
+  - gt-etcd-aws-svc-2
+description: "Tests impact_key no_leader on generator etcd_otel."
+investigation_notes: |-
+  1. Verify etcd_otel is active and reporting metrics.
+  2. Check that the no_leader metric has reached the trigger value (0.8).
+  3. Confirm generator_impact for etcd_otel.no_leader is set to 0.8.
+  4. Look for correlated changes in service gt-etcd-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_no_leader_baseline
+error_message: "GT-PROBE: gen=etcd_otel key=no_leader value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=etcd_otel
+  impact_key: no_leader
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 0.8
+  svc_name: gt-etcd-aws-svc-1
+rca_clues:
+  gt-etcd-aws-svc-1:
+    probe.generator: etcd_otel
+    probe.impact_key: no_leader
+    probe.trigger_value: 0.8
+  gt-etcd-aws-svc-2:
+    probe.upstream_generator: etcd_otel
+    probe.upstream_key: no_leader
+generator_impact:
+  etcd_otel:
+    no_leader: 0.8

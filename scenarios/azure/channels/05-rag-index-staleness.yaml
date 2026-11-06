@@ -1,0 +1,52 @@
+name: Rag Index Staleness
+subsystem: retrieval
+vehicle_section: retrieval_pipeline
+error_type: RAG-INDEX-STALE
+sensor_type: health_check
+affected_services: [retrieval-service]
+cascade_services: [chat-orchestrator]
+description: The AI Search index used by retrieval-service stops receiving updates after an indexer failure, so answers cite outdated documents.
+investigation_notes: |-
+  1. Search body.text for *RAG-INDEX-STALE* and check index_age_hours={index_age_hours} against the freshness SLO of {freshness_slo_hours} hours for index {index_name}.
+  2. Inspect the AI Search indexer {indexer_name} execution history: last status={indexer_status}, last success {hours_since_success}h ago, error={indexer_error}.
+  3. Compare source document count in the data source with documents in the index ({doc_count_gap} missing) to size the gap.
+  4. Check chat-orchestrator citations for documents older than the SLO and for grounding-relevance score drops.
+  5. A data source auth status of EXPIRED with zero skillset 429s means expired credentials, not skillset or quota. Update the data source credentials (or switch the data source to a managed identity), then run the indexer so change tracking picks up the missed documents (reset the indexer only if the gap does not close); verify index_age_hours falls below the SLO.
+remediation_action: rebuild_search_index
+error_message: '[RetrievalService] RAG-INDEX-STALE: index={index_name} indexer={indexer_name} status={indexer_status} index_age={index_age_hours}h (SLO {freshness_slo_hours}h) missing_docs={doc_count_gap}'
+stack_trace: |-
+  StaleSearchIndexException: RAG-INDEX-STALE
+    at RetrievalService.searchPassages(index={index_name})
+    at SearchIndexFreshnessCheck.verify(indexer={indexer_name})
+  Index age:         {index_age_hours}h (SLO: {freshness_slo_hours}h)
+  Indexer status:    {indexer_status}
+  Last success:      {hours_since_success}h ago
+  Last error:        {indexer_error}
+  Missing documents: {doc_count_gap}
+correlation_attr:
+  key: search.indexer_definition_version
+  value: kb-docs-indexer-2025-09-r4
+fault_params:
+  index_name: {choice: [kb-docs-index-prod, product-help-index-prod]}
+  indexer_name: {choice: [kb-docs-indexer, product-help-indexer]}
+  indexer_status: error
+  indexer_error: "Data source credentials expired"
+  index_age_hours: {randint: [48, 240]}
+  freshness_slo_hours: 6
+  hours_since_success: {randint: [48, 240]}
+  doc_count_gap: {randint: [1200, 28000]}
+rca_clues:
+  retrieval-service:
+    search.indexer_last_success_hours_ago: {randint: [48, 240]}
+    search.index_document_count_gap: {randint: [1200, 28000]}
+    search.indexer_failed_runs: {randint: [10, 80]}
+    search.datasource_auth_status: EXPIRED
+    search.skillset_429_count: 0
+  chat-orchestrator:
+    orchestrator.outdated_citation_ratio_pct: {uniform: [25.0, 60.0], round: 1}
+    orchestrator.grounding_score_drop_pct: {uniform: [10.0, 35.0], round: 1}
+business_impact:
+  - kpi: business.conversations_per_min
+    value: {uniform: [120.9, 139.1], round: 0}
+  - kpi: business.resolution_rate_pct
+    value: {uniform: [46.5, 53.5], round: 1}

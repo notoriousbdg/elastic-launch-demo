@@ -1,0 +1,37 @@
+name: "GT haproxy_otel: backend_has_no_active_servers"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-HAPROXY-BACKEND-HAS-NO-ACTIVE-SERVE
+sensor_type: impact_key_probe
+affected_services:
+  - gt-haproxy-aws-svc-1
+cascade_services:
+  - gt-haproxy-aws-svc-2
+description: "Tests impact_key backend_has_no_active_servers on generator haproxy_otel."
+investigation_notes: |-
+  1. Verify haproxy_otel is active and reporting metrics.
+  2. Check that the backend_has_no_active_servers metric has reached the trigger value (0.0).
+  3. Confirm generator_impact for haproxy_otel.backend_has_no_active_servers is set to 0.0.
+  4. Look for correlated changes in service gt-haproxy-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_backend_has_no_active_servers_baseline
+error_message: "GT-PROBE: gen=haproxy_otel key=backend_has_no_active_servers value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=haproxy_otel
+  impact_key: backend_has_no_active_servers
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 0.0
+  svc_name: gt-haproxy-aws-svc-1
+rca_clues:
+  gt-haproxy-aws-svc-1:
+    probe.generator: haproxy_otel
+    probe.impact_key: backend_has_no_active_servers
+    probe.trigger_value: 0.0
+  gt-haproxy-aws-svc-2:
+    probe.upstream_generator: haproxy_otel
+    probe.upstream_key: backend_has_no_active_servers
+generator_impact:
+  haproxy_otel:
+    backend_has_no_active_servers: 0.0

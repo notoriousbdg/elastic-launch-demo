@@ -14,7 +14,7 @@ investigation_notes: |-
   1. Check settlement-processor logs for SETTLE-FAIL — note trade_id, instrument, quantity, and failure_reason (e.g. insufficient_securities or SSI_mismatch).
   2. Query FROM logs.otel.financial.* | WHERE body.text LIKE "*SETTLE-FAIL*" | STATS count() BY failure_reason to determine if the cause is systemic.
   3. Inspect risk-calculator for the counterparty credit exposure — a counterparty_default failure_reason requires immediate credit event notification.
-  4. Check compliance-monitor for SWIFT MT548 processing — confirm the LACK reject code was received and logged for regulatory recordkeeping.
+  4. Check compliance-monitor for SWIFT MT548 processing — confirm the PEND//LACK pending reason was received and logged for regulatory recordkeeping.
   5. If auto_borrow=ATTEMPTED and borrow_result=UNAVAILABLE, initiate securities lending desk escalation or recycle the instruction with an extended settlement date.
 remediation_action: initiate_securities_borrow_and_recycle
 error_message: '[SETTLE] SETTLE-FAIL: trade={trade_id} instrument={instrument} qty={quantity} reason={failure_reason} counterparty={counterparty}'
@@ -25,14 +25,21 @@ stack_trace: |-
   :23G:INST
   :16R:STAT
   :25D::SETT//PEND
-  :24B::PEND//LACK  (reason={failure_reason})
+  :16R:REAS
+  :24B::PEND//LACK
+  :70D::REAS//{failure_reason}
+  :16S:REAS
   :16S:STAT
-  :16R:SETTRAN
-  :35B:ISIN US0378331005  {instrument}
-  :36B::SETT//UNIT/{quantity}
-  :97A::SAFE//DTC-{counterparty}
-  :16S:SETTRAN
   :16S:GENL
+  :16R:SETTRAN
+  :35B:ISIN US0378331005
+  /US/{instrument}
+  :36B::SETT//UNIT/{quantity},
+  :97A::SAFE//0352-001
+  :16R:SETPRTY
+  :95Q::DEAG//{counterparty}
+  :16S:SETPRTY
+  :16S:SETTRAN
   trade={trade_id}  fail_code=LACK  auto_borrow=ATTEMPTED  borrow_result=UNAVAILABLE
   ACTION: recycle_instruction=true  notify_ops=true  alert=SETTLE-FAIL
 correlation_attr: {}
@@ -40,9 +47,9 @@ fault_params:
   trade_id:
     format: "TRD-{n}"
     n: {randint: [100000, 999999]}
-  instrument: {choice: [US.AAPL, US.GOOGL, US.MSFT, US.AMZN, US.TSLA, FX.EURUSD, FX.GBPUSD, FUT.ES, FUT.NQ, OPT.SPX]}
+  instrument: US.AAPL
   quantity: {randint: [100, 50000]}
-  failure_reason: {choice: [insufficient_securities, funding_shortfall, counterparty_default, DTCC_rejection, SSI_mismatch]}
+  failure_reason: insufficient_securities
   counterparty: {choice: [Goldman Sachs, Morgan Stanley, JP Morgan, Citadel Securities, Virtu Financial, Jane Street]}
   settlement_id:
     format: "STL-{n}"
@@ -53,7 +60,7 @@ rca_clues:
     settlement.auto_borrow_failures: {randint: [1, 15]}
   risk-calculator:
     risk.counterparty_exposure_usd: {randint: [1000000, 50000000]}
-    risk.credit_hold_active: true
+    risk.credit_hold_active: false
   compliance-monitor:
     compliance.swift_mt548_rejections: {randint: [1, 20]}
     compliance.settle_fail_reg_events: {randint: [1, 10]}
@@ -66,6 +73,6 @@ business_impact:
   - kpi: business.settlement_fails_in_queue
     factor: {uniform: [2.5, 6.0]}
   - kpi: business.notional_value_usd_per_min
-    factor: {uniform: [0.25, 0.55]}
+    value: {uniform: [1692600.0, 1947400.0], round: 1}
   - kpi: business.counterparty_credit_risk_usd
     factor: {uniform: [2.0, 4.5]}

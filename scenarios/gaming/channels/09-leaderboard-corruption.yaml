@@ -11,12 +11,12 @@ cascade_services:
 - moderation-engine
 description: Leaderboard sorted set becomes inconsistent due to concurrent score updates causing rank calculation errors
 investigation_notes: |-
-  Root cause: concurrent ZADD operations to the Redis sorted set during AOF rewrite cause race conditions — two game servers submit score updates for overlapping rank ranges without distributed locking, producing rank inversions and NaN entries.
-  1. Check Redis state: `redis-cli info persistence` — if `aof_rewrite_in_progress=1`, the rewrite is contending with writes; defer bulk score updates until rewrite completes.
-  2. Audit the corruption: rank 42018 score > rank 42017 score is a classic ZADD race; NaN at rank 42103 indicates a Lua script received non-numeric input from game server.
-  3. Verify ZSET cardinality: `ZCARD {leaderboard_id}` should match `total_entries` — any mismatch indicates phantom entries from incomplete transaction rollbacks.
+  Root cause: non-idempotent concurrent score updates during AOF rewrite — the BGREWRITEAOF fork stalls Redis, game-server ZINCRBY calls time out and are retried without an idempotency key (so the same match result is applied twice), and two game servers update overlapping players without distributed locking. Redis keeps the set sorted, so the corruption shows up as stored scores that disagree with the transaction log.
+  1. Check Redis state: `redis-cli info persistence` — if `aof_rewrite_in_progress:1`, the rewrite is contending with writes; defer bulk score updates until rewrite completes.
+  2. Audit the corruption: compare sampled entries against the transaction log — a stored score that equals the logged score plus one extra match delta (rank 42103) is a retried ZINCRBY; neighbours whose stored score differs from the log are lost or duplicated updates.
+  3. Verify ZSET cardinality: `ZCARD {leaderboard_id}` should match `total_entries` — any mismatch indicates phantom entries from partially applied MULTI/EXEC batches.
   4. Remediate: issue `freeze_leaderboard` to block new writes, then `rebuild_leaderboard` to reconstruct the sorted set from the transaction log source of truth.
-  5. Deploy Redlock-based distributed mutex for score update batches and add input validation to reject NaN/Infinity scores at the game server API boundary.
+  5. Deploy Redlock-based distributed mutex for score update batches and make score submits idempotent (dedupe on match_id before ZINCRBY, e.g. SET NX on a per-match key inside the same Lua script).
 remediation_action: rebuild_leaderboard
 error_message: '[LB] LB-DATA-CORRUPT: board={leaderboard_id} affected={corrupt_entries} checksum_fail=true season={season_id}'
 stack_trace: |-
@@ -28,9 +28,9 @@ stack_trace: |-
     checksum_fail    = true
     last_valid_rank  = 42,017
   ----------- sample violations -------
-    rank 42018: score=8401 > rank 42017: score=8399  (INVERSION)
-    rank 42019: score=8401  (DUPLICATE score, different player)
-    rank 42103: score=NaN   (CORRUPT value)
+    rank 42018: stored=8401  txlog=8399  (MISMATCH vs transaction log)
+    rank 42019: stored=8401  txlog=8176  (MISMATCH, increment applied twice)
+    rank 42103: stored=8350  txlog=8125  (DUPLICATE ZINCRBY on retry)
   ----------- redis state -------------
     zset_card    = 1,284,301
     memory_used  = 142MB
@@ -58,13 +58,13 @@ rca_clues:
   analytics-pipeline:
     analytics.rank_anomaly_events: {randint: [100, 500]}
   moderation-engine:
-    moderation.rank_exploit_check: inconclusive
+    moderation.rank_exploit_check: no_exploit_found
 business_impact:
   - kpi: business.daily_retention_rate_pct
-    factor: {uniform: [0.25, 0.55]}
+    value: {uniform: [11.9, 13.7], round: 2}
   - kpi: business.matches_played_per_min
-    factor: {uniform: [0.30, 0.55]}
+    value: {uniform: [229.71, 264.29]}
   - kpi: business.churn_risk_index_0_100
     factor: {uniform: [1.8, 3.5]}
   - kpi: business.net_satisfaction_proxy_nps
-    factor: {uniform: [0.20, 0.45]}
+    value: {uniform: [9.3, 10.7], round: 1}

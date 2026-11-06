@@ -3,20 +3,16 @@ subsystem: security
 vehicle_section: perimeter_defense
 error_type: SYSTEM-session-threshold
 sensor_type: session_table
-affected_services:
-- firewall-gateway
-- network-controller
-cascade_services:
-- digital-marketplace
-- auction-engine
+affected_services: [firewall-gateway, network-controller, digital-marketplace]
+cascade_services: [auction-engine]
 description: Firewall session table approaching maximum capacity, new connections being dropped
 investigation_notes: |-
   1. Run `show session all filter count yes` to confirm active session count, then `show session info` for utilization percentage.
-  2. Identify top talkers: `show session all filter source <zone> count yes` — look for a single IP consuming disproportionate sessions.
-  3. Check for a DDoS or scan: `show session all filter application unknown` — unknown apps with high session counts suggest malicious traffic.
-  4. Review session timeout settings: `show running-config | match timeout` — aggressive TCP timeout defaults (3600s) may keep stale sessions alive.
+  2. Identify top talkers: `show session all filter from <zone> count yes` — look for a single IP consuming disproportionate sessions (above 20%); here the top source holds under 5%, ruling out a flood.
+  3. Check for a DDoS or scan: `show session all filter application unknown` — unknown apps with high session counts (above 10%) suggest malicious traffic; here they stay under 2%.
+  4. Review session timeout settings: `show config running | match timeout` — long TCP timeout defaults (3600s) keep stale sessions alive. If more than half of sessions are idle TCP sessions, the long timeout is the cause.
   5. Reduce TCP session timeout for non-critical zones: `set deviceconfig setting session timeout-tcp 1800`.
-  6. If a specific source is flooding, apply a DoS Protection Profile or temporarily block via `set security-rule deny-source <ip>`.
+  6. If a specific source is flooding, apply a DoS Protection Profile or temporarily block it with a deny security rule (`set rulebase security rules block-src from any to any source <ip> action deny` then `commit`).
 remediation_action: flush_session_table
 error_message: '1,2025/01/15 14:32:01,007200001234,SYSTEM,session,0,SYSTEM-session-threshold,Session table utilization critical:
   {session_count}/{session_max} ({session_util_pct}%) in zone {fw_zone}, {session_drops} new connections dropped, top source
@@ -29,7 +25,7 @@ stack_trace: |-
   Number of sessions dropped:      {session_drops}
     Zone: {fw_zone}
     Top source: {top_source_ip}
-  TCP sessions:    {session_count}
+  TCP sessions:    (bulk of active)
   UDP sessions:    1245
   ICMP sessions:   89
   Session aging:   TCP default timeout 3600s
@@ -49,12 +45,10 @@ fault_params:
     c: {randint: [1, 254]}
 rca_clues:
   firewall-gateway:
-    firewall.top_session_source:
-      format: "10.{a}.{b}.{c}"
-      a: {randint: [1, 254]}
-      b: {randint: [1, 254]}
-      c: {randint: [1, 254]}
     firewall.tcp_timeout_config: 3600
+    firewall.idle_session_pct: {uniform: [55, 80], round: 1}
+    firewall.top_source_session_share_pct: {uniform: [1, 4], round: 1}
+    firewall.unknown_app_session_pct: {uniform: [0.5, 2], round: 1}
   network-controller:
     network.qos_drops_increasing: true
     network.affected_queue: {choice: [Q1-PRIORITY, Q3-BEST-EFFORT]}
@@ -66,10 +60,10 @@ rca_clues:
     auction.bid_timeouts: {randint: [5, 50]}
 business_impact:
   - kpi: business.app_sessions_per_min
-    factor: {uniform: [0.15, 0.45]}
+    value: {uniform: [334.8, 385.2]}
   - kpi: business.page_views_per_min
-    factor: {uniform: [0.15, 0.45]}
+    value: {uniform: [66960.0, 77040.0]}
   - kpi: business.merch_gmv_usd_per_min
-    factor: {uniform: [0.15, 0.45]}
+    value: {uniform: [10416.0, 11984.0], round: 1}
   - kpi: business.betting_handle_usd_per_min
-    factor: {uniform: [0.15, 0.45]}
+    value: {uniform: [108810.0, 125190.0], round: 1}

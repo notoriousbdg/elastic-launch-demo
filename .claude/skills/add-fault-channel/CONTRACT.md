@@ -15,7 +15,7 @@ Reference source: [`scenarios/ecommerce/channels/01-payment-gateway-timeout.yaml
 | `vehicle_section` | ✅ | `str` | Domain-appropriate logical zone. E.g. `"checkout_pipeline"`, `"engine_bay"`, `"auth_layer"` |
 | `error_type` | ✅ | `str` | ALLCAPS-HYPHENATED. Used in `body.text` log search. E.g. `"PAYMENT-GATEWAY-TIMEOUT"` |
 | `sensor_type` | ✅ | `str` | Domain flavor — what sensor/metric triggered this. E.g. `"gateway_latency"`, `"pressure"` |
-| `affected_services` | ✅ | `list[str]` | Direct fault targets. Every entry must be a filename stem under `services/`. |
+| `affected_services` | ✅ | `list[str]` | Direct fault targets. Every entry must be a filename stem under `services/`. **Must include at least one trace entry service** (a service with `entry_endpoints`), not only a database — the trace generator only raises error spans for entry services, so otherwise the ops dashboard stays green (Check 31). |
 | `cascade_services` | ✅ | `list[str]` | Downstream victims. Every entry must be a filename stem under `services/`. May be `[]`. |
 | `description` | ✅ | `str` | 1–2 sentence customer-facing description of the observable failure |
 | `investigation_notes` | ✅ | `str` | 5–6 numbered steps for the runbook skill. See shape below. |
@@ -26,7 +26,7 @@ Reference source: [`scenarios/ecommerce/channels/01-payment-gateway-timeout.yaml
 | `fault_params` | ✅ | `dict` | YAML DSL expressions for every `{placeholder}` in `error_message` + `stack_trace`. |
 | `rca_clues` | ✅ | `dict` | Per-service partial clues. Keys = service names from `affected_services` + `cascade_services`. |
 | `infrastructure_events` | optional | `list` | Extra infrastructure log events during the fault window. |
-| `business_impact` | optional | `list[str]` | 2–4 KPI names from `scenario.yaml`'s `executive_kpi_emissions:` list. Used by the ML/anomaly layer to link fault windows to business metrics. All existing scenarios carry this field (schema 1.2). When replacing a channel, **copy `business_impact` from the old channel if present** rather than dropping it. |
+| `business_impact` | ✅ when the scenario has `executive_kpi_emitter_service_name` | `list[dict]` | Entries `{kpi, value: {uniform: [lo, hi], round: n}}` (absolute override, preferred — place it inside the KPI's red/yellow band) or `{kpi: business.<name>, factor: {uniform: [lo, hi]}}` (scales the nominal draw). `kpi` must match a `name:` in `executive_kpi_emissions`, which must declare `better: lower\|higher`. Count scales with scope (2×affected + cascade): minor ≥2 yellow/red tiles incl. 1 red, moderate ≥3 incl. 2 red, major ≥4 incl. 3 red (Check 32). This is what moves the executive dashboard during a fault; bare KPI-name strings are ignored. When replacing a channel, **copy `business_impact` from the old channel if present** rather than dropping it. |
 
 ### `investigation_notes` shape
 
@@ -34,6 +34,8 @@ Reference source: [`scenarios/ecommerce/channels/01-payment-gateway-timeout.yaml
 - Specific log field names (always `body.text`, never `body` alone)
 - Specific metric names from the scenario's service telemetry
 - `{placeholder}` values from `error_message` to anchor searches
+- Only `{placeholder}` names that are `fault_params` keys — the KB doc, Cortex runbook and channel runbook skill replace each one with the parameter's range, and any other `{name}` is shown literally (verifier Check 35). Shell syntax such as curl's `%{time_total}` is fine
+- Thresholds that the `rca_clues` values actually cross — investigators compare the clue values with these numbers, and a clue that may sit on the healthy side keeps them from confirming the cause
 - The root cause hypothesis (what component or condition triggers this)
 - The remediation action and how to confirm it worked
 
@@ -102,6 +104,11 @@ Rules:
 - Attributes should suggest (but not directly name) the root cause — different services see different partial symptoms
 - Use OTel-style dotted names: `"payment.pool_exhaustion_pct"`, `"gateway.connection_wait_ms"`
 - Numeric values with domain-appropriate ranges
+- **Evidence contract** — the clues are what investigations (the agent and Nightshift) use to confirm the cause, and they are only emitted while the fault is active:
+  - Every range sits entirely on the fault side of the threshold the notes give (notes say ">3.5A indicates binding" → `{uniform: [3.6, 4.5]}`, not `[2.5, 4.0]`)
+  - A `choice` lists only fault values — never `OFF`, `INTACT`, `false` or another healthy reading (verifier Check 36 warns)
+  - Each reading the notes tell an investigator to check has a clue on the service that would report it
+  - Readings in `stack_trace` frame dumps that the notes rely on are `{fault_params}` placeholders, so the dump agrees with the span clues instead of showing a fixed healthy-looking number
 
 ---
 
@@ -131,6 +138,6 @@ If the new channel adds a first fault in a new subsystem, add a new grouping lin
 - [ ] Old `error_type` removed from `system_prompt` (if it changed)
 - [ ] Channel number ≤ 15 → `remediation_action` is a HITL action
 - [ ] Channel number 16–20 → `remediation_action` is a plausible auto-runbook action
-- [ ] If the old channel had `business_impact`, the new channel also has it (values may differ; don't silently drop it)
+- [ ] `business_impact` has dict entries targeting names in `executive_kpi_emissions` that turn enough KPI tiles yellow/red for the channel's scope tier, impacted KPIs declare `better:`, and `affected_services` includes a trace entry service (copy the old channel's block if it had one; re-check the values; don't silently drop it)
 - [ ] `python3 scripts/verify_yaml_scenarios.py <id>` passes
 - [ ] `git diff --name-only` shows only files under `scenarios/<id>/`

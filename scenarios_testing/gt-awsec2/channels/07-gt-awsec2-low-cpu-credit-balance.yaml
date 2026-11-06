@@ -1,0 +1,37 @@
+name: "GT aws_ec2_otel: low_cpu_credit_balance"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-AWSEC2-LOW-CPU-CREDIT-BALANCE
+sensor_type: impact_key_probe
+affected_services:
+  - gt-awsec2-aws-svc-1
+cascade_services:
+  - gt-awsec2-aws-svc-2
+description: "Tests impact_key low_cpu_credit_balance on generator aws_ec2_otel."
+investigation_notes: |-
+  1. Verify aws_ec2_otel is active and reporting metrics.
+  2. Check that the low_cpu_credit_balance metric has reached the trigger value (5.0).
+  3. Confirm generator_impact for aws_ec2_otel.low_cpu_credit_balance is set to 5.0.
+  4. Look for correlated changes in service gt-awsec2-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_low_cpu_credit_balance_baseline
+error_message: "GT-PROBE: gen=aws_ec2_otel key=low_cpu_credit_balance value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=aws_ec2_otel
+  impact_key: low_cpu_credit_balance
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 5.0
+  svc_name: gt-awsec2-aws-svc-1
+rca_clues:
+  gt-awsec2-aws-svc-1:
+    probe.generator: aws_ec2_otel
+    probe.impact_key: low_cpu_credit_balance
+    probe.trigger_value: 5.0
+  gt-awsec2-aws-svc-2:
+    probe.upstream_generator: aws_ec2_otel
+    probe.upstream_key: low_cpu_credit_balance
+generator_impact:
+  aws_ec2_otel:
+    low_cpu_credit_balance: 5.0

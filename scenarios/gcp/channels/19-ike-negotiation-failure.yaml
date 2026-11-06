@@ -15,9 +15,9 @@ investigation_notes: |-
     Console > Logging > resource.type='vpn_gateway' severity>=WARNING
   Remediation: For NO_PROPOSAL_CHOSEN, align cipher suites with GCP-supported combinations:
     IKEv2: AES-256-CBC + SHA-256 + DH group 14 (or AES-256-GCM for combined mode)
-  For AUTHENTICATION_FAILED, verify pre-shared key matches on both sides. Rekey the session:
-    gcloud compute vpn-tunnels update <tunnel> --region=<region> --shared-secret=<new-secret>
-    (then update the same secret on the remote peer)
+  For AUTHENTICATION_FAILED, verify pre-shared key matches on both sides. Cloud VPN tunnels cannot be edited in place, so recreate the tunnel with the corrected secret:
+    gcloud compute vpn-tunnels delete <tunnel> --region=<region>, then vpn-tunnels create with --shared-secret=<secret>
+    (and set the same secret on the remote peer)
   For TS_UNACCEPTABLE, ensure traffic selectors (local/remote CIDR) match: Cloud VPN uses 0.0.0.0/0 by default with route-based VPN; remote peer must also use 0.0.0.0/0.
 remediation_action: rekey_vpn_session
 error_message: '[CloudVPN] VPN-IKE-NEGOTIATION-FAILURE tunnel={vpn_tunnel_name} gateway={vpn_gateway_name} peer={vpn_peer_ip}
@@ -33,27 +33,24 @@ stack_trace: |-
   Retries:     {ike_retry_count}/{ike_max_retries}
   Cipher:      AES-256-CBC
   Auth:        SHA-256
+  Peer Offer:  ChaCha20-Poly1305 / PRF-SHA256 / Curve25519 (DH group 31)
   Action: Verify pre-shared key and cipher suite compatibility
 correlation_attr:
   key: network.ike_cipher_suite
-  value: aes256-sha384-dh20-nonstandard
+  value: chacha20poly1305-curve25519-peer-default
 fault_params:
   vpn_tunnel_name: {choice: [gcpnet-vpn-tunnel-01, gcpnet-vpn-tunnel-02, gcpnet-vpn-tunnel-03]}
   vpn_gateway_name: {choice: [gcpnet-vpn-gw-europe1, gcpnet-vpn-gw-central1]}
   vpn_peer_ip: {format: "203.0.113.{a}", a: {randint: [1, 254]}}
-  ike_phase: {choice: ["1", "2"]}
-  ike_error:
-    choice:
-      - NO_PROPOSAL_CHOSEN
-      - AUTHENTICATION_FAILED
-      - INVALID_KE_PAYLOAD
-      - TS_UNACCEPTABLE
+  ike_phase: "1"
+  ike_error: NO_PROPOSAL_CHOSEN
   ike_retry_count: {randint: [3, 10]}
   ike_max_retries: 10
 rca_clues:
   cloud-vpn-gateway:
-    vpn.ike_phase_failing: {choice: ["1", "2"]}
-    vpn.cipher_mismatch: {choice: [true, false]}
+    vpn.ike_phase_failing: "1"
+    vpn.cipher_mismatch: true
+    vpn.peer_ike_proposal: chacha20poly1305-prfsha256-curve25519
   cloud-interconnect:
     interconnect.vpn_failback_blocked: true
   cloud-nat-gateway:
