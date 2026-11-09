@@ -452,6 +452,10 @@ class PlatformMixin:
     # service accounts, bind them, then mark onboarding enabled.  The same calls
     # the button makes, so a fresh project needs no click before investigations
     # can run and before the investigation agent accepts a connector.
+    # On serverless only a UIAM credential can create the accounts, so seden
+    # creates them at deploy from elastic_stack/serverless/project.json ("uiam",
+    # names/roles/descriptions must match below) and `seden delete` removes them.
+    # Here they are found and reused; binding them works with the deploy API key.
     _SERVICE_ACCOUNT_PATH = "/internal/security/service_account"
     _NIGHTSHIFT_SA_STATUS_PATH = "/internal/nightshift/investigations/service_account"
     _NIGHTSHIFT_SA_DESCRIPTIONS = {
@@ -508,10 +512,15 @@ class PlatformMixin:
             )
             created = resp.json().get("id") if resp.status_code < 300 else None
             if not created and "UIAM" in resp.text:
-                # Serverless service accounts live in UIAM and can only be created as a
-                # signed-in user; an API key is refused.  The UI button does it once,
-                # and the connector watcher finishes the setup after that click.
-                logger.info("serverless: Nightshift needs the one-time 'Enable Elastic Nightshift' click")
+                # Serverless service accounts live in UIAM and can only be created with a
+                # UIAM credential; the deploy API key is refused.  seden normally creates
+                # them first; a project made by a seden without the "uiam" block does not
+                # have them, so the UI button does it once and the connector watcher
+                # finishes the setup after that click.
+                logger.info(
+                    "serverless: Nightshift service accounts missing (seden did not create them); "
+                    "needs the one-time 'Enable Elastic Nightshift' click"
+                )
                 self._nightshift_enable_pending = True
                 return
             if not created:
@@ -647,6 +656,34 @@ class PlatformMixin:
                 errors.append(f"nightshift sandbox connector (assign {detail})")
                 return False
         return True
+
+    # The onboarding page's second "Proceed" (Add data step): Nightshift looks at the
+    # project's data for first investigations to suggest.  Once onboarding records
+    # that execution the page moves on to "Try first investigation".
+    _NIGHTSHIFT_ONBOARDING_PATH = "/internal/nightshift/onboarding"
+
+    def _start_nightshift_onboarding(self, client: httpx.Client) -> None:
+        """[serverless] Press "Proceed" past Add data, once.  Call it when telemetry is
+        flowing, so the suggestions are about the scenario.  Never raises."""
+        headers = _kibana_headers(self.api_key)
+        try:
+            resp = client.get(f"{self.kibana_url}{self._NIGHTSHIFT_ONBOARDING_PATH}", headers=headers)
+            if resp.status_code >= 300:
+                return  # build without Nightshift onboarding
+            state = resp.json()
+            if not state.get("agent_installed"):
+                return  # not enabled yet (waiting for the one-time click)
+            if state.get("execution"):
+                return  # already past Add data: never start a second run
+            resp = client.post(
+                f"{self.kibana_url}{self._NIGHTSHIFT_ONBOARDING_PATH}/suggestions", headers=headers,
+            )
+            if resp.status_code < 300:
+                logger.info("serverless: Nightshift onboarding started looking for first investigations")
+            else:
+                logger.warning("Nightshift onboarding suggestions HTTP %s: %s", resp.status_code, resp.text[:300])
+        except (httpx.HTTPError, ValueError) as exc:
+            logger.warning("Nightshift onboarding suggestions failed: %s", exc)
 
     _NIGHTSHIFT_WATCH_INTERVAL = 30.0
     _NIGHTSHIFT_WATCH_MAX = 12 * 3600.0

@@ -148,6 +148,11 @@ class SloMixin:
                 self._slo_refresh_worker()
             except Exception as exc:
                 logger.warning("SLO refresh worker failed: %s", exc)
+            if self._is_serverless():
+                # Telemetry is flowing now, so Nightshift's first suggestions are
+                # about the scenario (the onboarding page's Add data "Proceed").
+                with httpx.Client(timeout=60.0) as client:
+                    self._start_nightshift_onboarding(client)
 
         t = threading.Thread(target=_worker, daemon=True, name="slo-refresh")
         t.start()

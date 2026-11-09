@@ -547,3 +547,58 @@ def test_watcher_assigns_connector_once_enabled(monkeypatch):
     assert [json.loads(r.content)["configuration"]["connector_ids"] for r in puts] == [
         [PlatformMixin._SANDBOX_CONNECTOR_ID]
     ]
+
+
+# ── [serverless] Nightshift onboarding: the Add data "Proceed" ────────────────
+
+def _onboarding_host(seen, *, state, status=200):
+    def handle(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if request.url.path == PlatformMixin._NIGHTSHIFT_ONBOARDING_PATH:
+            return httpx.Response(status, json=state)
+        return httpx.Response(200, json={"execution_id": "exec-1"})
+
+    host = PlatformMixin()
+    host.kibana_url = "http://kibana.test"
+    host.api_key = "plat-key"
+    return host, httpx.MockTransport(handle)
+
+
+def _suggestion_posts(seen):
+    return [r for r in seen
+            if r.method == "POST" and r.url.path == "/internal/nightshift/onboarding/suggestions"]
+
+
+def test_onboarding_starts_suggestions_once_enabled():
+    seen: list[httpx.Request] = []
+    host, transport = _onboarding_host(seen, state={"agent_installed": True})
+    with httpx.Client(transport=transport) as client:
+        host._start_nightshift_onboarding(client)
+    [post] = _suggestion_posts(seen)
+    assert post.headers["x-elastic-internal-origin"] == "kibana"
+
+
+def test_onboarding_never_starts_a_second_run():
+    seen: list[httpx.Request] = []
+    host, transport = _onboarding_host(
+        seen, state={"agent_installed": True, "execution": {"execution_id": "e", "status": "running"}},
+    )
+    with httpx.Client(transport=transport) as client:
+        host._start_nightshift_onboarding(client)
+    assert _suggestion_posts(seen) == []
+
+
+def test_onboarding_waits_for_nightshift_to_be_enabled():
+    seen: list[httpx.Request] = []
+    host, transport = _onboarding_host(seen, state={"agent_installed": False})
+    with httpx.Client(transport=transport) as client:
+        host._start_nightshift_onboarding(client)
+    assert _suggestion_posts(seen) == []
+
+
+def test_onboarding_skips_builds_without_it():
+    seen: list[httpx.Request] = []
+    host, transport = _onboarding_host(seen, state={}, status=404)
+    with httpx.Client(transport=transport) as client:
+        host._start_nightshift_onboarding(client)
+    assert _suggestion_posts(seen) == []
