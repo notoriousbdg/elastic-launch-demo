@@ -306,7 +306,7 @@ class ScenarioDeployer(
         )
         results["knowledge_base"] = resp.status_code < 300
         if self._is_serverless():
-            results["cortex_runbooks_deleted"] = self._cleanup_cortex_runbooks(client)
+            results["wiki_runbooks_deleted"] = self._cleanup_wiki_runbooks(client)
             results["nightshift_context_removed"] = self._set_nightshift_context(client, None)
 
         # Delete audit indices and remediation queue
@@ -471,8 +471,8 @@ class ScenarioDeployer(
                     step.status = "ok"
                     step.detail = "KB index deleted" if resp.status_code < 300 else "KB index not found"
                     if self._is_serverless():
-                        deleted_pages = self._cleanup_cortex_runbooks(client)
-                        step.detail += f"; {deleted_pages} Cortex runbook(s) deleted"
+                        deleted_pages = self._cleanup_wiki_runbooks(client)
+                        step.detail += f"; {deleted_pages} Wiki runbook(s) deleted"
                         if self._set_nightshift_context(client, None):
                             step.detail += "; Nightshift context removed"
                 except Exception as exc:

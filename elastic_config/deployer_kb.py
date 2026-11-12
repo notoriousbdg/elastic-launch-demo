@@ -21,8 +21,8 @@ from elastic_config.deployer_base import (
 
 logger = logging.getLogger("deployer")
 
-# [serverless] Nightshift reads its knowledge from Cortex wiki pages, not the KB index.
-_CORTEX_PAGES_PATH = "/internal/nightshift/cortex/pages"
+# [serverless] Nightshift reads its knowledge from Wiki pages, not the KB index.
+_WIKI_PAGES_PATH = "/internal/nightshift/wiki/pages"
 # Every scenario's spans land here (generators/traces), whatever the namespace.
 _TRACES_INDEX = "traces-generic.otel-default"
 
@@ -117,13 +117,13 @@ class KbMixin:
         step.items_total = len(registry)
         if registry and self._is_serverless():
             # Same knowledge for Nightshift; the KB index above stays for the agent flow.
-            written = self._deploy_cortex_runbooks(client, registry)
-            step.detail += f"; {written}/{len(registry)} Cortex runbooks"
+            written = self._deploy_wiki_runbooks(client, registry)
+            step.detail += f"; {written}/{len(registry)} Wiki runbooks"
             if self._set_nightshift_context(client, self._nightshift_context_text()):
                 step.detail += "; Nightshift context set"
         notify(self.progress)
 
-    # ── [serverless] Nightshift Cortex runbooks ───────────────────────────
+    # ── [serverless] Nightshift Wiki runbooks ───────────────────────────
 
     # ── [serverless] Nightshift custom context ────────────────────────────
     # One snippet per scenario: several scenarios can share a project, and the
@@ -144,7 +144,7 @@ class KbMixin:
             f"- Scenario logs: FROM {self._stream_name},{self._stream_name}.*. Fault error "
             f"codes{example} are in body.text, severity in severity_text, and the service in "
             f"resource.attributes.service.name.\n"
-            f"- Each fault channel has a Cortex runbook (cortex_runbook_{self.ns}-chNN-*) with "
+            f"- Each fault channel has a Wiki runbook (wiki_runbook_{self.ns}-chNN-*) with "
             f"the error signature, affected and cascade services, investigation steps and "
             f"remediation action."
         )
@@ -192,39 +192,39 @@ class KbMixin:
                 return True
         return False
 
-    def _cortex_slug(self, ch_num: int, ch_data: dict[str, Any]) -> str:
+    def _wiki_slug(self, ch_num: int, ch_data: dict[str, Any]) -> str:
         error_type = re.sub(r"[^a-z0-9]+", "-", ch_data["error_type"].lower()).strip("-")
         return f"{self.ns}-ch{int(ch_num):02d}-{error_type}"
 
-    def _cortex_page_ids(self) -> list[str]:
-        """Cortex page ids for every channel runbook this scenario writes."""
+    def _wiki_page_ids(self) -> list[str]:
+        """Wiki page ids for every channel runbook this scenario writes."""
         registry = self.scenario.channel_registry or {}
         return [
-            f"cortex_runbook_{self._cortex_slug(ch_num, ch_data)}"
+            f"wiki_runbook_{self._wiki_slug(ch_num, ch_data)}"
             for ch_num, ch_data in sorted(registry.items())
         ]
 
-    def _deploy_cortex_runbooks(self, client: httpx.Client, registry: dict) -> int:
-        """Create or update one Cortex runbook page per channel.  Returns pages written."""
+    def _deploy_wiki_runbooks(self, client: httpx.Client, registry: dict) -> int:
+        """Create or update one Wiki runbook page per channel.  Returns pages written."""
         written = 0
         for ch_num, ch_data in sorted(registry.items()):
-            slug = self._cortex_slug(ch_num, ch_data)
-            page_id = f"cortex_runbook_{slug}"
+            slug = self._wiki_slug(ch_num, ch_data)
+            page_id = f"wiki_runbook_{slug}"
             description = ch_data.get("description", "").strip().split(". ")[0].rstrip(".")
             body: dict[str, Any] = {
                 "entity_type": "runbook",
                 "slug": slug,
                 "title": f"Runbook: {self.scenario.scenario_name} channel {int(ch_num):02d}: {ch_data['name']}",
                 "description": description or f"{ch_data.get('subsystem', 'system')}: {ch_data['error_type']}",
-                "content": self._generate_cortex_runbook(ch_num, ch_data),
+                "content": self._generate_wiki_runbook(ch_num, ch_data),
                 "status": "established",
             }
             existing = _retry_http(
                 lambda: client.get(
-                    f"{self.kibana_url}{_CORTEX_PAGES_PATH}/{page_id}",
+                    f"{self.kibana_url}{_WIKI_PAGES_PATH}/{page_id}",
                     headers=_kibana_headers(self.api_key),
                 ),
-                label=f"get cortex page {page_id}",
+                label=f"get wiki page {page_id}",
             )
             if existing is not None and existing.status_code < 300:
                 body["version"] = existing.json().get("page", {}).get("version")
@@ -234,35 +234,35 @@ class KbMixin:
             resp = _retry_http(
                 lambda: client.request(
                     method,
-                    f"{self.kibana_url}{_CORTEX_PAGES_PATH}",
+                    f"{self.kibana_url}{_WIKI_PAGES_PATH}",
                     headers=_kibana_headers(self.api_key),
                     json=body,
                 ),
-                label=f"{method} cortex page {page_id}",
+                label=f"{method} wiki page {page_id}",
             )
             if resp is not None and resp.status_code < 300:
                 written += 1
             else:
                 logger.warning(
-                    "Failed to write Cortex runbook %s: %s", page_id,
+                    "Failed to write Wiki runbook %s: %s", page_id,
                     f"HTTP {resp.status_code} {resp.text[:300]}" if resp is not None else "no response",
                 )
         return written
 
-    def _cleanup_cortex_runbooks(self, client: httpx.Client) -> int:
-        """[serverless] Delete this scenario's Cortex runbooks.  Returns pages deleted.
+    def _cleanup_wiki_runbooks(self, client: httpx.Client) -> int:
+        """[serverless] Delete this scenario's Wiki runbooks.  Returns pages deleted.
 
-        Cortex DELETE archives the page (status "archived") rather than removing it,
+        Wiki DELETE archives the page (status "archived") rather than removing it,
         and needs the current version.  A redeploy PUTs it back to "established".
         """
         deleted = 0
-        for page_id in self._cortex_page_ids():
+        for page_id in self._wiki_page_ids():
             existing = _retry_http(
                 lambda: client.get(
-                    f"{self.kibana_url}{_CORTEX_PAGES_PATH}/{page_id}",
+                    f"{self.kibana_url}{_WIKI_PAGES_PATH}/{page_id}",
                     headers=_kibana_headers(self.api_key),
                 ),
-                label=f"get cortex page {page_id}",
+                label=f"get wiki page {page_id}",
             )
             if existing is None or existing.status_code >= 300:
                 continue
@@ -271,18 +271,18 @@ class KbMixin:
                 continue
             resp = _retry_http(
                 lambda: client.delete(
-                    f"{self.kibana_url}{_CORTEX_PAGES_PATH}/{page_id}",
+                    f"{self.kibana_url}{_WIKI_PAGES_PATH}/{page_id}",
                     headers=_kibana_headers(self.api_key),
                     params={"version": page.get("version")},
                 ),
-                label=f"delete cortex page {page_id}",
+                label=f"delete wiki page {page_id}",
             )
             if resp is not None and resp.status_code < 300:
                 deleted += 1
         return deleted
 
-    def _generate_cortex_runbook(self, ch_num: int, ch_data: dict[str, Any]) -> str:
-        """Cortex form of _generate_kb_doc: same facts, no Agent Builder tool or skill names."""
+    def _generate_wiki_runbook(self, ch_num: int, ch_data: dict[str, Any]) -> str:
+        """Wiki form of _generate_kb_doc: same facts, no Agent Builder tool or skill names."""
         error_type = ch_data["error_type"]
         subsystem = ch_data.get("subsystem", "unknown")
         affected = ", ".join(ch_data.get("affected_services", [])) or "none listed"
@@ -325,7 +325,7 @@ class KbMixin:
     def _evidence_section(self, ch_num: int, ch_data: dict[str, Any]) -> str:
         """Where this channel's root-cause evidence lives in the generated telemetry.
 
-        Shared by the KB doc and the Cortex runbook: without it, investigations look
+        Shared by the KB doc and the Wiki runbook: without it, investigations look
         for the hardware readings named in the notes, find no such fields and stop at
         low confidence, although the generators emit them as span attributes.
         """

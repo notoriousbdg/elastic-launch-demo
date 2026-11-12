@@ -143,22 +143,22 @@ def test_knowledge_base_bulk_retries_with_es_headers(monkeypatch):
     assert step.items_done == 1
 
 
-_CORTEX = "/internal/nightshift/cortex/pages"
+_WIKI = "/internal/nightshift/wiki/pages"
 _REAL_CLIENT = httpx.Client
 
 
-def _cortex_host(monkeypatch, seen, existing_version=None, write_status=200, serverless=True):
+def _wiki_host(monkeypatch, seen, existing_version=None, write_status=200, serverless=True):
     def handle(request: httpx.Request) -> httpx.Response:
         seen.append(request)
         if request.url.path == "/_bulk":
             return httpx.Response(
                 200, json={"errors": False, "items": [{"index": {"status": 201}}]},
             )
-        if request.url.path.startswith(f"{_CORTEX}/") and request.method == "GET":
+        if request.url.path.startswith(f"{_WIKI}/") and request.method == "GET":
             if existing_version is None:
                 return httpx.Response(404, json={})
             return httpx.Response(200, json={"page": {"version": existing_version}})
-        if request.url.path == _CORTEX:
+        if request.url.path == _WIKI:
             return httpx.Response(write_status, json={})
         return httpx.Response(200, json={})
 
@@ -184,15 +184,15 @@ def _cortex_host(monkeypatch, seen, existing_version=None, write_status=200, ser
     return host, step, httpx.MockTransport(handle)
 
 
-def test_serverless_kb_also_writes_cortex_runbook(monkeypatch):
+def test_serverless_kb_also_writes_wiki_runbook(monkeypatch):
     seen: list[httpx.Request] = []
-    host, step, transport = _cortex_host(monkeypatch, seen)
+    host, step, transport = _wiki_host(monkeypatch, seen)
     with _REAL_CLIENT(transport=transport) as client:
         host._deploy_knowledge_base(client, lambda _progress: None)
 
-    gets = [r for r in seen if r.method == "GET" and r.url.path.startswith(_CORTEX)]
-    posts = [r for r in seen if r.method == "POST" and r.url.path == _CORTEX]
-    assert gets[0].url.path == f"{_CORTEX}/cortex_runbook_demo-ch01-timeout"
+    gets = [r for r in seen if r.method == "GET" and r.url.path.startswith(_WIKI)]
+    posts = [r for r in seen if r.method == "POST" and r.url.path == _WIKI]
+    assert gets[0].url.path == f"{_WIKI}/wiki_runbook_demo-ch01-timeout"
     assert len(posts) == 1
     assert posts[0].headers["x-elastic-internal-origin"] == "kibana"
     body = json.loads(posts[0].content)
@@ -205,57 +205,57 @@ def test_serverless_kb_also_writes_cortex_runbook(monkeypatch):
     assert "`attributes.edge.queue_depth` (40–60)" in body["content"]
     assert "`attributes.runtime.pool` = `small`" in body["content"]
     assert step.status == "ok"
-    assert "1/1 Cortex runbooks" in step.detail
+    assert "1/1 Wiki runbooks" in step.detail
 
 
-def test_cortex_runbook_updates_existing_page_with_version(monkeypatch):
+def test_wiki_runbook_updates_existing_page_with_version(monkeypatch):
     seen: list[httpx.Request] = []
-    host, _step, transport = _cortex_host(monkeypatch, seen, existing_version="WzEsMV0=")
+    host, _step, transport = _wiki_host(monkeypatch, seen, existing_version="WzEsMV0=")
     with _REAL_CLIENT(transport=transport) as client:
         host._deploy_knowledge_base(client, lambda _progress: None)
 
-    puts = [r for r in seen if r.method == "PUT" and r.url.path == _CORTEX]
+    puts = [r for r in seen if r.method == "PUT" and r.url.path == _WIKI]
     assert len(puts) == 1
     assert json.loads(puts[0].content)["version"] == "WzEsMV0="
-    assert not [r for r in seen if r.method == "POST" and r.url.path == _CORTEX]
+    assert not [r for r in seen if r.method == "POST" and r.url.path == _WIKI]
 
 
-def test_cortex_failure_keeps_kb_step_ok(monkeypatch):
+def test_wiki_failure_keeps_kb_step_ok(monkeypatch):
     seen: list[httpx.Request] = []
-    host, step, transport = _cortex_host(monkeypatch, seen, write_status=500)
+    host, step, transport = _wiki_host(monkeypatch, seen, write_status=500)
     with _REAL_CLIENT(transport=transport) as client:
         host._deploy_knowledge_base(client, lambda _progress: None)
 
     assert step.status == "ok"
-    assert "0/1 Cortex runbooks" in step.detail
+    assert "0/1 Wiki runbooks" in step.detail
 
 
-def test_non_serverless_kb_skips_cortex(monkeypatch):
+def test_non_serverless_kb_skips_wiki(monkeypatch):
     seen: list[httpx.Request] = []
-    host, step, transport = _cortex_host(monkeypatch, seen, serverless=False)
+    host, step, transport = _wiki_host(monkeypatch, seen, serverless=False)
     with _REAL_CLIENT(transport=transport) as client:
         host._deploy_knowledge_base(client, lambda _progress: None)
 
-    assert not [r for r in seen if r.url.path.startswith(_CORTEX)]
-    assert "Cortex" not in step.detail
+    assert not [r for r in seen if r.url.path.startswith(_WIKI)]
+    assert "Wiki" not in step.detail
 
 
-def test_cortex_cleanup_deletes_each_channel_page(monkeypatch):
+def test_wiki_cleanup_deletes_each_channel_page(monkeypatch):
     seen: list[httpx.Request] = []
-    host, _step, transport = _cortex_host(monkeypatch, seen, existing_version="7:1")
+    host, _step, transport = _wiki_host(monkeypatch, seen, existing_version="7:1")
     with _REAL_CLIENT(transport=transport) as client:
-        assert host._cleanup_cortex_runbooks(client) == 1
+        assert host._cleanup_wiki_runbooks(client) == 1
 
     deletes = [r for r in seen if r.method == "DELETE"]
-    assert [r.url.path for r in deletes] == [f"{_CORTEX}/cortex_runbook_demo-ch01-timeout"]
+    assert [r.url.path for r in deletes] == [f"{_WIKI}/wiki_runbook_demo-ch01-timeout"]
     assert deletes[0].url.params["version"] == "7:1"
 
 
-def test_cortex_cleanup_skips_missing_pages(monkeypatch):
+def test_wiki_cleanup_skips_missing_pages(monkeypatch):
     seen: list[httpx.Request] = []
-    host, _step, transport = _cortex_host(monkeypatch, seen)
+    host, _step, transport = _wiki_host(monkeypatch, seen)
     with _REAL_CLIENT(transport=transport) as client:
-        assert host._cleanup_cortex_runbooks(client) == 0
+        assert host._cleanup_wiki_runbooks(client) == 0
 
     assert not [r for r in seen if r.method == "DELETE"]
 

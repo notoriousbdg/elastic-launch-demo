@@ -1191,7 +1191,7 @@ The deployer is composed of mixins (`SloMixin`, `AlertingMixin`, `DashboardMixin
 | 4 | Configure platform settings (serverless: also the `launch-next-nightshift-es` External Elasticsearch sandbox connector, assigned to the `nightshift.investigation` agent so the sandbox can query through it) | `deployer_platform.py` |
 | 5 | Generate APM rollup data | `deployer_apm.py` |
 | 6 | Deploy workflows | `deployer_workflows.py` |
-| 7 | Index knowledge base (serverless: also one Nightshift Cortex runbook per channel and a `[launch-next:<ns>]` Nightshift custom context snippet) | `deployer_kb.py` |
+| 7 | Index knowledge base (serverless: also one Nightshift Wiki runbook per channel and a `[launch-next:<ns>]` Nightshift custom context snippet) | `deployer_kb.py` |
 | 8 | Deploy AI agent tools + skills | `deployer_agent.py` + `deployer_skills.py` |
 | 9 | Create AI agent | `deployer_agent.py` |
 | 10 | Create scenario stream | `deployer_streams.py` |
@@ -1458,7 +1458,7 @@ def prefixed_tool_id(self, base_id: str) -> str:
 3. **Scenario teardown** (`_teardown_scenario` → `_cleanup_agent`) — uses `prefixed_tool_id()` for each tool name; do NOT use a flat hardcoded set
 4. **Agent system prompt** — Tool Selection Guide and Remediation instructions must reference prefixed IDs so the LLM calls the correct tool name
 5. **Knowledge base documents** — Investigation Procedure and Remediation sections reference tool names; use `self.scenario.prefixed_tool_id(...)` inside the f-string
-   - On serverless, `_generate_cortex_runbook` writes the same facts to Nightshift Cortex (`runbook` pages, slug `{ns}-chNN-<error_type>`). It must not name Agent Builder tools or skills. When you add a field to `_generate_kb_doc`, add it there too
+   - On serverless, `_generate_wiki_runbook` writes the same facts to Nightshift Wiki (`runbook` pages, slug `{ns}-chNN-<error_type>`). It must not name Agent Builder tools or skills. When you add a field to `_generate_kb_doc`, add it there too
 
 **The `platform.core.cases` tool is a built-in — it is NOT prefixed and should never be passed through `prefixed_tool_id()`.**
 

@@ -70,7 +70,7 @@ Checks performed for each scenario:
   33. incr_key state keys are initialised as a dict ({init: {}} / init_per_key),
       not a scalar, or the service telemetry loop crashes every tick
   35. every {placeholder} in investigation_notes is a fault_params key — the
-      KB docs, Cortex runbooks and channel runbook skill fill them with the
+      KB docs, Wiki runbooks and channel runbook skill fill them with the
       parameter's range, and an unknown one is shown as a literal {name}.
       Shell syntax such as curl's %{time_total} or ${VAR} is not a placeholder.
   36. (warning only) evidence quality: a choice rca_clue that can emit a
