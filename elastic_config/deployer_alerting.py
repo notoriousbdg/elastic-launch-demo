@@ -45,6 +45,41 @@ def universal_rule_id(ns: str, ch_int: int) -> str:
     return f"{ns}-ch{ch_int:02d}"
 
 
+def alert_rule_name(scenario_name: str, ch_int: int, name: str) -> str:
+    """Display name of a channel's alert rule (also the case title, hence 160 chars).
+
+    No channel number in the name: Nightshift and the case title show it to the
+    audience.  The channel stays in the rule id, the tags and the ``channel`` column.
+    """
+    suffix = " (Auto-Remediate)" if int(ch_int) >= 16 else ""
+    return f"{scenario_name}: {name}{suffix}"[:160]
+
+
+def alert_rule_name_prefix(scenario_name: str) -> str:
+    """Name prefix of the channel alert rules (and the Nightshift trigger pattern).
+
+    The scenario's Nightshift signal rules are titled "{scenario_name} signal — ..."
+    and so don't share it; callers still check ``kind == "alert"`` to be safe.
+    """
+    return f"{scenario_name}: "
+
+
+def is_scenario_alert_rule(rule: dict, ns: str, scenario_name: str) -> bool:
+    """True for a v2 rule this scenario's alerting step created.
+
+    Current rules: kind alert, the scenario-name prefix and the ``ns`` tag (so a
+    user's "{scenario_name}: ..." rule is left alone).  Legacy rules from before
+    the rename were named "{scenario_name} CHNN: ...".
+    """
+    if rule.get("kind") != "alert":
+        return False
+    meta = rule.get("metadata", {}) or {}
+    name = meta.get("name", "")
+    if name.startswith(f"{scenario_name} CH"):
+        return True
+    return name.startswith(alert_rule_name_prefix(scenario_name)) and ns in (meta.get("tags") or [])
+
+
 def universal_routing_tag(ns: str, ch_int: int) -> str:
     """HITL channels (1-15) and auto-remediate channels (16-20) route separately."""
     return f"{ns}-{'auto' if ch_int >= 16 else 'hitl'}"
@@ -64,10 +99,7 @@ def universal_rule_body(ns: str, scenario_name: str, ch_int: int, ch_data: dict)
     error_type = ch_data["error_type"]
     ch_int = int(ch_int)
     severity = "critical" if ch_int >= 19 else "high" if ch_int <= 6 else "medium"
-    rule_name = (
-        f"{scenario_name} CH{ch_int:02d}: {ch_data['name']}"
-        + (" (Auto-Remediate)" if ch_int >= 16 else "")
-    )[:160]  # the case title fallback / Cases API 160-char limit, same as the classic rule
+    rule_name = alert_rule_name(scenario_name, ch_int, ch_data["name"])
     kql = 'body.text: "{}" AND severity_text: "ERROR"'.format(
         error_type.replace("\\", "\\\\").replace('"', '\\"')
     )
@@ -156,11 +188,12 @@ def nightshift_automation_body(ns: str, scenario_name: str) -> dict:
         "tags": [ns],
         "isEnabled": True,  # the API defaults to disabled
         "automationType": "custom",
-        # Matches this scenario's chaos rules ("{scenario_name} CH01: ..."), not its
-        # "{scenario_name}: SE CH ..." signal rules and not another scenario's rules.
+        # Matches this scenario's channel rules ("{scenario_name}: <name>").  The
+        # "{scenario_name} signal — ..." signal rules no longer share the prefix and are kind
+        # "signal", which this kind "alert" row does not match.
         "trigger": {"rows": [{
             "kind": "alert",
-            "ruleNamePattern": f"{scenario_name} CH",
+            "ruleNamePattern": alert_rule_name_prefix(scenario_name),
             "ruleNameMatchMode": "substring",
         }]},
         "execution": {"reasoningMode": "investigate"},
@@ -278,7 +311,6 @@ class AlertingMixin:
         step.items_total = len(registry)
 
         for ch_num, ch_data in sorted(registry.items()):
-            num_str = f"{int(ch_num):02d}"
             error_type = ch_data["error_type"]
             name = ch_data["name"]
             subsystem = ch_data.get("subsystem", "")
@@ -294,12 +326,8 @@ class AlertingMixin:
 
             # Channels 16-20 use auto-remediation; 1-15 remain HITL
             auto_remediate = ch_int >= 16
-            if auto_remediate:
-                rule_name = f"{self.scenario.scenario_name} CH{num_str}: {name} (Auto-Remediate)"
-            else:
-                rule_name = f"{self.scenario.scenario_name} CH{num_str}: {name}"
             # Kibana Cases API enforces a 160-char title limit; rule name becomes the case title
-            rule_name = rule_name[:160]
+            rule_name = alert_rule_name(self.scenario.scenario_name, ch_int, name)
 
             es_query = json.dumps({
                 "query": {
@@ -541,9 +569,11 @@ class AlertingMixin:
     def _cleanup_universal(self, client: httpx.Client) -> tuple[int, int]:
         """[serverless] Delete this scenario's Universal rules, action policies and Nightshift automation.
 
-        Rules are found by their fixed ids plus a "{scenario_name} CH" name prefix on
-        kind=alert rules.  A name-contains match would also hit the scenario's
-        Nightshift signal rules ("{scenario_name}: SE CH…"), which are not ours to delete.
+        Rules are found by their fixed ids plus is_scenario_alert_rule (kind=alert,
+        the "{scenario_name}: " prefix and the ns tag, or the legacy
+        "{scenario_name} CH" prefix).  A name-contains match would also hit the
+        scenario's Nightshift signal rules ("{scenario_name} signal — …"), which are not
+        ours to delete.
         """
         scenario_name = self.scenario.scenario_name
         rule_ids = {universal_rule_id(self.ns, int(n)) for n in self.scenario.channel_registry}
@@ -567,8 +597,7 @@ class AlertingMixin:
             if not items:
                 break
             for rule in items:
-                name = rule.get("metadata", {}).get("name", "")
-                if rule.get("kind") == "alert" and name.startswith(f"{scenario_name} CH") and rule.get("id"):
+                if is_scenario_alert_rule(rule, self.ns, scenario_name) and rule.get("id"):
                     rule_ids.add(rule["id"])
 
         def _delete_one(path: str) -> bool:
@@ -590,7 +619,7 @@ class AlertingMixin:
     def _cleanup_alerts(self, client: httpx.Client) -> tuple[int, int]:
         """Delete alert rules belonging to this scenario.
 
-        Primary: name-based search (new-style rules named "{scenario_name} CH…").
+        Primary: name-based search (rules named "{scenario_name}: <channel name>").
         Fallback: tag-based search (old-style rules tagged with namespace).
 
         IDs are collected across all search phases first, then deleted
@@ -602,7 +631,7 @@ class AlertingMixin:
         scenario_name = self.scenario.scenario_name
         rule_ids: set[str] = set()
 
-        # Phase 1: name-based (rules named "{scenario_name} CH…")
+        # Phase 1: name-based (rules whose name contains the scenario name)
         for page in range(1, 11):
             resp = _retry_http(
                 lambda: client.get(

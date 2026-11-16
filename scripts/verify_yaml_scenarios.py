@@ -73,6 +73,9 @@ Checks performed for each scenario:
       KB docs, Wiki runbooks and channel runbook skill fill them with the
       parameter's range, and an unknown one is shown as a literal {name}.
       Shell syntax such as curl's %{time_total} or ${VAR} is not a placeholder.
+  37-44. schema 1.3 scenarios only: remediation_command, state keys, fault_scope,
+      error_services / cascade_messages, verification, cause-before-effect and
+      coherence lint, quote-free error_type (see check_schema_13)
   36. (warning only) evidence quality: a choice rca_clue that can emit a
       healthy-looking value (OFF, INTACT, false...) does not always indicate the
       fault, which leaves investigations unable to confirm the cause; and a choice
@@ -128,9 +131,31 @@ _CHANNEL_REQUIRED_FIELDS = (
 )
 
 
+
+# Indices a remediation_effects.verification check may name in ``from`` (besides the
+# scenario's own logs.otel.<ns> stream).
+_VERIFICATION_INDICES = {
+    "metrics-k8sclusterreceiver.otel-*",
+    "metrics-kubeletstatsreceiver.otel-*",
+    "metrics-generic.otel-default",
+    "metrics-hostmetricsreceiver.otel-*",
+    "logs-k8seventsreceiver.otel-default",
+    "traces-generic.otel-default",
+}
+
 def _placeholders(text: str) -> set[str]:
     # Match {word} but not {{word}} (double-brace escapes are literal in log lines).
     return set(re.findall(r"(?<!\{)\{(\w+)\}(?!\})", text))
+
+
+_RUNTIME_PLACEHOLDER_RE = re.compile(
+    r"^(self_\w+|node_count|cluster_name|pool_\w+_count|klog_time|nginx_time|iso_now|epoch_now|actor)$"
+)
+
+
+def _is_runtime_placeholder(name: str) -> bool:
+    """Placeholders the engine fills from the pinned platform (schema 1.3)."""
+    return bool(_RUNTIME_PLACEHOLDER_RE.match(name))
 
 
 def _notes_placeholders(text: str) -> set[str]:
@@ -144,6 +169,15 @@ _HEALTHY_CHOICE_VALUES = frozenset({
     "off", "ok", "okay", "normal", "nominal", "healthy", "intact", "pass",
     "passed", "green", "none", "false", "no", "idle", "stable", "online", "up",
 })
+
+
+def _schema_at_least(scenario: Any, version: tuple[int, int]) -> bool:
+    raw = getattr(scenario, "schema_version", None)
+    try:
+        major, minor = (int(x) for x in str(raw).split(".")[:2])
+    except (TypeError, ValueError):
+        return False
+    return (major, minor) >= version
 
 
 def channel_file_problems(channels_dir: Path) -> list[str]:
@@ -389,6 +423,9 @@ def check_scenario(scenario_id: str) -> tuple[list[str], list[str]]:
             errors.append(f"ch {ch_num}: get_fault_params() raised: {exc}")
             continue
         param_keys = set(params.keys())
+        # Schema 1.3: values the engine fills in at emit time from the pinned topology
+        # ({self_node}, {self_pod_ip}, {node_count}, {pool_edge_c6i_count}...).
+        log_placeholders = {p for p in log_placeholders if not _is_runtime_placeholder(p)}
         missing = log_placeholders - param_keys
         orphans = param_keys - referenced
         if missing:
@@ -617,8 +654,17 @@ def check_scenario(scenario_id: str) -> tuple[list[str], list[str]]:
     entry_services = set(_ordered[:1]) | {
         n for n, eps in s.entry_endpoints.items() if eps and n not in _no_trace
     }
+    _v13 = _schema_at_least(s, (1, 3))
     for num, ch in sorted(raw_channels.items()):
         if not set(ch.get("affected_services") or []) & entry_services:
+            if _v13 and ch.get("fault_scope"):
+                # An infrastructure fault scoped to nodes or platform components can
+                # legitimately leave the tenant-facing API (and its traces) healthy.
+                warnings.append(
+                    f"ch {num}: no trace entry service in affected_services — the ops "
+                    f"dashboard stays green for this scoped infrastructure fault"
+                )
+                continue
             errors.append(
                 f"ch {num}: affected_services {ch.get('affected_services')} contains no trace "
                 f"entry service {sorted(entry_services)} — the ops dashboard will not react "
@@ -940,6 +986,12 @@ def check_scenario(scenario_id: str) -> tuple[list[str], list[str]]:
                 f"channel, so those alerts never fire: {missing}"
             )
 
+    # ── Checks 37-44: schema 1.3 realism contract (only for scenarios >= 1.3) ──
+    if _schema_at_least(s, (1, 3)):
+        e13, w13 = check_schema_13(s)
+        errors.extend(e13)
+        warnings.extend(w13)
+
     return errors, warnings
 
 
@@ -952,6 +1004,179 @@ _GENERATOR_IDENTITY_BANS = (
     "123456789012",
 )
 
+
+
+def check_schema_13(s: Any) -> tuple[list[str], list[str]]:
+    """Checks 37-44 for schema 1.3 scenarios (realism + verifiable remediation).
+
+    37. every channel has a ``remediation_command``; each line is ``opsctl <verb> ...``
+        with a known verb (``app.ops.VERBS``)
+    38. ``fault_state`` / ``remediation_effects.state`` only name enabled generators,
+        their declared ``SPEC.state_keys``, and workloads / node pools that exist in
+        ``k8s_topology``
+    39. ``fault_scope`` names (cluster, node_pool, nodes, az, workloads) exist in the
+        pinned topology (nodes may also be added by the channel's own state)
+    40. ``error_services`` is a subset of ``affected_services``; every
+        ``cascade_messages`` key is a cascade service or an affected service outside
+        ``error_services``; their placeholders are fault_params or runtime values
+    41. every channel has ``remediation_effects.verification`` entries with
+        ``signal`` and ``expect`` (the runbook's "Recovery is confirmed when"), and a
+        ``from`` index; field names with ``/`` are backtick-quoted and metric fields
+        compared to numbers carry the ``metrics.`` prefix, so the rendered query runs
+    42. (warning) a cause precedes the effect: at least one ``infrastructure_events``
+        entry is emitted before the symptoms (negative ``offset_seconds`` or an
+        ``onset_delay_seconds`` greater than the event's offset)
+    43. (warning) coherence: Pending pods need a scheduling/pull reason in
+        ``k8s_events``; node_not_ready needs a ``fault_scope`` with nodes or a pool
+    44. ``error_type`` contains no quote characters (it is embedded in KQL/ES|QL)
+    """
+    from app.ops import VERBS
+    from generator_engine.platform_topology import build_platform
+    from generator_engine.registry import GENERATORS, enabled_specs
+
+    errors: list[str] = []
+    warnings: list[str] = []
+    raw_channels = s._channels
+    topo = getattr(s, "k8s_topology", None)
+    platform = build_platform(topo, s.namespace) if topo else None
+    enabled = {spec.id for spec in enabled_specs(s)}
+
+    def _workloads(cluster_name: str | None) -> set[str]:
+        if platform is None:
+            return set()
+        return set(platform.cluster(cluster_name).workloads)
+
+    def _pools(cluster_name: str | None) -> set[str]:
+        if platform is None:
+            return set()
+        return set(platform.cluster(cluster_name).pools)
+
+    for num, ch in sorted(raw_channels.items()):
+        label = f"ch {num} '{ch.get('name', '')}'"
+
+        # 37
+        cmd = ch.get("remediation_command")
+        lines = [ln.strip() for ln in str(cmd or "").splitlines() if ln.strip() and not ln.strip().startswith("#")]
+        if not lines:
+            errors.append(f"{label}: schema 1.3 needs remediation_command (one opsctl command per line)")
+        for ln in lines:
+            parts = ln.split()
+            if parts[0] != "opsctl" or len(parts) < 3 or parts[1] not in VERBS:
+                errors.append(f"{label}: remediation_command line {ln!r} must be 'opsctl <verb> <target> ...' "
+                              f"with a verb in {sorted(VERBS)}")
+
+        # 38
+        added_nodes: set[str] = set()
+        for field in ("fault_state", "remediation_effects"):
+            block = ch.get(field) or {}
+            state = block.get("state") if field == "remediation_effects" else block
+            for gid, st in (state or {}).items():
+                spec = GENERATORS.get(gid)
+                if spec is None or gid not in enabled:
+                    errors.append(f"{label}: {field} names generator '{gid}', which is not enabled")
+                    continue
+                declared = set(getattr(spec, "state_keys", {}) or {})
+                for key in (st or {}):
+                    if key not in declared:
+                        errors.append(f"{label}: {field}.{gid}.{key} is not in {gid} SPEC.state_keys {sorted(declared)}")
+                cl = (st or {}).get("cluster")
+                for wl in ((st or {}).get("workloads") or {}):
+                    if wl not in _workloads(cl):
+                        errors.append(f"{label}: {field} workload '{wl}' is not in k8s_topology")
+                for pool, pov in ((st or {}).get("node_pools") or {}).items():
+                    if pool not in _pools(cl):
+                        errors.append(f"{label}: {field} node pool '{pool}' is not in k8s_topology")
+                    add = (pov or {}).get("add_nodes")
+                    if isinstance(add, list):
+                        added_nodes.update(a.get("name") for a in add if isinstance(a, dict) and a.get("name"))
+
+        # 39
+        scope = ch.get("fault_scope")
+        if not scope:
+            warnings.append(f"{label}: no fault_scope — the fault hits every cluster, pool and node")
+        elif platform is not None:
+            cl = scope.get("cluster")
+            if cl and cl not in platform.clusters:
+                errors.append(f"{label}: fault_scope cluster '{cl}' is not in k8s_topology")
+            c = platform.cluster(cl)
+            pools = scope.get("node_pool")
+            for pool in ([pools] if isinstance(pools, str) else (pools or [])):
+                if pool not in c.pools:
+                    errors.append(f"{label}: fault_scope node_pool '{pool}' is not in k8s_topology")
+            azs = scope.get("az")
+            for az in ([azs] if isinstance(azs, str) else (azs or [])):
+                if az not in c.subnets:
+                    errors.append(f"{label}: fault_scope az '{az}' has no subnet in k8s_topology")
+            known_nodes = {n.name for n in c.nodes} | added_nodes
+            for node in scope.get("nodes") or []:
+                if node not in known_nodes:
+                    errors.append(f"{label}: fault_scope node '{node}' is not in the pinned topology")
+            for wl in scope.get("workloads") or []:
+                if wl not in c.workloads:
+                    errors.append(f"{label}: fault_scope workload '{wl}' is not in k8s_topology")
+
+        # 40
+        affected = set(ch.get("affected_services") or [])
+        err_svcs = ch.get("error_services")
+        if err_svcs and not set(err_svcs) <= affected:
+            errors.append(f"{label}: error_services {err_svcs} must be a subset of affected_services")
+        allowed_cascade = set(ch.get("cascade_services") or []) | (affected - set(err_svcs or affected))
+        params = set((ch.get("fault_params") or {}).keys())
+        for svc, msgs in (ch.get("cascade_messages") or {}).items():
+            if svc not in allowed_cascade:
+                errors.append(f"{label}: cascade_messages for '{svc}', which is neither a cascade service "
+                              f"nor an affected service outside error_services")
+            for m in msgs or []:
+                text = m.get("message", "") if isinstance(m, dict) else str(m)
+                unknown = {p for p in _placeholders(text) if p not in params and not _is_runtime_placeholder(p)}
+                if unknown:
+                    errors.append(f"{label}: cascade_messages[{svc}] placeholders with no fault_params key: {sorted(unknown)}")
+
+        # 41
+        ver = (ch.get("remediation_effects") or {}).get("verification") or []
+        if not ver:
+            errors.append(f"{label}: schema 1.3 needs remediation_effects.verification "
+                          f"(the signals that confirm recovery)")
+        for v in ver:
+            if not isinstance(v, dict) or not v.get("signal") or not v.get("expect"):
+                errors.append(f"{label}: verification entries need 'signal' and 'expect': {v!r}")
+                continue
+            # the runbook renders each check as a runnable ES|QL query
+            src = str(v.get("from") or "")
+            if not (src.startswith("logs.otel.") or src in _VERIFICATION_INDICES):
+                errors.append(f"{label}: verification '{v['signal']}' needs 'from' set to the index "
+                              f"the signal lives in (logs.otel.<ns> or one of {sorted(_VERIFICATION_INDICES)})")
+            for fld in [str(v.get("where") or ""), str(v.get("field") or "")]:
+                # ignore string literals and already-quoted identifiers
+                fld = re.sub(r'"[^"]*"|`[^`]*`', " ", fld)
+                for tok in re.findall(r"[\w.]+/[\w./-]+", fld):
+                    errors.append(f"{label}: verification '{v['signal']}': field '{tok}' needs backticks in ES|QL")
+                for tok in re.findall(r"(?<![\w.`])k8s\.[a-z_.]+(?=\s*[<>=!]=?\s*\d)", fld):
+                    errors.append(f"{label}: verification '{v['signal']}': metric '{tok}' needs the 'metrics.' prefix")
+
+        # 42
+        onset = float(ch.get("onset_delay_seconds", 0) or 0)
+        events = ch.get("infrastructure_events") or []
+        if not any(float((e or {}).get("offset_seconds", 0) or 0) < max(onset, 0.001) for e in events):
+            warnings.append(f"{label}: no infrastructure_events entry precedes the symptoms — "
+                            f"add the change or provider event that caused the fault")
+
+        # 43
+        k8s_imp = (ch.get("generator_impact") or {}).get("kubernetes_otel") or {}
+        if k8s_imp.get("pods_stuck_in_pending_phase") and not ch.get("k8s_events") \
+                and not ch.get("cascade_messages"):
+            warnings.append(f"{label}: Pending pods without a reason — add k8s_events (FailedScheduling, "
+                            f"FailedCreatePodSandBox, Failed pull...) or cascade lines that explain them")
+        if k8s_imp.get("node_not_ready") and not (scope and (scope.get("nodes") or scope.get("node_pool"))):
+            warnings.append(f"{label}: node_not_ready without fault_scope nodes/node_pool would take down "
+                            f"every node hosting the affected workloads")
+
+        # 44
+        et = str(ch.get("error_type", ""))
+        if '"' in et or "'" in et:
+            errors.append(f"{label}: error_type must not contain quotes (it is embedded in KQL): {et!r}")
+
+    return errors, warnings
 
 def check_checked_in_host_identity() -> list[str]:
     """Fail when a scenario file's host ids disagree with ScenarioIdentity."""

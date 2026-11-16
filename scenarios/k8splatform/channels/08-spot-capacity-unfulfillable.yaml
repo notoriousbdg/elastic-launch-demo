@@ -1,0 +1,116 @@
+name: Cluster Autoscaler cannot add batch-spot nodes
+subsystem: capacity
+vehicle_section: batch-spot/autoscaling
+error_type: UnfulfillableCapacity
+sensor_type: node_group_scale_up
+affected_services:
+  - cluster-autoscaler
+cascade_services:
+  - kube-apiserver
+description: Batch pods stay Pending because the batch-spot node group cannot launch Spot instances. Only the batch-spot
+  pool is affected.
+investigation_notes: |-
+  Root cause: a Terraform change narrowed the batch-spot launch template / node group to a single instance type ({only_type}); it used to allow c6i, c6a, m6i and m7i 4xlarge. Spot capacity for that one type is unavailable in all three AZs, so every scale-up attempt fails with UnfulfillableCapacity and the autoscaler backs the group off.
+  Confirm:
+    - cluster-autoscaler: Failed to increase node group size ... UnfulfillableCapacity: Unable to fulfill capacity due to your request configuration
+    - Disabling scale-up for node group eks-batch-spot-7b31d05e ... errorClass=OutOfResource
+    - attributes.asg.instance_types on those lines lists only {only_type}; batch-spot stays at its current node count while batch-worker pods are Pending
+    - scheduler FailedScheduling: nodes are available but none match (taint workload=batch / affinity)
+    - aws eks describe-nodegroup --cluster-name prod-use1 --nodegroup-name batch-spot --query nodegroup.instanceTypes
+  Remediation: restore the diversified instance-type list so the Spot allocation strategy can pick any of the four pools; the autoscaler retries after its backoff and new nodes join within ~3 minutes.
+  Follow-up: revert the Terraform change that narrowed the batch-spot instance types in the infrastructure repository before the next Atlantis apply; otherwise the apply undoes the fix.
+remediation_action: diversify_spot_instance_types
+remediation_command: |-
+  opsctl patch nodegroup/batch-spot --instance-types c6i.4xlarge,c6a.4xlarge,m6i.4xlarge,m7i.4xlarge
+error_message: 'E{klog_time}       1 scale_up.go:{line}] Failed to scale up: failed to increase node group size: failed to set desired capacity
+  for eks-batch-spot-7b31d05e: UnfulfillableCapacity: Unable to fulfill capacity due to your request configuration. Please
+  adjust your request and try again. instanceTypes=[{only_type}] capacityType=SPOT increase={increase}'
+stack_trace: ''
+fault_params:
+  line: {randint: [495, 505]}
+  only_type: c6i.4xlarge
+  increase: {randint: [3, 6]}
+  rs: 5d8f7c9b64
+  sfx: {choice: [h2k9x, q7m4t, w8v2c, z5n6r, b3j8p]}
+rca_clues:
+  cluster-autoscaler:
+    asg.name: eks-batch-spot-7b31d05e
+    asg.instance_types: c6i.4xlarge
+    asg.capacity_type: SPOT
+    cluster_autoscaler.backoff: OutOfResource
+cascade_messages:
+  kube-apiserver:
+    - severity: WARN
+      message: 'I{klog_time}      11 schedule_one.go:1055] "Unable to schedule pod; no fit; waiting" pod="tenant-batch/batch-worker-{rs}-{sfx}"
+        err="0/{node_count} nodes are available: {pool_batch_spot_count} Insufficient cpu, {pool_batch_spot_others_count} node(s) had untolerated taint
+        or didn''t match Pod''s node affinity/selector. preemption: 0/{node_count} nodes are available: {pool_batch_spot_count}
+        No preemption victims found for incoming pod."'
+fault_scope:
+  cluster: prod-use1
+  node_pool: batch-spot
+  workloads: [batch-worker]
+onset_delay_seconds: 40
+generator_impact:
+  kubernetes_otel:
+    pods_stuck_in_pending_phase: 6
+fault_state:
+  kubernetes_otel:
+    node_pools:
+      batch-spot: {instance_types: [c6i.4xlarge]}
+infrastructure_events:
+  - service: kube-apiserver
+    severity: INFO
+    offset_seconds: -100
+    body: 'cloudtrail: eventSource=eks.amazonaws.com eventName=UpdateNodegroupConfig userIdentity=arn:aws:sts::752253522700:assumed-role/terraform-platform/atlantis
+      requestParameters.nodegroupName=batch-spot requestParameters.instanceTypes=[c6i.4xlarge] errorCode=none'
+    attributes:
+      aws.cloudtrail.event_name: UpdateNodegroupConfig
+      user.name: arn:aws:sts::752253522700:assumed-role/terraform-platform/atlantis
+  - service: cluster-autoscaler
+    severity: INFO
+    offset_seconds: -20
+    body: 'I{klog_time}       1 scale_up.go:552] Scale-up: setting group eks-batch-spot-7b31d05e size to 14 instead of 8 (max:
+      40)'
+remediation_effects:
+  transition_seconds: 180
+  state:
+    kubernetes_otel:
+      node_pools:
+        batch-spot:
+          instance_types: [c6i.4xlarge, c6a.4xlarge, m6i.4xlarge, m7i.4xlarge]
+          add_nodes: 6
+  log_events:
+    - service: cluster-autoscaler
+      severity: INFO
+      offset_seconds: 30
+      body: 'I{klog_time}       1 scale_up.go:552] Scale-up: setting group eks-batch-spot-7b31d05e size to 14 instead of 8 (max:
+        40)'
+    - service: cluster-autoscaler
+      severity: INFO
+      offset_seconds: 170
+      body: 'I{klog_time}       1 static_autoscaler.go:547] No unschedulable pods'
+  verification:
+    - signal: batch-spot node count and instance types
+      from: 'metrics-k8sclusterreceiver.otel-*'
+      field: 'resource.attributes.host.type'
+      where: 'resource.attributes.`k8s.node.label.eks.amazonaws.com/nodegroup` == "batch-spot" AND resource.attributes.k8s.cluster.name == "prod-use1"'
+      expect: '14 nodes; new nodes report host.type c6a.4xlarge / m6i.4xlarge / m7i.4xlarge'
+      within_seconds: 240
+    - signal: Pending batch-worker pods
+      from: 'metrics-k8sclusterreceiver.otel-*'
+      field: 'resource.attributes.k8s.pod.name'
+      where: 'resource.attributes.k8s.deployment.name == "batch-worker" AND metrics.k8s.pod.phase == 1 AND resource.attributes.k8s.cluster.name == "prod-use1"'
+      expect: '0'
+      within_seconds: 240
+    - signal: UnfulfillableCapacity lines
+      from: 'logs.otel.platform'
+      where: 'resource.attributes.service.name == "cluster-autoscaler" AND body.text LIKE "*UnfulfillableCapacity*"'
+      expect: '0 new lines'
+      within_seconds: 120
+business_impact:
+  - kpi: business.pending_pods
+    value: {uniform: [30.0, 38.0], round: 0}
+  - kpi: business.batch_jobs_success_pct
+    value: {uniform: [68.0, 74.0], round: 1}
+  - kpi: business.pod_start_p95_s
+    value: {uniform: [300.0, 420.0], round: 1}

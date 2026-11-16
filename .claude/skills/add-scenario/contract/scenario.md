@@ -9,6 +9,8 @@ The runtime reads scenario data from three sources:
 
 Reference implementation: [`scenario_engine/yaml_scenario.py`](scenario_engine/yaml_scenario.py)
 
+Reference scenarios: `scenarios/k8splatform/` (schema 1.3, pinned `k8s_topology`, infrastructure faults on one cloud) and `scenarios/space/` (business-impact and dashboard visibility for an application vertical).
+
 ---
 
 ## Identity properties
@@ -22,6 +24,7 @@ Reference implementation: [`scenario_engine/yaml_scenario.py`](scenario_engine/y
 | `scenario_icon` | optional | `str` | Emoji. Default `"🔧"` |
 | `sort_order` | optional | `int` | Lower = earlier. Default 999. Use 10–99 for new scenarios. |
 | `nominal_label` | optional | `str` | Label for the "nominal" state. Default `"NORMAL"`. |
+| `schema_version` | ✅ | `str` | `"1.3"` for new scenarios (the scaffolder writes the current version from `scenario_engine/schema.yaml`). Checks 37-44 apply from 1.3. |
 
 ---
 
@@ -55,7 +58,7 @@ Two reference patterns already in the repo:
 
 ## Infrastructure
 
-### `hosts` — 3 hosts, one per cloud
+### `hosts` — 3 hosts, one per cloud (or 3 nodes of one cloud for a single-cloud scenario such as `k8splatform`)
 
 ```yaml
 hosts:
@@ -114,6 +117,66 @@ k8s_clusters:
     services: [<azure-svc-1>, <azure-svc-2>, <azure-svc-3>]
 ```
 
+### `k8s_topology` — pinned platform (optional, schema 1.3)
+
+Without this block every cluster gets three generated nodes and one pod per service (`generator_engine/infra_topology.py`). That is enough for an application scenario. An infrastructure story needs the numbers to agree everywhere: a scheduler line that says `0/51 nodes are available` must match the node count in the metrics, and a CoreDNS line that reads from `10.42.33.12` must come from a pod with that IP. `k8s_topology` pins that model (`generator_engine/platform_topology.py`). When it is present:
+
+- `kubernetes_otel` reports these nodes, pools, workloads and pods (`generators/kubernetes_otel/pinned.py`), honours each channel's `fault_scope`, ramps, and applies `fault_state` / `remediation_effects.state`.
+- Every service log record takes the identity of a real pod of the workload mapped to it (`service:`), or of a node for `log_identity: node` services; the runtime placeholders (`{self_node}`, `{self_pod_ip}`, `{node_count}`, `{pool_<name>_count}`) read the same model.
+- `host_metrics` limits a scoped fault to the hosts inside the scope (matched by node name).
+
+Keep `k8s_clusters` alongside it: generators that predate `k8s_topology` still read it, and Check 8 still wants 3 hosts and 3 clusters. Pin the 3 `hosts` as real nodes of the topology (list them under `node_pools[].nodes`) so host and node identity agree.
+
+```yaml
+k8s_topology:
+  default_cluster: prod-use1           # cluster used when a scope or state names none
+  clusters:
+    - name: prod-use1
+      provider: aws
+      platform: aws_eks
+      region: us-east-1
+      vpc_cidr: 10.42.0.0/16
+      service_cidr: 172.20.0.0/16
+      kube_dns_ip: 172.20.0.10
+      node_name_format: 'ip-{ip_dashed}.ec2.internal'
+      subnets:                          # AZ -> CIDR; node and pod IPs come from these
+        us-east-1a: 10.42.32.0/23       # (or `zones: [...]` for a minimal comparison cluster)
+        us-east-1b: 10.42.36.0/23
+        us-east-1c: 10.42.40.0/23
+      node_pools:
+        - name: edge-c6i
+          count: 6
+          instance_types: [c6i.2xlarge]
+          cpu: 8
+          memory_gib: 16
+          os_image: Amazon Linux 2023.6.20250115
+          kubelet_version: v1.30.4-eks-a737599
+          nodes: [ip-10-42-33-51.ec2.internal]   # pinned names (a scenario host); the rest are generated
+          # optional: capacity_type: SPOT, arch: arm64, taints: [...], labels: {...}, zones: [...]
+        - name: arm-m7g
+          count: 0                        # added by a channel's fault_state (node_pools.<name>.add_nodes)
+          arch: arm64
+          instance_types: [m7g.2xlarge]
+      workloads:
+        - name: ingress-nginx-controller
+          kind: Deployment                # Deployment | DaemonSet | StatefulSet | Job
+          namespace: ingress-nginx
+          service: ingress-nginx          # the scenario service whose logs come from these pods
+          node_pool: edge-c6i
+          replicas: 6
+          image: registry.k8s.io/ingress-nginx/controller:v1.11.3
+          container: controller
+          cpu_request: 1
+          memory_request: 512Mi
+          memory_limit: 1Gi
+          cpu_util: [0.35, 0.50]          # baseline utilisation ranges
+          memory_util: [0.55, 0.65]
+          # optional: cpu_limit, hpa: {min, max, target_cpu}, pvc: {name, capacity, used},
+          # tolerations, placement: [pool, ...], arch_images, selector, labels
+```
+
+Pools that a change adds (a new node group) start at `count: 0`; the channel that adds them sets `fault_state`. Full example: `scenarios/k8splatform/scenario.yaml` (three EKS clusters; only `prod-use1` is fully pinned, the other two are smaller comparison clusters).
+
 ---
 
 ## Agent config
@@ -127,10 +190,11 @@ agent_config:
     You are the <Role> for a <description>.
     You help engineering teams investigate incidents and perform root cause analysis
     across 9 services spanning AWS, GCP, and Azure.
-    When investigating, search for these error identifiers in logs (field: body.text):
-    <subsystem 1>: ERROR-TYPE-1, ERROR-TYPE-2, ...
-    <subsystem 2>: ERROR-TYPE-3, ERROR-TYPE-4, ...
-    (list all 20 error_type values from channel files, grouped by subsystem)
+    When investigating, search for these error signatures in logs (field: body.text):
+      - <error_type 1>: <one-line meaning>
+      - <error_type 2>: <one-line meaning>
+    (list all 20 error_type values from the channel files; at 1.3 these are natural
+    substrings of the error lines, e.g. "nf_conntrack: table full, dropping packet")
     Log messages are in body.text — NEVER search the body field alone.
 
 assessment_tool_config:

@@ -23,7 +23,25 @@ WORKFLOW_INDEX_SUFFIXES = (
     "escalation-audit",
     "remediation-queue",
     "daily-report-audit",
+    "chaos-context",
 )
+
+# Explicit mappings for workflow indices that are *queried* (not only written) before
+# the first document arrives: ES|QL rejects SORT on a column an empty index lacks.
+WORKFLOW_INDEX_MAPPINGS: dict[str, dict] = {
+    # Who triggered each fault, written by the app at trigger time. The notification
+    # workflows read user_email from here (it used to ride on every fault log record
+    # as an event_name JSON blob, which no real component would emit).
+    "chaos-context": {
+        "properties": {
+            "@timestamp": {"type": "date"},
+            "channel": {"type": "integer"},
+            "user_email": {"type": "keyword"},
+            "callback_url": {"type": "keyword"},
+            "deployment_id": {"type": "keyword"},
+        }
+    },
+}
 
 
 # ── Step index registry ─────────────────────────────────────────────────────

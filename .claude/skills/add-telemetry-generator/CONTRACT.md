@@ -4,8 +4,8 @@
 
 A new package under `generators/<id>/` with:
 
-- `__init__.py` — `GeneratorSpec` (`schema_version`, datasets, integrations,
-  `impact_keys`, `wants_chaos`, …)
+- `__init__.py` — `GeneratorSpec` (`schema_version="1.1"`, datasets, integrations,
+  `impact_keys`, `wants_chaos`, `state_keys`, `scope_aware`, `coherence`, …)
 - `generator.py` — emit loop using `resolve_active_chaos` when chaos is enabled
 - `test_generator.py` — coverage for emit shape and chaos on/off
 
@@ -44,6 +44,27 @@ A new package under `generators/<id>/` with:
 - Healthy baseline when chaos is inactive.
 - Do not edit `scenarios/` from this skill.
 - Do not synthesize `kibana.alert.*` or fake SLO documents.
+
+## Generator schema 1.1 (state, scope, coherence)
+
+- `SPEC.schema_version="1.1"` (`generator_engine/schema.yaml` `current`).
+- **state_keys:** every config-like value a fix can change (limit, capacity,
+  replicas, version, image, instance type) is declared in `SPEC.state_keys`
+  (`{key: {"type", "doc"}}`) and read from `ChaosController.get_platform_state()`,
+  through `generator_engine.platform_topology.effective_platform` for
+  Kubernetes-shaped values or from the `fixes` / `faults` rows directly, with
+  transition progress applied. Scenario Check 38 rejects undeclared keys.
+- **scope:** honour a channel's `fault_scope` (cluster, node_pool, nodes, az,
+  workloads) and set `SPEC.scope_aware=True`; entities outside it stay healthy.
+- **ramps:** honour `onset_delay_seconds` / `ramp_seconds` via
+  `ChaosController.get_channel_elapsed()`.
+- **coherence:** couple related signals in the generator and list the couplings
+  in `SPEC.coherence`.
+- **no demo bookkeeping:** never emit `chaos.*` attributes or other demo fields
+  (`ops.*`, `system.status`, `event_name` blobs).
+
+Template: [TEMPLATES.md](TEMPLATES.md) §SPEC template. Reference:
+`generators/kubernetes_otel/`.
 
 ## Package grounding
 

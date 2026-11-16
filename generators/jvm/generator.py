@@ -231,14 +231,9 @@ def _generate_metrics(state: JvmState, rng: random.Random, active_chaos: dict | 
     gc_pause_multiplier = float((active_chaos or {}).get("gc_pause_multiplier", 1.0))
     under_stress = heap_pressure > 0 or gc_pause_multiplier > 1.0
 
-    # Channel tag dict — merged into every data point this scrape when chaos is active
+    # Per-data-point extras. Data points used to carry chaos.channel / chaos.fault_type
+    # while a fault was active; no real JVM exporter emits those, so they are gone.
     chaos_attrs: dict = {}
-    if active_chaos:
-        chaos_attrs["chaos.channel"] = active_chaos["channel_id"]
-        if active_chaos.get("name"):
-            chaos_attrs["chaos.fault_type"] = active_chaos["name"]
-        if active_chaos.get("subsystem"):
-            chaos_attrs["chaos.subsystem"] = active_chaos["subsystem"]
 
     def _ca(extra: dict | None = None) -> dict:
         """Merge chaos_attrs into per-data-point attribute dict."""

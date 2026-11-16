@@ -1,0 +1,103 @@
+name: ingress-nginx controllers OOMKilled during a reload storm
+subsystem: ingress
+vehicle_section: ingress-nginx/controller
+error_type: exited on signal 9
+sensor_type: controller_memory
+affected_services:
+  - ingress-nginx
+cascade_services: []
+description: The ingress-nginx controller pods are OOMKilled over and over while they reload nginx for a flood of new Ingress
+  objects. Requests fail with 502s and connection resets while pods restart.
+investigation_notes: |-
+  Root cause: a CI bug in the tenant-previews pipeline created a preview Ingress for every commit in the branch history instead of only the latest: about {preview_count} Ingresses in a minute and a half. Every new host forces a full nginx reload, and each preview Ingress also requests a TLS certificate, so for minutes afterwards a new Secret lands every few seconds and forces another one; the controllers reload at the sync rate limit (14-22 a minute each). Each reload starts a new generation of workers while old ones drain for worker-shutdown-timeout (240s). With several generations alive and a config for ~1,800 server blocks, controller memory climbs past its {mem_limit} limit and the kernel OOM-kills it.
+  Confirm:
+    - ingress-nginx: worker process <pid> exited on signal 9; "Backend successfully reloaded" every few seconds; Found valid IngressClass for tenant-previews/pr-* ingresses
+    - k8s.container.memory_limit_utilization for the controller ramps to 1.0 before each kill; k8s.container.restarts climbing; last_terminated_reason OOMKilled
+    - nginx_ingress_controller.ingresses climbs from ~40 to ~1,840 over about 90s, before the first OOM kill; 502s in the access log
+    - kubectl get ingress -n tenant-previews --no-headers | wc -l
+  Remediation: delete the stale preview Ingresses to stop the reloads, then raise the controller memory limit to 3Gi so a large config plus draining workers fits.
+remediation_action: cleanup_ingresses_and_raise_memory
+remediation_command: |-
+  opsctl delete ingresses -n tenant-previews --selector preview-state=stale
+  opsctl patch deployment/ingress-nginx-controller -n ingress-nginx --memory-limit 3Gi
+error_message: '{nginx_time} [alert] 1#1: worker process {pid} exited on signal 9'
+stack_trace: ''
+fault_params:
+  pid: {randint: [2100, 9800]}
+  preview_count: 1800
+  mem_limit: 1Gi
+rca_clues:
+  ingress-nginx:
+    nginx.ingress_count: 1840
+    nginx.reloads_per_min: {randint: [14, 22]}
+    k8s.container.memory_limit: 1Gi
+cascade_messages: {}
+fault_scope:
+  cluster: prod-use1
+  workloads: [ingress-nginx-controller]
+onset_delay_seconds: 90
+ramp_seconds: 120
+generator_impact:
+  kubernetes_otel:
+    oomkilled_containers: 1.0
+infrastructure_events:
+  - service: kube-apiserver
+    severity: INFO
+    offset_seconds: -5
+    body: 'audit: level=Metadata stage=ResponseComplete verb=create resource=ingresses namespace=tenant-previews name=pr-18244
+      user=system:serviceaccount:tenant-previews:preview-deployer code=201 userAgent=preview-deployer/2.3.0'
+k8s_events:
+  - type: Warning
+    reason: BackOff
+    object: {kind: Pod, namespace: ingress-nginx}
+    message: 'Back-off restarting failed container controller in pod {self_pod}_ingress-nginx'
+    component: kubelet
+    every_seconds: 60
+remediation_effects:
+  transition_seconds: 120
+  state:
+    kubernetes_otel:
+      workloads:
+        ingress-nginx-controller: {memory_limit: 3Gi, memory_util: [0.12, 0.18]}
+  log_events:
+    - service: kube-apiserver
+      severity: INFO
+      offset_seconds: 2
+      body: 'audit: level=Metadata verb=deletecollection resource=ingresses namespace=tenant-previews user={actor} code=200
+        labelSelector=preview-state=stale deleted=1800'
+    - service: kube-apiserver
+      severity: INFO
+      offset_seconds: 6
+      body: 'audit: level=Metadata verb=patch resource=deployments namespace=ingress-nginx name=ingress-nginx-controller user={actor}
+        code=200 change="containers[controller].resources.limits.memory: 1Gi -> 3Gi"'
+  verification:
+    - signal: k8s.container.memory_limit
+      from: 'metrics-k8sclusterreceiver.otel-*'
+      field: 'metrics.k8s.container.memory_limit'
+      where: 'resource.attributes.k8s.deployment.name == "ingress-nginx-controller" AND resource.attributes.k8s.cluster.name == "prod-use1"'
+      expect: '3221225472 (3Gi) on every controller pod in prod-use1 (pods from the new ReplicaSet; the old pods are gone). prod-use2 and prod-euw1 were not affected and stay at 1Gi'
+      within_seconds: 150
+    - signal: k8s.container.memory_limit_utilization
+      from: 'metrics-kubeletstatsreceiver.otel-*'
+      field: 'metrics.k8s.container.memory_limit_utilization'
+      where: 'resource.attributes.k8s.deployment.name == "ingress-nginx-controller" AND resource.attributes.k8s.cluster.name == "prod-use1"'
+      expect: 'about 0.15'
+      within_seconds: 150
+    - signal: nginx_ingress_controller.ingresses
+      from: 'metrics-generic.otel-default'
+      field: 'metrics.nginx_ingress_controller.ingresses'
+      where: 'resource.attributes.service.name == "ingress-nginx"'
+      expect: '~40'
+      within_seconds: 60
+    - signal: worker OOM kills
+      from: 'logs.otel.platform'
+      where: 'resource.attributes.service.name == "ingress-nginx" AND body.text LIKE "*exited on signal 9*"'
+      expect: '0 new lines; k8s.container.restarts stops increasing'
+      within_seconds: 150
+business_impact:
+  - kpi: business.api_availability_pct
+    value: {uniform: [98.6, 99.1], round: 3}
+  - kpi: business.api_5xx_rate_pct
+    value: {uniform: [0.9, 1.3], round: 3}
+  - kpi: business.api_p99_latency_ms
+    value: {uniform: [266.0, 280.0], round: 0}

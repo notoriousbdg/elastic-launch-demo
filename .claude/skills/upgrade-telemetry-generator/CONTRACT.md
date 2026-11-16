@@ -4,7 +4,7 @@
 
 | Capability | Meaning |
 |---|---|
-| **validate** | Read-only: engine schema status + package citation drift + alert ES\|QL emit gaps (+ optional live rule errors) |
+| **validate** | Read-only: engine schema status + 1.1 gaps (state_keys, scope, coherence, `chaos.*` attributes) + package citation drift + alert ES\|QL emit gaps (+ optional live rule errors) |
 | **upgrade** | Write under `generators/<id>/`: package re-ground and/or pending engine migrations |
 
 ## Version semantics
@@ -26,9 +26,21 @@ Unversioned SPECs use `default_unversioned` (currently `"1.0"`).
 # generators/<id>/__init__.py
 SPEC = GeneratorSpec(
     ...
-    schema_version="1.0",
+    schema_version="1.1",
+    scope_aware=True,          # 1.1: honours fault_scope
+    state_keys={...},          # 1.1: values fault_state / remediation_effects.state may set
+    coherence=(...),           # 1.1: signal couplings the generator enforces
 )
 ```
+
+## Registered versions
+
+| Version | Summary | Validate reports | Upgrade applies |
+|---|---|---|---|
+| 1.0 | `schema_version` on the SPEC | — | — |
+| 1.1 | Platform state, fault scope and signal coherence | config-like values without `state_keys`; no scope handling; no onset/ramp; coherence gaps; `chaos.*` (or other demo) attributes | the 1.1 `guidance` in `generator_engine/schema.yaml`: `state_keys` read through `get_platform_state()`, `scope_aware`, `get_channel_elapsed()` ramps, `coherence`, demo attributes removed, `schema_version="1.1"` |
+
+1.1 is additive: 1.0 generators keep running (`outdated_compatible`).
 
 ## Migration entry shape (`generator_engine/schema.yaml`)
 

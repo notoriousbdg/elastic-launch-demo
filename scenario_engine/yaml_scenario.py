@@ -84,6 +84,10 @@ class YamlScenario(BaseScenario):
                     "description", "investigation_notes", "remediation_action",
                     "error_message", "stack_trace", "infrastructure_events",
                     "business_impact", "generator_impact", "infra_impact",
+                    # schema 1.3: realism + verifiable remediation
+                    "remediation_command", "cascade_messages", "fault_scope",
+                    "onset_delay_seconds", "ramp_seconds", "k8s_events",
+                    "fault_state", "remediation_effects", "error_services",
                 )
                 if k in ch
             }
@@ -294,6 +298,36 @@ class YamlScenario(BaseScenario):
     def k8s_clusters(self) -> list[dict[str, Any]]:
         return self._data.get("k8s_clusters", [])
 
+    @property
+    def k8s_topology(self) -> dict[str, Any] | None:
+        """Pinned topology with identity filled in (cached: the platform model keys on it).
+
+        Account ids come from ``ScenarioIdentity`` and nodes that also appear in
+        ``hosts:`` reuse those hosts' instance ids, so host metrics, node metrics and
+        logs agree on ``host.id`` / ``cloud.instance.id``.
+        """
+        cached = self.__dict__.get("_k8s_topology_cache")
+        if cached is not None:
+            return cached or None
+        topo = self._data.get("k8s_topology")
+        if not (isinstance(topo, dict) and topo.get("clusters")):
+            self.__dict__["_k8s_topology_cache"] = {}
+            return None
+        import copy
+
+        from generator_engine.identity import ScenarioIdentity
+
+        out = copy.deepcopy(topo)
+        ident = ScenarioIdentity(self.namespace)
+        for cluster in out["clusters"]:
+            if cluster.get("provider", "aws") == "aws":
+                cluster.setdefault("account_id", ident.aws_account_id)
+        out["_host_ids"] = {
+            h.get("host.name"): h.get("host.id") for h in self.hosts if h.get("host.name")
+        }
+        self.__dict__["_k8s_topology_cache"] = out
+        return out
+
     # ── Agent & Elastic Config ───────────────────────────────────────────
 
     @property
@@ -359,6 +393,24 @@ class YamlScenario(BaseScenario):
     def fault_param_ranges(self, channel: int) -> dict[str, str]:
         raw = self._channels.get(channel, {}).get("fault_params", {})
         return {k: describe(v) for k, v in raw.items()}
+
+    def service_metric_names(self, service_name: str) -> list[str]:
+        """Names of the metrics a service's telemetry DSL emits (``- metric: {name: ...}``)."""
+        names: list[str] = []
+
+        def walk(node: Any) -> None:
+            if isinstance(node, dict):
+                m = node.get("metric")
+                if isinstance(m, dict) and isinstance(m.get("name"), str):
+                    names.append(m["name"])
+                for v in node.values():
+                    walk(v)
+            elif isinstance(node, list):
+                for v in node:
+                    walk(v)
+
+        walk((self._service_specs or {}).get(service_name) or {})
+        return list(dict.fromkeys(names))
 
     def rca_clue_ranges(self, channel: int, service_name: str) -> dict[str, str]:
         raw = self._channels.get(channel, {}).get("rca_clues", {}).get(service_name, {})

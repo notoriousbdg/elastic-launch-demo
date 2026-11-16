@@ -38,7 +38,15 @@ grep -n "agent_config\|system_prompt" scenarios/<id>/scenario.yaml | head -5
 
 Then `Read` only the `agent_config:` block (use `offset`/`limit` from the line numbers returned above). You need only the `system_prompt` string to locate the `error_type` list.
 
-Also read [CONTRACT.md](CONTRACT.md) now as a generation checklist.
+4. The scenario's **`schema_version`** and, if present, its **`k8s_topology`** names (clusters, node pools, workloads) — `fault_scope` and `state` must use them:
+
+```bash
+grep -n "schema_version\|k8s_topology" scenarios/<id>/scenario.yaml
+```
+
+At schema 1.3 (`k8splatform` today) the new channel must carry the 1.3 fields (Checks 37-44). Below 1.3 they are optional and unchecked; add them anyway when the user wants the channel to work with `opsctl` and show an after-state, and suggest the upgrade-scenario skill to bring the whole scenario to 1.3.
+
+Also read [CONTRACT.md](CONTRACT.md) now as a generation checklist, and the Realism checklist in [../add-scenario/BRIEF.md](../add-scenario/BRIEF.md). Reference channels: `scenarios/k8splatform/channels/02-edge-conntrack-exhaustion.yaml` (rollback fix) and `13-ingress-oom-reload-storm.yaml` (fix that sets a new value).
 
 ---
 
@@ -53,7 +61,14 @@ The proposal must cover:
 - **error_message** template (showing all `{placeholder}` names)
 - **affected_services** and **cascade_services** (service keys, not display names)
 - **remediation_action** and whether it's HITL (1–15) or auto-remediable (16–20)
-- **investigation_notes** summary (key steps; full 5–6 lines in Phase 4)
+- **Three phases** of the fault:
+  - *baseline* — what the healthy signals look like before the trigger (and what stays healthy outside the scope during the fault);
+  - *fault* — the cause event (with its negative `offset_seconds`), when symptoms start (`onset_delay_seconds`, `ramp_seconds`), the error line and the coupled signals that move with it;
+  - *remediated* — the `remediation_command` (`opsctl ...`, fixing the root cause), the lines the fix leaves (`log_events`, `steady_attributes`), and any config value that changes (`remediation_effects.state`).
+- **fault_scope** — cluster, node pool, nodes, AZ or workloads, and the healthy comparison outside it
+- **Verification signals** — 2–4 `{signal, where, expect, within_seconds}` entries that confirm recovery
+- **Differential clue** — if another channel in the scenario looks similar, the clue that tells them apart
+- **investigation_notes** summary (key steps; full text in Phase 4)
 - **agent_config.system_prompt** change — old error_type → new error_type
 
 If the channel number is 16–20, confirm the `remediation_action` passes the auto-remediate test from GUARDRAILS.md §3.
@@ -72,7 +87,9 @@ Follow the field order from CONTRACT.md. See the full schema there.
 
 Include `business_impact` so BOTH dashboards react in proportion to the fault's scope: dict entries targeting `executive_kpi_emissions` names, enough to turn tiles yellow/red (scope = 2×affected + cascade; minor ≥2 non-green incl. 1 red, moderate ≥3 incl. 2 red, major ≥4 incl. 3 red), with `value:` ranges inside each KPI's red/yellow band. `affected_services` must include a trace entry service (a service with `entry_endpoints`), not only a database, or the ops dashboard stays green. Reference: `scenarios/space/channels/01-*.yaml`.
 
-`investigation_notes`: 5–6 numbered steps. Reference specific log field names, metric names, and `{placeholder}` values. Tell the agent exactly what to search for and how to confirm the fix.
+`investigation_notes`: 5–6 numbered steps, or the k8splatform shape (`Root cause:` / `Confirm:` bullets / `Remediation:`). Reference specific log field names, metric names, and `{placeholder}` values; name the change event that preceded the errors and the healthy comparison outside `fault_scope`. Tell the agent exactly what to search for and how to confirm the fix.
+
+Schema 1.3 fields (see CONTRACT.md §Schema 1.3 fields): `remediation_command`, `fault_scope`, `infrastructure_events` with the cause at a negative `offset_seconds`, `onset_delay_seconds` / `ramp_seconds`, `cascade_messages` (and `error_services` when needed), `k8s_events` for Kubernetes reasons, `fault_state` for values that differ during the fault, and `remediation_effects` (`verification`, plus `state` / `log_events` / `steady_attributes` as the fix requires). Do not add `chaos.*` or other demo attributes anywhere.
 
 `fault_params` and `rca_clues` use the YAML DSL (see CONTRACT.md):
 
@@ -110,7 +127,9 @@ Run the CONTRACT.md checklist inline (no external script needed — inspect the 
 3. **Channel count** — run `ls scenarios/<id>/channels/*.yaml | wc -l` → must be 20.
 4. **HITL/auto-remediate** — channel ≤ 15: HITL action; channel 16–20: plausible auto-runbook action.
 5. **system_prompt sync** — new `error_type` appears in the prompt; old `error_type` (if changed) does not.
-6. **Dashboards react** — `business_impact` has dict entries targeting names from `executive_kpi_emissions` that land enough tiles in yellow/red for the channel's scope tier (copy the old channel's block as a starting point; re-check the values; see CONTRACT.md), every impacted KPI has `better:` set, and `affected_services` includes a trace entry service. `python3 scripts/verify_yaml_scenarios.py <id>` (Checks 30–32) is the arbiter.
+6. **Schema 1.3** (when the scenario is at 1.3) — `remediation_command` lines are `opsctl <verb> ...` with a known verb (Check 37); `fault_state` / `remediation_effects.state` keys are in the generator's `SPEC.state_keys` and name workloads / pools in `k8s_topology` (38); `fault_scope` names exist (39); `error_services` ⊆ `affected_services` and `cascade_messages` keys and placeholders are valid (40); `remediation_effects.verification` present (41); a cause event precedes the symptoms (42, warning); coherence (43, warning); `error_type` has no quotes (44).
+7. **Realism** — walk the Realism checklist in `../add-scenario/BRIEF.md`; in particular the new `error_type` is a substring of the new `error_message`, unique among the 20 channels, and no text says "channel N", "chaos" or "demo".
+8. **Dashboards react** — `business_impact` has dict entries targeting names from `executive_kpi_emissions` that land enough tiles in yellow/red for the channel's scope tier (copy the old channel's block as a starting point; re-check the values; see CONTRACT.md), every impacted KPI has `better:` set, and `affected_services` includes a trace entry service. `python3 scripts/verify_yaml_scenarios.py <id>` (Checks 30–32) is the arbiter.
 
 **Full integrity check:**
 ```bash

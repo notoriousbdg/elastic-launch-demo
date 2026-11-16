@@ -21,7 +21,7 @@
 #   needs_input (bool) — true → skill must AskUserQuestion to gather a value
 #                        before it can apply this migration
 
-current: "1.0"
+current: "1.1"
 default_unversioned: "1.0"
 
 migrations:
@@ -38,4 +38,24 @@ migrations:
 
       SPEC.module must be "generators.<id>.generator".
       Do not place engine helpers (db_common, registry, etc.) under generators/.
+    needs_input: false
+
+  - to: "1.1"
+    breaking: false
+    summary: "Platform state, fault scope and signal coherence for generators"
+    guidance: |
+      Generator schema 1.1 is additive; 1.0 generators keep running.
+      1. state_keys: if the generator reports config-like values a fix can change
+         (limits, capacities, replicas, versions, images, instance types), declare them
+         in SPEC.state_keys and read them from ChaosController.get_platform_state()
+         through generator_engine.platform_topology.effective_platform (or the
+         fixes/faults rows directly). Apply transition progress so changes play out.
+      2. scope: honour a channel's fault_scope (cluster, node_pool, nodes, az,
+         workloads) and set SPEC.scope_aware=True; entities outside it stay healthy.
+      3. coherence: couple related signals inside the generator and list them in
+         SPEC.coherence (e.g. HPA at max => replicas = max and CPU above target).
+      4. ramps: honour onset_delay_seconds / ramp_seconds via
+         ChaosController.get_channel_elapsed().
+      5. never emit chaos.* attributes or other demo bookkeeping.
+      Bump SPEC.schema_version to "1.1".
     needs_input: false

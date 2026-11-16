@@ -537,11 +537,6 @@ def _generate_trace(client: OTLPClient, resources: dict, rng: random.Random,
         if _svc_channels.get(svc) and channel_registry:
             primary_ch = _svc_channels[svc][0]
             ch_entry = channel_registry.get(primary_ch, {})
-            extra["chaos.channel"] = primary_ch
-            if ch_entry.get("name"):
-                extra["chaos.fault_type"] = ch_entry["name"]
-            if ch_entry.get("subsystem"):
-                extra["chaos.subsystem"] = ch_entry["subsystem"]
             if is_err and ch_entry.get("error_type"):
                 extra["error.type"] = ch_entry["error_type"]
         return extra

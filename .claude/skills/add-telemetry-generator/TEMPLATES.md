@@ -122,3 +122,31 @@ Workflow step gaps use the same `template_emit_pending.json` (strict xfail) and
 A step whose dataset starts with a wildcard (`logs-*.otel-*`, generic application logs)
 belongs to no one generator and is not tested per generator.
 
+
+## SPEC template (generator schema 1.1)
+
+New generators ship at `schema_version="1.1"` (`generator_engine/schema.yaml` `current`). The 1.1 fields are in `generator_engine/spec.py`; the reference implementation is `generators/kubernetes_otel/` (`__init__.py` SPEC, `pinned.py` behaviour).
+
+```python
+SPEC = GeneratorSpec(
+    id="<id>",
+    # ... datasets, integrations, impact_keys, wants_chaos, chaos_mode, family ...
+    schema_version="1.1",
+    # Honours a channel's fault_scope: only entities inside it degrade.
+    scope_aware=True,
+    # Config-like values a fix (remediation_effects.state.<id>) or an active fault
+    # (fault_state.<id>) may set. They persist after the fix, unlike impact_keys.
+    # The verifier (Check 38) rejects any key not declared here.
+    state_keys={
+        "workloads": {"type": "dict", "doc": "Per-workload overrides: memory_limit, replicas, image, ..."},
+        "pvc_capacity": {"type": "str", "doc": "Volume size after an expand, e.g. 2Ti."},
+    },
+    # Couplings the generator enforces, so a channel need not set both sides.
+    coherence=(
+        "oomkilled_containers => memory ramps to the limit before each kill; restarts increment",
+        "hpa_at_max_replicas => replicas = HPA max; per-pod CPU above target",
+    ),
+)
+```
+
+Leave `state_keys` empty and `scope_aware=False` only when the generator reports no config-like value and has no entity a scope could select (one global stream).

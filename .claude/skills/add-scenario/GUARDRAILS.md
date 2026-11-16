@@ -104,6 +104,8 @@ Test: "Would a well-run SRE team add this to their auto-remediation runbook?" If
 
 These numbers are baked into the deployer, dashboard generator, ML jobs, and the executive dashboard layout. Deviation causes silent failures or misaligned dashboards.
 
+The counts are fixed; the cloud split is not. A single-cloud infrastructure scenario may put all 9 services, 3 hosts and 3 clusters on one provider (`k8splatform`: 9 AWS services, 3 EKS clusters). Check 19 then only warns.
+
 ---
 
 ## 8. Service language must be in the allowed set
@@ -185,9 +187,19 @@ If you believe a change to these files is necessary, stop and ask the user. The 
 
 ---
 
+## 14. Fault telemetry must look like real telemetry (schema 1.3)
+
+New scenarios are schema 1.3. Every channel follows the Realism checklist in [BRIEF.md](BRIEF.md): real component log formats, a natural quote-free `error_type` that is a substring of the error line and unique across channels, a `remediation_command` that fixes the root cause, a `fault_scope`, a cause event with negative `offset_seconds`, and `remediation_effects.verification`. Checks 37-44 enforce the structural part.
+
+**No demo bookkeeping in telemetry.** Fault logs no longer carry `chaos.*` fields (`chaos.channel`, `chaos.fault_type`, `chaos.callback_url`, `chaos.user_email`), nor `ops.*`, `system.*`, `cascade.*`, `sensor.type`, `vehicle_section` or an `event_name` JSON blob. No real component emits them, and investigations would show them to the audience. Do not add them back in `attrs`, `rca_clues`, `infrastructure_events[].attributes`, `remediation_effects.log_events` or `steady_attributes`. Who triggered a fault is stored in the `{ns}-chaos-context` index, not on log records.
+
+No "channel N", "chaos", "demo" or mission jargon in any text that becomes telemetry or a runbook.
+
+---
+
 ## Subagent mirroring note
 
-Rules §5, §6, §8, §9, §10, plus the fault_params parity rule, the zero-TODO rule, the generator_impact validity rule, and the §13 business_impact rule, are inlined verbatim into the subagent prompt templates in SKILL.md's Phase 5. If you update any of those rules here, also update the corresponding lines in the subagent prompts in SKILL.md so they stay in sync.
+Rules §5, §6, §8, §9, §10, §14, plus the fault_params parity rule, the zero-TODO rule, the generator_impact validity rule, and the §13 business_impact rule, are inlined verbatim into the subagent prompt templates in SKILL.md's Phase 5. If you update any of those rules here, also update the corresponding lines in the subagent prompts in SKILL.md so they stay in sync.
 
 ---
 

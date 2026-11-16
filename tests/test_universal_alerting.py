@@ -17,6 +17,7 @@ import yaml
 from elastic_config.deployer import ScenarioDeployer
 from elastic_config.deployer_alerting import (
     AlertingMixin,
+    is_scenario_alert_rule,
     nightshift_automation_body,
     nightshift_workflow_yaml,
     universal_policy_bodies,
@@ -239,8 +240,10 @@ def test_serverless_cleanup_leaves_the_nightshift_signal_rules_alone():
     d = _Deployer(*SERVERLESS)
     listed = [
         {"id": "old-ch03", "kind": "alert", "metadata": {"name": "Demo CH03: Fault 3"}},
-        {"id": "sig-1", "kind": "signal", "metadata": {"name": "Demo: SE CH 01: Fault 1 (match count)"}},
+        {"id": "sig-1", "kind": "signal", "metadata": {"name": "Demo signal — Fault 1 (match count)"}},
         {"id": "user-rule", "kind": "alert", "metadata": {"name": "Demo latency (mine)"}},
+        {"id": "renamed", "kind": "alert", "metadata": {"name": "Demo: Fault 9", "tags": ["demo", "ERR-9"]}},
+        {"id": "user-colon", "kind": "alert", "metadata": {"name": "Demo: my own rule", "tags": ["mine"]}},
     ]
     deleted, remaining = d._cleanup_alerts(_kibana(seen, v2_rules=listed))
 
@@ -250,6 +253,8 @@ def test_serverless_cleanup_leaves_the_nightshift_signal_rules_alone():
     assert {f"/api/alerting/v2/action_policies/{i}" for i in universal_policy_ids("demo").values()} <= gone
     assert "/api/alerting/v2/rules/sig-1" not in gone
     assert "/api/alerting/v2/rules/user-rule" not in gone
+    assert "/api/alerting/v2/rules/renamed" in gone
+    assert "/api/alerting/v2/rules/user-colon" not in gone
     assert remaining == 0
 
 
@@ -267,7 +272,7 @@ def test_nightshift_automation_body_is_enabled_and_scoped_to_the_scenario():
     assert body["name"] == "Demo Investigation"
     assert body["isEnabled"] is True  # the API defaults to disabled
     assert body["trigger"]["rows"] == [
-        {"kind": "alert", "ruleNamePattern": "Demo CH", "ruleNameMatchMode": "substring"}
+        {"kind": "alert", "ruleNamePattern": "Demo: ", "ruleNameMatchMode": "substring"}
     ]
     assert body["execution"] == {"reasoningMode": "investigate"}
     assert body["completions"] == [] and body["runtime"] == {"dailyDispatchLimit": 20}
@@ -431,3 +436,50 @@ def test_serverless_notification_workflow_matches_its_classic_file(base):
     assert serverless["name"] == classic["name"]
     assert serverless["tags"] == classic["tags"]
     assert serverless["enabled"] is True
+
+
+# ── rule names carry no channel number ────────────────────────────────────────
+
+_CHANNEL_IN_NAME = re.compile(r"\bCH\s*\d+", re.IGNORECASE)
+
+
+@pytest.mark.parametrize("ch", sorted(REGISTRY))
+def test_universal_rule_name_has_no_channel_number(ch):
+    body = universal_rule_body("demo", "Demo", ch, REGISTRY[ch])
+    name = body["metadata"]["name"]
+    assert not _CHANNEL_IN_NAME.search(name)
+    expected = f"Demo: Fault {ch}" + (" (Auto-Remediate)" if ch >= 16 else "")
+    assert name == expected
+    # the channel stays machine-readable in the id, the tags and the EVAL column
+    assert body["metadata"]["tags"][3] == str(ch)
+    assert f"channel = {ch}," in body["query"]["base"]
+    assert f'rule_name = "{expected}"' in body["query"]["base"]
+
+
+def test_classic_rule_names_have_no_channel_number():
+    seen: list = []
+    _Deployer(*ECH_95)._deploy_alerting(_kibana(seen), lambda _p: None)
+    posts = [json.loads(c) for m, p, c in seen if m == "POST" and p == "/api/alerting/rule"]
+    assert posts
+    for body in posts:
+        ch = int(body["tags"][3])
+        assert not _CHANNEL_IN_NAME.search(body["name"])
+        assert body["name"] == f"Demo: Fault {ch}" + (" (Auto-Remediate)" if ch >= 16 else "")
+
+
+@pytest.mark.parametrize("ch", sorted(REGISTRY))
+def test_nightshift_trigger_pattern_matches_every_generated_rule_name(ch):
+    row = nightshift_automation_body("demo", "Demo")["trigger"]["rows"][0]
+    assert row["ruleNameMatchMode"] == "substring"
+    body = universal_rule_body("demo", "Demo", ch, REGISTRY[ch])
+    assert row["ruleNamePattern"] in body["metadata"]["name"]
+    assert is_scenario_alert_rule(body, "demo", "Demo")
+    # another scenario's rules don't match
+    other = universal_rule_body("other", "Other", ch, REGISTRY[ch])
+    assert row["ruleNamePattern"] not in other["metadata"]["name"]
+    assert not is_scenario_alert_rule(other, "demo", "Demo")
+
+
+def test_scenario_rule_match_skips_signal_rules():
+    sig = {"kind": "signal", "metadata": {"name": "Demo signal — Fault 1", "tags": ["demo"]}}
+    assert not is_scenario_alert_rule(sig, "demo", "Demo")

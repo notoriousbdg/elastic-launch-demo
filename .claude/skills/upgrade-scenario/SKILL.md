@@ -125,6 +125,8 @@ For each pending migration (oldest → newest):
 
 **The `1.0 → 1.1` migration** (adding the `schema_version` field) is handled like any other: read its guidance from `schema.yaml` and apply it. The guidance says to add `schema_version: "1.1"` immediately after the `sort_order` line in `scenario.yaml`.
 
+**The `1.2 → 1.3` migration** (realism and verifiable remediation) is per-channel work and has `needs_input: true`. Apply its guidance from `schema.yaml` to each of the 20 channel files. Values that cannot be derived from the files — the exact `opsctl` remediation commands, realistic after-state values for `remediation_effects.state` (a new memory limit, instance types, a PVC size), the cause event when the notes do not name one — must come from the user: draft a proposal per channel from the investigation notes and confirm it with `AskUserQuestion` (batch several channels per question) before writing. Use `scenarios/k8splatform/channels/02-edge-conntrack-exhaustion.yaml` (rollback) and `13-ingress-oom-reload-storm.yaml` (new value) as the reference, and the Realism checklist in `.claude/skills/add-scenario/BRIEF.md`. A scenario without `k8s_topology` uses only `cluster` and `workloads` in `fault_scope`, and needs no `state` unless a generator it enables declares matching `SPEC.state_keys`.
+
 After each migration is applied, confirm the target version is correct.
 
 ### Step 3: Verify
@@ -135,7 +137,7 @@ After all migrations are applied, run the verifier:
 python3 scripts/verify_yaml_scenarios.py <id>
 ```
 
-A scenario is only up to date when it has no Check 35 errors (unknown `{placeholder}` in `investigation_notes`) and no Check 36 warnings (healthy-looking `choice` clues, faulty units the `stack_trace` lists as healthy). Fix those per the evidence contract in `.claude/skills/add-fault-channel/CONTRACT.md`.
+A scenario is only up to date when it has no Check 35 errors (unknown `{placeholder}` in `investigation_notes`) and no Check 36 warnings (healthy-looking `choice` clues, faulty units the `stack_trace` lists as healthy). Fix those per the evidence contract in `.claude/skills/add-fault-channel/CONTRACT.md`. At 1.3, Checks 37-44 also run: Checks 37, 38, 39 (names), 40, 41 and 44 are errors; Checks 39 (missing `fault_scope`), 42 (no cause event before the symptoms) and 43 (coherence) are warnings to fix before calling the upgrade done.
 
 Also run the auto-discovery check:
 
@@ -220,9 +222,9 @@ After registering the new version, offer to run Mode B across all bundled scenar
 
 If the migration has `breaking: true`, make sure the user understands that any external (exported) scenarios will need upgrading before they can be re-imported and launched.
 
-If the user confirms, **first collect any `needs_input` values** from the pending migration chain using `AskUserQuestion` — subagents cannot prompt the user mid-run, so gather all required values now and pass them into each subagent prompt.
+If the user confirms, **first collect any `needs_input` values** from the pending migration chain using `AskUserQuestion` — subagents cannot prompt the user mid-run, so gather all required values now and pass them into each subagent prompt. For a per-channel migration such as 1.3, that means the remediation commands and after-state values for every channel of every scenario: draft them from each scenario's investigation notes, confirm them with the user scenario by scenario, and pass the confirmed list to that scenario's subagent.
 
-Then **dispatch one subagent per scenario in a single message** (they run concurrently; each scenario's files are disjoint). The 10 bundled scenarios are: `banking`, `ecommerce`, `fanatics`, `financial`, `gaming`, `gcp`, `healthcare`, `manufacturing`, `space`, `telecom`.
+Then **dispatch one subagent per scenario in a single message** (they run concurrently; each scenario's files are disjoint). The 13 bundled scenarios are: `aws`, `azure`, `banking`, `ecommerce`, `fanatics`, `financial`, `gaming`, `gcp`, `healthcare`, `k8splatform`, `manufacturing`, `space`, `telecom` (confirm with `ls scenarios`; skip any already at the new version — `k8splatform` ships at 1.3).
 
 **Subagent prompt template** (fill in `<ID>`, `<CURRENT>`, `<NEW>`, `<GUIDANCE>`, and any resolved `needs_input` values):
 

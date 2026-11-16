@@ -1,0 +1,162 @@
+name: fluent-bit crash-looping on the new arm64 nodes
+subsystem: nodes
+vehicle_section: logging/fluent-bit
+error_type: exec format error
+sensor_type: daemonset_ready
+affected_services:
+  - kube-apiserver
+cascade_services: []
+description: The six nodes of the new arm-m7g pool run no working log collector, so no logs leave those nodes. fluent-bit
+  is healthy on every amd64 node. The failure is visible centrally, in the control-plane audit log (the kubelet's Failed
+  events) and in the Kubernetes metrics, not in the nodes' own logs.
+investigation_notes: |-
+  Root cause: the arm-m7g (Graviton, arm64) node group was just added. fluent-bit runs from {mirror_image}, a mirror that was built for amd64 only (pushed without the multi-arch manifest list). On arm64 nodes the container runtime starts an amd64 binary and it fails immediately with exec format error, so the DaemonSet's pods on those nodes crash-loop.
+  The nodes' own logs never arrive (fluent-bit is the log shipper that is failing), so the evidence is central:
+  Confirm:
+    - kube-apiserver audit: the kubelets on the arm-m7g nodes create Failed events for the fluent-bit pods with exec: "/fluent-bit/bin/fluent-bit": exec format error, and BackOff events (logs-k8seventsreceiver: reason BackOff / Failed)
+    - k8s.daemonset.ready_nodes for fluent-bit = desired - 6; the not-ready pods are exactly the arm-m7g nodes (host.arch arm64)
+    - log volume from arm-m7g nodes is zero since they joined, while every other pool ships logs
+    - Harbor served {mirror_image} to the new nodes as a single-platform manifest (application/vnd.oci.image.manifest.v1+json, not an image index); docker manifest inspect {mirror_image} shows amd64 only
+  Remediation: point the DaemonSet at the upstream multi-arch image through the proxy cache; the rolling update replaces the crash-looping pods.
+remediation_action: patch_daemonset_image
+remediation_command: |-
+  opsctl patch daemonset/fluent-bit -n logging --image harbor.example-saas.io/dockerhub-proxy/fluent/fluent-bit:3.0.7
+error_message: 'audit: level=RequestResponse stage=ResponseComplete verb=create resource=events namespace=logging user=system:node:{self_node}
+  code=201 requestObject.type=Warning requestObject.reason=Failed requestObject.involvedObject=pod/{self_pod} requestObject.message="Error:
+  failed to start container \"fluent-bit\": failed to create containerd task: failed to create shim task: OCI runtime create failed:
+  runc create failed: unable to start container process: exec: \"/fluent-bit/bin/fluent-bit\": exec format error: unknown"'
+stack_trace: ''
+fault_params:
+  mirror_image: harbor.example-saas.io/platform/fluent-bit:3.0.7
+rca_clues:
+  kube-apiserver:
+    host.arch: arm64
+    k8s.node.pool: arm-m7g
+    container.image.name: harbor.example-saas.io/platform/fluent-bit
+cascade_messages: {}
+fault_scope:
+  cluster: prod-use1
+  node_pool: arm-m7g
+  workloads: [fluent-bit]
+  # fluent-bit ships the nodes' own logs: nothing node-level arrives from arm-m7g
+  node_logs: false
+onset_delay_seconds: 60
+generator_impact:
+  kubernetes_otel:
+    daemonset_mis_scheduled_or_not_ready: 6
+    pod_crashloopbackoff: 1.0
+fault_state:
+  kubernetes_otel:
+    node_pools:
+      arm-m7g: {add_nodes: 6}
+infrastructure_events:
+  - service: kube-apiserver
+    severity: INFO
+    offset_seconds: -300
+    body: 'cloudtrail: eventSource=eks.amazonaws.com eventName=CreateNodegroup userIdentity=arn:aws:sts::752253522700:assumed-role/terraform-platform/atlantis
+      requestParameters.nodegroupName=arm-m7g requestParameters.amiType=AL2023_ARM_64_STANDARD requestParameters.instanceTypes=[m7g.2xlarge]
+      requestParameters.scalingConfig.desiredSize=6'
+  - service: harbor-registry
+    severity: INFO
+    offset_seconds: -40
+    body: 'time="{iso_now}" level=info msg="response completed" go.version=go1.22.7 http.request.host=harbor.example-saas.io http.request.method=GET
+      http.request.remoteaddr=10.42.41.77 http.request.uri="/v2/platform/fluent-bit/manifests/3.0.7" http.request.useragent="containerd/v1.7.22"
+      http.response.contenttype="application/vnd.oci.image.manifest.v1+json" http.response.duration=0.011s http.response.status=200
+      http.response.written=1576'
+    attributes:
+      url.path: /v2/platform/fluent-bit/manifests/3.0.7
+      http.response.status_code: 200
+      oci.media_type: application/vnd.oci.image.manifest.v1+json
+k8s_events:
+  - type: Warning
+    reason: Failed
+    object: {kind: Pod, namespace: logging}
+    message: 'Error: failed to start container "fluent-bit": failed to create containerd task: failed to create shim task: OCI runtime
+      create failed: runc create failed: unable to start container process: exec: "/fluent-bit/bin/fluent-bit": exec format error: unknown'
+    component: kubelet
+    every_seconds: 60
+  - type: Warning
+    reason: BackOff
+    object: {kind: Pod, namespace: logging}
+    message: 'Back-off restarting failed container fluent-bit in pod {self_pod}_logging'
+    component: kubelet
+    every_seconds: 45
+remediation_effects:
+  # the old pods keep failing until the rolling update replaces them
+  log_taper_seconds: 90
+  transition_seconds: 180
+  state:
+    kubernetes_otel:
+      node_pools:
+        arm-m7g: {add_nodes: 6}
+      workloads:
+        fluent-bit: {image: 'harbor.example-saas.io/dockerhub-proxy/fluent/fluent-bit:3.0.7'}
+  log_events:
+    - service: kube-apiserver
+      severity: INFO
+      offset_seconds: 2
+      body: 'audit: level=Metadata verb=patch resource=daemonsets namespace=logging name=fluent-bit user={actor} code=200
+        change="image platform/fluent-bit:3.0.7 -> dockerhub-proxy/fluent/fluent-bit:3.0.7"'
+    - service: harbor-registry
+      severity: INFO
+      offset_seconds: 12
+      body: 'time="{iso_now}" level=info msg="response completed" go.version=go1.22.7 http.request.host=harbor.example-saas.io http.request.method=GET
+        http.request.remoteaddr=10.42.41.77 http.request.uri="/v2/dockerhub-proxy/fluent/fluent-bit/manifests/3.0.7" http.request.useragent="containerd/v1.7.22"
+        http.response.contenttype="application/vnd.oci.image.index.v1+json" http.response.duration=0.014s http.response.status=200 http.response.written=2031'
+      attributes:
+        url.path: /v2/dockerhub-proxy/fluent/fluent-bit/manifests/3.0.7
+        http.response.status_code: 200
+        oci.media_type: application/vnd.oci.image.index.v1+json
+    - service: harbor-registry
+      severity: INFO
+      offset_seconds: 31
+      body: 'time="{iso_now}" level=info msg="response completed" go.version=go1.22.7 http.request.host=harbor.example-saas.io http.request.method=GET
+        http.request.remoteaddr=10.42.37.140 http.request.uri="/v2/dockerhub-proxy/fluent/fluent-bit/manifests/3.0.7" http.request.useragent="containerd/v1.7.22"
+        http.response.contenttype="application/vnd.oci.image.index.v1+json" http.response.duration=0.014s http.response.status=200 http.response.written=2031'
+      attributes:
+        url.path: /v2/dockerhub-proxy/fluent/fluent-bit/manifests/3.0.7
+        http.response.status_code: 200
+        oci.media_type: application/vnd.oci.image.index.v1+json
+    - service: harbor-registry
+      severity: INFO
+      offset_seconds: 55
+      body: 'time="{iso_now}" level=info msg="response completed" go.version=go1.22.7 http.request.host=harbor.example-saas.io http.request.method=GET
+        http.request.remoteaddr=10.42.33.62 http.request.uri="/v2/dockerhub-proxy/fluent/fluent-bit/manifests/3.0.7" http.request.useragent="containerd/v1.7.22"
+        http.response.contenttype="application/vnd.oci.image.index.v1+json" http.response.duration=0.014s http.response.status=200 http.response.written=2031'
+      attributes:
+        url.path: /v2/dockerhub-proxy/fluent/fluent-bit/manifests/3.0.7
+        http.response.status_code: 200
+        oci.media_type: application/vnd.oci.image.index.v1+json
+    - service: harbor-registry
+      severity: INFO
+      offset_seconds: 84
+      body: 'time="{iso_now}" level=info msg="response completed" go.version=go1.22.7 http.request.host=harbor.example-saas.io http.request.method=GET
+        http.request.remoteaddr=10.42.40.201 http.request.uri="/v2/dockerhub-proxy/fluent/fluent-bit/manifests/3.0.7" http.request.useragent="containerd/v1.7.22"
+        http.response.contenttype="application/vnd.oci.image.index.v1+json" http.response.duration=0.014s http.response.status=200 http.response.written=2031'
+      attributes:
+        url.path: /v2/dockerhub-proxy/fluent/fluent-bit/manifests/3.0.7
+        http.response.status_code: 200
+        oci.media_type: application/vnd.oci.image.index.v1+json
+  verification:
+    - signal: k8s.daemonset.ready_nodes for fluent-bit
+      from: 'metrics-k8sclusterreceiver.otel-*'
+      field: 'metrics.k8s.daemonset.ready_nodes'
+      where: 'resource.attributes.k8s.daemonset.name == "fluent-bit" AND resource.attributes.k8s.cluster.name == "prod-use1"'
+      expect: 'ready = desired = all nodes including the 6 arm-m7g nodes'
+      within_seconds: 240
+    - signal: Failed events for fluent-bit in the audit log
+      from: 'logs.otel.platform'
+      where: 'resource.attributes.service.name == "kube-apiserver" AND body.text LIKE "*exec format error*"'
+      expect: '0 new lines'
+      within_seconds: 240
+    - signal: BackOff events for fluent-bit pods
+      from: 'logs-k8seventsreceiver.otel-default'
+      field: 'attributes.k8s.event.object.name'
+      where: 'attributes.k8s.event.reason == "BackOff" AND attributes.k8s.event.object.name LIKE "fluent-bit-*"'
+      expect: 'no new events'
+      within_seconds: 240
+business_impact:
+  - kpi: business.log_pipeline_coverage_pct
+    value: {uniform: [87.0, 88.5], round: 2}
+  - kpi: business.daemonset_ready_pct
+    value: {uniform: [87.0, 88.5], round: 1}

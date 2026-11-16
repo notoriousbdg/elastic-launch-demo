@@ -453,7 +453,7 @@ class PlatformMixin:
     # the button makes, so a fresh project needs no click before investigations
     # can run and before the investigation agent accepts a connector.
     # On serverless only a UIAM credential can create the accounts, so seden
-    # creates them at deploy from elastic_stack/serverless/project.json ("uiam",
+    # creates them at deploy from elastic_stack/serverless/seden.json ("uiam",
     # names/roles/descriptions must match below) and `seden delete` removes them.
     # Here they are found and reused; binding them works with the deploy API key.
     _SERVICE_ACCOUNT_PATH = "/internal/security/service_account"

@@ -4,7 +4,7 @@ scenario_description: Orbital insertion mission with rocket propulsion, guidance
   NASA-style Mission Control with countdown clock and 20 fault channels across 9 space systems.
 namespace: nova7
 scenario_icon: 🚀
-sort_order: 1
+sort_order: 0
 schema_version: "1.2"
 nominal_label: NOMINAL
 hosts:

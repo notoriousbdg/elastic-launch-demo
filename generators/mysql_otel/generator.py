@@ -461,11 +461,6 @@ def _generate_query_sample_event(
         "mysql.events_waits_current.timer_wait": float(wait_s),
     }
     if active_chaos:
-        attrs["chaos.channel"] = active_chaos["channel_id"]
-        if active_chaos.get("name"):
-            attrs["chaos.fault_type"] = active_chaos["name"]
-        if active_chaos.get("subsystem"):
-            attrs["chaos.subsystem"] = active_chaos["subsystem"]
         if active_chaos.get("error_type"):
             attrs["error.type"] = active_chaos["error_type"]
 
@@ -491,11 +486,6 @@ def _generate_query_sample_event(
         "db.user": ScenarioIdentity(ns).database("app"),
     }
     if active_chaos:
-        _span_attrs["chaos.channel"] = active_chaos["channel_id"]
-        if active_chaos.get("name"):
-            _span_attrs["chaos.fault_type"] = active_chaos["name"]
-        if active_chaos.get("subsystem"):
-            _span_attrs["chaos.subsystem"] = active_chaos["subsystem"]
         if active_chaos.get("error_type"):
             _span_attrs["error.type"] = active_chaos["error_type"]
     span = client.build_span(

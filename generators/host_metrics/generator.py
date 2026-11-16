@@ -251,7 +251,9 @@ def _build_host_resource(host_cfg: dict, cluster_by_provider: dict = CLUSTER_BY_
         if key in host_cfg:
             attrs[key] = host_cfg[key]
 
-    cluster_name = cluster_by_provider.get(host_cfg.get("cloud.provider"))
+    # A pinned topology (schema 1.3) knows exactly which cluster a node belongs to;
+    # the provider map is ambiguous when one provider runs several clusters.
+    cluster_name = host_cfg.get("_k8s_cluster") or cluster_by_provider.get(host_cfg.get("cloud.provider"))
     if cluster_name:
         attrs["k8s.cluster.name"] = cluster_name
 
@@ -1235,6 +1237,29 @@ def _send_process_metrics(
 from generators.host_metrics import SPEC as _ALERT_SPEC
 from generator_engine.tick import run_tick_loop
 
+
+def _host_scope(scenario_data: dict, controller, registry: dict, channel_ids: list) -> set[str] | None:
+    """Host names inside the fault_scope of the channels driving host_metrics, or None."""
+    scopes = [
+        (registry.get(ch) or {}).get("fault_scope")
+        for ch in channel_ids
+        if (registry.get(ch) or {}).get("generator_impact", {}).get("host_metrics") is not None
+    ]
+    scopes = [sc for sc in scopes if sc]
+    if not scopes:
+        return None
+    from generator_engine.platform_topology import effective_platform, get_platform
+
+    base = get_platform(scenario_data["k8s_topology"], scenario_data.get("namespace", "default"))
+    if base is None:
+        return None
+    getter = getattr(controller, "get_platform_state", None)
+    platform = effective_platform(base, getter() if getter else None, time.time())
+    names: set[str] = set()
+    for sc in scopes:
+        names.update(n.name for n in platform.nodes_in_scope(sc))
+    return names
+
 def run(
     client: OTLPClient,
     stop_event: threading.Event,
@@ -1270,6 +1295,14 @@ def run(
     host_states = []
     host_proc_states: list[list[ProcessState]] = []
     for host_idx, host_cfg in enumerate(hosts):
+        if scenario_data and scenario_data.get("k8s_topology"):
+            from generator_engine.platform_topology import get_platform
+
+            _pl = get_platform(scenario_data["k8s_topology"], scenario_data.get("namespace", "default"))
+            for _c in (_pl.clusters.values() if _pl else []):
+                if _c.node(host_cfg["host.name"]):
+                    host_cfg = {**host_cfg, "_k8s_cluster": _c.name}
+                    break
         resource = _build_host_resource(host_cfg, _cluster_by_provider)
         state = HostMetricState(
             cpu_count=host_cfg["cpu_count"],
@@ -1312,6 +1345,14 @@ def run(
                 chaos_mode="any", impact_keys=_HOST_SPEC.impact_keys,
             )
 
+        # Schema 1.3 fault_scope: when the channels driving host_metrics declare a
+        # scope, only the hosts inside it (matched by node name) take the impact.
+        _scoped_hosts: set[str] | None = None
+        if _host_chaos and scenario_data and scenario_data.get("k8s_topology"):
+            _scoped_hosts = _host_scope(scenario_data, chaos_controller, _channel_registry,
+                                        _host_chaos.get("channel_ids") or [])
+        _all_host_chaos = _host_chaos
+
         _chaos_fd_pressure: float = (_host_chaos or {}).get("fd_pressure", 0.0) or 0.0
         _chaos_fs_pct: float | None = (_host_chaos or {}).get("filesystem_pct")
         _chaos_disk_mul: float = (_host_chaos or {}).get("disk_io_multiplier", 1.0) or 1.0
@@ -1341,6 +1382,12 @@ def run(
         ):
             host_name = host_cfg["host.name"]
             host_cloud = _host_cloud_map.get(host_name, "")
+            _host_chaos = _all_host_chaos
+            if _scoped_hosts is not None and host_name not in _scoped_hosts:
+                _host_chaos = None
+            _chaos_fs_pct = (_host_chaos or {}).get("filesystem_pct")
+            _chaos_disk_mul = (_host_chaos or {}).get("disk_io_multiplier", 1.0) or 1.0
+            _chaos_net_mul = (_host_chaos or {}).get("network_connections_multiplier", 1.0) or 1.0
             # Spike this host if: sliders active AND (no faults → spike all, or this host's cloud is affected)
             if (cpu_pct > 0 or mem_pct > 0) and (
                 not has_active_faults or host_cloud in spiked_clouds

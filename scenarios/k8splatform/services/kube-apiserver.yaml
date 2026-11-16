@@ -1,0 +1,103 @@
+service: kube-apiserver
+sort_order: 4
+cloud_provider: aws
+cloud_region: us-east-1
+cloud_platform: aws_eks
+cloud_availability_zone: us-east-1a
+subsystem: control-plane
+language: go
+generates_traces: false
+
+# EKS control plane logs (CloudWatch control-plane logging: api, audit, scheduler,
+# controllerManager). Managed by AWS, so records carry the cluster, not a host.
+# Baseline includes routine GitOps syncs to unrelated apps: the change behind a
+# fault is never the only change in the window.
+log_identity: cluster
+topology: []
+
+emit_fault_logs: true
+kpi_emitter: false
+
+constants:
+  ROUTINE:
+    - [get, leases, kube-node-lease, '', system:node]
+    - [update, leases, kube-system, kube-controller-manager, system:kube-controller-manager]
+    - [list, pods, tenant-edge, '', system:serviceaccount:tenant-edge:gateway-config-watcher]
+    - [watch, endpointslices, '', '', system:serviceaccount:ingress-nginx:ingress-nginx]
+    - [get, secrets, tenant-edge, tenant-gateway-db, system:serviceaccount:external-secrets:external-secrets]
+    - [patch, nodes, '', '', system:node]
+  # Other clients in the workload-low priority level (service accounts outside the
+  # system/leader-election levels); they are throttled alongside the noisy one.
+  APF_VICTIMS:
+    - [list, cronjobs, tenant-batch, system:serviceaccount:tenant-batch:report-builder, report-builder/v3.1.4]
+    - [watch, workflows, argo, system:serviceaccount:argo:argo-server, argo/v3.5.11]
+    - [get, configmaps, tenant-core, system:serviceaccount:tenant-core:billing-api, billing-api/2.31.0]
+    - [list, jobs, tenant-batch, system:serviceaccount:tenant-batch:nightly-reconcile, kubectl/v1.30.4]
+  ARGO_APPS:
+    - [deployments, tenant-core, billing-api, a3e91f0]
+    - [deployments, tenant-core, usage-api, 5c7d210]
+    - [configmaps, observability, otel-collector-config, 9b81e44]
+    - [deployments, tenant-core, webhook-relay, e04a6b2]
+    - [cronjobs, tenant-batch, nightly-reconcile, 77fd0c3]
+
+steps:
+  - sample:
+      routine: {choice: ROUTINE}
+      latency_ms: {expr: "rand.randint(2, 18) if 5 not in all_active else rand.randint(240, 1900)"}
+      apf_busy: {expr: "5 in all_active"}
+  - log:
+      level: INFO
+      message: 'audit: level=Metadata stage=ResponseComplete verb={routine[0]} resource={routine[1]} namespace={routine[2]} name={routine[3]} user={routine[4]} code=200 latency={latency_ms}ms'
+      attrs:
+        k8s.audit.verb: {expr: "routine[0]"}
+        k8s.audit.resource: {expr: "routine[1]"}
+        k8s.audit.user: {expr: "routine[4]"}
+        user.name: {expr: "routine[4]"}
+        k8s.audit.response_code: 200
+  # While job-operator saturates workload-low, the other clients in that level are
+  # rejected too (APF queues are shared per priority level).
+  - sample:
+      victim: {choice: APF_VICTIMS}
+  - when: "5 in all_active and elapsed.get(5, 0) >= 40 and rand.random() < 0.55"
+    log:
+      level: ERROR
+      message: 'audit: level=Metadata stage=ResponseComplete verb={victim[0]} resource={victim[1]} namespace={victim[2]} user={victim[3]} code=429 reason=TooManyRequests priorityLevel=workload-low flowSchema=service-accounts latency={latency_ms}ms userAgent={victim[4]}'
+      attrs:
+        k8s.audit.verb: {expr: "victim[0]"}
+        k8s.audit.resource: {expr: "victim[1]"}
+        k8s.audit.user: {expr: "victim[3]"}
+        user.name: {expr: "victim[3]"}
+        k8s.audit.response_code: 429
+        apf.priority_level: workload-low
+        apf.flow_schema: service-accounts
+  - every:
+      seconds: 420
+      state_key: _last_argo
+      steps:
+        - sample:
+            app: {choice: ARGO_APPS}
+        - log:
+            level: INFO
+            message: 'audit: level=RequestResponse stage=ResponseComplete verb=patch resource={app[0]} namespace={app[1]} name={app[2]} user=system:serviceaccount:argocd:argocd-application-controller code=200 annotations=argocd.argoproj.io/tracking-id={app[1]}/{app[2]} sync.revision={app[3]}'
+            attrs:
+              k8s.audit.verb: patch
+              k8s.audit.resource: {expr: "app[0]"}
+              user.name: system:serviceaccount:argocd:argocd-application-controller
+              vcs.revision: {expr: "app[3]"}
+  - sample:
+      p99: {expr: "round(rand.uniform(1400, 2600)) if apf_busy else round(rand.uniform(120, 240))"}
+      rejected: {expr: "round(rand.uniform(80, 140), 1) if apf_busy else 0.0"}
+      inflight: {expr: "rand.randint(380, 400) if apf_busy else rand.randint(30, 90)"}
+      sfx: {expr: "rand.choice('bcdfghjklmnpqrstvwxz2456789') + rand.choice('bcdfghjklmnpqrstvwxz2456789') + rand.choice('bcdfghjklmnpqrstvwxz2456789') + rand.choice('bcdfghjklmnpqrstvwxz2456789') + rand.choice('bcdfghjklmnpqrstvwxz2456789')"}
+      node: {expr: "rand.choice(node_names) if node_names else 'ip-10-42-36-32.ec2.internal'"}
+      feasible: {expr: "rand.randint(18, 24)"}
+  - metric: {name: apiserver.request.duration_p99_ms, value: {var: p99}, unit: ms}
+  - metric: {name: apiserver.flowcontrol.rejected_requests_per_s, value: {var: rejected}, unit: '{request}/s', attrs: {priority_level: workload-low}}
+  - metric: {name: apiserver.flowcontrol.current_executing_requests, value: {var: inflight}, unit: '{request}', attrs: {priority_level: workload-low}}
+  - every:
+      seconds: 180
+      state_key: _last_sched
+      steps:
+        - log:
+            level: INFO
+            message: 'I{klog_time}      11 schedule_one.go:286] "Successfully bound pod to node" pod="tenant-core/billing-api-6f9c8d7b5-{sfx}" node="{node}" evaluatedNodes={node_count} feasibleNodes={feasible}'

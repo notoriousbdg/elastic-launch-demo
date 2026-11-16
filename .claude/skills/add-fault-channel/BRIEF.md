@@ -10,7 +10,7 @@ All three must be confirmed before moving to Phase 2.
 
 ### 1. Scenario
 
-Which scenario is being modified. Accept either the `scenario_id` slug (any existing scenario under `scenarios/` — e.g. `banking`, `ecommerce`, `telecom`, `space`, `fanatics`, `financial`, `healthcare`, `gaming`, `gcp`, `manufacturing`) or a display name.
+Which scenario is being modified. Accept either the `scenario_id` slug (any existing scenario under `scenarios/` — `aws`, `azure`, `banking`, `ecommerce`, `fanatics`, `financial`, `gaming`, `gcp`, `healthcare`, `k8splatform`, `manufacturing`, `space`, `telecom`) or a display name.
 
 If the user names a customer or vertical without specifying a scenario, pick the closest existing scenario and confirm: "It sounds like you want the `financial` scenario — is that right?"
 
@@ -30,6 +30,8 @@ What the new channel should represent — the observable failure, what causes it
 **Sufficient:** "payment gateway connection pool exhaustion — all outbound payment connections backed up, causing checkout failures. Remediation is a connection pool restart."
 
 **Too vague:** "something with payments" — ask for the observable failure and remediation action.
+
+For a schema 1.3 scenario also get, or propose, the **cause** (the change or provider event that came first: a GitOps sync, a Terraform apply, an expired token, an AWS Health event) and the **fix** as it would be typed (`opsctl rollback configmap/<name> -n <ns>`). The fix must address the cause, not the symptom.
 
 ---
 

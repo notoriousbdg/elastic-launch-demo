@@ -15,6 +15,8 @@ Never touch:
 
 If you think a change elsewhere is needed, stop and ask the user.
 
+If the new fault needs a workload or node pool that `k8s_topology` in `scenario.yaml` does not have, stop and ask the user before adding it there.
+
 ---
 
 ## 2. Channel count stays at exactly 20
@@ -57,9 +59,9 @@ Test: "Would a well-run SRE team add this to their auto-remediation runbook?" If
 
 Every `{placeholder}` name in `error_message` and `stack_trace` must be a key in `fault_params` in the same channel YAML file. Missing keys cause `KeyError` at runtime.
 
-Collect all placeholder names from both strings before writing `fault_params`.
+Collect all placeholder names from both strings before writing `fault_params`. The runtime placeholders the engine fills (`{self_node}`, `{self_pod}`, `{self_pod_ip}`, `{node_count}`, `{pool_<name>_count}`, `{klog_time}`, `{nginx_time}`, `{iso_now}`, `{epoch_now}`, ...) need no key.
 
-The same holds for `investigation_notes`: every `{placeholder}` there must be a `fault_params` key, or it is shown as literal text in the KB doc, Cortex runbook and channel runbook skill (verifier Check 35).
+The same holds for `investigation_notes`: every `{placeholder}` there must be a `fault_params` key, or it is shown as literal text in the KB doc, Wiki runbook and channel runbook skill (verifier Check 35).
 
 ---
 
@@ -80,3 +82,16 @@ The agent will fail to find fault logs for any `error_type` not listed in its pr
 ## 7. No invented service names or subsystems
 
 Do not introduce a `subsystem` label that doesn't already exist in service files. Do not reference a service key that isn't a filename stem under `scenarios/<id>/services/`.
+
+---
+
+## 8. Telemetry must read like a real incident (schema 1.3)
+
+Follow the Realism checklist in [../add-scenario/BRIEF.md](../add-scenario/BRIEF.md). In particular:
+
+- `error_type` is a natural substring of `error_message`, contains no quote characters (Check 44), and is unique among the 20 channels.
+- `remediation_command` fixes the root cause (roll back the change, restore the policy), not the symptom (restart pods).
+- There is a `fault_scope`, a cause event with a negative `offset_seconds`, and `remediation_effects.verification`.
+- Fault logs no longer carry `chaos.*` fields (or `ops.*`, `system.*`, `cascade.*`, an `event_name` blob). Never add such attributes in `rca_clues`, `infrastructure_events`, `remediation_effects` or anywhere else.
+- No "channel N", "chaos", "demo" or mission jargon in any text that becomes telemetry or a runbook.
+

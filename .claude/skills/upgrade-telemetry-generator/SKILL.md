@@ -20,7 +20,7 @@ Two capabilities for generators under `generators/<id>/`:
 
 | Capability | Purpose | Edits |
 |---|---|---|
-| **validate** | Read-only status: engine `schema_version` vs `generator_engine/schema.yaml` `current`; `SOURCE_INTEGRATION` vs upstream package version; alert ES\|QL emit gaps; SLO template / ML module emit gaps; optional live Kibana rule errors | None |
+| **validate** | Read-only status: engine `schema_version` vs `generator_engine/schema.yaml` `current`; 1.1 gaps (state_keys, scope, onset/ramp, coherence, `chaos.*` attributes); `SOURCE_INTEGRATION` vs upstream package version; alert ES\|QL emit gaps; SLO template / ML module emit gaps; optional live Kibana rule errors | None |
 | **upgrade** | Bring generator(s) current: re-ground against latest `elastic/integrations` package (primary path); if `schema_version` lags engine `current`, also apply pending `schema.yaml` migration guidance in the same pass | `generators/<id>/` only |
 
 Read [GUARDRAILS.md](GUARDRAILS.md), [CONTRACT.md](CONTRACT.md),
@@ -91,6 +91,38 @@ Also report **impact_keys** gaps when inventories / SPECs are available:
   `wants_chaos` is false despite impact_keys / alerts / SLOs, or when keys
   are declare-without-apply.
 
+### Generator schema 1.1 gaps
+
+`generator_engine/schema.yaml` `current` is 1.1; most generators still declare
+1.0 (`outdated_compatible`, still launchable). For each generator below 1.1,
+read its SPEC and `generator.py` and report:
+
+- **Missing state_keys** — the generator emits config-like values a fix could
+  change (memory or CPU limits, capacities, PVC sizes, replica counts, HPA max,
+  versions, images, instance types) from constants or config, with no
+  `SPEC.state_keys` entry and no read of `ChaosController.get_platform_state()`.
+- **Missing scope handling** — it has entities a `fault_scope` could select
+  (nodes, pools, AZs, workloads, hosts, instances) but degrades all of them on
+  a fault; `SPEC.scope_aware` is false.
+- **Missing onset/ramp** — impacts start at trigger time instead of honouring
+  `onset_delay_seconds` / `ramp_seconds` (`get_channel_elapsed()`).
+- **Coherence gaps** — coupled signals set independently (HPA at max without
+  replicas = max and CPU above target; OOMKilled without memory at the limit
+  and rising restarts; Pending pods without a reason; a node's CPU or memory
+  that does not add up to its pods); `SPEC.coherence` empty.
+- **Demo attributes** — any emitted `chaos.*` attribute (or `ops.*`,
+  `system.status`, an `event_name` JSON blob):
+
+  ```bash
+  grep -rn '"chaos\.\|ops\.mission\|system\.status' generators/<id>/
+  ```
+
+  A real OTel `event_name` (`aws.cloudtrail.event`, `device.crash`) is fine;
+  an `event_name` that carries a JSON blob of callback URL or user email is not.
+
+Recommend **upgrade** for each gap. `generators/kubernetes_otel/` (pinned path)
+and `generators/host_metrics/` (scope) are the 1.1 references.
+
 ### Alert ES|QL emit gaps (mandatory when templates exist)
 
 For each package-backed generator with `alerting_rule_template`:
@@ -147,6 +179,23 @@ If `list_generators()` shows `outdated_compatible` or `upgrade_required`:
 2. Apply each migration's `guidance` under `generators/<id>/` only.
 3. Set `schema_version="<to>"` on the package SPEC in `__init__.py`.
 4. Never edit `generator_engine/` during upgrade (except reading `schema.yaml`).
+
+**1.0 → 1.1** (platform state, fault scope, coherence; guidance in
+`generator_engine/schema.yaml`), closing the gaps validate reports:
+
+- Declare `SPEC.state_keys` for config-like values a fix can change and read
+  them from `get_platform_state()` (via `effective_platform` for
+  Kubernetes-shaped values, or the `fixes` / `faults` rows directly) with
+  transition progress applied, so the changed value persists after the fix.
+- Honour `fault_scope`; set `SPEC.scope_aware=True`.
+- Honour `onset_delay_seconds` / `ramp_seconds` via `get_channel_elapsed()`.
+- Couple related signals and list them in `SPEC.coherence`.
+- Remove every `chaos.*` (and other demo) attribute from the emit.
+- Tests: in-scope entities degrade and out-of-scope ones stay healthy; a
+  `remediation_effects.state` row changes the reported value; no `chaos.` keys.
+
+Details and code: [add-telemetry-generator SKILL.md](../add-telemetry-generator/SKILL.md)
+Phase 7 and [TEMPLATES.md](../add-telemetry-generator/TEMPLATES.md) §SPEC template.
 
 ### Package re-ground (primary path)
 

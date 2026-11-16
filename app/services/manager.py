@@ -107,6 +107,7 @@ class ServiceManager:
                 "namespace": self._ctx.namespace,
                 "hosts": scenario.hosts,
                 "k8s_clusters": scenario.k8s_clusters,
+                "k8s_topology": getattr(scenario, "k8s_topology", None),
                 "service_topology": scenario.service_topology,
                 "entry_endpoints": scenario.entry_endpoints,
                 "db_operations": scenario.db_operations,

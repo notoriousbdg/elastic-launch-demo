@@ -300,11 +300,6 @@ def _generate_access_log(
         "nginx.request_time": request_time,
     }
     if active_chaos:
-        attrs["chaos.channel"] = active_chaos["channel_id"]
-        if active_chaos.get("name"):
-            attrs["chaos.fault_type"] = active_chaos["name"]
-        if active_chaos.get("subsystem"):
-            attrs["chaos.subsystem"] = active_chaos["subsystem"]
         if status >= 500 and active_chaos.get("error_type"):
             attrs["error.type"] = active_chaos["error_type"]
 
@@ -330,11 +325,6 @@ def _generate_access_log(
         "network.protocol.version": "1.1",
     }
     if active_chaos:
-        _span_attrs["chaos.channel"] = active_chaos["channel_id"]
-        if active_chaos.get("name"):
-            _span_attrs["chaos.fault_type"] = active_chaos["name"]
-        if active_chaos.get("subsystem"):
-            _span_attrs["chaos.subsystem"] = active_chaos["subsystem"]
         if span_status == STATUS_ERROR and active_chaos.get("error_type"):
             _span_attrs["error.type"] = active_chaos["error_type"]
     span = client.build_span(
@@ -434,11 +424,6 @@ def _generate_error_log(
     trace_id = None
     span_id = None
     if active_chaos:
-        attrs["chaos.channel"] = active_chaos["channel_id"]
-        if active_chaos.get("name"):
-            attrs["chaos.fault_type"] = active_chaos["name"]
-        if active_chaos.get("subsystem"):
-            attrs["chaos.subsystem"] = active_chaos["subsystem"]
         if active_chaos.get("error_type"):
             attrs["error.type"] = active_chaos["error_type"]
         _ns = namespace or ""

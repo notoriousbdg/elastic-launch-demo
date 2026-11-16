@@ -64,6 +64,7 @@ def _purge_deployment_records(deployment_id: str) -> None:
     store.delete(deployment_id)
     chaos_store.delete_channels_for_deployment(deployment_id)
     chaos_store.delete_spikes_for_deployment(deployment_id)
+    chaos_store.delete_platform_state(deployment_id)
 
 
 # In-memory progress trackers keyed by deployment_id
@@ -810,8 +811,47 @@ async def remediate_channel(channel: int, deployment_id: Optional[str] = None):
     inst = _get_instance(deployment_id)
     if not inst:
         return JSONResponse(status_code=404, content={"error": "No active deployment"})
-    result = inst.resolve_channel(channel, force=True)
+    # The auto-remediate workflow applies the fix on its own: its change lines name the
+    # automation, not a person or Claude Code.
+    from app.chaos.controller import AUTO_REMEDIATOR_ACTOR
+    result = inst.resolve_channel(channel, force=True, actor=AUTO_REMEDIATOR_ACTOR)
     return {"action": "remediated", "channel": channel, **result}
+
+
+# ── Platform operations (opsctl) ───────────────────────────────────────────
+
+
+@app.get("/api/ops/actions")
+async def ops_actions():
+    from app import ops
+    return ops.list_actions()
+
+
+@app.post("/api/ops/actions")
+async def ops_apply(body: dict):
+    from app import ops
+    inst = _get_instance(body.get("deployment_id"))
+    if not inst:
+        return JSONResponse(status_code=404, content={"error": "No active deployment"})
+    command = body.get("argv")
+    if command is None:
+        command = body.get("command")
+    if not command or not isinstance(command, (str, list)):
+        return JSONResponse(status_code=400, content={"error": "error: you must specify a command (argv or command)"})
+    try:
+        return ops.execute(inst, command, dry_run=bool(body.get("dry_run")),
+                           user=body.get("user"))
+    except ops.OpsError as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+
+
+@app.post("/api/ops/reset")
+async def ops_reset(body: Optional[dict] = None, deployment_id: Optional[str] = None):
+    from app import ops
+    inst = _get_instance((body or {}).get("deployment_id") or deployment_id)
+    if not inst:
+        return JSONResponse(status_code=404, content={"error": "No active deployment"})
+    return ops.reset(inst)
 
 
 # ── User Info (for auto-populating email) ─────────────────────────────────

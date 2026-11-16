@@ -1,0 +1,83 @@
+service: tenant-gateway
+sort_order: 1
+cloud_provider: aws
+cloud_region: us-east-1
+cloud_platform: aws_eks
+cloud_availability_zone: us-east-1a
+subsystem: edge
+language: go
+generates_traces: true
+
+# Public API gateway (Envoy-based). Its access log is the blast radius tenants see.
+topology: []
+
+entry_endpoints:
+  - [/v1/accounts, GET]
+  - [/v1/invoices, GET]
+  - [/v1/payments, POST]
+  - [/v1/webhooks, POST]
+  - [/v1/usage, GET]
+
+emit_fault_logs: true
+kpi_emitter: true
+
+constants:
+  ROUTES:
+    - [GET, /v1/accounts, billing-api.tenant-core.svc]
+    - [GET, /v1/invoices, billing-api.tenant-core.svc]
+    - [POST, /v1/payments, payments.corp.internal]
+    - [POST, /v1/webhooks, webhook-relay.tenant-core.svc]
+    - [GET, /v1/usage, usage-api.tenant-core.svc]
+  TENANTS: [tenant-1182, tenant-2290, tenant-3071, tenant-4471, tenant-5523, tenant-6604, tenant-7718, tenant-8812]
+  AGENTS: [acme-billing-sync/4.2, okhttp/4.12.0, python-requests/2.32.3, Go-http-client/2.0, axios/1.7.7]
+  CLIENT_NETS: [203.0.113, 198.51.100, 192.0.2]
+
+state:
+  _served: {init: 0}
+
+steps:
+  - sample:
+      route: {choice: ROUTES}
+      storm: {expr: "17 in all_active"}
+      limited: {expr: "17 in fixed_channels"}
+      tenant: {expr: "'tenant-4471' if (storm or limited) and rand.random() < 0.83 else rand.choice(TENANTS)"}
+      agent: {choice: AGENTS}
+      client_ip: {expr: "rand.choice(CLIENT_NETS) + '.' + str(rand.randint(2, 250))"}
+      # Backend services (tenant-core) run on general-c6i pods in the three AZ subnets.
+      upstream_ip: {expr: "'10.42.' + str(rand.choice([32, 33, 36, 37, 40, 41])) + '.' + str(rand.randint(10, 250))"}
+      duration_ms: {expr: "rand.randint(180, 900) if storm else rand.randint(12, 140)"}
+      status: {expr: "429 if (limited and tenant == 'tenant-4471') else (503 if (storm and rand.random() < 0.18) else (200 if rand.random() > 0.002 else 502))"}
+      flags: {expr: "'RL' if status == 429 else ('UO' if status == 503 else ('UF' if status == 502 else '-'))"}
+      bytes_sent: {expr: "rand.randint(300, 9000) if status == 200 else rand.randint(0, 120)"}
+      req_id: {expr: "'%08x-%04x-4%03x-a%03x-%012x' % (rand.randint(0, 0xffffffff), rand.randint(0, 0xffff), rand.randint(0, 0xfff), rand.randint(0, 0xfff), rand.randint(0, 0xffffffffffff))"}
+  - counter: {state_key: _served, by: 1}
+  # No requests reach the gateway while its Service selects no pods.
+  - when: "20 not in all_active"
+    log:
+      level: INFO
+      message: '"{route[0]} {route[1]} HTTP/1.1" {status} {flags} 0 {bytes_sent} {duration_ms} {duration_ms} "{client_ip}" "{agent}" "{req_id}" "api.example-saas.io" "{upstream_ip}:8080" response_flags={flags} tenant={tenant} upstream_cluster={route[2]}'
+      attrs:
+        http.request.method: {expr: "route[0]"}
+        http.response.status_code: {var: status}
+        url.path: {expr: "route[1]"}
+        envoy.response_flags: {var: flags}
+        tenant.id: {var: tenant}
+        client.address: {var: client_ip}
+        user_agent.original: {var: agent}
+        http.server.request.duration_ms: {var: duration_ms}
+  - sample:
+      rps: {expr: "0 if 20 in all_active else round(4400 * (4.0 if storm else (1.1 if limited else 1.0)) * rand.uniform(0.92, 1.08))"}
+      rps_5xx: {expr: "round(rps * (0.18 if storm else 0.0006) * rand.uniform(0.8, 1.2), 2)"}
+      rps_429: {expr: "round(rps * 0.7, 1) if limited else 0.0"}
+  - metric: {name: envoy.http.downstream_rq_per_s, value: {var: rps}, unit: '{request}/s'}
+  - metric: {name: envoy.http.downstream_rq_5xx_per_s, value: {var: rps_5xx}, unit: '{request}/s'}
+  - metric: {name: envoy.http.downstream_rq_429_per_s, value: {var: rps_429}, unit: '{request}/s'}
+  - every:
+      seconds: 90
+      state_key: _last_cfg
+      steps:
+        - log:
+            level: INFO
+            message: 'cds: add 6 cluster(s), remove 0 cluster(s); lds: add/update listener ''api_https'''
+            attrs:
+              envoy.component: config

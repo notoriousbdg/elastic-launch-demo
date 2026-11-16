@@ -1,0 +1,48 @@
+service: cluster-autoscaler
+sort_order: 7
+cloud_provider: aws
+cloud_region: us-east-1
+cloud_platform: aws_eks
+cloud_availability_zone: us-east-1c
+subsystem: capacity
+language: go
+generates_traces: false
+
+# Cluster Autoscaler (one replica, leader-elected) managing the EKS managed node
+# groups through their Auto Scaling groups.
+topology: []
+
+emit_fault_logs: true
+kpi_emitter: false
+
+constants:
+  GROUPS: [eks-general-c6i-2ec8a1f4, eks-batch-spot-7b31d05e, eks-edge-c6i-41f9e2aa]
+
+steps:
+  - sample:
+      group: {choice: GROUPS}
+      pending: {expr: "rand.randint(14, 38) if 8 in all_active else 0"}
+      unneeded: {randint: [0, 2]}
+  - sample:
+      line: {expr: "547 if pending == 0 else 595"}
+      msg: {expr: "'No unschedulable pods' if pending == 0 else str(pending) + ' unschedulable pods remain after binpacking simulation'"}
+      pl: {randint: [250, 260]}
+      node: {expr: "rand.choice(node_names) if node_names else 'ip-10-42-36-32.ec2.internal'"}
+      cpu: {randint: [52, 79]}
+  - every:
+      seconds: 10
+      state_key: _last_loop
+      steps:
+        - log:
+            level: INFO
+            message: 'I{klog_time}       1 static_autoscaler.go:{line}] {msg}'
+            attrs:
+              cluster_autoscaler.unschedulable_pods: {var: pending}
+  - every:
+      seconds: 120
+      state_key: _last_scaledown
+      steps:
+        - log:
+            level: INFO
+            message: 'I{klog_time}       1 planner.go:{pl}] Node {node} - cpu utilization 0.{cpu} is above threshold, not considered for removal'
+  - metric: {name: cluster_autoscaler.unschedulable_pods_count, value: {var: pending}, unit: '{pod}'}

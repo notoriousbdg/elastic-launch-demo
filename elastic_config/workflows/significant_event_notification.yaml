@@ -4,7 +4,7 @@ enabled: true
 description: >
   Notify launch operations team when a significant event is detected on a
   HITL channel (1-15). Triggered by alert rules — uses event.rule.tags[1] for
-  the error_type search, extracts user_email from event_name, runs AI root
+  the error_type search, reads user_email from the chaos-context index, runs AI root
   cause analysis, creates a case, attaches the alert to the case, then sends
   an email notification requesting human approval. The agent invokes the
   remediation_action workflow tool, which pauses at a waitForInput step. That
@@ -36,10 +36,8 @@ steps:
     if: "${{ event.alerts[0].kibana.alert.action_group != 'recovered' }}"
     with:
       query: >
-        FROM logs.otel.__NS__,logs.otel.__NS__.*
-        | WHERE event_name IS NOT NULL
+        FROM __NS__-chaos-context
         | SORT @timestamp DESC
-        | GROK event_name """.*"user_email"\s*:\s*"(?<user_email>[^"]*)".*"""
         | KEEP user_email
         | LIMIT 1
       format: json

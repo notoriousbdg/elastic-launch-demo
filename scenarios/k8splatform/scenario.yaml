@@ -1,0 +1,518 @@
+scenario_id: k8splatform
+scenario_name: Kubernetes Platform Operations
+scenario_description: Internal platform team running a shared multi-tenant EKS platform (three clusters, us-east-1, us-east-2
+  and eu-west-1) behind the public API api.example-saas.io. Faults are infrastructure faults (DNS, conntrack, certificates,
+  nodes, control plane, capacity, registry) caught from component logs.
+namespace: platform
+scenario_icon: ☸️
+sort_order: 1
+nominal_label: HEALTHY
+schema_version: '1.3'
+apm_ml_bucket_span: 5m
+
+# Infrastructure scenario: the k8s and host generators carry the corroborating
+# metrics; component logs come from the nine services. No JVM, no nginx package
+# (ingress-nginx logs come from its own service), no app-tier raw access logs.
+generators:
+  kubernetes_otel: true
+  host_metrics: true
+  traces: true
+  jvm: false
+  nginx_otel: false
+  nginx_metrics: false
+  raw_access: false
+  gcp_vpcflow_otel: false
+  azure_vnetflow_otel: false
+  aws_vpcflow_otel: false
+
+workflow_template_inputs:
+  service_name: tenant-gateway
+
+# Three hosts = three real nodes of prod-use1 (one per pool that host-level
+# evidence matters for). Their ids come from ScenarioIdentity; the pinned topology
+# reuses them for the same node names.
+hosts:
+  - host.name: ip-10-42-36-17.ec2.internal
+    host.id: i-20c802d21172010c2
+    host.arch: amd64
+    host.type: c6i.4xlarge
+    host.cpu.model.name: Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz
+    host.cpu.vendor.id: GenuineIntel
+    host.cpu.family: '6'
+    host.cpu.model.id: '106'
+    host.cpu.stepping: '6'
+    host.cpu.cache.l2.size: 1310720
+    host.ip:
+      - 10.42.36.17
+    host.mac:
+      - 0e:3a:91:5c:22:17
+    os.type: linux
+    os.description: Amazon Linux 2023.6.20250115
+    cloud.provider: aws
+    cloud.platform: aws_ec2
+    cloud.region: us-east-1
+    cloud.availability_zone: us-east-1b
+    cloud.account.id: '752253522700'
+    cloud.instance.id: i-20c802d21172010c2
+    cpu_count: 16
+    memory_total_bytes: 34359738368
+    disk_total_bytes: 107374182400
+  - host.name: ip-10-42-33-51.ec2.internal
+    host.id: i-e7f7e2bd96eedf0ce
+    host.arch: amd64
+    host.type: c6i.2xlarge
+    host.cpu.model.name: Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz
+    host.cpu.vendor.id: GenuineIntel
+    host.cpu.family: '6'
+    host.cpu.model.id: '106'
+    host.cpu.stepping: '6'
+    host.cpu.cache.l2.size: 1310720
+    host.ip:
+      - 10.42.33.51
+    host.mac:
+      - 0e:3a:91:5c:21:33
+    os.type: linux
+    os.description: Amazon Linux 2023.6.20250115
+    cloud.provider: aws
+    cloud.platform: aws_ec2
+    cloud.region: us-east-1
+    cloud.availability_zone: us-east-1a
+    cloud.account.id: '752253522700'
+    cloud.instance.id: i-e7f7e2bd96eedf0ce
+    cpu_count: 8
+    memory_total_bytes: 17179869184
+    disk_total_bytes: 107374182400
+  - host.name: ip-10-42-40-12.ec2.internal
+    host.id: i-d1092645a6cb2b20d
+    host.arch: amd64
+    host.type: m6i.large
+    host.cpu.model.name: Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz
+    host.cpu.vendor.id: GenuineIntel
+    host.cpu.family: '6'
+    host.cpu.model.id: '106'
+    host.cpu.stepping: '6'
+    host.cpu.cache.l2.size: 1310720
+    host.ip:
+      - 10.42.40.12
+    host.mac:
+      - 0e:3a:91:5c:28:0c
+    os.type: linux
+    os.description: Amazon Linux 2023.6.20250115
+    cloud.provider: aws
+    cloud.platform: aws_ec2
+    cloud.region: us-east-1
+    cloud.availability_zone: us-east-1c
+    cloud.account.id: '752253522700'
+    cloud.instance.id: i-d1092645a6cb2b20d
+    cpu_count: 2
+    memory_total_bytes: 8589934592
+    disk_total_bytes: 85899345920
+
+# Legacy cluster list (generators that predate k8s_topology read it). It mirrors the
+# pinned clusters below; kubernetes_otel and log identity use k8s_topology.
+k8s_clusters:
+  - name: prod-use1
+    provider: aws
+    platform: aws_eks
+    region: us-east-1
+    zones: [us-east-1a, us-east-1b, us-east-1c]
+    os_description: Amazon Linux 2023.6.20250115
+    services:
+      - tenant-gateway
+      - ingress-nginx
+      - coredns
+      - cert-manager
+      - cluster-autoscaler
+      - external-secrets
+      - harbor-registry
+  - name: prod-use2
+    provider: aws
+    platform: aws_eks
+    region: us-east-2
+    zones: [us-east-2a, us-east-2b, us-east-2c]
+    os_description: Amazon Linux 2023.6.20250115
+    services: []
+  - name: prod-euw1
+    provider: aws
+    platform: aws_eks
+    region: eu-west-1
+    zones: [eu-west-1a, eu-west-1b, eu-west-1c]
+    os_description: Amazon Linux 2023.6.20250115
+    services: []
+
+# ── Pinned platform (schema 1.3) ────────────────────────────────────────────────
+# Every node count, node name, pod IP, instance type and kubelet version quoted in a
+# log line comes from this block. Pools that are rolled out by a change (general-m7i,
+# arm-m7g) start at zero nodes; the channel that adds them carries a fault_state.
+k8s_topology:
+  default_cluster: prod-use1
+  clusters:
+    - name: prod-use1
+      provider: aws
+      platform: aws_eks
+      region: us-east-1
+      vpc_cidr: 10.42.0.0/16
+      service_cidr: 172.20.0.0/16
+      kube_dns_ip: 172.20.0.10
+      node_name_format: 'ip-{ip_dashed}.ec2.internal'
+      subnets:
+        us-east-1a: 10.42.32.0/23
+        us-east-1b: 10.42.36.0/23
+        us-east-1c: 10.42.40.0/23
+      node_pools:
+        - name: system
+          count: 3
+          instance_types: [m6i.large]
+          cpu: 2
+          memory_gib: 8
+          os_image: Amazon Linux 2023.6.20250115
+          kubelet_version: v1.30.4-eks-a737599
+          nodes: [ip-10-42-40-12.ec2.internal]
+        - name: edge-c6i
+          count: 6
+          instance_types: [c6i.2xlarge]
+          cpu: 8
+          memory_gib: 16
+          os_image: Amazon Linux 2023.6.20250115
+          kubelet_version: v1.30.4-eks-a737599
+          nodes: [ip-10-42-33-51.ec2.internal]
+        - name: general-c6i
+          count: 24
+          instance_types: [c6i.4xlarge]
+          cpu: 16
+          memory_gib: 32
+          os_image: Amazon Linux 2023.6.20250115
+          kubelet_version: v1.30.4-eks-a737599
+          nodes: [ip-10-42-36-17.ec2.internal]
+        - name: batch-spot
+          count: 8
+          capacity_type: SPOT
+          instance_types: [c6i.4xlarge, c6a.4xlarge, m6i.4xlarge, m7i.4xlarge]
+          cpu: 16
+          memory_gib: 32
+          os_image: Amazon Linux 2023.6.20250115
+          kubelet_version: v1.30.4-eks-a737599
+          taints: ['workload=batch:NoSchedule']
+        - name: general-m7i
+          count: 0
+          instance_types: [m7i.2xlarge]
+          cpu: 8
+          memory_gib: 32
+          os_image: Ubuntu 22.04.5 LTS
+          kubelet_version: v1.30.4-eks-a737599
+        - name: arm-m7g
+          count: 0
+          arch: arm64
+          instance_types: [m7g.2xlarge]
+          cpu: 8
+          memory_gib: 32
+          os_image: Amazon Linux 2023.6.20250115
+          kubelet_version: v1.30.4-eks-a737599
+      workloads:
+        - name: tenant-gateway
+          kind: Deployment
+          namespace: tenant-edge
+          service: tenant-gateway
+          node_pool: general-c6i
+          replicas: 8
+          image: harbor.example-saas.io/platform/tenant-gateway:v2.14.0
+          container: gateway
+          cpu_request: 2
+          cpu_limit: 2
+          memory_request: 2Gi
+          memory_limit: 2Gi
+          cpu_util: [0.55, 0.65]
+          memory_util: [0.45, 0.55]
+          hpa: {min: 4, max: 20, target_cpu: 0.70}
+        # The green half of the blue/green pair: scaled to zero between releases.
+        # The deploy pipeline scales it up before switching the Service selector.
+        - name: tenant-gateway-green
+          kind: Deployment
+          namespace: tenant-edge
+          node_pool: general-c6i
+          replicas: 0
+          image: harbor.example-saas.io/platform/tenant-gateway:v2.15.0
+          container: gateway
+          cpu_request: 2
+          cpu_limit: 2
+          memory_request: 2Gi
+          memory_limit: 2Gi
+          labels: {app: tenant-gateway, track: green}
+        - name: ingress-nginx-controller
+          kind: Deployment
+          namespace: ingress-nginx
+          service: ingress-nginx
+          node_pool: edge-c6i
+          replicas: 6
+          image: registry.k8s.io/ingress-nginx/controller:v1.11.3
+          container: controller
+          cpu_request: 1
+          memory_request: 512Mi
+          memory_limit: 1Gi
+          cpu_util: [0.35, 0.50]
+          memory_util: [0.55, 0.65]
+        - name: coredns
+          kind: Deployment
+          namespace: kube-system
+          service: coredns
+          replicas: 3
+          placement: [system, system, system]
+          image: 602401143452.dkr.ecr.us-east-1.amazonaws.com/eks/coredns:v1.11.3-eksbuild.1
+          container: coredns
+          cpu_request: 100m
+          memory_request: 70Mi
+          memory_limit: 170Mi
+          cpu_util: [0.6, 1.2]
+          memory_util: [0.30, 0.45]
+        - name: cert-manager
+          kind: Deployment
+          namespace: cert-manager
+          service: cert-manager
+          node_pool: system
+          replicas: 1
+          image: quay.io/jetstack/cert-manager-controller:v1.15.3
+          container: cert-manager-controller
+          cpu_request: 100m
+          memory_request: 128Mi
+          memory_limit: 512Mi
+        - name: cluster-autoscaler
+          kind: Deployment
+          namespace: kube-system
+          service: cluster-autoscaler
+          node_pool: system
+          replicas: 1
+          image: registry.k8s.io/autoscaling/cluster-autoscaler:v1.30.2
+          container: cluster-autoscaler
+          cpu_request: 100m
+          memory_request: 600Mi
+          memory_limit: 1Gi
+        - name: external-secrets
+          kind: Deployment
+          namespace: external-secrets
+          service: external-secrets
+          node_pool: system
+          replicas: 1
+          image: ghcr.io/external-secrets/external-secrets:v0.10.4
+          container: external-secrets
+          cpu_request: 50m
+          memory_request: 64Mi
+          memory_limit: 256Mi
+        - name: harbor-registry
+          kind: Deployment
+          namespace: harbor
+          service: harbor-registry
+          node_pool: general-c6i
+          replicas: 2
+          image: goharbor/registry-photon:v2.11.1
+          container: registry
+          cpu_request: 500m
+          memory_request: 512Mi
+          memory_limit: 2Gi
+          pvc: {name: harbor-registry, capacity: 1Ti, used: [0.62, 0.66]}
+        - name: kyverno-admission-controller
+          kind: Deployment
+          namespace: kyverno
+          node_pool: system
+          replicas: 3
+          image: ghcr.io/kyverno/kyverno:v1.12.5
+          container: kyverno
+          cpu_request: 100m
+          memory_request: 128Mi
+          memory_limit: 384Mi
+        - name: job-operator
+          kind: Deployment
+          namespace: tenant-batch
+          node_pool: general-c6i
+          replicas: 2
+          image: harbor.example-saas.io/tenant-batch/job-operator:v0.8.4
+          container: manager
+          cpu_request: 200m
+          memory_request: 256Mi
+          memory_limit: 512Mi
+        - name: report-builder
+          kind: Deployment
+          namespace: tenant-batch
+          node_pool: general-c6i
+          replicas: 3
+          image: harbor.example-saas.io/tenant-batch/report-builder:v3.1.4
+          container: report-builder
+          cpu_request: 1
+          memory_request: 2Gi
+          memory_limit: 4Gi
+        - name: session-cache
+          kind: Deployment
+          namespace: tenant-edge
+          node_pool: general-c6i
+          replicas: 3
+          image: harbor.example-saas.io/dockerhub-proxy/library/redis:7.2.5
+          container: redis
+          cpu_request: 250m
+          memory_request: 1Gi
+          memory_limit: 2Gi
+        - name: batch-worker
+          kind: Deployment
+          namespace: tenant-batch
+          node_pool: batch-spot
+          replicas: 8
+          image: harbor.example-saas.io/tenant-batch/batch-worker:v1.22.0
+          container: worker
+          cpu_request: 6
+          memory_request: 12Gi
+          memory_limit: 16Gi
+          cpu_util: [0.65, 0.85]
+          tolerations: [workload]
+        - name: fluent-bit
+          kind: DaemonSet
+          namespace: logging
+          image: harbor.example-saas.io/platform/fluent-bit:3.0.7
+          container: fluent-bit
+          cpu_request: 100m
+          memory_request: 128Mi
+          memory_limit: 256Mi
+          tolerations: [workload]
+        - name: aws-node
+          kind: DaemonSet
+          namespace: kube-system
+          image: 602401143452.dkr.ecr.us-east-1.amazonaws.com/amazon-k8s-cni:v1.18.5-eksbuild.1
+          container: aws-node
+          cpu_request: 25m
+          memory_request: 64Mi
+          tolerations: [workload]
+        - name: nightly-reconcile
+          kind: Job
+          namespace: tenant-batch
+    - name: prod-use2
+      provider: aws
+      platform: aws_eks
+      region: us-east-2
+      vpc_cidr: 10.43.0.0/16
+      node_name_format: 'ip-{ip_dashed}.us-east-2.compute.internal'
+      subnets:
+        us-east-2a: 10.43.32.0/23
+        us-east-2b: 10.43.36.0/23
+        us-east-2c: 10.43.40.0/23
+      node_pools:
+        - {name: system, count: 3, instance_types: [m6i.large], cpu: 2, memory_gib: 8, kubelet_version: v1.30.4-eks-a737599, os_image: Amazon Linux 2023.6.20250115}
+        - {name: edge-c6i, count: 3, instance_types: [c6i.2xlarge], cpu: 8, memory_gib: 16, kubelet_version: v1.30.4-eks-a737599, os_image: Amazon Linux 2023.6.20250115}
+        - {name: general-c6i, count: 8, instance_types: [c6i.4xlarge], cpu: 16, memory_gib: 32, kubelet_version: v1.30.4-eks-a737599, os_image: Amazon Linux 2023.6.20250115}
+      workloads:
+        - {name: tenant-gateway, namespace: tenant-edge, node_pool: general-c6i, replicas: 4, image: harbor.example-saas.io/platform/tenant-gateway:v2.14.0, container: gateway, cpu_request: 2, cpu_limit: 2, memory_request: 2Gi, memory_limit: 2Gi, cpu_util: [0.5, 0.6], hpa: {min: 3, max: 12, target_cpu: 0.70}}
+        - {name: ingress-nginx-controller, namespace: ingress-nginx, node_pool: edge-c6i, replicas: 3, image: registry.k8s.io/ingress-nginx/controller:v1.11.3, container: controller, cpu_request: 1, memory_request: 512Mi, memory_limit: 1Gi}
+        - {name: coredns, namespace: kube-system, node_pool: system, replicas: 2, image: 602401143452.dkr.ecr.us-east-2.amazonaws.com/eks/coredns:v1.11.3-eksbuild.1, container: coredns, cpu_request: 100m, memory_request: 70Mi, memory_limit: 170Mi}
+        - {name: fluent-bit, kind: DaemonSet, namespace: logging, image: harbor.example-saas.io/platform/fluent-bit:3.0.7, container: fluent-bit, cpu_request: 100m, memory_request: 128Mi, memory_limit: 256Mi}
+    - name: prod-euw1
+      provider: aws
+      platform: aws_eks
+      region: eu-west-1
+      vpc_cidr: 10.44.0.0/16
+      node_name_format: 'ip-{ip_dashed}.eu-west-1.compute.internal'
+      subnets:
+        eu-west-1a: 10.44.32.0/23
+        eu-west-1b: 10.44.36.0/23
+        eu-west-1c: 10.44.40.0/23
+      node_pools:
+        - {name: system, count: 3, instance_types: [m6i.large], cpu: 2, memory_gib: 8, kubelet_version: v1.30.4-eks-a737599, os_image: Amazon Linux 2023.6.20250115}
+        - {name: edge-c6i, count: 3, instance_types: [c6i.2xlarge], cpu: 8, memory_gib: 16, kubelet_version: v1.30.4-eks-a737599, os_image: Amazon Linux 2023.6.20250115}
+        - {name: general-c6i, count: 6, instance_types: [c6i.4xlarge], cpu: 16, memory_gib: 32, kubelet_version: v1.30.4-eks-a737599, os_image: Amazon Linux 2023.6.20250115}
+      workloads:
+        - {name: tenant-gateway, namespace: tenant-edge, node_pool: general-c6i, replicas: 4, image: harbor.example-saas.io/platform/tenant-gateway:v2.14.0, container: gateway, cpu_request: 2, cpu_limit: 2, memory_request: 2Gi, memory_limit: 2Gi, cpu_util: [0.45, 0.55], hpa: {min: 3, max: 12, target_cpu: 0.70}}
+        - {name: ingress-nginx-controller, namespace: ingress-nginx, node_pool: edge-c6i, replicas: 3, image: registry.k8s.io/ingress-nginx/controller:v1.11.3, container: controller, cpu_request: 1, memory_request: 512Mi, memory_limit: 1Gi}
+        - {name: coredns, namespace: kube-system, node_pool: system, replicas: 2, image: 602401143452.dkr.ecr.eu-west-1.amazonaws.com/eks/coredns:v1.11.3-eksbuild.1, container: coredns, cpu_request: 100m, memory_request: 70Mi, memory_limit: 170Mi}
+        - {name: fluent-bit, kind: DaemonSet, namespace: logging, image: harbor.example-saas.io/platform/fluent-bit:3.0.7, container: fluent-bit, cpu_request: 100m, memory_request: 128Mi, memory_limit: 256Mi}
+
+agent_config:
+  id: platform-sre-analyst
+  name: Platform SRE Analyst
+  assessment_tool_name: platform_readiness_assessment
+  system_prompt: "You are an SRE on the platform team that runs the shared EKS clusters (prod-use1, prod-use2, prod-euw1)\
+    \ behind api.example-saas.io.\n\nWhen an incident is reported:\n1. Find the change or event that preceded the first\
+    \ errors (Argo CD syncs, audit records, CloudTrail, rollouts, provider health events)\n2. Confirm the cause from the\
+    \ component logs and their attributes, then from k8s metrics and events\n3. Recommend the opsctl remediation from the\
+    \ runbook and the signals that will confirm recovery\n\nKnown failure signatures (search body.text):\n  - 10.20.8.53:53:\
+    \ i/o timeout: CoreDNS corp.internal forward to unreachable resolvers\n  - nf_conntrack: table full, dropping packet:\
+    \ Edge node conntrack exhaustion\n  - is not authorized to perform: route53:ChangeResourceRecordSets: cert-manager DNS-01\
+    \ challenge denied\n  - PLEG is not healthy: Node NotReady (kubelet PLEG)\n  - code=429 reason=TooManyRequests: API\
+    \ priority level saturated\n  - failed calling webhook: Admission webhook timeouts\n  - toomanyrequests: You have reached\
+    \ your unauthenticated pull rate limit: Registry proxy cache pull limit\n  - UnfulfillableCapacity: Autoscaler cannot\
+    \ add Spot nodes\n  - failed to assign an IP address to container: VPC CNI IP exhaustion\n  - Cannot evict pod as it\
+    \ would violate the pod disruption budget: Node group upgrade blocked by PDB\n  - Not authorized to perform sts:AssumeRoleWithWebIdentity:\
+    \ external-secrets IRSA trust failure\n  - The node was low on resource: ephemeral-storage: Ephemeral storage evictions\n\
+    \  - exited on signal 9: ingress-nginx OOMKilled during reload storm\n  - 10.42.0.2:53: i/o timeout: ndots amplification\
+    \ against the VPC resolver\n  - Another app is currently holding the xtables lock: kube-proxy sync blocked\n  - plugin/loop:\
+    \ Loop: CoreDNS forwarding loop on new nodes\n  - response_flags=UO: tenant-gateway saturated by a retry storm\n  -\
+    \ filesystem: no space left on device: Harbor registry volume full\n  - exec format error: fluent-bit image missing arm64\n\
+    \  - does not have any active Endpoint: Service selector matches no pods\n\nCompare the affected cluster, pool or zone\
+    \ with the healthy ones before concluding."
+assessment_tool_config:
+  id: platform_readiness_assessment
+  description: 'Platform readiness assessment for the shared EKS clusters. Evaluates DNS resolution, ingress health, certificate
+    renewal, node readiness, control-plane latency, capacity headroom, registry and log pipeline health against their own
+    baselines, and returns the evidence for each. Log message field: body.text (never use ''body'' alone).'
+executive_kpi_emitter_service_name: tenant-gateway
+executive_dashboard_intro: '**Platform service levels** — public API, cluster services, delivery and capacity for the shared
+  EKS platform. `business.*` gauges reported by the platform SLO exporter.'
+executive_kpi_sections:
+  - header: '**Public API** — what tenants experience on api.example-saas.io'
+    specs:
+      - [Availability (%), metrics.business.api_availability_pct]
+      - [P99 latency (ms), metrics.business.api_p99_latency_ms]
+      - [5xx rate (%), metrics.business.api_5xx_rate_pct]
+      - [Requests / s, metrics.business.api_requests_per_s]
+      - [TLS handshake success (%), metrics.business.tls_handshake_success_pct]
+      - [Error budget burn rate, metrics.business.error_budget_burn_rate]
+  - header: '**Cluster services** — DNS, control plane, nodes'
+    specs:
+      - [DNS success (%), metrics.business.dns_success_rate_pct]
+      - [Control plane p99 (ms), metrics.business.control_plane_p99_ms]
+      - [Nodes ready (%), metrics.business.nodes_ready_pct]
+      - [Cordoned nodes, metrics.business.cordoned_nodes]
+      - [Nodes on target Kubernetes version (%), metrics.business.nodes_on_target_version_pct]
+      - [Certificate renewals succeeding (%), metrics.business.cert_renewal_success_pct]
+  - header: '**Delivery and capacity** — deploys, scheduling, batch, registry, logs'
+    specs:
+      - [Deploy success (%), metrics.business.deploy_success_rate_pct]
+      - [Pod start p95 (s), metrics.business.pod_start_p95_s]
+      - [Pending pods, metrics.business.pending_pods]
+      - [Batch jobs succeeding (%), metrics.business.batch_jobs_success_pct]
+      - [Registry push success (%), metrics.business.registry_push_success_pct]
+      - [Log pipeline coverage (%), metrics.business.log_pipeline_coverage_pct]
+      - [Node agents ready (%), metrics.business.daemonset_ready_pct]
+executive_trend_charts:
+  - {title: API availability (%), field: metrics.business.api_availability_pct, y_label: '%'}
+  - {title: API p99 latency (ms), field: metrics.business.api_p99_latency_ms, y_label: ms}
+  - {title: DNS success (%), field: metrics.business.dns_success_rate_pct, y_label: '%'}
+  - {title: Pending pods, field: metrics.business.pending_pods, y_label: pods}
+  - {title: Nodes ready (%), field: metrics.business.nodes_ready_pct, y_label: '%'}
+  - {title: Error budget burn rate, field: metrics.business.error_budget_burn_rate, y_label: x}
+executive_kpi_emissions:
+  - {name: business.api_availability_pct, better: higher, value: {uniform: [99.95, 99.99], round: 3}, unit: '%'}
+  - {name: business.api_p99_latency_ms, better: lower, value: {uniform: [180.0, 260.0], round: 0}, unit: ms}
+  - {name: business.api_5xx_rate_pct, better: lower, value: {uniform: [0.02, 0.08], round: 3}, unit: '%'}
+  - {name: business.api_requests_per_s, better: higher, value: {uniform: [3800.0, 5200.0], round: 0}, unit: req/s}
+  - {name: business.tls_handshake_success_pct, better: higher, value: {uniform: [99.9, 99.98], round: 2}, unit: '%'}
+  - {name: business.error_budget_burn_rate, better: lower, value: {uniform: [0.4, 1.0], round: 2}, unit: x}
+  - {name: business.dns_success_rate_pct, better: higher, value: {uniform: [99.97, 99.995], round: 3}, unit: '%'}
+  - {name: business.control_plane_p99_ms, better: lower, value: {uniform: [120.0, 260.0], round: 0}, unit: ms}
+  - {name: business.nodes_ready_pct, better: higher, value: {uniform: [99.5, 100.0], round: 1}, unit: '%'}
+  - {name: business.cordoned_nodes, better: lower, value: {uniform: [0.0, 1.0], round: 0}, unit: nodes}
+  - {name: business.nodes_on_target_version_pct, better: higher, value: {uniform: [99.5, 100.0], round: 1}, unit: '%'}
+  - {name: business.cert_renewal_success_pct, better: higher, value: {uniform: [99.0, 100.0], round: 1}, unit: '%'}
+  - {name: business.deploy_success_rate_pct, better: higher, value: {uniform: [97.0, 100.0], round: 1}, unit: '%'}
+  - {name: business.pod_start_p95_s, better: lower, value: {uniform: [6.0, 14.0], round: 1}, unit: s}
+  - {name: business.pending_pods, better: lower, value: {uniform: [0.0, 3.0], round: 0}, unit: pods}
+  - {name: business.batch_jobs_success_pct, better: higher, value: {uniform: [98.0, 100.0], round: 1}, unit: '%'}
+  - {name: business.registry_push_success_pct, better: higher, value: {uniform: [99.5, 100.0], round: 2}, unit: '%'}
+  - {name: business.log_pipeline_coverage_pct, better: higher, value: {uniform: [99.5, 100.0], round: 2}, unit: '%'}
+  - {name: business.daemonset_ready_pct, better: higher, value: {uniform: [99.5, 100.0], round: 1}, unit: '%'}
+
+trace_attributes:
+  base:
+    platform.cluster: prod-use1
+    platform.region: us-east-1
+  services:
+    tenant-gateway:
+      svc.version: v2.14.0
+      tenant.tier:
+        choice: [standard, standard, enterprise]
+      http.route:
+        choice: [/v1/accounts, /v1/invoices, /v1/payments, /v1/webhooks, /v1/usage]

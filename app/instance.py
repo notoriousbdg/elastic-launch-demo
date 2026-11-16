@@ -143,7 +143,49 @@ class ScenarioInstance:
         )
 
     def trigger_channel(self, channel: int, **kwargs):
-        return self.chaos_controller.trigger(channel, **kwargs)
+        result = self.chaos_controller.trigger(channel, **kwargs)
+        if isinstance(result, dict) and result.get("status") == "triggered":
+            self._record_chaos_context(
+                channel, kwargs.get("user_email", ""), kwargs.get("callback_url", ""),
+            )
+        return result
+
+    def _record_chaos_context(self, channel: int, user_email: str, callback_url: str) -> None:
+        """Write who triggered *channel* to ``{ns}-chaos-context`` (best effort).
+
+        The notification workflows look the email up there. It used to travel on every
+        fault log record as an ``event_name`` JSON blob, a field no real component emits.
+        """
+        url = (self.ctx.elastic_url or "").rstrip("/")
+        key = self.ctx.elastic_api_key
+        if not url or not key:
+            return
+        import datetime
+        import threading
+
+        import httpx
+
+        doc = {
+            "@timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "channel": channel,
+            "user_email": user_email or "",
+            "callback_url": callback_url or "",
+            "deployment_id": self.scenario_id,
+        }
+
+        def _post() -> None:
+            try:
+                with httpx.Client(timeout=10.0) as client:
+                    client.post(
+                        f"{url}/{self.namespace}-chaos-context/_doc",
+                        headers={"Authorization": f"ApiKey {key}",
+                                 "Content-Type": "application/json"},
+                        json=doc,
+                    )
+            except Exception as exc:
+                logger.debug("chaos-context write failed: %s", exc)
+
+        threading.Thread(target=_post, name="chaos-context", daemon=True).start()
 
     def resolve_channel(self, channel: int, **kwargs):
         return self.chaos_controller.resolve(channel, **kwargs)

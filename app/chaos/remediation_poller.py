@@ -190,7 +190,13 @@ class RemediationPoller:
             self._mark_processed(client, doc_id, error="duplicate")
             return
 
-        result = self._chaos.resolve(channel, force=True)
+        # The auto-remediate path (approval_mode skip) applies the fix without a person:
+        # its change records name the automation. Approved HITL fixes keep the
+        # default on-call identity.
+        from app.chaos.controller import AUTO_REMEDIATOR_ACTOR
+
+        auto = str(src.get("approval_mode") or "").strip().lower() == "skip"
+        result = self._chaos.resolve(channel, force=True, **({"actor": AUTO_REMEDIATOR_ACTOR} if auto else {}))
         status = result.get("status", "unknown")
         resolved_channels.add(channel)
         logger.info(

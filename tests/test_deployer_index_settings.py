@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-from elastic_config.deployer_base import WORKFLOW_INDEX_SUFFIXES
+from elastic_config.deployer_base import WORKFLOW_INDEX_MAPPINGS, WORKFLOW_INDEX_SUFFIXES
 from elastic_config.deployer_kb import KbMixin
 from elastic_config.deployer_workflows import WorkflowsMixin
 
@@ -65,8 +65,19 @@ class TestWorkflowIndices:
         created = _Workflows(serverless=False)._ensure_workflow_indices(_client(puts))
         assert created == len(WORKFLOW_INDEX_SUFFIXES)
         assert len(puts) == len(WORKFLOW_INDEX_SUFFIXES)
-        for _path, body in puts:
-            assert body == {"settings": SETTINGS}
+        for path, body in puts:
+            suffix = path.lstrip("/").split("-", 1)[1]
+            expected = {"settings": SETTINGS}
+            if suffix in WORKFLOW_INDEX_MAPPINGS:
+                expected["mappings"] = WORKFLOW_INDEX_MAPPINGS[suffix]
+            assert body == expected
+
+    def test_queried_indices_carry_mappings(self):
+        """ES|QL SORT on an empty index needs the column mapped up front."""
+        puts: list = []
+        _Workflows(serverless=True)._ensure_workflow_indices(_client(puts))
+        by_suffix = {p.lstrip("/").split("-", 1)[1]: b for p, b in puts}
+        assert by_suffix["chaos-context"]["mappings"]["properties"]["@timestamp"] == {"type": "date"}
 
     def test_serverless_sends_no_settings(self):
         puts: list = []

@@ -1,0 +1,113 @@
+name: Node group upgrade stalled on pod disruption budget
+subsystem: control-plane
+vehicle_section: general-c6i/upgrade
+error_type: Cannot evict pod as it would violate the pod disruption budget
+sensor_type: node_drain
+affected_services:
+  - kube-apiserver
+cascade_services: []
+description: The general-c6i managed node group update from Kubernetes 1.30 to 1.31 stopped partway. Evictions of tenant-gateway
+  pods are refused, two nodes stay cordoned and the pool runs mixed kubelet versions. Tenants see no impact.
+investigation_notes: |-
+  Root cause: while the node group update was draining nodes, the tenant team changed the tenant-gateway PodDisruptionBudget from maxUnavailable: 1 to maxUnavailable: {pdb_value} (Argo CD, commit {commit_sha}). With zero allowed disruptions every eviction of a tenant-gateway pod is refused, so the update cannot drain the next node and EKS eventually fails it with PodEvictionFailure.
+  Confirm:
+    - kube-apiserver audit: create pods/eviction ... code=429 ... Cannot evict pod as it would violate the pod disruption budget (always for tenant-gateway pods)
+    - EKS update event: PodEvictionFailure: Reached max retries while trying to evict pods from nodes in node group general-c6i
+    - the pool reports mixed k8s.kubelet.version (v1.31 on the replaced nodes, v1.30 on the rest); two nodes cordoned (NodeNotSchedulable events)
+    - the audit shows poddisruptionbudgets/tenant-gateway patched shortly before evictions started failing
+    - kubectl -n tenant-edge get pdb tenant-gateway -o jsonpath='{.status.disruptionsAllowed}'
+  Remediation: roll the PDB back to maxUnavailable: 1; evictions succeed and the update resumes on its own, one node at a time.
+  Follow-up: revert commit 81c4e5d in Git, or pause auto-sync for the Argo CD application, before the next sync; otherwise Argo CD re-applies the change and the fault returns.
+remediation_action: rollback_pdb
+remediation_command: |-
+  opsctl rollback pdb/tenant-gateway -n tenant-edge
+error_message: 'audit: level=Metadata stage=ResponseComplete verb=create resource=pods/eviction namespace=tenant-edge name={pod}
+  user=eks:node-manager code=429 reason="Cannot evict pod as it would violate the pod disruption budget." pdb=tenant-gateway
+  disruptionsAllowed=0'
+stack_trace: ''
+fault_params:
+  pod: {choice: [tenant-gateway-1250b0e72d-vq5d4, tenant-gateway-1250b0e72d-8ftvx, tenant-gateway-1250b0e72d-9d2dt]}
+  pdb_value: 0
+  commit_sha: 81c4e5d
+rca_clues:
+  kube-apiserver:
+    k8s.pdb.name: tenant-gateway
+    k8s.pdb.max_unavailable: 0
+    k8s.pdb.disruptions_allowed: 0
+    eks.nodegroup.update_id: 6f2c8e1a-47b9-3d05-9a61-c2e74b8f1d90
+cascade_messages: {}
+fault_scope:
+  cluster: prod-use1
+  node_pool: general-c6i
+  workloads: [tenant-gateway]
+onset_delay_seconds: 30
+fault_state:
+  kubernetes_otel:
+    node_pools:
+      general-c6i:
+        kubelet_version: v1.31.2-eks-7f9249a
+        upgraded_count: 6
+infrastructure_events:
+  - service: kube-apiserver
+    severity: INFO
+    offset_seconds: -1500
+    body: 'cloudtrail: eventSource=eks.amazonaws.com eventName=UpdateNodegroupVersion userIdentity=arn:aws:sts::752253522700:assumed-role/platform-admin/oncall
+      requestParameters.nodegroupName=general-c6i requestParameters.version=1.31 responseElements.update.id=6f2c8e1a-47b9-3d05-9a61-c2e74b8f1d90'
+  - service: kube-apiserver
+    severity: INFO
+    offset_seconds: -60
+    body: 'audit: level=RequestResponse stage=ResponseComplete verb=patch resource=poddisruptionbudgets namespace=tenant-edge
+      name=tenant-gateway user=system:serviceaccount:argocd:argocd-application-controller code=200 sync.revision=81c4e5d change="maxUnavailable:
+      1 -> 0"'
+    attributes:
+      k8s.audit.verb: patch
+      k8s.audit.resource: poddisruptionbudgets
+      user.name: system:serviceaccount:argocd:argocd-application-controller
+      vcs.revision: 81c4e5d
+  - service: kube-apiserver
+    severity: WARN
+    offset_seconds: 600
+    body: 'eks: nodegroup=general-c6i update=6f2c8e1a-47b9-3d05-9a61-c2e74b8f1d90 status=Failed errors=[{{errorCode=PodEvictionFailure,
+      errorMessage=Reached max retries while trying to evict pods from nodes in node group general-c6i}}]'
+k8s_events:
+  - type: Normal
+    reason: NodeNotSchedulable
+    object: {kind: Node}
+    message: 'Node {self_node} status is now: NodeNotSchedulable'
+    component: kubelet
+    every_seconds: 300
+remediation_effects:
+  transition_seconds: 900
+  state:
+    kubernetes_otel:
+      node_pools:
+        general-c6i:
+          kubelet_version: v1.31.2-eks-7f9249a
+  log_events:
+    - service: kube-apiserver
+      severity: INFO
+      offset_seconds: 3
+      body: 'audit: level=Metadata verb=patch resource=poddisruptionbudgets namespace=tenant-edge name=tenant-gateway user={actor}
+        code=200 change="maxUnavailable: 0 -> 1"'
+    - service: kube-apiserver
+      severity: INFO
+      offset_seconds: 40
+      body: 'audit: level=Metadata stage=ResponseComplete verb=create resource=pods/eviction namespace=tenant-edge user=eks:node-manager
+        code=201 pdb=tenant-gateway'
+  verification:
+    - signal: refused evictions
+      from: 'logs.otel.platform'
+      where: 'resource.attributes.service.name == "kube-apiserver" AND body.text LIKE "*Cannot evict pod*"'
+      expect: '0 new lines'
+      within_seconds: 120
+    - signal: k8s.kubelet.version across general-c6i
+      from: 'metrics-k8sclusterreceiver.otel-*'
+      field: 'resource.attributes.k8s.kubelet.version'
+      where: 'resource.attributes.`k8s.node.label.eks.amazonaws.com/nodegroup` == "general-c6i" AND resource.attributes.k8s.cluster.name == "prod-use1"'
+      expect: 'all 24 nodes on v1.31.2-eks-7f9249a'
+      within_seconds: 1000
+business_impact:
+  - kpi: business.nodes_on_target_version_pct
+    value: {uniform: [24.0, 26.0], round: 1}
+  - kpi: business.cordoned_nodes
+    value: {uniform: [2.0, 2.0], round: 0}

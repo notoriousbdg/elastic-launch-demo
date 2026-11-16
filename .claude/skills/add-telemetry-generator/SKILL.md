@@ -27,9 +27,10 @@ extract/verify (and any package fetch/extract/merge helpers present in this chec
 2. **Fetch / extract / merge** inventories into `$OUT` (package-backed)
 3. **Package template gate (mandatory when templates exist)**: alerts, SLOs and ML jobs — see below
 4. **Emit** metrics/logs/traces to match dashboards + alerts + SLOs + ML jobs + constraints
-5. **SPEC** in `__init__.py` (`schema_version`, datasets, integrations, `identity_fields`, …). Every host, service, instance, database, URL, bucket, endpoint and cloud-account, subscription, tenant or project value comes from `ScenarioIdentity` (`generator_engine/identity.py`), so no two scenarios share it. Do not hardcode these or format `{namespace}-` prefixes in the generator. See guardrail 36 in [GUARDRAILS.md](GUARDRAILS.md) for the helper table; `tests/test_generator_identity.py` enforces it.
+5. **SPEC** in `__init__.py` (`schema_version="1.1"`, `scope_aware`, `state_keys`, `coherence` — template in [TEMPLATES.md](TEMPLATES.md) §SPEC template — datasets, integrations, `identity_fields`, …). Every host, service, instance, database, URL, bucket, endpoint and cloud-account, subscription, tenant or project value comes from `ScenarioIdentity` (`generator_engine/identity.py`), so no two scenarios share it. Do not hardcode these or format `{namespace}-` prefixes in the generator. See guardrail 36 in [GUARDRAILS.md](GUARDRAILS.md) for the helper table; `tests/test_generator_identity.py` enforces it.
 6. **Impact keys (mandatory)** — see below
-7. **Tests** + registry reload; remind **Refresh list**
+7. **State keys, scope and coherence (generator schema 1.1)** — see below
+8. **Tests** + registry reload; remind **Refresh list**
 
 Synthetics (`integrations=()`) skip package extract but still need impact_keys.
 
@@ -124,6 +125,27 @@ SOURCE_INTEGRATION = "elastic/integrations packages/<id>@<version>"
 ```
 
 The citation is the **install pin**: step 20 installs exactly this package version (`generator_engine.registry.package_versions`), so the deployed dashboards, alerts, SLOs and ML jobs are the ones the generator was built against. Cite every package in `SPEC.integrations`; `tests/test_package_pins.py` fails on a missing or conflicting citation, or on fixtures snapshotted from another version.
+
+---
+
+## Phase 7: state_keys and coherence (generator schema 1.1)
+
+Scenario schema 1.3 channels describe a fault's scope, its timing and the state the fix leaves. A 1.1 generator honours all of it. Reference: `generators/kubernetes_otel/pinned.py`; host-level scope: `generators/host_metrics/generator.py` (`_host_scope`).
+
+1. **state_keys.** If the generator reports config-like values a fix can change (limits, capacities, replicas, versions, images, instance types), declare them in `SPEC.state_keys` and read them from the controller instead of constants:
+
+    ```python
+    getter = getattr(chaos_controller, "get_platform_state", None)
+    state = getter() if getter else None   # {"fixes": [{channel, state, applied_at, transition_seconds}],
+                                           #  "faults": [{channel, state, triggered_at, onset_at}]}
+    ```
+
+    Kubernetes-shaped values: build the model with `generator_engine.platform_topology.get_platform(scenario_data["k8s_topology"], namespace)` and call `effective_platform(base, state, time.time(), generator_id="<id>")` (baseline, then applied fixes oldest first with transition progress, then active faults past onset). Other values: read `row["state"]["<id>"]` from each row yourself, scale fix rows by `fix_progress(row, now)` so changes play out over `transition_seconds`, and apply fault rows only once `now >= onset_at`.
+2. **Scope.** Read the active channels' `fault_scope` from the channel registry (`scenario_data["channel_registry"]`, or `channel_ids` in the `resolve_active_chaos` result). Degrade only the entities inside it (cluster, node_pool, nodes, az, workloads) and keep the rest healthy as a comparison. Set `SPEC.scope_aware=True`.
+3. **Onset and ramp.** `resolve_active_chaos` does not apply them. Use `chaos_controller.get_channel_elapsed(channel)` (None when inactive): no impact before `onset_delay_seconds`, then scale it in over `ramp_seconds`.
+4. **Coherence.** Couple related signals inside the generator (HPA at max ⇒ replicas = max and CPU above target; OOMKilled ⇒ memory at the limit before each kill and restarts rising; node CPU and memory = sum of its pods) and list each coupling in `SPEC.coherence`.
+5. **No demo bookkeeping.** Never emit `chaos.*` attributes (channel, fault type, callback URL, user email) or other demo fields such as `ops.*`, `system.status` or an `event_name` blob. Emit what the real receiver or integration emits.
+6. Tests: a fault with a `fault_scope` changes only in-scope entities; a `remediation_effects.state` row changes the reported value and it persists after the channel resolves; nothing is emitted under a `chaos.` key.
 
 ---
 

@@ -124,6 +124,7 @@ def test_knowledge_base_bulk_retries_with_es_headers(monkeypatch):
     host.api_key = "kb-key"
     host.scenario = _Scenario()
     host.progress = object()
+    host._stream_name = "logs.otel.demo"
     host._step = lambda _idx: step
     host._is_serverless = lambda: False
 
@@ -201,7 +202,9 @@ def test_serverless_kb_also_writes_wiki_runbook(monkeypatch):
     assert body["status"] == "established"
     assert "version" not in body
     assert "`Timeout`" in body["content"] and "restart_edge" in body["content"]
-    assert "demo." not in body["content"] and "remediation-guide" not in body["content"]
+    # no Agent Builder tool ids (demo.<tool>) or skill names
+    assert "demo.search" not in body["content"] and "demo.remediation" not in body["content"]
+    assert "remediation-guide" not in body["content"]
     assert "`attributes.edge.queue_depth` (40–60)" in body["content"]
     assert "`attributes.runtime.pool` = `small`" in body["content"]
     assert step.status == "ok"
@@ -220,13 +223,13 @@ def test_wiki_runbook_updates_existing_page_with_version(monkeypatch):
     assert not [r for r in seen if r.method == "POST" and r.url.path == _WIKI]
 
 
-def test_wiki_failure_keeps_kb_step_ok(monkeypatch):
+def test_wiki_failure_fails_kb_step(monkeypatch):
     seen: list[httpx.Request] = []
     host, step, transport = _wiki_host(monkeypatch, seen, write_status=500)
     with _REAL_CLIENT(transport=transport) as client:
         host._deploy_knowledge_base(client, lambda _progress: None)
 
-    assert step.status == "ok"
+    assert step.status == "failed"
     assert "0/1 Wiki runbooks" in step.detail
 
 

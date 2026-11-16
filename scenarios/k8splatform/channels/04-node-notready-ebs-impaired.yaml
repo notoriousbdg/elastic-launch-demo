@@ -1,0 +1,115 @@
+name: Node NotReady with kubelet PLEG unhealthy
+subsystem: nodes
+vehicle_section: general-c6i/kubelet
+error_type: PLEG is not healthy
+sensor_type: node_ready
+affected_services:
+  - kubelet
+cascade_services: []
+description: One general-c6i node in us-east-1b goes NotReady. Its kubelet stops reporting, its pods go Unknown and are
+  evicted after five minutes. Every other node is healthy.
+investigation_notes: |-
+  Root cause: the EBS root volume of the instance behind {node_name} is impaired (AWS Health event AWS_EBS_VOLUME_LOST / impaired I/O on {volume_id}). Container runtime calls hang on disk I/O, the kubelet's pod lifecycle event generator stops relisting, and after 3 minutes the kubelet reports PLEG is not healthy and the node controller marks the node NotReady. It is a single-instance hardware problem, not an AMI or configuration problem: the other 23 general-c6i nodes run the same image and are healthy.
+  Confirm:
+    - kubelet lines from this node only: PLEG is not healthy: pleg was last seen active ... ago; threshold is 3m0s
+    - containerd: rpc error: code = DeadlineExceeded on ListPodSandbox / ContainerStatus
+    - attributes.ebs.volume_status = impaired; host metrics for the node show disk I/O time pinned at 100%
+    - k8s.node.condition_ready = 0 for {node_name}; its pods phase Unknown, then TaintManagerEviction after 300s
+    - aws ec2 describe-volume-status --volume-ids {volume_id}
+  Remediation: drain the node (DaemonSet pods stay) and replace the instance; the managed node group's Auto Scaling group launches a fresh node in the same AZ within ~2 minutes.
+remediation_action: replace_node
+remediation_command: |-
+  opsctl drain node/ip-10-42-36-17.ec2.internal --ignore-daemonsets
+  opsctl replace node/ip-10-42-36-17.ec2.internal
+error_message: 'E{klog_time}    2817 kubelet.go:2412] "Skipping pod synchronization" err="PLEG is not healthy: pleg was last
+  seen active {pleg_age} ago; threshold is 3m0s"'
+stack_trace: ''
+fault_params:
+  pleg_age: {choice: [3m12.421s, 3m41.007s, 4m3.882s, 4m27.135s, 5m2.640s]}
+  node_name: ip-10-42-36-17.ec2.internal
+  volume_id: vol-0b5f2c9e81d3a4f67
+rca_clues:
+  kubelet:
+    ebs.volume_id: vol-0b5f2c9e81d3a4f67
+    ebs.volume_status: impaired
+    host.disk.io_time_pct: {uniform: [98.5, 100.0], round: 1}
+cascade_messages: {}
+fault_scope:
+  cluster: prod-use1
+  nodes: [ip-10-42-36-17.ec2.internal]
+onset_delay_seconds: 90
+generator_impact:
+  kubernetes_otel:
+    node_not_ready: 1.0
+  host_metrics:
+    disk_io_multiplier: 15.0
+infrastructure_events:
+  - service: kubelet
+    severity: INFO
+    offset_seconds: -60
+    body: 'aws.health: eventTypeCode=AWS_EBS_VOLUME_LOST service=EBS region=us-east-1 availabilityZone=us-east-1b statusCode=open
+      affectedEntity=vol-0b5f2c9e81d3a4f67 description="A storage server hosting your volume has degraded. I/O to vol-0b5f2c9e81d3a4f67
+      (instance i-20c802d21172010c2) may be impaired."'
+    attributes:
+      aws.health.event_type_code: AWS_EBS_VOLUME_LOST
+      cloud.availability_zone: us-east-1b
+      ebs.volume_id: vol-0b5f2c9e81d3a4f67
+  - service: kubelet
+    severity: ERROR
+    offset_seconds: 30
+    body: 'E{klog_time}    2817 remote_runtime.go:296] "ListPodSandbox with filter from runtime service failed" err="rpc
+      error: code = DeadlineExceeded desc = context deadline exceeded"'
+k8s_events:
+  - type: Warning
+    reason: NodeNotReady
+    object: {kind: Node, name: ip-10-42-36-17.ec2.internal}
+    message: 'Node ip-10-42-36-17.ec2.internal status is now: NodeNotReady'
+    component: node-controller
+    every_seconds: 120
+remediation_effects:
+  transition_seconds: 150
+  state:
+    kubernetes_otel:
+      remove_nodes: [ip-10-42-36-17.ec2.internal]
+      node_pools:
+        general-c6i:
+          add_nodes:
+            - {name: ip-10-42-37-88.ec2.internal, az: us-east-1b}
+  log_events:
+    - service: kube-apiserver
+      severity: INFO
+      offset_seconds: 5
+      body: 'audit: level=Metadata verb=create resource=pods/eviction namespace=tenant-edge user={actor} code=201 reason=drain
+        node=ip-10-42-36-17.ec2.internal'
+    - service: kube-apiserver
+      severity: INFO
+      offset_seconds: 30
+      body: 'cloudtrail: eventSource=autoscaling.amazonaws.com eventName=TerminateInstanceInAutoScalingGroup requestParameters.instanceId=i-20c802d21172010c2
+        requestParameters.shouldDecrementDesiredCapacity=false'
+    - service: kubelet
+      severity: INFO
+      offset_seconds: 140
+      body: 'I{klog_time}    2604 kubelet_node_status.go:76] "Successfully registered node" node="ip-10-42-37-88.ec2.internal"'
+  verification:
+    - signal: k8s.node.condition_ready
+      from: 'metrics-k8sclusterreceiver.otel-*'
+      field: 'metrics.k8s.node.condition_ready'
+      where: 'resource.attributes.k8s.node.name == "ip-10-42-37-88.ec2.internal" AND resource.attributes.k8s.cluster.name == "prod-use1"'
+      expect: '1 (new node Ready); ip-10-42-36-17.ec2.internal no longer reported'
+      within_seconds: 180
+    - signal: count of general-c6i nodes
+      from: 'metrics-k8sclusterreceiver.otel-*'
+      field: 'resource.attributes.k8s.node.name'
+      where: 'resource.attributes.`k8s.node.label.eks.amazonaws.com/nodegroup` == "general-c6i" AND resource.attributes.k8s.cluster.name == "prod-use1"'
+      expect: '24'
+      within_seconds: 180
+    - signal: kubelet PLEG errors
+      from: 'logs.otel.platform'
+      where: 'resource.attributes.service.name == "kubelet" AND body.text LIKE "*PLEG is not healthy*"'
+      expect: '0 new lines'
+      within_seconds: 60
+business_impact:
+  - kpi: business.nodes_ready_pct
+    value: {uniform: [97.4, 97.7], round: 1}
+  - kpi: business.pod_start_p95_s
+    value: {uniform: [14.6, 16.0], round: 1}

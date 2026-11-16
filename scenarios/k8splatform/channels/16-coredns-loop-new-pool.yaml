@@ -1,0 +1,100 @@
+name: CoreDNS replica crash-looping on the new Ubuntu node pool
+subsystem: dns
+vehicle_section: general-m7i/coredns
+error_type: 'plugin/loop: Loop'
+sensor_type: dns_replica
+affected_services:
+  - coredns
+cascade_services: []
+description: The CoreDNS replica scheduled onto the newly added general-m7i pool exits at start-up with a forwarding loop
+  and crash-loops. The two replicas on the system pool keep answering, so DNS capacity is reduced rather than lost.
+investigation_notes: |-
+  Root cause: the general-m7i node group (rolled out just before) uses a custom Ubuntu 22.04 AMI whose /etc/resolv.conf points at the systemd-resolved stub {stub_ip}, and its kubelet config does not set resolvConf: /run/systemd/resolve/resolv.conf. CoreDNS pods use dnsPolicy Default, so the replica on that pool inherits nameserver {stub_ip}; with forward . /etc/resolv.conf it sends queries to itself, the loop plugin detects it and CoreDNS exits.
+  Confirm:
+    - coredns: [FATAL] plugin/loop: Loop (127.0.0.1:{loop_port} -> :53) detected for zone ".", see https://coredns.io/plugins/loop#troubleshooting
+    - only the coredns pod on a general-m7i node (os Ubuntu 22.04.5 LTS) restarts (k8s.container.restarts rising, CrashLoopBackOff); the system-pool replicas are Running
+    - the node group general-m7i was created (CloudTrail CreateNodegroup) shortly before
+    - kubectl -n kube-system get pods -l k8s-app=kube-dns -o wide ; kubectl debug node/<m7i-node> -- cat /host/etc/resolv.conf
+  Remediation: keep CoreDNS off the pool right away, then fix the pool's kubelet resolvConf (the node group rolls its four nodes).
+remediation_action: fix_coredns_resolv_conf
+remediation_command: |-
+  opsctl patch deployment/coredns -n kube-system --avoid-nodepool general-m7i
+  opsctl patch nodegroup/general-m7i --kubelet-arg resolv-conf=/run/systemd/resolve/resolv.conf
+error_message: '[FATAL] plugin/loop: Loop (127.0.0.1:{loop_port} -> :53) detected for zone ".", see https://coredns.io/plugins/loop#troubleshooting.
+  Query: "HINFO {probe_a}.{probe_b}."'
+stack_trace: ''
+fault_params:
+  loop_port: {randint: [33000, 60999]}
+  probe_a: {randint: [1000000000000000000, 9223372036854775807]}
+  probe_b: {randint: [1000000000000000000, 9223372036854775807]}
+  stub_ip: 127.0.0.53
+rca_clues:
+  coredns:
+    dns.resolv_conf.nameserver: 127.0.0.53
+    k8s.node.pool: general-m7i
+    os.description: Ubuntu 22.04.5 LTS
+cascade_messages: {}
+fault_scope:
+  cluster: prod-use1
+  node_pool: general-m7i
+  workloads: [coredns]
+onset_delay_seconds: 60
+generator_impact:
+  kubernetes_otel:
+    pod_crashloopbackoff: 1.0
+fault_state:
+  kubernetes_otel:
+    node_pools:
+      general-m7i: {add_nodes: 4}
+    workloads:
+      coredns: {placement: [system, system, general-m7i]}
+infrastructure_events:
+  - service: kube-apiserver
+    severity: INFO
+    offset_seconds: -240
+    body: 'cloudtrail: eventSource=eks.amazonaws.com eventName=CreateNodegroup userIdentity=arn:aws:sts::752253522700:assumed-role/terraform-platform/atlantis
+      requestParameters.nodegroupName=general-m7i requestParameters.amiType=CUSTOM requestParameters.launchTemplate.name=general-m7i-ubuntu2204
+      requestParameters.scalingConfig.desiredSize=4'
+k8s_events:
+  - type: Warning
+    reason: BackOff
+    object: {kind: Pod, namespace: kube-system}
+    message: 'Back-off restarting failed container coredns in pod {self_pod}_kube-system'
+    component: kubelet
+    every_seconds: 60
+remediation_effects:
+  transition_seconds: 600
+  state:
+    kubernetes_otel:
+      node_pools:
+        general-m7i: {add_nodes: 4, kubelet_resolv_conf: /run/systemd/resolve/resolv.conf}
+      workloads:
+        coredns: {placement: [system, system, system], affinity: {nodegroup_not_in: [general-m7i]}}
+  log_events:
+    - service: kube-apiserver
+      severity: INFO
+      offset_seconds: 2
+      body: 'audit: level=Metadata verb=patch resource=deployments namespace=kube-system name=coredns user={actor} code=200
+        change="affinity: eks.amazonaws.com/nodegroup NotIn [general-m7i]"'
+    - service: kube-apiserver
+      severity: INFO
+      offset_seconds: 8
+      body: 'cloudtrail: eventSource=eks.amazonaws.com eventName=UpdateNodegroupVersion userIdentity={actor} requestParameters.nodegroupName=general-m7i
+        requestParameters.launchTemplate.version=2'
+  verification:
+    - signal: CoreDNS loop crashes
+      from: 'logs.otel.platform'
+      where: 'resource.attributes.service.name == "coredns" AND body.text LIKE "*plugin/loop*"'
+      expect: '0 new lines'
+      within_seconds: 90
+    - signal: coredns pod placement and restarts
+      from: 'metrics-k8sclusterreceiver.otel-*'
+      field: 'metrics.k8s.container.restarts'
+      where: 'resource.attributes.k8s.deployment.name == "coredns" AND resource.attributes.k8s.cluster.name == "prod-use1"'
+      expect: 'all 3 pods on system-pool nodes, ready; k8s.container.restarts flat'
+      within_seconds: 120
+business_impact:
+  - kpi: business.dns_success_rate_pct
+    value: {uniform: [99.94, 99.955], round: 3}
+  - kpi: business.api_p99_latency_ms
+    value: {uniform: [265.0, 275.0], round: 0}

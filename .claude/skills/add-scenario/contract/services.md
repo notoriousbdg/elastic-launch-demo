@@ -84,7 +84,7 @@ steps:                             # ordered list; executed once per generate_te
 | Value spec | Resolves to |
 |---|---|
 | `{var: name}` | Current value of sample var or state key `name` |
-| `{expr: "python_expr"}` | Sandboxed Python eval; env includes all vars, state, constants, `rand`, `active` |
+| `{expr: "python_expr"}` | Sandboxed Python eval; env includes all vars, state, constants, `rand`, `active`, `all_active`, `fixed_channels` (see Realism additions) |
 | `{if_active: spec, else: spec}` | First spec during a fault, second spec nominally |
 | `{choice: [a, b, c]}` | `random.choice` — list literal or name of a constant list |
 | `{randint: [lo, hi]}` | `random.randint(lo, hi)` |
@@ -94,6 +94,16 @@ steps:                             # ordered list; executed once per generate_te
 | scalar | Literal string / int / float / bool |
 
 State init specs: `{init: 0}`, `{init: now}`, `{init_per_key: {keys_from: CONST, spec: value_spec}}`.
+
+### Realism additions (schema 1.3)
+
+Reference: `scenarios/k8splatform/services/` (`kubelet.yaml`, `ingress-nginx.yaml`, `kube-apiserver.yaml`).
+
+- **`when: "<expr>"` on any step.** The step runs only when the expression is true, e.g. `when: "13 in all_active"` to log extra reload lines while channel 13's fault is active, or `when: "20 not in all_active"`.
+- **`scope:` on a `log` step.** Narrows the pod or node the record comes from, with the same keys as a channel's `fault_scope`.
+- **`log_identity: pod | node | cluster`** (top level, default `pod`). With a pinned `k8s_topology`, each record takes the resource identity of a pod of the workload mapped to the service; `node` services (kubelet, kernel, journald) rotate across nodes; `cluster` services (a managed control plane such as the EKS API server) carry only the cluster and cloud attributes. `log_identity_pools: [pool, ...]` limits `node` services to some pools outside a fault.
+- **Expression environment.** Besides `active` / `active_channels` (faults affecting this service): `all_active` (every active channel), `fixed_channels` (channels whose `remediation_effects` were applied, so a service can render post-fix values), `pod_ips` (`{workload: [ip, ...]}`), `node_names`, and timestamps `klog_time`, `iso_now`, `epoch_now`. Log messages may also use the runtime placeholders listed in channels.md (`{self_node}`, `{self_pod_ip}`, `{node_count}`, `{klog_time}`, `{nginx_time}`...).
+- **Real log formats.** Write each line in the component's own format (klog, nginx, CoreDNS, logfmt, JSON) and no demo bookkeeping attributes. `with_remediation_meta` is still accepted on older specs but no longer stamps anything.
 
 ### Example: request service
 

@@ -47,10 +47,8 @@ steps:
     if: "${{ steps.claim_alert.output.result == 'created' }}"
     with:
       query: >
-        FROM logs.otel.__NS__,logs.otel.__NS__.*
-        | WHERE event_name IS NOT NULL
+        FROM __NS__-chaos-context
         | SORT @timestamp DESC
-        | GROK event_name """.*"user_email"\s*:\s*"(?<user_email>[^"]*)".*"""
         | KEEP user_email
         | LIMIT 1
       format: json

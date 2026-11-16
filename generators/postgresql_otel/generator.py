@@ -555,10 +555,6 @@ def _generate_query_sample(
         "network.peer.address": rng.choice(CLIENT_ADDRESSES),
         "user.name": rolname,
     }
-    if active_chaos:
-        attrs["chaos.channel"] = active_chaos["channel_id"]
-        if active_chaos.get("name"):
-            attrs["chaos.fault_type"] = active_chaos["name"]
 
     log_record = client.build_log_record(
         severity="INFO" if not active_chaos else "WARN",
@@ -577,8 +573,6 @@ def _generate_query_sample(
         "db.query.text": query,
         "db.operation.name": operation,
     }
-    if active_chaos:
-        span_attrs["chaos.channel"] = active_chaos["channel_id"]
 
     span = client.build_span(
         name=f"{operation} {db}.{table}",

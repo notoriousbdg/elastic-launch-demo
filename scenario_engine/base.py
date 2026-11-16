@@ -169,6 +169,16 @@ class BaseScenario(ABC):
         ...
 
     @property
+    def k8s_topology(self) -> dict[str, Any] | None:
+        """Pinned cluster model (schema 1.3): node pools, subnets and workloads.
+
+        None (the default) keeps the generated three-node-per-cluster layout.
+        When set, ``kubernetes_otel`` and ``infra_topology`` build every node,
+        pod and IP from it so counts and names agree across all signals.
+        """
+        return None
+
+    @property
     def nominal_label(self) -> str:
         """Status label for 'all clear'. Override for domain jargon (e.g. space uses 'NOMINAL')."""
         return "NORMAL"

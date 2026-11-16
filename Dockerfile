@@ -65,6 +65,11 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
+# Platform operations skill + opsctl CLI (must land in /root/.claude before the seed snapshot).
+RUN mkdir -p /root/.claude/skills \
+    && cp -r /app/claude-skills/platform-ops /root/.claude/skills/platform-ops \
+    && chmod +x /root/.claude/skills/platform-ops/bin/opsctl \
+    && ln -sf /root/.claude/skills/platform-ops/bin/opsctl /usr/local/bin/opsctl
 # Move entrypoint outside /app so it is always executed from the image layer
 # even when a PVC shadows /app on first boot.
 # Snapshot the full /app and /root/.claude trees for first-boot seeding of

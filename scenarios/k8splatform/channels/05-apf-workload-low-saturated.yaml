@@ -1,0 +1,95 @@
+name: API server throttling requests in priority level workload-low
+subsystem: control-plane
+vehicle_section: kube-apiserver/flowcontrol
+error_type: code=429 reason=TooManyRequests
+sensor_type: apf_rejections
+affected_services:
+  - kube-apiserver
+cascade_services: []
+description: The API server rejects requests from service accounts in the workload-low priority level. Controllers and
+  deploy pipelines in tenant namespaces see 429s and slow rollouts; system components are unaffected.
+investigation_notes: |-
+  Root cause: job-operator {bad_version} (tenant-batch) was rolled out with an informer resync bug: every {resync_s}s it LISTs all pods in the cluster without a resourceVersion, roughly {list_rate} requests/s of full LISTs. Those requests fall into API Priority and Fairness priority level workload-low (flow schema service-accounts), which saturates, so the API server queues and then rejects requests from every client in that level with 429.
+  Confirm:
+    - audit lines: verb=list resource=pods user=system:serviceaccount:tenant-batch:job-operator code=429 reason=TooManyRequests priorityLevel=workload-low
+    - attributes.apf.priority_level = workload-low and attributes.k8s.audit.user = the job-operator service account on most rejected requests
+    - apiserver.flowcontrol.rejected_requests_per_s for workload-low far above 0; request p99 latency up; system and leader-election traffic unaffected
+    - the audit shows the deployments/job-operator image update to {bad_version} shortly before the first 429
+    - kubectl get --raw /debug/api_priority_and_fairness/dump_priority_levels
+  Remediation: roll job-operator back to {good_version}; LIST volume drops immediately and the priority level drains within a minute.
+  Follow-up: revert commit 4f0d2a8 in Git, or pause auto-sync for the Argo CD application, before the next sync; otherwise Argo CD re-applies the change and the fault returns.
+remediation_action: rollback_deployment
+remediation_command: |-
+  opsctl rollback deployment/job-operator -n tenant-batch
+error_message: 'audit: level=Metadata stage=ResponseComplete verb=list resource=pods namespace= user=system:serviceaccount:tenant-batch:job-operator
+  code=429 reason=TooManyRequests priorityLevel=workload-low flowSchema=service-accounts latency={latency_ms}ms userAgent=job-operator/{bad_version}'
+stack_trace: ''
+fault_params:
+  latency_ms: {randint: [3, 40]}
+  bad_version: v0.9.0
+  good_version: v0.8.4
+  resync_s: 2
+  list_rate: {randint: [380, 420]}
+rca_clues:
+  kube-apiserver:
+    apf.priority_level: workload-low
+    apf.flow_schema: service-accounts
+    k8s.audit.user: system:serviceaccount:tenant-batch:job-operator
+    apf.rejected_per_s: {uniform: [80.0, 140.0], round: 1}
+cascade_messages: {}
+fault_scope:
+  cluster: prod-use1
+  workloads: [job-operator]
+onset_delay_seconds: 40
+fault_state:
+  kubernetes_otel:
+    workloads:
+      job-operator: {image: 'harbor.example-saas.io/tenant-batch/job-operator:v0.9.0', cpu_util: [1.6, 2.2]}
+infrastructure_events:
+  - service: kube-apiserver
+    severity: INFO
+    offset_seconds: -80
+    body: 'audit: level=RequestResponse stage=ResponseComplete verb=patch resource=deployments namespace=tenant-batch name=job-operator
+      user=system:serviceaccount:argocd:argocd-application-controller code=200 sync.revision=4f0d2a8 change="image job-operator:v0.8.4
+      -> job-operator:v0.9.0"'
+    attributes:
+      k8s.audit.verb: patch
+      k8s.audit.resource: deployments
+      k8s.namespace.name: tenant-batch
+      user.name: system:serviceaccount:argocd:argocd-application-controller
+      vcs.revision: 4f0d2a8
+remediation_effects:
+  # the old pods keep failing until the rolling update replaces them
+  log_taper_seconds: 60
+  transition_seconds: 45
+  log_events:
+    - service: kube-apiserver
+      severity: INFO
+      offset_seconds: 3
+      body: 'audit: level=Metadata verb=patch resource=deployments namespace=tenant-batch name=job-operator user={actor}
+        code=200 change="rollback to revision 11 (job-operator:v0.8.4)"'
+  verification:
+    - signal: apiserver.flowcontrol.rejected_requests_per_s
+      from: 'metrics-generic.otel-default'
+      field: 'metrics.apiserver.flowcontrol.rejected_requests_per_s'
+      where: 'attributes.priority_level == "workload-low"'
+      expect: '0'
+      within_seconds: 90
+    - signal: job-operator container image
+      from: 'metrics-k8sclusterreceiver.otel-*'
+      field: 'resource.attributes.container.image.tag'
+      where: 'resource.attributes.k8s.deployment.name == "job-operator" AND resource.attributes.k8s.cluster.name == "prod-use1"'
+      expect: 'container.image.tag = v0.8.4 on every pod'
+      within_seconds: 90
+    - signal: audit 429s
+      from: 'logs.otel.platform'
+      where: 'resource.attributes.service.name == "kube-apiserver" AND body.text LIKE "*code=429*"'
+      expect: '0 new lines'
+      within_seconds: 90
+business_impact:
+  - kpi: business.control_plane_p99_ms
+    value: {uniform: [1700.0, 2100.0], round: 0}
+  - kpi: business.deploy_success_rate_pct
+    value: {uniform: [90.0, 93.0], round: 1}
+  - kpi: business.pod_start_p95_s
+    value: {uniform: [15.0, 16.0], round: 1}

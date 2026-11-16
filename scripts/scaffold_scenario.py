@@ -50,7 +50,7 @@ Brief YAML format
 
     channels:
       - slug: order-routing-failure      # becomes: 01-order-routing-failure.yaml
-        error_type: ORD-ROUTING-FAIL     # UPPER-KEBAB-CASE; unique per channel
+        error_type: ORD-ROUTING-FAIL     # a natural, quote-free substring of the error line; unique per channel
         affected_services: [order-intake]
         cascade_services: [storefront-gateway]
         generator: redis_otel            # optional: makes this channel the ONE dedicated
@@ -85,6 +85,11 @@ from scenario_engine.schema_version import CURRENT_SCHEMA_VERSION as _CURRENT_SC
 from generator_engine.identity import apply_host_identity  # noqa: E402
 from generator_engine.registry import GENERATORS  # noqa: E402
 
+
+
+def _yaml_str(value: str) -> str:
+    """Single-quote a scalar for YAML (natural signatures contain ': ')."""
+    return "'" + str(value).replace("'", "''") + "'"
 
 def _current_schema_version() -> str:
     """Return the current schema version from the engine registry."""
@@ -484,7 +489,7 @@ def _build_channel_yaml(ch_num: int, ch: dict) -> str:
         f"name: {_slug_to_title(slug)}",
         f"subsystem: {_infer_subsystem(slug)}",
         f"vehicle_section: {_infer_subsystem(slug)}_pipeline",
-        f"error_type: {error_type}",
+        f"error_type: {_yaml_str(error_type)}",
         f"sensor_type: {_infer_sensor_type(slug)}",
     ]
 

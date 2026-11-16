@@ -129,5 +129,23 @@ SPEC = GeneratorSpec(
     },
     chaos_mode='explicit',
     family='core',
-    schema_version="1.0",
+    schema_version="1.1",
+    scope_aware=True,
+    # Generator schema 1.1: what fault_state / remediation_effects.state may change.
+    # Read by the pinned-topology path (scenarios that declare k8s_topology).
+    state_keys={
+        "workloads": {"type": "dict", "doc": "Per-workload overrides: image, replicas, cpu_request, cpu_limit, memory_request, memory_limit, cpu_util, memory_util, hpa_max, hpa_target_cpu, pvc_capacity, pvc_used, node_pool, placement, tolerations."},
+        "node_pools": {"type": "dict", "doc": "Per-pool overrides: instance_types, add_nodes (count or [{name, az, instance_type}]), kubelet_version (+ upgraded_count), kubelet_resolv_conf, cordoned."},
+        "remove_nodes": {"type": "list", "doc": "Node names that leave the cluster (drained and replaced)."},
+        "cluster": {"type": "str", "doc": "Cluster the overrides apply to (default: the topology's default cluster)."},
+    },
+    coherence=(
+        "hpa_at_max_replicas => deployment replicas = HPA current = max; per-pod CPU above the HPA target",
+        "container_cpu_throttling => CPU usage just under the limit",
+        "oomkilled_containers => memory ramps to the limit before each kill; restarts increment",
+        "node_not_ready => kubelet stops reporting; pods Unknown, evicted after 300s",
+        "node_disk_pressure => filesystem utilisation above 0.85; disk-pressure condition",
+        "pod_crashloopbackoff => restarts with kubelet back-off spacing; container not ready",
+        "pods_stuck_in_pending_phase => extra Pending pods; running pods unaffected",
+    ),
 )

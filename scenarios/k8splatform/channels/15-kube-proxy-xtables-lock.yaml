@@ -1,0 +1,86 @@
+name: Stale service endpoints from blocked kube-proxy syncs
+subsystem: nodes
+vehicle_section: kube-system/kube-proxy
+error_type: Another app is currently holding the xtables lock
+sensor_type: iptables_sync
+affected_services:
+  - kubelet
+  - tenant-gateway
+error_services:
+  - kubelet
+cascade_services: []
+description: Calls from tenant-gateway to ClusterIP services intermittently hit pods that no longer exist, after every
+  backend rollout. Traffic from the ingress to tenant-gateway is unaffected because ingress-nginx routes to pod endpoints
+  directly.
+investigation_notes: |-
+  Root cause: the security team rolled out node-firewall {bad_version} as a DaemonSet. It re-applies its own iptables chains every 5 seconds and holds the xtables lock while doing so. kube-proxy's iptables-restore cannot take the lock, retries and gives up, so a sync that normally takes about a second now takes ~40 seconds or fails. Service rules on each node lag behind EndpointSlice changes, and connections to a ClusterIP land on pod IPs that were just removed.
+  Confirm:
+    - kube-proxy (node journal): Failed to execute iptables-restore: exit status 4 (Another app is currently holding the xtables lock ...); SyncProxyRules complete elapsed="~40s"
+    - attributes.kubeproxy.sync_duration_s ~40 on all nodes (baseline ~1s)
+    - tenant-gateway: upstream connect error ... delayed connect error: 113 (No route to host) to ClusterIP backends, clustered right after backend pod rollouts
+    - the audit shows daemonsets/node-firewall image updated to {bad_version} before the first failed sync
+  Remediation: roll node-firewall back to {good_version}, which takes the lock only on config change.
+  Follow-up: revert commit b8e2f61 in Git, or pause auto-sync for the Argo CD application, before the next sync; otherwise Argo CD re-applies the change and the fault returns.
+remediation_action: rollback_daemonset
+remediation_command: |-
+  opsctl rollback daemonset/node-firewall -n security
+error_message: 'E{klog_time}       1 proxier.go:1550] "Failed to execute iptables-restore" err=<exit status 4: Another app is currently
+  holding the xtables lock; still {waited}s 100000us time ahead to have a chance to grab the lock...> rules="{rules}"'
+stack_trace: ''
+fault_params:
+  waited: {randint: [1, 5]}
+  rules: {randint: [11800, 12600]}
+  bad_version: v1.9.0
+  good_version: v1.8.3
+rca_clues:
+  kubelet:
+    kubeproxy.sync_duration_s: {uniform: [38.0, 44.0], round: 3}
+    kubeproxy.mode: iptables
+    iptables.lock_holder: node-firewall
+  tenant-gateway:
+    network.peer.port: 8080
+cascade_messages:
+  tenant-gateway:
+    - severity: ERROR
+      message: 'upstream connect error or disconnect/reset before headers. reset reason: connection failure, transport failure
+        reason: delayed connect error: 113 upstream_cluster=billing-api.tenant-core.svc response_code=503 response_flags=UF'
+fault_scope:
+  cluster: prod-use1
+onset_delay_seconds: 45
+infrastructure_events:
+  - service: kube-apiserver
+    severity: INFO
+    offset_seconds: -90
+    body: 'audit: level=RequestResponse stage=ResponseComplete verb=patch resource=daemonsets namespace=security name=node-firewall
+      user=system:serviceaccount:argocd:argocd-application-controller code=200 sync.revision=b8e2f61 change="image node-firewall:v1.8.3
+      -> node-firewall:v1.9.0"'
+remediation_effects:
+  # the old pods keep failing until the rolling update replaces them
+  log_taper_seconds: 60
+  transition_seconds: 120
+  log_events:
+    - service: kube-apiserver
+      severity: INFO
+      offset_seconds: 3
+      body: 'audit: level=Metadata verb=patch resource=daemonsets namespace=security name=node-firewall user={actor}
+        code=200 change="rollback to revision 14 (node-firewall:v1.8.3)"'
+  verification:
+    - signal: kube-proxy sync duration
+      from: 'logs.otel.platform'
+      where: 'resource.attributes.service.name == "kubelet" AND body.text LIKE "*SyncProxyRules complete*"'
+      expect: 'attributes.kubeproxy.sync_duration_s back to ~1s'
+      within_seconds: 180
+    - signal: xtables lock failures
+      from: 'logs.otel.platform'
+      where: 'resource.attributes.service.name == "kubelet" AND body.text LIKE "*xtables lock*"'
+      expect: '0 new lines'
+      within_seconds: 180
+business_impact:
+  - kpi: business.api_5xx_rate_pct
+    value: {uniform: [0.6, 0.9], round: 3}
+  - kpi: business.api_availability_pct
+    value: {uniform: [99.2, 99.5], round: 3}
+  - kpi: business.error_budget_burn_rate
+    value: {uniform: [7.0, 9.0], round: 2}
+  - kpi: business.api_p99_latency_ms
+    value: {uniform: [266.0, 278.0], round: 0}

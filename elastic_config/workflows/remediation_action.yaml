@@ -205,6 +205,8 @@ steps:
             namespace: "__NS__"
             status: "pending"
             mission_id: "__SCENARIO_NAME__"
+            # who applies the fix: the app's change records name the automation
+            approval_mode: "skip"
           refresh: wait_for
 
       - name: log_queued_auto

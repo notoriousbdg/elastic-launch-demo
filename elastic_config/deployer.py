@@ -38,7 +38,7 @@ from elastic_config.deployer_skills import SkillsMixin
 from elastic_config.deployer_streams import StreamsMixin
 from elastic_config.deployer_views import DataViewsMixin
 from elastic_config.deployer_dashboard import DashboardMixin
-from elastic_config.deployer_alerting import AlertingMixin
+from elastic_config.deployer_alerting import AlertingMixin, is_scenario_alert_rule
 
 logger = logging.getLogger("deployer")
 
@@ -282,8 +282,7 @@ class ScenarioDeployer(
                     if resp.status_code < 300:
                         found["alert_rules"] += sum(
                             1 for r in resp.json().get("items", [])
-                            if r.get("kind") == "alert"
-                            and r.get("metadata", {}).get("name", "").startswith(f"{name} CH")
+                            if is_scenario_alert_rule(r, self.ns, name)
                         )
         except Exception as exc:
             found["error"] = str(exc)

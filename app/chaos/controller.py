@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+import uuid
 from typing import TYPE_CHECKING, Any, Callable
 
 from app.config import CHANNEL_REGISTRY, CHANNEL_TIMEOUT
@@ -17,6 +18,15 @@ logger = logging.getLogger("nova7.chaos")
 # Channel states
 STANDBY = "STANDBY"
 ACTIVE = "ACTIVE"
+
+# Who a fix's log lines name as the actor ({actor} in remediation_effects.log_events).
+DEFAULT_FIX_ACTOR = "opsctl/oncall"  # a person resolving from the Chaos UI
+AUTO_REMEDIATOR_ACTOR = "system:serviceaccount:platform-automation:auto-remediator"
+
+
+def with_actor(value: Any, actor: str) -> Any:
+    """*value* with ``{actor}`` replaced (strings only)."""
+    return value.replace("{actor}", actor) if isinstance(value, str) else value
 
 # Maximum fault duration (seconds) — override via CHANNEL_TIMEOUT in .env
 MAX_FAULT_DURATION = CHANNEL_TIMEOUT
@@ -75,6 +85,20 @@ class ChaosController:
                 "user_email": "",
             }
         self._infra_spikes: dict[str, float] = dict(INFRA_SPIKE_DEFAULTS)
+        # Post-remediation platform state (schema 1.3): one row per channel whose fix was
+        # applied — {channel, state, applied_at, transition_seconds}. Generators read the
+        # merged view through get_platform_state(); empty for every channel without
+        # remediation_effects, so older scenarios behave exactly as before.
+        self._platform_rows: list[dict[str, Any]] = []
+        # One-shot log lines a fix leaves behind (audit records, rollout events), drained
+        # by the owning service once their emit_at time has passed.
+        self._pending_events: list[dict[str, Any]] = []
+        # channel -> indices of its remediation_effects.log_events that opsctl already
+        # emitted as the audit record of a matching command (so they are not doubled).
+        self._emitted_fix_events: dict[int, set[int]] = {}
+        # channel -> (fixed_at, taper_seconds): fault log lines fade out after a fix
+        # instead of stopping on the instant (pods roll one at a time).
+        self._tapers: dict[int, tuple[float, float]] = {}
         # Restore persisted state from SQLite
         self._restore_from_store()
 
@@ -110,6 +134,7 @@ class ChaosController:
                         for key, val in impact.items():
                             if key in self._infra_spikes:
                                 self._infra_spikes[key] = max(self._infra_spikes[key], float(val))
+            self._platform_rows = list(self._store.get_platform_state(self._deployment_id))
             # Overlay any manually-set spike values persisted via the sliders
             persisted_spikes = self._store.get_spikes(self._deployment_id)
             if persisted_spikes:
@@ -144,6 +169,23 @@ class ChaosController:
             ch["resolved_at"] = None
             ch["callback_url"] = callback_url
             ch["user_email"] = user_email
+            # Re-triggering a channel undoes its earlier fix, so the demo repeats from
+            # the same baseline (e.g. the memory limit goes back to 1Gi).
+            targets = _state_targets(self._channel_registry.get(channel) or {})
+            dropped = [
+                r for r in self._platform_rows
+                if r["channel"] == channel
+                or (r["channel"] < 0 and _state_touches(r["state"], targets))
+            ]
+            had_fix = bool(dropped)
+            self._platform_rows = [r for r in self._platform_rows if r not in dropped]
+            self._pending_events = [e for e in self._pending_events if e.get("channel") != channel]
+            self._emitted_fix_events.pop(channel, None)
+            self._tapers.pop(channel, None)
+
+        if had_fix and self._store and self._deployment_id:
+            for r in dropped:
+                self._store.delete_platform_state(self._deployment_id, r["channel"])
 
         # Write-through to SQLite
         if self._store and self._deployment_id:
@@ -186,7 +228,15 @@ class ChaosController:
         session_id: str = "",
         force: bool = False,
         user_email: str = "",
+        apply_effects: bool = True,
+        actor: str = "",
     ) -> dict[str, Any]:
+        """Return *channel* to STANDBY.
+
+        Every resolve path except auto-expiry represents the fix being made, so by
+        default the channel's ``remediation_effects`` (if any) are applied: the changed
+        config values persist in telemetry and the change log lines are queued.
+        """
         if channel not in self._channel_registry:
             return {"error": f"Unknown channel {channel}"}
 
@@ -221,6 +271,8 @@ class ChaosController:
 
         ch_def = self._channel_registry[channel]
         logger.info("CHAOS: Channel %d [%s] RESOLVED", channel, ch_def["name"])
+        if apply_effects:
+            self.apply_remediation_effects(channel, actor=actor)
 
         # If this was the last active channel, fire the on_resolve hook
         # (e.g. revert the APM ML model to baseline) in a background thread.
@@ -366,6 +418,210 @@ class ChaosController:
                 ch_id for ch_id, ch in self._channels.items() if ch["state"] == ACTIVE
             ]
 
+    # ── Timing (schema 1.3 onset_delay_seconds / ramp_seconds) ───────────
+
+    def get_channel_elapsed(self, channel: int) -> float | None:
+        """Seconds since *channel* was triggered, or None when it is not active."""
+        with self._lock:
+            ch = self._channels.get(channel)
+            if ch is None or ch["state"] != ACTIVE or not ch["triggered_at"]:
+                return None
+            return max(0.0, time.time() - ch["triggered_at"])
+
+    def get_channel_triggered_at(self, channel: int) -> float | None:
+        with self._lock:
+            ch = self._channels.get(channel)
+            if ch is None or ch["state"] != ACTIVE:
+                return None
+            return ch["triggered_at"]
+
+    # ── Post-remediation platform state ──────────────────────────────────
+
+    def apply_remediation_effects(self, channel: int, actor: str = "") -> bool:
+        """Record *channel*'s remediation_effects. Returns False when it declares none.
+
+        *actor* is who made the fix; it replaces ``{actor}`` in the fix's log lines
+        (``opsctl/claude-code`` for opsctl, the auto-remediator for the workflow).
+        Log lines that opsctl already emitted for this fix (see
+        :meth:`mark_fix_event_emitted`) are not queued again.
+        """
+        ch_def = self._channel_registry.get(channel) or {}
+        effects = ch_def.get("remediation_effects")
+        if not isinstance(effects, dict) or not effects:
+            return False
+        actor = (actor or DEFAULT_FIX_ACTOR).strip() or DEFAULT_FIX_ACTOR
+        now = time.time()
+        state = effects.get("state") or {}
+        transition = float(effects.get("transition_seconds", 0) or 0)
+        row = {
+            "channel": channel,
+            "state": state if isinstance(state, dict) else {},
+            "applied_at": now,
+            "transition_seconds": transition,
+            # A fix that plays out over time starts from where the fault left things
+            # (e.g. 6 of 24 nodes already upgraded), not from the pre-fault baseline.
+            "from_state": dict(ch_def.get("fault_state") or {}),
+        }
+        with self._lock:
+            already = self._emitted_fix_events.pop(channel, set())
+        events = []
+        # one change id for the fix, on every record the fixer made (the lines naming
+        # {actor}: audit, CloudTrail, or a service's own "applied by" line); follow-on
+        # records by controllers such as the node manager's evictions are not part of
+        # the change. opsctl adds its own id.
+        change_id = "chg-" + uuid.uuid4().hex[:8]
+        for idx, evt in enumerate(effects.get("log_events") or []):
+            if not isinstance(evt, dict) or not evt.get("body") or idx in already:
+                continue
+            body = with_actor(evt["body"], actor)
+            if "{actor}" in evt["body"] and "change_id=" not in body:
+                body += f" change_id={change_id}"
+            events.append({
+                "channel": channel,
+                "service": evt.get("service"),
+                "severity": evt.get("severity", "INFO"),
+                "body": body,
+                "attributes": {k: with_actor(v, actor) for k, v in (evt.get("attributes") or {}).items()},
+                "emit_at": now + max(0.0, float(evt.get("offset_seconds", 0) or 0)),
+            })
+        taper = float(effects.get("log_taper_seconds", 0) or 0)
+        with self._lock:
+            self._platform_rows = [r for r in self._platform_rows if r["channel"] != channel]
+            self._platform_rows.append(row)
+            self._pending_events.extend(events)
+            if taper > 0:
+                self._tapers[channel] = (now, taper)
+        if self._store and self._deployment_id:
+            self._store.upsert_platform_state(
+                self._deployment_id, channel, row["state"], now, transition,
+            )
+        logger.info("CHAOS: Channel %d remediation effects applied", channel)
+        return True
+
+    def get_platform_state(self) -> dict[str, Any]:
+        """Fix rows plus the fault_state of channels whose onset has passed.
+
+        ``{"fixes": [{channel, state, applied_at, transition_seconds}],
+           "faults": [{channel, state, triggered_at, onset_at}]}``
+        """
+        with self._lock:
+            self._expire_stale()
+            fixes = [dict(r) for r in self._platform_rows]
+            faults = []
+            now = time.time()
+            for ch_id, ch in self._channels.items():
+                if ch["state"] != ACTIVE:
+                    continue
+                ch_def = self._channel_registry.get(ch_id) or {}
+                fstate = ch_def.get("fault_state")
+                if not isinstance(fstate, dict) or not fstate:
+                    continue
+                onset_at = (ch["triggered_at"] or now) + float(ch_def.get("onset_delay_seconds", 0) or 0)
+                faults.append({
+                    "channel": ch_id,
+                    "state": fstate,
+                    "triggered_at": ch["triggered_at"],
+                    "onset_at": onset_at,
+                })
+        return {"fixes": fixes, "faults": faults}
+
+    def get_fixed_channels(self) -> list[int]:
+        with self._lock:
+            return [r["channel"] for r in self._platform_rows if r["channel"] > 0]
+
+    def apply_change_state(self, state: dict[str, Any], transition_seconds: float = 0.0) -> None:
+        """Record the effect of one applied platform change (an opsctl patch, scale...).
+
+        A change takes effect whether or not it completes a fix: patching a memory limit
+        changes the limit even while the fault continues. Each change is its own row
+        (negative id, never a channel) so its rollout keeps its own timing.
+        """
+        if not state:
+            return
+        now = time.time()
+        with self._lock:
+            ids = [r["channel"] for r in self._platform_rows if r["channel"] < 0]
+            row = {"channel": min(ids, default=0) - 1, "state": state,
+                   "applied_at": now, "transition_seconds": float(transition_seconds)}
+            self._platform_rows.append(row)
+        if self._store and self._deployment_id:
+            self._store.upsert_platform_state(
+                self._deployment_id, row["channel"], state, now, row["transition_seconds"],
+            )
+
+    def mark_fix_event_emitted(self, channel: int, index: int) -> None:
+        """opsctl emitted *channel*'s fix log line *index* as its audit record."""
+        with self._lock:
+            self._emitted_fix_events.setdefault(channel, set()).add(index)
+
+    def taper_fraction(self, channel: int) -> float:
+        """Share (1 → 0) of *channel*'s fault log rate still emitted after its fix."""
+        with self._lock:
+            entry = self._tapers.get(channel)
+            if not entry:
+                return 0.0
+            fixed_at, span = entry
+            left = 1.0 - (time.time() - fixed_at) / span
+            if left <= 0:
+                self._tapers.pop(channel, None)
+                return 0.0
+            ch = self._channels.get(channel) or {}
+            if ch.get("state") == ACTIVE:  # re-triggered: the fault is back for real
+                self._tapers.pop(channel, None)
+                return 0.0
+            return left
+
+    def tapering_channels(self) -> dict[int, float]:
+        """Channels whose fault lines are still fading out after a fix."""
+        with self._lock:
+            chans = list(self._tapers)
+        return {c: f for c in chans if (f := self.taper_fraction(c)) > 0}
+
+    def drain_events(self, service: str) -> list[dict[str, Any]]:
+        """Pop queued one-shot fix events for *service* whose emit time has passed."""
+        now = time.time()
+        out: list[dict[str, Any]] = []
+        with self._lock:
+            keep = []
+            for e in self._pending_events:
+                if e.get("service") == service and e["emit_at"] <= now:
+                    out.append(e)
+                else:
+                    keep.append(e)
+            self._pending_events = keep
+        return out
+
+    def queue_event(
+        self,
+        service: str,
+        body: str,
+        severity: str = "INFO",
+        attributes: dict[str, Any] | None = None,
+        delay_seconds: float = 0,
+        channel: int | None = None,
+    ) -> None:
+        """Queue a one-shot log line for *service*, emitted after *delay_seconds*."""
+        evt = {
+            "channel": channel,
+            "service": service,
+            "severity": severity,
+            "body": body,
+            "attributes": dict(attributes or {}),
+            "emit_at": time.time() + max(0.0, float(delay_seconds or 0)),
+        }
+        with self._lock:
+            self._pending_events.append(evt)
+
+    def reset_platform_state(self) -> None:
+        """Forget every applied fix (``POST /api/ops/reset``)."""
+        with self._lock:
+            self._platform_rows = []
+            self._pending_events = []
+            self._emitted_fix_events = {}
+            self._tapers = {}
+        if self._store and self._deployment_id:
+            self._store.delete_platform_state(self._deployment_id)
+
     def set_infra_spikes(self, spikes: dict[str, float]) -> None:
         with self._lock:
             for key in self._infra_spikes:
@@ -377,3 +633,26 @@ class ChaosController:
     def get_infra_spikes(self) -> dict[str, float]:
         with self._lock:
             return dict(self._infra_spikes)
+
+
+def _state_targets(ch_def: dict[str, Any]) -> set[tuple[str, str]]:
+    """(kind, name) of the workloads / node pools a channel's fault or fix sets."""
+    out: set[tuple[str, str]] = set()
+    blocks = [ch_def.get("fault_state") or {}, (ch_def.get("remediation_effects") or {}).get("state") or {}]
+    for block in blocks:
+        for gen_state in block.values():
+            if not isinstance(gen_state, dict):
+                continue
+            out.update(("workloads", w) for w in (gen_state.get("workloads") or {}))
+            out.update(("node_pools", p) for p in (gen_state.get("node_pools") or {}))
+    return out
+
+
+def _state_touches(state: dict[str, Any], targets: set[tuple[str, str]]) -> bool:
+    for gen_state in (state or {}).values():
+        if not isinstance(gen_state, dict):
+            continue
+        for kind in ("workloads", "node_pools"):
+            if any((kind, name) in targets for name in (gen_state.get(kind) or {})):
+                return True
+    return False

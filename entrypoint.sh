@@ -11,6 +11,14 @@ if [ ! -f /root/.claude/.seeded ]; then
   touch /root/.claude/.seeded
 fi
 
+# The platform-ops skill (opsctl) ships with the image: refresh it on every boot so
+# PVCs seeded by an older image pick it up (/usr/local/bin/opsctl links into it).
+if [ -d /root-claude-seed/skills/platform-ops ]; then
+  mkdir -p /root/.claude/skills
+  rm -rf /root/.claude/skills/platform-ops
+  cp -rp /root-claude-seed/skills/platform-ops /root/.claude/skills/platform-ops
+fi
+
 # Seed the whole /app workspace on first boot.
 # Because /app is mounted from a PVC it is empty on first pod start; the image
 # snapshot at /app-seed is copied in exactly once. Subsequent boots (node failure
@@ -223,6 +231,13 @@ node <<'JS'
     '',
     'After adding a scenario, restart the app (or trigger the rediscover endpoint if available)',
     'so the new scenario appears in the Demo Management Console, then click Deploy.',
+    '',
+    '## Platform operations',
+    '',
+    'Changes to the Kubernetes platform and its cloud account go through `opsctl`',
+    '(see the **platform-ops** skill; full path `/root/.claude/skills/platform-ops/bin/opsctl`).',
+    'Change procedure: **plan** (`opsctl plan <verb> ...`) -> **apply** (record each change id)',
+    '-> **verify** recovery in telemetry, allowing for the transition time the runbook states.',
     '',
     '## Dashboards',
     '',

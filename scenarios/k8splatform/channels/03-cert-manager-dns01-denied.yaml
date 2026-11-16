@@ -1,0 +1,186 @@
+name: Tenant custom-domain certificates failing DNS-01 issuance
+subsystem: certificates
+vehicle_section: cert-manager/acme-dns01
+error_type: 'is not authorized to perform: route53:ChangeResourceRecordSets'
+sensor_type: acme_challenge
+affected_services:
+  - cert-manager
+cascade_services:
+  - ingress-nginx
+description: New and renewing tenant custom-domain certificates cannot complete their DNS-01 challenge. ingress-nginx serves
+  its default fake certificate for those hosts and clients reject the TLS handshake. The platform wildcard certificate is
+  unaffected.
+investigation_notes: |-
+  Root cause: a Terraform apply created policy version {bad_version} of the cert-manager-route53 IAM policy and set it as default. The new version limits route53:ChangeResourceRecordSets to the example-saas.io hosted zone and drops the delegated acme.example-saas.io zone ({acme_zone_id}). Tenant custom domains CNAME _acme-challenge.<domain> into that zone, so cert-manager can no longer write their TXT records and every new or renewing tenant certificate stays not Ready.
+  Confirm:
+    - cert-manager ERROR lines: error presenting challenge ... AccessDenied ... is not authorized to perform: route53:ChangeResourceRecordSets on resource: arn:aws:route53:::hostedzone/{acme_zone_id}
+    - CloudTrail (audit line on kube-apiserver): CreatePolicyVersion {bad_version} with setAsDefault=true on cert-manager-route53 shortly before the first failure
+    - ingress-nginx: Error getting SSL certificate "tenant-edge/<tenant>-custom-tls": local SSL certificate ... was not found. Using default certificate; SSL_do_handshake() failed ... sslv3 alert bad certificate
+    - attributes.tls.cert.issuer on the ingress lines is "Kubernetes Ingress Controller Fake Certificate" for the affected hosts only; wildcard-api-tls (api.example-saas.io) is still served normally
+    - kubectl get certificates -A | grep False ; aws iam get-policy-version --policy-arn <arn> --version-id {bad_version}
+  Remediation: restore the previous default policy version ({good_version}), then ask cert-manager to retry the not-Ready certificates instead of waiting for its exponential backoff.
+  Follow-up: revert the Terraform change that created the narrowed policy version in the infrastructure repository before the next Atlantis apply; otherwise the apply undoes the fix.
+remediation_action: restore_dns01_iam_policy
+remediation_command: |-
+  opsctl restore iam-policy/cert-manager-route53 --version v3
+  opsctl renew certificate --all -n tenant-edge --not-ready
+error_message: 'E{klog_time}       1 sync.go:190] "propagation check failed" err="error presenting challenge: failed to
+  change Route 53 record set: operation error Route 53: ChangeResourceRecordSets, https response error StatusCode: 403, RequestID:
+  {request_id}, api error AccessDenied: User: arn:aws:sts::752253522700:assumed-role/cert-manager-route53/{session} is not authorized
+  to perform: route53:ChangeResourceRecordSets on resource: arn:aws:route53:::hostedzone/{acme_zone_id} because no identity-based
+  policy allows the route53:ChangeResourceRecordSets action" logger="cert-manager.challenges" resource_name="{tenant}-custom-tls-1-{order_suffix}"
+  resource_namespace="tenant-edge" dnsName="{tenant_domain}" type="DNS-01"'
+stack_trace: ''
+fault_params:
+  client_octet: {randint: [2, 250]}
+  request_id: {format: '{a}-{b}', a: {randint: [10000000, 99999999]}, b: {randint: [1000, 9999]}}
+  session: {randint: [1731400000000000000, 1731499999999999999]}
+  acme_zone_id: Z0ACME7C1Q2W3E4R5T
+  tenant: {choice: [t-1182, t-2290, t-5523, t-7718, t-8812]}
+  order_suffix: {randint: [1000000000, 4294967295]}
+  tenant_domain: {choice: [api.acme-billing.com, portal.northpeak.io, pay.lumenretail.eu, app.ridgeline.co]}
+  bad_version: v4
+  good_version: v3
+rca_clues:
+  cert-manager:
+    aws.iam.role: cert-manager-route53
+    aws.iam.policy_version: v4
+    acme.challenge.zone: acme.example-saas.io
+    acme.challenge.type: DNS-01
+  ingress-nginx:
+    tls.cert.issuer: Kubernetes Ingress Controller Fake Certificate
+cascade_messages:
+  ingress-nginx:
+    - severity: WARN
+      message: 'W{klog_time}       7 backend_ssl.go:47] Error getting SSL certificate "tenant-edge/{tenant}-custom-tls":
+        local SSL certificate tenant-edge/{tenant}-custom-tls was not found. Using default certificate'
+    - severity: ERROR
+      message: '{nginx_time} [crit] 44#44: *{order_suffix} SSL_do_handshake() failed (SSL: error:0A000412:SSL routines::sslv3
+        alert bad certificate:SSL alert number 42) while SSL handshaking, client: 198.51.100.{client_octet}, server: 0.0.0.0:443'
+fault_scope:
+  cluster: prod-use1
+  workloads: [cert-manager]
+onset_delay_seconds: 50
+infrastructure_events:
+  - service: kube-apiserver
+    severity: INFO
+    offset_seconds: -120
+    body: 'cloudtrail: eventSource=iam.amazonaws.com eventName=CreatePolicyVersion userIdentity=arn:aws:sts::752253522700:assumed-role/terraform-platform/atlantis
+      requestParameters.policyArn=arn:aws:iam::752253522700:policy/cert-manager-route53 requestParameters.setAsDefault=true responseElements.policyVersion.versionId=v4
+      errorCode=none'
+    attributes:
+      cloud.provider: aws
+      cloud.account.id: '752253522700'
+      aws.cloudtrail.event_source: iam.amazonaws.com
+      aws.cloudtrail.event_name: CreatePolicyVersion
+      user.name: arn:aws:sts::752253522700:assumed-role/terraform-platform/atlantis
+      change.summary: 'route53:ChangeResourceRecordSets Resource -> hostedzone/Z0EXSAAS9K8J7H6G5F only'
+remediation_effects:
+  transition_seconds: 120
+  log_events:
+    - service: cert-manager
+      severity: INFO
+      offset_seconds: 25
+      body: 'I{klog_time}       1 dns.go:118] "presented DNS01 challenge for domain" logger="cert-manager.challenges.Present"
+        resource_name="t-1182-custom-tls-1-ok" type="DNS-01" zone="acme.example-saas.io."'
+      attributes: {k8s.namespace.name: tenant-edge, cert_manager.certificate: t-1182-custom-tls}
+    - service: cert-manager
+      severity: INFO
+      offset_seconds: 60
+      body: 'I{klog_time}       1 conditions.go:260] "Certificate issued" logger="cert-manager.certificates-issuing"
+        namespace="tenant-edge" name="t-1182-custom-tls" reason="Issued" message="The certificate has been successfully issued" notAfter="+90d"'
+      attributes: {k8s.namespace.name: tenant-edge, cert_manager.certificate: t-1182-custom-tls}
+    - service: ingress-nginx
+      severity: INFO
+      offset_seconds: 68
+      body: 'I{klog_time}       7 backend_ssl.go:66] "Adding secret to local store" name="tenant-edge/t-1182-custom-tls"'
+    - service: cert-manager
+      severity: INFO
+      offset_seconds: 33
+      body: 'I{klog_time}       1 dns.go:118] "presented DNS01 challenge for domain" logger="cert-manager.challenges.Present"
+        resource_name="t-2290-custom-tls-1-ok" type="DNS-01" zone="acme.example-saas.io."'
+      attributes: {k8s.namespace.name: tenant-edge, cert_manager.certificate: t-2290-custom-tls}
+    - service: cert-manager
+      severity: INFO
+      offset_seconds: 68
+      body: 'I{klog_time}       1 conditions.go:260] "Certificate issued" logger="cert-manager.certificates-issuing"
+        namespace="tenant-edge" name="t-2290-custom-tls" reason="Issued" message="The certificate has been successfully issued" notAfter="+90d"'
+      attributes: {k8s.namespace.name: tenant-edge, cert_manager.certificate: t-2290-custom-tls}
+    - service: ingress-nginx
+      severity: INFO
+      offset_seconds: 76
+      body: 'I{klog_time}       7 backend_ssl.go:66] "Adding secret to local store" name="tenant-edge/t-2290-custom-tls"'
+    - service: cert-manager
+      severity: INFO
+      offset_seconds: 41
+      body: 'I{klog_time}       1 dns.go:118] "presented DNS01 challenge for domain" logger="cert-manager.challenges.Present"
+        resource_name="t-5523-custom-tls-1-ok" type="DNS-01" zone="acme.example-saas.io."'
+      attributes: {k8s.namespace.name: tenant-edge, cert_manager.certificate: t-5523-custom-tls}
+    - service: cert-manager
+      severity: INFO
+      offset_seconds: 76
+      body: 'I{klog_time}       1 conditions.go:260] "Certificate issued" logger="cert-manager.certificates-issuing"
+        namespace="tenant-edge" name="t-5523-custom-tls" reason="Issued" message="The certificate has been successfully issued" notAfter="+90d"'
+      attributes: {k8s.namespace.name: tenant-edge, cert_manager.certificate: t-5523-custom-tls}
+    - service: ingress-nginx
+      severity: INFO
+      offset_seconds: 84
+      body: 'I{klog_time}       7 backend_ssl.go:66] "Adding secret to local store" name="tenant-edge/t-5523-custom-tls"'
+    - service: cert-manager
+      severity: INFO
+      offset_seconds: 49
+      body: 'I{klog_time}       1 dns.go:118] "presented DNS01 challenge for domain" logger="cert-manager.challenges.Present"
+        resource_name="t-7718-custom-tls-1-ok" type="DNS-01" zone="acme.example-saas.io."'
+      attributes: {k8s.namespace.name: tenant-edge, cert_manager.certificate: t-7718-custom-tls}
+    - service: cert-manager
+      severity: INFO
+      offset_seconds: 84
+      body: 'I{klog_time}       1 conditions.go:260] "Certificate issued" logger="cert-manager.certificates-issuing"
+        namespace="tenant-edge" name="t-7718-custom-tls" reason="Issued" message="The certificate has been successfully issued" notAfter="+90d"'
+      attributes: {k8s.namespace.name: tenant-edge, cert_manager.certificate: t-7718-custom-tls}
+    - service: ingress-nginx
+      severity: INFO
+      offset_seconds: 92
+      body: 'I{klog_time}       7 backend_ssl.go:66] "Adding secret to local store" name="tenant-edge/t-7718-custom-tls"'
+    - service: cert-manager
+      severity: INFO
+      offset_seconds: 57
+      body: 'I{klog_time}       1 dns.go:118] "presented DNS01 challenge for domain" logger="cert-manager.challenges.Present"
+        resource_name="t-8812-custom-tls-1-ok" type="DNS-01" zone="acme.example-saas.io."'
+      attributes: {k8s.namespace.name: tenant-edge, cert_manager.certificate: t-8812-custom-tls}
+    - service: cert-manager
+      severity: INFO
+      offset_seconds: 92
+      body: 'I{klog_time}       1 conditions.go:260] "Certificate issued" logger="cert-manager.certificates-issuing"
+        namespace="tenant-edge" name="t-8812-custom-tls" reason="Issued" message="The certificate has been successfully issued" notAfter="+90d"'
+      attributes: {k8s.namespace.name: tenant-edge, cert_manager.certificate: t-8812-custom-tls}
+    - service: ingress-nginx
+      severity: INFO
+      offset_seconds: 100
+      body: 'I{klog_time}       7 backend_ssl.go:66] "Adding secret to local store" name="tenant-edge/t-8812-custom-tls"'
+  steady_attributes:
+    cert-manager:
+      aws.iam.policy_version: v3
+  verification:
+    - signal: cert-manager AccessDenied lines
+      from: 'logs.otel.platform'
+      where: 'resource.attributes.service.name == "cert-manager" AND body.text LIKE "*route53:ChangeResourceRecordSets*"'
+      expect: '0 new lines'
+      within_seconds: 120
+    - signal: Certificate issued events
+      from: 'logs.otel.platform'
+      where: 'resource.attributes.service.name == "cert-manager" AND body.text LIKE "*Certificate issued*"'
+      expect: 'one per not-Ready tenant-edge certificate (5)'
+      within_seconds: 150
+    - signal: TLS handshake failures on ingress-nginx
+      from: 'logs.otel.platform'
+      where: 'resource.attributes.service.name == "ingress-nginx" AND body.text LIKE "*SSL_do_handshake() failed*"'
+      expect: '0'
+      within_seconds: 180
+business_impact:
+  - kpi: business.tls_handshake_success_pct
+    value: {uniform: [93.5, 94.5], round: 2}
+  - kpi: business.cert_renewal_success_pct
+    value: {uniform: [0.0, 4.0], round: 1}
+  - kpi: business.api_availability_pct
+    value: {uniform: [99.0, 99.3], round: 3}

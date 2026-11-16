@@ -57,5 +57,6 @@ SPEC = GeneratorSpec(
     },
     chaos_mode='any',
     family='core',
-    schema_version="1.0",
+    schema_version="1.1",
+    scope_aware=True,
 )

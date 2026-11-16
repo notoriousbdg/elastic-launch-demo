@@ -1,0 +1,70 @@
+service: harbor-registry
+sort_order: 9
+cloud_provider: aws
+cloud_region: us-east-1
+cloud_platform: aws_eks
+cloud_availability_zone: us-east-1b
+subsystem: registry
+language: go
+generates_traces: false
+
+# Harbor (registry, core, jobservice) at harbor.example-saas.io. Images are pushed
+# by CI; the dockerhub-proxy project is a pull-through cache for Docker Hub.
+topology: []
+
+emit_fault_logs: true
+kpi_emitter: false
+
+constants:
+  # Steady pulls come from pods that start all the time: Jobs, CronJobs and CI
+  # runners. Long-running Deployments and DaemonSets pull once per new pod (their
+  # rollouts log those pulls), and nodes serve cached images after that.
+  PULLS:
+    - [tenant-batch/batch-worker, v4.12.1]
+    - [tenant-batch/nightly-reconcile, v1.9.0]
+    - [ci/runner-go, '1.23']
+    - [dockerhub-proxy/library/python, 3.12-slim]
+    - [dockerhub-proxy/library/alpine, '3.20']
+    - [dockerhub-proxy/bitnami/kubectl, 1.30.4]
+  # Repositories CI publishes to (robot$ci-publisher).
+  PUSHES:
+    - platform/tenant-gateway
+    - tenant-core/billing-api
+    - tenant-batch/batch-worker
+    - tenant-core/usage-api
+
+steps:
+  - sample:
+      img: {choice: PULLS}
+      dur: {expr: "round(rand.uniform(0.004, 0.09), 6)"}
+      size: {randint: [1400, 9200]}
+      jid: {expr: "'%024x' % rand.randint(0, 16 ** 24 - 1)"}
+      client: {expr: "'10.42.' + str(rand.choice([32, 33, 36, 37, 40, 41])) + '.' + str(rand.randint(10, 250))"}
+  - log:
+      level: INFO
+      message: 'time="{iso_now}" level=info msg="response completed" go.version=go1.22.7 http.request.host=harbor.example-saas.io http.request.method=GET http.request.remoteaddr={client} http.request.uri="/v2/{img[0]}/manifests/{img[1]}" http.request.useragent="containerd/v1.7.22" http.response.duration={dur}s http.response.status=200 http.response.written={size}'
+      attrs:
+        http.request.method: GET
+        http.response.status_code: 200
+        url.path: {expr: "'/v2/' + img[0] + '/manifests/' + img[1]"}
+  # CI publishes images now and then (blob uploads). While the registry volume is
+  # full (channel 18) these fail instead and are logged by the fault.
+  - sample:
+      push_repo: {choice: PUSHES}
+      upload_id: {expr: "'%08x-%04x-%04x-%04x-%012x' % (rand.randint(0, 2**32 - 1), rand.randint(0, 65535), rand.randint(0, 65535), rand.randint(0, 65535), rand.randint(0, 2**48 - 1))"}
+  - when: "18 not in all_active and rand.random() < 0.04"
+    log:
+      level: INFO
+      message: 'time="{iso_now}" level=info msg="response completed" auth.user.name="robot$ci-publisher" go.version=go1.22.7 http.request.host=harbor.example-saas.io http.request.method=PUT http.request.uri="/v2/{push_repo}/blobs/uploads/{upload_id}" http.request.useragent="buildkit/v0.16" http.response.duration={dur}s http.response.status=201 http.response.written=0'
+      attrs:
+        http.request.method: PUT
+        http.response.status_code: 201
+        url.path: {expr: "'/v2/' + push_repo + '/blobs/uploads/' + upload_id"}
+        user.name: robot$ci-publisher
+  - every:
+      seconds: 900
+      state_key: _last_jobsvc
+      steps:
+        - log:
+            level: INFO
+            message: '{iso_now} [INFO] [/jobservice/worker/cworker/c_worker.go:76]: Job incoming: {{"name":"SCAN_ARTIFACT","id":"{jid}","t":{epoch_now}}}'

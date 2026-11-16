@@ -1618,6 +1618,13 @@ def run(
     chaos_controller=None,
 ) -> None:
     """Run K8s metrics generator loop until stop_event is set."""
+    if scenario_data and scenario_data.get("k8s_topology"):
+        # Schema 1.3 pinned platform: node pools, workloads and scoped, coupled faults.
+        from generators.kubernetes_otel.pinned import run_pinned
+
+        run_pinned(client, stop_event, scenario_data=scenario_data,
+                   chaos_controller=chaos_controller)
+        return
     rng = random.Random()
     clusters = scenario_data["k8s_clusters"] if scenario_data else CLUSTERS
     # Prefer per-deployment namespace; fall back to module global for standalone mode.
@@ -1957,6 +1964,11 @@ def run(
 
         # APPLY node_filesystem_pct / volume_filesystem_pct before tick so the
         # ramp advances toward the target in this same scrape.
+        # Coherence (generator schema 1.1): the disk-pressure condition implies a full
+        # filesystem, so the flag alone also drives the fill past the 0.85 threshold.
+        if _chaos_node_fs_pct is None and _chaos_disk_pressure_flag is not None:
+            _chaos_node_fs_pct = 0.9
+        _chaos_oom = _positive_impact("oomkilled_containers")
         for _nk in all_node_names:
             _fs_target = _chaos_node_fs_pct if _nk in _impact_nodes else None
             if _fs_target is None and aug_node_disk > 0 and _nk in aug_nodes:
@@ -2016,6 +2028,9 @@ def run(
                 crash_svc = aug_here and (aug_crash or aug_live_fail)
                 ready_fail_svc = aug_here and aug_ready_fail
                 on_down_node = nr_elapsed is not None and pod["node_name"] == aug.nr_node
+                # Coherence: a node held NotReady by the node_not_ready impact also stops
+                # reporting kubelet stats, and its pods go Unknown.
+                chaos_node_down = _chaos_node_not_ready > 0 and pod["node_name"] in _impact_nodes
                 # Pod phase and kubelet visibility under node eviction / NotReady.
                 aug_phase: int | None = None
                 if svc in evicted_svcs:
@@ -2024,7 +2039,9 @@ def run(
                     aug_phase = PHASE_UNKNOWN
                 elif on_down_node and nr_stage == "pending":
                     aug_phase = PHASE_PENDING
-                kubelet_dark = on_down_node and nr_stage in ("down", "unknown", "pending")
+                if chaos_node_down and aug_phase is None:
+                    aug_phase = PHASE_UNKNOWN
+                kubelet_dark = (on_down_node and nr_stage in ("down", "unknown", "pending")) or chaos_node_down
                 aug_pod[svc] = {
                     "phase": aug_phase,
                     "unavailable": 1 if aug_phase is not None else 0,
@@ -2075,6 +2092,9 @@ def run(
                     mem_util_override = min(1.0, max(0.0, oom_ratio))
                 elif impacted and _chaos_mem_util is not None:
                     mem_util_override = float(_chaos_mem_util)
+                elif impacted and _chaos_oom > 0:
+                    # Coherence: an OOM-killed container sits at its memory limit.
+                    mem_util_override = rng.uniform(0.94, 0.995)
                 elif aug_hpa and aug_here and aug.hpa_cur.get(svc, 0) >= _hpa_max.get(svc, 0) > 0:
                     mem_util_override = 0.85  # capped replicas starve: near the limit, below OOM
 
@@ -2086,6 +2106,9 @@ def run(
                     if v > 1.0:
                         v = v / 100.0
                     cpu_util_override = max(0.95, min(1.0, v))
+                elif impacted and _chaos_hpa_at_max > 0:
+                    # Coherence: an HPA pinned at max means every replica runs hot.
+                    cpu_util_override = rng.uniform(0.93, 0.99)
                 elif aug_hpa and aug_here:
                     # Hot while scaling out; past the 0.9 throttling alert once capped.
                     at_cap = aug.hpa_cur.get(svc, 0) >= _hpa_max.get(svc, 0) > 0
@@ -2158,6 +2181,9 @@ def run(
                 # when chaos is off (gauge is sticky; state must not keep climbing).
                 if oom_this_scrape:
                     restart_chance = 0.05 + 0.70 * oom_ratio
+                elif impacted and _chaos_oom > 0:
+                    # Coherence: OOMKilled containers restart, so the counter climbs.
+                    restart_chance = 0.35
                 elif impacted and _chaos_restart_rate is not None and float(_chaos_restart_rate) > 0:
                     restart_chance = float(_chaos_restart_rate)
                     # GT often sends percent (75.0) — normalize to 0–1 probability.
@@ -2244,7 +2270,9 @@ def run(
 
                 # kubeletstatsreceiver: cpu.usage, memory.*, filesystem.*, network.*
                 # A NotReady node's kubelet stops posting, so its node stats go dark.
-                node_down = nr_elapsed is not None and node_name == aug.nr_node
+                node_down = (nr_elapsed is not None and node_name == aug.nr_node) or (
+                    node_impacted and _chaos_node_not_ready > 0
+                )
                 kubelet_node_res = _build_node_resource_kubelet(node_name, pod_data, cluster)
                 kubelet_node_metrics = _generate_node_metrics_kubelet(
                     rng, node_name=node_name, profiles=_profiles, state=state,
@@ -2323,9 +2351,12 @@ def run(
                 _dep_fraction = _chaos_pod_ready_fraction if svc in _impact_services else None
                 if _dep_fraction is None and _aug.get("degraded"):
                     _dep_fraction = 0.5  # crash-looping / not-Ready replicas are out of service
+                _desired = aug.hpa_cur.get(svc, _replicas.get(svc))
+                if _chaos_hpa_at_max > 0 and svc in _impact_services and _hpa_max.get(svc):
+                    _desired = _hpa_max[svc]  # coherence: replicas track the capped HPA
                 metrics = _generate_deployment_metrics(
                     rng, ready_fraction=_dep_fraction,
-                    desired=aug.hpa_cur.get(svc, _replicas.get(svc)),
+                    desired=_desired,
                     unavailable=_aug.get("unavailable", 0),
                 )
                 resource_metrics.append({

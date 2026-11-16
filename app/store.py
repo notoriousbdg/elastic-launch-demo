@@ -159,6 +159,21 @@ CREATE TABLE IF NOT EXISTS chaos_spikes (
 );
 """
 
+# Post-remediation platform state (schema 1.3 remediation_effects.state). One row per
+# channel whose fix changed a config value (memory limit, HPA max, instance types...),
+# so re-triggering a channel can drop just that channel's overrides. Created with
+# IF NOT EXISTS: older PVC databases gain the table on first start, nothing else changes.
+_CREATE_PLATFORM_STATE_TABLE = """
+CREATE TABLE IF NOT EXISTS platform_state (
+    deployment_id       TEXT NOT NULL,
+    channel             INTEGER NOT NULL,
+    state_json          TEXT NOT NULL DEFAULT '{}',
+    applied_at          REAL NOT NULL,
+    transition_seconds  REAL NOT NULL DEFAULT 0,
+    PRIMARY KEY (deployment_id, channel)
+);
+"""
+
 # Columns added after the initial schema — applied via ALTER on existing PVCs.
 _SPIKES_MIGRATIONS = (
     ("k8s_pod_cpu_intensity", "REAL NOT NULL DEFAULT 0"),
@@ -187,6 +202,7 @@ class ChaosStore:
         with self._connect() as conn:
             conn.execute(_CREATE_CHAOS_TABLE)
             conn.execute(_CREATE_SPIKES_TABLE)
+            conn.execute(_CREATE_PLATFORM_STATE_TABLE)
             self._migrate_spikes_table(conn)
 
     def _migrate_spikes_table(self, conn: sqlite3.Connection) -> None:
@@ -313,6 +329,63 @@ class ChaosStore:
                     "DELETE FROM chaos_spikes WHERE deployment_id = ?",
                     (deployment_id,),
                 )
+
+    # ── Platform state (post-remediation config values) ──────────────────
+
+    def upsert_platform_state(
+        self,
+        deployment_id: str,
+        channel: int,
+        state: dict,
+        applied_at: float,
+        transition_seconds: float = 0.0,
+    ) -> None:
+        """Record the config values a channel's fix left behind."""
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute(
+                    """INSERT OR REPLACE INTO platform_state
+                       (deployment_id, channel, state_json, applied_at, transition_seconds)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (deployment_id, channel, json.dumps(state), applied_at, transition_seconds),
+                )
+
+    def get_platform_state(self, deployment_id: str) -> list[dict[str, Any]]:
+        """Return persisted fix overrides, oldest first."""
+        with self._lock:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    """SELECT channel, state_json, applied_at, transition_seconds
+                       FROM platform_state WHERE deployment_id = ? ORDER BY applied_at""",
+                    (deployment_id,),
+                ).fetchall()
+        out = []
+        for r in rows:
+            try:
+                state = json.loads(r["state_json"] or "{}")
+            except ValueError:
+                state = {}
+            out.append({
+                "channel": r["channel"],
+                "state": state,
+                "applied_at": r["applied_at"],
+                "transition_seconds": r["transition_seconds"],
+            })
+        return out
+
+    def delete_platform_state(self, deployment_id: str, channel: int | None = None) -> None:
+        """Drop one channel's overrides, or all of a deployment's with channel=None."""
+        with self._lock:
+            with self._connect() as conn:
+                if channel is None:
+                    conn.execute(
+                        "DELETE FROM platform_state WHERE deployment_id = ?", (deployment_id,)
+                    )
+                else:
+                    conn.execute(
+                        "DELETE FROM platform_state WHERE deployment_id = ? AND channel = ?",
+                        (deployment_id, channel),
+                    )
 
     def delete_channels_for_deployment(self, deployment_id: str) -> None:
         """Remove all persisted chaos rows for a deployment (e.g. on teardown)."""

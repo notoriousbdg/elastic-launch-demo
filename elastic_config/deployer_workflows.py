@@ -10,6 +10,7 @@ import re
 import httpx
 
 from elastic_config.deployer_base import (
+    WORKFLOW_INDEX_MAPPINGS,
     WORKFLOW_INDEX_SUFFIXES,
     ProgressCallback,
     StepIdx,
@@ -309,7 +310,10 @@ class WorkflowsMixin:
             head = client.head(f"{self.elastic_url}/{index}", headers=headers)
             if head.status_code == 200:
                 continue
-            resp = client.put(f"{self.elastic_url}/{index}", headers=headers, json=body)
+            idx_body = dict(body)
+            if suffix in WORKFLOW_INDEX_MAPPINGS:
+                idx_body["mappings"] = WORKFLOW_INDEX_MAPPINGS[suffix]
+            resp = client.put(f"{self.elastic_url}/{index}", headers=headers, json=idx_body)
             if resp.status_code < 300:
                 created += 1
             else:

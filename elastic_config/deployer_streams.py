@@ -10,6 +10,7 @@ from typing import Any
 import httpx
 
 from elastic_config.deployer_base import _es_headers, _kibana_headers, _retry_http, ProgressCallback, StepIdx
+from elastic_config.deployer_kb import _is_numeric_spec
 from scenario_engine.runtimes import RUNTIME_BY_LANGUAGE
 
 logger = logging.getLogger("deployer")
@@ -53,6 +54,52 @@ _ERROR_WIRED_FIELDS: dict[str, dict[str, str]] = {
     "attributes.exception.message": {"type": "match_only_text"},
     "attributes.exception.stacktrace": {"type": "match_only_text"},
 }
+
+
+# Ingress access-log attributes (nginx_ingress_controller_otel writes these on the
+# scenario stream for scenarios with an ingress service). Runbook recovery checks
+# filter on the status code, which ES|QL cannot see unless it is mapped.
+_ACCESS_LOG_WIRED_FIELDS: dict[str, dict[str, str]] = {
+    "attributes.http.request.method": {"type": "keyword"},
+    "attributes.http.response.status_code": {"type": "long"},
+    "attributes.url.path": {"type": "keyword"},
+    "attributes.upstream.name": {"type": "keyword"},
+    "attributes.upstream.response.status_code": {"type": "long"},
+}
+
+
+def _clue_wired_fields(channels: dict[Any, Any]) -> dict[str, dict[str, str]]:
+    """Wired-stream mappings for the attributes the fault log lines carry.
+
+    The runbooks' Evidence section queries ``attributes.<clue>`` with ES|QL, and the
+    wired stream maps nothing under ``attributes`` it has not been told about. A clue
+    is ``double`` only when every channel that sets it produces numbers; anything
+    else is ``keyword``. The stream sets ``ignore_malformed``, so an odd value is
+    dropped from the index rather than rejecting the document.
+    """
+    numeric: dict[str, bool] = {}
+
+    def add(key: str, spec: Any) -> None:
+        numeric[key] = numeric.get(key, True) and _is_numeric_spec(spec)
+
+    for ch in (channels or {}).values():
+        if not isinstance(ch, dict):
+            continue
+        for clues in (ch.get("rca_clues") or {}).values():
+            for key, spec in (clues or {}).items():
+                add(str(key), spec)
+        steady = (ch.get("remediation_effects") or {}).get("steady_attributes") or {}
+        for attrs in steady.values():
+            if isinstance(attrs, dict):
+                for key, spec in attrs.items():
+                    add(str(key), spec)
+    keys = set(numeric)
+    return {
+        f"attributes.{key}": {"type": "double" if numeric[key] else "keyword"}
+        for key in sorted(keys)
+        # A key that is also the parent of another key can't be both a leaf and an object.
+        if not any(other.startswith(key + ".") for other in keys)
+    }
 
 
 def _strip_stream_runtime_keys(obj: Any) -> Any:
@@ -187,8 +234,14 @@ class StreamsMixin:
             fields = {}
             wired["fields"] = fields
 
+        wanted = {
+            **_clue_wired_fields(getattr(getattr(self, "scenario", None), "_channels", {}) or {}),
+            **_K8S_WIRED_FIELDS,
+            **_ERROR_WIRED_FIELDS,
+            **_ACCESS_LOG_WIRED_FIELDS,
+        }
         changed = False
-        for field_name, field_def in {**_K8S_WIRED_FIELDS, **_ERROR_WIRED_FIELDS}.items():
+        for field_name, field_def in wanted.items():
             if field_name not in fields:
                 fields[field_name] = dict(field_def)
                 changed = True
@@ -208,8 +261,7 @@ class StreamsMixin:
             )
             return False
         logger.info(
-            "Mapped %d k8s resource attributes on stream %s",
-            len(_K8S_WIRED_FIELDS) + len(_ERROR_WIRED_FIELDS), name,
+            "Mapped %d resource and log attributes on stream %s", len(wanted), name,
         )
         return True
 
@@ -711,7 +763,9 @@ class StreamsMixin:
             operations.append({
                 "index": {
                     "id": f"{self.ns}-se-ch{num_str}",
-                    "title": f"{self.scenario.scenario_name}: SE CH {num_str}: {ch_data['name']}",
+                    # "<scenario> signal — <name>": no channel number (a demo tell), and no
+                    # "<scenario>: " prefix, which the Nightshift alert trigger matches.
+                    "title": f"{self.scenario.scenario_name} signal — {ch_data['name']}",
                     "description": f"{ch_data.get('subsystem', 'system')} — {error_type}",
                     "esql": {"query": esql_query},
                 }

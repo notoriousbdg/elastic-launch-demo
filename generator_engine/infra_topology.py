@@ -30,6 +30,11 @@ def build_topology(scenario_data: dict) -> dict[str, dict]:
     host_by_provider: dict[str, dict] = {h.get("cloud.provider", "aws"): h for h in hosts}
     topology: dict[str, dict] = {}
 
+    # Schema 1.3: a pinned k8s_topology places each service on a real pod of its
+    # workload, so logs, traces and k8s metrics share node names, pod IPs and AZs.
+    pinned = _pinned_entries(scenario_data, services, namespace)
+    topology.update(pinned)
+
     for idx, cluster in enumerate(k8s_clusters):
         # Namespace-scoped seed: random.Random(str) uses sha512, stable across processes.
         # This ensures identifiers (node names, pod/node UIDs, container IDs) are unique
@@ -45,6 +50,8 @@ def build_topology(scenario_data: dict) -> dict[str, dict]:
         zones = cluster.get("zones", [region + "-a"])
 
         for svc in cluster.get("services", []):
+            if svc in pinned:
+                continue
             # Mirror _init_pod_data RNG sequence per service exactly
             node_name = stable.choice(node_names)
             pod_hex1 = f"{stable.getrandbits(32):08x}"
@@ -111,6 +118,52 @@ def build_topology(scenario_data: dict) -> dict[str, dict]:
     return topology
 
 
+def _pinned_entries(scenario_data: dict, services: dict, namespace: str) -> dict[str, dict]:
+    topo_cfg = scenario_data.get("k8s_topology")
+    if not topo_cfg:
+        return {}
+    from generator_engine.platform_topology import get_platform, pod_resource_attrs
+
+    platform = get_platform(topo_cfg, namespace)
+    if platform is None:
+        return {}
+    out: dict[str, dict] = {}
+    for svc in services:
+        found = platform.workload_for_service(svc)
+        if not found:
+            continue
+        cluster, wl = found
+        pods = cluster.pods_of(wl.name)
+        if not pods:
+            continue
+        attrs = pod_resource_attrs(cluster, pods[0], wl)
+        entry = dict(attrs)
+        if wl.kind == "Deployment":
+            entry["k8s.replicaset.name"] = f"{wl.name}-{wl.replicaset_hash}"
+        entry.update({
+            "_node_name": attrs["k8s.node.name"],
+            "_is_k8s": True,
+            "_service_instance_id": attrs["k8s.pod.uid"],
+            "_workload": wl.name,
+        })
+        out[svc] = entry
+    return out
+
+
+_K8S_RESOURCE_KEYS = (
+    "container.id", "k8s.pod.name", "k8s.pod.uid", "k8s.pod.ip", "k8s.namespace.name",
+    "k8s.deployment.name", "k8s.replicaset.name", "k8s.node.name", "k8s.node.uid",
+    "k8s.cluster.name",
+)
+# Extra keys only pinned (schema 1.3) entries carry; legacy entries never have them.
+_PINNED_EXTRA_KEYS = (
+    "k8s.daemonset.name", "k8s.statefulset.name", "k8s.container.name", "container.name",
+    "container.image.name", "container.image.tag", "host.type", "host.ip",
+    "cloud.availability_zone", "cloud.region", "cloud.provider", "cloud.platform",
+    "cloud.account.id", "cloud.instance.id", "os.description",
+)
+
+
 def get_resource_attrs(topology: dict, service_name: str) -> dict:
     """Return OTel attribute key-values for a service (suitable for _format_attributes()).
 
@@ -126,18 +179,13 @@ def get_resource_attrs(topology: dict, service_name: str) -> dict:
     }
 
     if entry.get("_is_k8s"):
-        attrs.update({
-            "container.id": entry["container.id"],
-            "k8s.pod.name": entry["k8s.pod.name"],
-            "k8s.pod.uid": entry["k8s.pod.uid"],
-            "k8s.pod.ip": entry["k8s.pod.ip"],
-            "k8s.namespace.name": entry["k8s.namespace.name"],
-            "k8s.deployment.name": entry["k8s.deployment.name"],
-            "k8s.replicaset.name": entry["k8s.replicaset.name"],
-            "k8s.node.name": entry["k8s.node.name"],
-            "k8s.node.uid": entry["k8s.node.uid"],
-            "k8s.cluster.name": entry["k8s.cluster.name"],
-        })
+        for key in _K8S_RESOURCE_KEYS:
+            if key in entry:
+                attrs[key] = entry[key]
+        if entry.get("_workload"):
+            for key in _PINNED_EXTRA_KEYS:
+                if key in entry:
+                    attrs[key] = entry[key]
 
     return attrs
 

@@ -1,0 +1,104 @@
+name: Image pulls failing through the Docker Hub proxy cache
+subsystem: registry
+vehicle_section: harbor/dockerhub-proxy
+error_type: 'toomanyrequests: You have reached your unauthenticated pull rate limit'
+sensor_type: image_pull
+affected_services:
+  - harbor-registry
+cascade_services:
+  - kubelet
+description: Pods that need an image tag Harbor has not cached yet stay in ImagePullBackOff. Already-cached images and
+  running pods are unaffected, so the impact shows up as stuck rollouts.
+investigation_notes: |-
+  Root cause: the access token on Harbor's dockerhub registry endpoint (used by the dockerhub-proxy project) expired ({token_expiry}, 90-day expiry). Harbor now pulls from Docker Hub anonymously from its NAT gateway address, which hits Docker Hub's unauthenticated pull limit. Tags already in the proxy cache still serve; any new tag fails.
+  Confirm:
+    - harbor-registry: failed to pull manifest from upstream ... 429 Too Many Requests: toomanyrequests: You have reached your unauthenticated pull rate limit
+    - harbor core: registry endpoint "dockerhub" health check reports unauthorized: incorrect username or password. Docker Hub returns the same message for an expired access token as for a wrong password, so the logs do not show the expiry itself: check the token's expiry date in Docker Hub (Account settings > Personal access tokens); it was created 90 days before {token_expiry}
+    - kubelet: Failed to pull image "harbor.example-saas.io/dockerhub-proxy/library/redis:7.4.1" ... 429
+    - session-cache rollout (redis 7.2.5 -> 7.4.1) has new pods Pending with ImagePullBackOff; the old pods keep running
+  Remediation: rotate the Docker Hub credential on the dockerhub registry endpoint; Harbor retries upstream pulls immediately and the stuck pods start on their next back-off.
+remediation_action: rotate_registry_credential
+remediation_command: |-
+  opsctl rotate registry-credential/dockerhub -n harbor
+error_message: 'time="{iso_now}" level=error msg="failed to pull manifest from upstream" error="http status code: 429, body:
+  {{\"errors\":[{{\"code\":\"TOOMANYREQUESTS\",\"message\":\"toomanyrequests: You have reached your unauthenticated pull rate
+  limit. https://www.docker.com/increase-rate-limit\"}}]}}" project=dockerhub-proxy repository=library/{repo} reference={tag}'
+stack_trace: ''
+fault_params:
+  repo: {choice: [redis, redis, python, node]}
+  tag: {choice: [7.4.1, 7.4.1, 3.12.7-slim, 22.11.0-alpine]}
+  token_expiry: '2026-11-13T00:00:00Z'
+rca_clues:
+  harbor-registry:
+    harbor.project: dockerhub-proxy
+    harbor.upstream.auth: anonymous
+    harbor.registry_endpoint: dockerhub
+cascade_messages:
+  kubelet:
+    - severity: ERROR
+      message: 'E{klog_time}    2817 log.go:32] "PullImage from image service failed" err="rpc error: code = Unknown desc
+        = failed to pull and unpack image \"harbor.example-saas.io/dockerhub-proxy/library/redis:7.4.1\": unexpected status from
+        HEAD request: 429 Too Many Requests" image="harbor.example-saas.io/dockerhub-proxy/library/redis:7.4.1"'
+fault_scope:
+  cluster: prod-use1
+  workloads: [session-cache]
+onset_delay_seconds: 30
+generator_impact:
+  kubernetes_otel:
+    pods_stuck_in_pending_phase: 3
+infrastructure_events:
+  - service: harbor-registry
+    severity: WARN
+    offset_seconds: -45
+    body: '{iso_now} [WARNING] [/controller/registry/health.go:84]: registry endpoint dockerhub health check failed: unauthorized:
+      incorrect username or password'
+  - service: kube-apiserver
+    severity: INFO
+    offset_seconds: -5
+    body: 'audit: level=RequestResponse stage=ResponseComplete verb=patch resource=deployments namespace=tenant-edge name=session-cache
+      user=system:serviceaccount:argocd:argocd-application-controller code=200 sync.revision=6b2e9f1 change="image redis:7.2.5
+      -> redis:7.4.1"'
+k8s_events:
+  - type: Warning
+    reason: Failed
+    object: {kind: Pod, namespace: tenant-edge}
+    message: 'Failed to pull image "harbor.example-saas.io/dockerhub-proxy/library/redis:7.4.1": failed to pull and unpack
+      image: unexpected status from HEAD request: 429 Too Many Requests'
+    component: kubelet
+    every_seconds: 45
+  - type: Warning
+    reason: BackOff
+    object: {kind: Pod, namespace: tenant-edge}
+    message: 'Back-off pulling image "harbor.example-saas.io/dockerhub-proxy/library/redis:7.4.1"'
+    component: kubelet
+    every_seconds: 60
+remediation_effects:
+  transition_seconds: 90
+  state:
+    kubernetes_otel:
+      workloads:
+        session-cache: {image: 'harbor.example-saas.io/dockerhub-proxy/library/redis:7.4.1'}
+  log_events:
+    - service: harbor-registry
+      severity: INFO
+      offset_seconds: 4
+      body: '{iso_now} [INFO] [/controller/registry/controller.go:211]: registry endpoint dockerhub updated, health: healthy'
+  verification:
+    - signal: harbor upstream 429s
+      from: 'logs.otel.platform'
+      where: 'resource.attributes.service.name == "harbor-registry" AND body.text LIKE "*toomanyrequests*"'
+      expect: '0 new lines'
+      within_seconds: 60
+    - signal: k8s.pod.phase for session-cache
+      from: 'metrics-k8sclusterreceiver.otel-*'
+      field: 'metrics.k8s.pod.phase'
+      where: 'resource.attributes.k8s.deployment.name == "session-cache" AND resource.attributes.k8s.cluster.name == "prod-use1"'
+      expect: 'no Pending pods; container.image.tag = 7.4.1 on all 3 pods'
+      within_seconds: 150
+business_impact:
+  - kpi: business.deploy_success_rate_pct
+    value: {uniform: [86.0, 90.0], round: 1}
+  - kpi: business.pod_start_p95_s
+    value: {uniform: [80.0, 110.0], round: 1}
+  - kpi: business.pending_pods
+    value: {uniform: [5.0, 7.0], round: 0}

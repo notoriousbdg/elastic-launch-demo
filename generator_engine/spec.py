@@ -6,7 +6,7 @@ telemetry generator. The registry holds one spec per generator id.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 
@@ -100,6 +100,24 @@ class GeneratorSpec:
     Compared against ``generator_engine/schema.yaml`` ``current``.  Missing
     values are treated as ``default_unversioned``.  Major gaps block Launch
     for any scenario that enables this generator."""
+
+    state_keys: dict = field(default_factory=dict)
+    """Config-like values a fix can change (generator schema 1.1).
+
+    ``{key: {"type": str, "doc": str}}`` — what a channel's ``fault_state`` /
+    ``remediation_effects.state.<generator id>`` may set: limits, capacities,
+    replicas, versions, images, instance types. They persist after the fix (unlike
+    ``impact_keys``, which end with the fault) so the changed value shows up in
+    telemetry and can be verified. The verifier rejects undeclared keys."""
+
+    scope_aware: bool = False
+    """True when the generator honours a channel's ``fault_scope`` (cluster, node
+    pool, nodes, AZ, workloads), degrading only the entities inside it (1.1)."""
+
+    coherence: tuple = ()
+    """Signal couplings the generator enforces (1.1), e.g.
+    ``("hpa_at_max => replicas=max, cpu>target",)``. Documentation for authors:
+    a channel need not set both sides of a coupled pair."""
 
     identity_fields: tuple = (
         "host.name",

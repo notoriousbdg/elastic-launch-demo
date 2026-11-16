@@ -1,0 +1,157 @@
+#!/usr/bin/env python3
+"""opsctl - apply platform changes through the platform operations API.
+
+Every change is recorded in the audit trail with a change id.
+"""
+
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+
+API = os.environ.get("OPSCTL_API", "http://localhost:8080").rstrip("/")
+TIMEOUT = float(os.environ.get("OPSCTL_TIMEOUT", "30"))
+
+VERB_HELP = {
+    "rollback": ("Roll a resource back to an earlier revision",
+                 "opsctl rollback configmap/<name> -n <namespace> --to-revision <N|previous>"),
+    "restore": ("Restore a versioned resource to a known-good version",
+                "opsctl restore iam-policy/<name> --version <vN>"),
+    "renew": ("Trigger certificate renewal",
+              "opsctl renew certificate[/<name>] -n <namespace> [--all] [--not-ready]"),
+    "rotate": ("Rotate a credential or secret and roll out the new value",
+               "opsctl rotate registry-credential/<name> -n <namespace>"),
+    "sync": ("Force an immediate refresh of a synced secret or config source",
+             "opsctl sync externalsecret/<name> -n <namespace>"),
+    "drain": ("Cordon a node and evict its pods",
+              "opsctl drain node/<name> --ignore-daemonsets"),
+    "replace": ("Cordon, drain and terminate a node; the node group launches a replacement",
+                "opsctl replace node/<name>"),
+    "patch": ("Change settings on a resource",
+              "opsctl patch deployment/<name> -n <namespace> --memory-limit 3Gi\n"
+              "  opsctl patch nodegroup/<name> --instance-types c6i.4xlarge,m6i.4xlarge"),
+    "apply": ("Create or update a policy object",
+              "opsctl apply ratelimit/<name> -n <namespace> --rps 200"),
+    "expand": ("Grow a persistent volume claim",
+               "opsctl expand pvc/<name> -n <namespace> --size 2Ti"),
+    "run": ("Start a one-off job from its template",
+            "opsctl run job/<name> -n <namespace>"),
+    "delete": ("Delete a resource, or every resource matching a selector",
+               "opsctl delete <kind>/<name> -n <namespace>\n"
+               "  opsctl delete <kind> -n <namespace> --selector key=value"),
+    "restart": ("Rolling restart of a workload",
+                "opsctl restart deployment/<name> -n <namespace>"),
+}
+
+
+def usage() -> str:
+    width = max(len(v) for v in VERB_HELP)
+    lines = [
+        "opsctl applies changes to the platform (cluster and cloud account).",
+        "Every applied change is written to the audit log with a change id.",
+        "",
+        "Usage:",
+        "  opsctl [plan] <verb> <kind>[/<name>] [-n <namespace>] [--flag value | --flag=value | --switch]...",
+        "",
+        "Commands:",
+    ]
+    for verb, (summary, _) in VERB_HELP.items():
+        lines.append(f"  {verb.ljust(width)}  {summary}")
+    lines += [
+        f"  {'plan'.ljust(width)}  Dry run: show what a command would change without applying it",
+        "",
+        "Options:",
+        "  -n, --namespace   Namespace of the target (omit for cluster or account scoped objects)",
+        "  -h, --help        Show help for opsctl or a command",
+        "",
+        "Environment:",
+        f"  OPSCTL_API        Platform operations API (current: {API})",
+        "",
+        "Use \"opsctl <verb> --help\" for more information about a command.",
+    ]
+    return "\n".join(lines)
+
+
+def verb_usage(verb: str) -> str:
+    summary, example = VERB_HELP[verb]
+    return (f"{summary}.\n\nExamples:\n  {example}\n\n"
+            f"Dry run:\n  opsctl plan {verb} ...\n\nOptions:\n"
+            f"  -n, --namespace   Namespace of the target\n  -h, --help        Show this help")
+
+
+def post(path: str, payload: dict) -> tuple:
+    req = urllib.request.Request(
+        API + path,
+        data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json", "User-Agent": "opsctl/1.4"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+            return resp.status, json.loads(resp.read().decode() or "{}")
+    except urllib.error.HTTPError as exc:
+        try:
+            body = json.loads(exc.read().decode() or "{}")
+        except ValueError:
+            body = {}
+        return exc.code, body
+    except (urllib.error.URLError, OSError) as exc:
+        reason = getattr(exc, "reason", exc)
+        return 0, {"error": f"error: unable to reach the platform operations API at {API}: {reason}"}
+
+
+def main(argv: list) -> int:
+    if not argv or argv[0] in ("-h", "--help", "help"):
+        print(usage())
+        return 0
+    if argv[0] in ("--version", "version"):
+        print("opsctl v1.4.2")
+        return 0
+
+    args = list(argv)
+    dry_run = False
+    if args[0] == "plan":
+        dry_run = True
+        args = args[1:]
+        if not args or args[0] in ("-h", "--help"):
+            print("Show what a command would change without applying it.\n\n"
+                  "Usage:\n  opsctl plan <verb> <kind>[/<name>] [-n <namespace>] [flags]")
+            return 0
+    verb = args[0]
+    if verb not in VERB_HELP:
+        print(f'error: unknown command "{verb}" for "opsctl"\nRun \'opsctl --help\' for usage.',
+              file=sys.stderr)
+        return 1
+    if "-h" in args[1:] or "--help" in args[1:]:
+        print(verb_usage(verb))
+        return 0
+
+    payload = {"argv": args, "dry_run": dry_run}
+    if os.environ.get("OPSCTL_DEPLOYMENT"):
+        payload["deployment_id"] = os.environ["OPSCTL_DEPLOYMENT"]
+    status, body = post("/api/ops/actions", payload)
+    if status != 200 or body.get("error"):
+        msg = body.get("error") or f"error: request failed (HTTP {status})"
+        if status == 404:
+            msg = "error: the server could not find the target platform (no environment registered)"
+        print(msg if msg.startswith("error") else f"error: {msg}", file=sys.stderr)
+        return 1
+
+    if body.get("status") == "planned":
+        print(f"Plan: {' '.join(args)}")
+        for line in body.get("changes", []):
+            print(f"  {line}")
+        print("\nNo changes applied (dry run). Run without 'plan' to apply.")
+        return 0
+
+    print(body.get("message", "applied"))
+    print(f"change id: {body.get('change_id', '-')}  ({body.get('timestamp', '')})")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except KeyboardInterrupt:
+        sys.exit(130)

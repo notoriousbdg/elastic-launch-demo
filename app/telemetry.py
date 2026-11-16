@@ -483,9 +483,37 @@ class OTLPClient:
         ).rstrip("/")
         return f"{es}/_otlp/v1/metrics" if es else None
 
+    @staticmethod
+    def _split_by_data_stream(payload: dict) -> list[dict]:
+        """Split a metrics payload into one payload per ``data_stream.dataset``.
+
+        Elasticsearch's OTLP endpoint merges resources in one request whose attributes
+        differ only in ``data_stream.*``, and indexes the merged document into one of
+        the data streams. A node's k8sclusterreceiver metrics sent next to its
+        kubeletstatsreceiver metrics were indexed into metrics-kubeletstatsreceiver, so
+        the cluster-receiver index showed one or two nodes per cluster.
+        """
+        groups: dict[str, list[dict]] = {}
+        for rm in payload.get("resourceMetrics") or []:
+            ds = ""
+            for a in (rm.get("resource") or {}).get("attributes") or []:
+                if a.get("key") == "data_stream.dataset":
+                    ds = str((a.get("value") or {}).get("stringValue", ""))
+                    break
+            groups.setdefault(ds, []).append(rm)
+        if len(groups) <= 1:
+            return [payload]
+        return [{**payload, "resourceMetrics": rms} for rms in groups.values()]
+
     def _send(self, url: str, payload: dict, signal_name: str) -> None:
         if not self.endpoint:
             return  # No endpoint configured yet; silently drop until reconfigure() is called
+        if "resourceMetrics" in payload:
+            parts = self._split_by_data_stream(payload)
+            if len(parts) > 1:
+                for part in parts:
+                    self._send(url, part, signal_name)
+                return
         if self.consecutive_failures >= self.max_failures_before_backoff:
             # Exponential backoff — skip sending
             backoff = min(
