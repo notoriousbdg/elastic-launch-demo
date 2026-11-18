@@ -25,16 +25,6 @@ constants:
   - hate_speech
   - exploits
   - spam
-  MODEL_VERSIONS:
-  - automod-v5.2
-  - automod-v5.3
-  - automod-v6.0
-  - automod-v6.1
-  VERDICTS:
-  - CLEAN
-  - CLEAN
-  - CLEAN
-  - FLAGGED
   RESOLUTIONS:
   - warning_issued
   - temp_ban
@@ -45,35 +35,57 @@ state:
     init: 0
   _last_moderation_report:
     init: now
+  _queue18_peak:
+    init: 0
 steps:
+# Channel 17: the model registry promotes automod-text v6.2, whose hate_speech threshold is
+# 0.55 instead of 0.85, so borderline messages (score 0.55-0.84) are actioned. After the
+# rollback the serving replicas reload v6.1 within ~20 s, so actions per minute are back in
+# ~30 s; the appeal-overturn rate is computed over decided appeals and keeps counting the
+# v6.2 actions for a while, so it converges over ~300 s.
 - sample:
-    model:
-      choice: MODEL_VERSIONS
-    confidence:
-      uniform:
-      - 0.85
-      - 0.99
-      round: 3
-    category:
-      choice: CATEGORIES
-    scan_latency_ms:
-      uniform:
-      - 5.0
-      - 30.0
-      round: 1
+    am_fixed:
+      expr: "17 in fixed_channels and 17 not in all_active"
+    am_ramp:
+      expr: "min(1.0, max(0.0, elapsed.get(17, 0) - lag.get(17, 0)) / 30.0) if 17 in all_active else 0.0"
+    am_since:
+      expr: "since_fix.get(17, 0) if am_fixed else 0"
+    actions_base:
+      expr: "rand.uniform(50.0, 150.0)"
+    actions_per_min:
+      expr: "round(actions_base + (rand.uniform(2000.0, 5000.0) - actions_base) * am_ramp) if 17 in all_active else (round(3500.0 + (actions_base - 3500.0) * min(1.0, am_since / 30.0)) if am_fixed else round(actions_base))"
+    fp_base:
+      expr: "rand.uniform(1.0, 4.0)"
+    fp_rate:
+      expr: "round(fp_base + (rand.uniform(30.0, 60.0) - fp_base) * am_ramp, 2) if 17 in all_active else (round(45.0 + (fp_base - 45.0) * min(1.0, am_since / 300.0), 2) if am_fixed else round(fp_base, 2))"
+    model_version:
+      expr: "'v6.2' if 17 in all_active else 'v6.1'"
+    hs_threshold:
+      expr: "0.55 if 17 in all_active else 0.85"
+    am_degraded:
+      expr: "(17 in all_active and am_ramp > 0) or fp_rate > 6.0 or actions_per_min > 300"
     verdict:
-      choice: VERDICTS
+      expr: "'FLAGGED' if rand.random() < 0.25 + 0.5 * am_ramp else 'CLEAN'"
+    category:
+      expr: "'hate_speech' if verdict == 'FLAGGED' and am_ramp > 0 and rand.random() < 0.8 else rand.choice(CATEGORIES)"
+    confidence:
+      expr: "round(rand.uniform(0.55, 0.84), 3) if verdict == 'FLAGGED' and category == 'hate_speech' and am_ramp > 0 else round(rand.uniform(0.85, 0.99), 3)"
+    scan_latency_ms:
+      expr: "round(rand.uniform(5.0, 30.0), 1)"
+    scan_rate:
+      expr: "rand.randint(900, 1300)"
 - counter:
     state_key: _actions_taken
     by:
-      expr: 1 if verdict == 'FLAGGED' else 0
+      expr: "1 if verdict == 'FLAGGED' else 0"
 - log:
     level: INFO
-    message: '[T&S] content_scan model={model} verdict={verdict} category={category} confidence={confidence} latency={scan_latency_ms}ms'
+    message: '[T&S] content_scan model=automod-text version={model_version} verdict={verdict} category={category} confidence={confidence}
+      latency={scan_latency_ms}ms'
     attrs:
       operation: content_scanned
       moderation.model:
-        var: model
+        var: model_version
       moderation.verdict:
         var: verdict
       moderation.category:
@@ -82,72 +94,6 @@ steps:
         var: confidence
       moderation.latency_ms:
         var: scan_latency_ms
-- sample:
-    report_category:
-      choice: CATEGORIES
-    report_player_id:
-      format: PLR-{n}
-      n:
-        randint:
-        - 100000
-        - 999999
-    resolution:
-      choice: RESOLUTIONS
-    wait_min:
-      randint:
-      - 1
-      - 120
-- log:
-    level: INFO
-    message: '[T&S] report_processed player={report_player_id} category={report_category} resolution={resolution} wait={wait_min}min
-      queue_depth=142'
-    attrs:
-      operation: report_processed
-      report.player_id:
-        var: report_player_id
-      report.category:
-        var: report_category
-      report.resolution:
-        var: resolution
-      report.wait_minutes:
-        var: wait_min
-- every:
-    seconds: 10
-    state_key: _last_moderation_report
-    steps:
-    - log:
-        level: INFO
-        message: '[T&S] summary actions_taken={_actions_taken} active_models=4 fp_rate=1.2% queue_depth=84'
-        attrs:
-          operation: moderation_summary
-          summary.actions_taken:
-            var: _actions_taken
-          summary.active_models: 4
-- sample:
-    scan_rate:
-      randint:
-      - 200
-      - 2000
-    fp_rate:
-      if_active:
-        uniform:
-        - 15.0
-        - 45.0
-        round: 2
-      else:
-        uniform:
-        - 0.5
-        - 3.0
-        round: 2
-    queue_depth:
-      if_active:
-        randint:
-        - 5000
-        - 50000
-      else:
-        randint:
-        - 50
-        - 500
 - metric:
     name: moderation.scan_rate
     value:
@@ -159,12 +105,162 @@ steps:
       var: fp_rate
     unit: '%'
 - metric:
+    name: moderation.actions_taken
+    value:
+      var: actions_per_min
+    unit: actions/min
+- when: "not am_degraded"
+  log:
+    level: INFO
+    message: '[T&S] automod-serving model=automod-text version={model_version} hate_speech_threshold={hs_threshold} replicas=12/12
+      actions_1m={actions_per_min} appeal_overturn_rate={fp_rate}% status=HEALTHY'
+    attrs:
+      operation: automod_status
+      model.name: automod-text
+      model.version:
+        var: model_version
+      model.hate_speech_threshold:
+        var: hs_threshold
+      moderation.actions_per_min:
+        var: actions_per_min
+      moderation.appeal_overturn_rate_pct:
+        var: fp_rate
+      moderation.status: HEALTHY
+- when: "am_degraded"
+  log:
+    level: WARN
+    message: '[T&S] automod-serving model=automod-text version={model_version} hate_speech_threshold={hs_threshold} replicas=12/12
+      actions_1m={actions_per_min} appeal_overturn_rate={fp_rate}% status=DEGRADED'
+    attrs:
+      operation: automod_status
+      model.name: automod-text
+      model.version:
+        var: model_version
+      model.hate_speech_threshold:
+        var: hs_threshold
+      moderation.actions_per_min:
+        var: actions_per_min
+      moderation.appeal_overturn_rate_pct:
+        var: fp_rate
+      moderation.status: DEGRADED
+# Channel 18: the report-classifier ConfigMap raises the inference batch size 32 -> 128. The
+# new pods run out of GPU memory on their first batch (A100 40 GB) and go into
+# CrashLoopBackOff within ~45 s, so reports pile up at the ~35/s inflow, up to the 60000-report
+# queue limit. After the rollback the pods roll with batch 32 and load the model (~90 s to
+# 12/12 ready); 12 workers drain the backlog back to 50-300 over ~300 s.
+- sample:
+    rq_fixed:
+      expr: "18 in fixed_channels and 18 not in all_active"
+    rq_t:
+      expr: "max(0.0, elapsed.get(18, 0) - lag.get(18, 0)) if 18 in all_active else 0.0"
+    rq_on:
+      expr: "18 in all_active and rq_t > 0"
+    rq_ramp:
+      expr: "min(1.0, rq_t / 45.0)"
+    rq_since:
+      expr: "since_fix.get(18, 0) if rq_fixed else 0"
+    rq_base:
+      expr: "rand.randint(50, 300)"
+    rq_from:
+      expr: "_queue18_peak if _queue18_peak > 0 else 30000.0"
+    queue_depth:
+      expr: "round(min(60000.0, rq_base + 35.0 * rq_t * rq_ramp + rand.gauss(0, 150) * rq_ramp)) if 18 in all_active else (round(rq_from + (rq_base - rq_from) * min(1.0, max(0.0, rq_since - 30.0) / 270.0)) if rq_fixed else rq_base)"
+    workers_ready:
+      expr: "round(12 - (12 - rand.randint(0, 3)) * rq_ramp) if 18 in all_active else (min(12, round(3 + 9 * min(1.0, rq_since / 90.0))) if rq_fixed else 12)"
+    batch_size:
+      expr: "128 if 18 in all_active else 32"
+    gpu_mem_gib:
+      expr: "39.4 if rq_on else round(rand.uniform(9.0, 12.5), 1)"
+    oldest_report_min:
+      expr: "round(max(rand.uniform(0.5, 3.0), queue_depth / 35.0 / 60.0), 1)"
+    rq_degraded:
+      expr: "rq_on or workers_ready < 12 or queue_depth > 1000"
+    report_category:
+      choice: CATEGORIES
+    report_player_id:
+      format: PLR-{n}
+      n:
+        randint:
+        - 100000
+        - 999999
+    resolution:
+      choice: RESOLUTIONS
+- when: "18 in all_active"
+  counter:
+    state_key: _queue18_peak
+    by:
+      expr: "queue_depth - _queue18_peak"
+- metric:
     name: moderation.report_queue_depth
     value:
       var: queue_depth
     unit: reports
 - metric:
-    name: moderation.actions_taken
+    name: moderation.classifier.workers_ready
     value:
-      var: _actions_taken
-    unit: actions
+      var: workers_ready
+    unit: workers
+- when: "workers_ready > 0"
+  log:
+    level: INFO
+    message: '[T&S] report_processed player={report_player_id} category={report_category} resolution={resolution} wait={oldest_report_min}min
+      queue_depth={queue_depth}'
+    attrs:
+      operation: report_processed
+      report.player_id:
+        var: report_player_id
+      report.category:
+        var: report_category
+      report.resolution:
+        var: resolution
+      report.wait_minutes:
+        var: oldest_report_min
+- when: "not rq_degraded"
+  log:
+    level: INFO
+    message: '[T&S] report-classifier workers_ready={workers_ready}/12 inference_batch_size={batch_size} gpu_mem_used={gpu_mem_gib}GiB/40GiB
+      queue_depth={queue_depth} oldest_report={oldest_report_min}min status=HEALTHY'
+    attrs:
+      operation: classifier_status
+      moderation.classifier.workers_ready:
+        var: workers_ready
+      moderation.report_queue_depth:
+        var: queue_depth
+      moderation.classifier_status: HEALTHY
+      config.inference_batch_size:
+        var: batch_size
+- when: "rq_degraded"
+  log:
+    level: WARN
+    message: '[T&S] report-classifier workers_ready={workers_ready}/12 inference_batch_size={batch_size} gpu_mem_used={gpu_mem_gib}GiB/40GiB
+      queue_depth={queue_depth} oldest_report={oldest_report_min}min status=DEGRADED'
+    attrs:
+      operation: classifier_status
+      moderation.classifier.workers_ready:
+        var: workers_ready
+      moderation.report_queue_depth:
+        var: queue_depth
+      moderation.classifier_status: DEGRADED
+      config.inference_batch_size:
+        var: batch_size
+- when: "rq_on"
+  log:
+    level: ERROR
+    message: 'report-classifier worker: torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 9.38 GiB (GPU 0; 39.39 GiB
+      total capacity; 31.02 GiB already allocated) while running batch of {batch_size} reports'
+    attrs:
+      operation: classifier_inference
+      config.inference_batch_size:
+        var: batch_size
+- every:
+    seconds: 10
+    state_key: _last_moderation_report
+    steps:
+    - log:
+        level: INFO
+        message: '[T&S] summary actions_taken={_actions_taken} active_models=1 fp_rate={fp_rate}% queue_depth={queue_depth}'
+        attrs:
+          operation: moderation_summary
+          summary.actions_taken:
+            var: _actions_taken
+          summary.active_models: 1

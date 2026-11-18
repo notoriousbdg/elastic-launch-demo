@@ -6,7 +6,7 @@ scenario_description: 'GCP-native network operations across three regions: us-ce
 namespace: gcpnet
 scenario_icon: ☁️
 sort_order: 9
-schema_version: "1.2"
+schema_version: "1.3"
 nominal_label: NORMAL
 hosts:
 - host.name: gcpnet-host-central1
@@ -141,13 +141,13 @@ agent_config:
     engineers investigate incidents, analyze telemetry data, and provide root cause analysis for fault conditions across 9
     GCP networking services spanning 3 regions (us-central1, us-east1, europe-west1). You have deep expertise in Google Cloud
     VPC networking, Cloud Armor WAF and DDoS protection, Cloud NAT gateway management, Cloud DNS (including DNSSEC), Dedicated
-    Interconnect and BGP routing, Cloud VPN (IKE/IPsec), Cloud CDN caching and origin management, Memorystore for Memcached edge caching, Cloud Audit Logs, Vertex AI (Gemini Cloud Assist), Compute Engine managed instance groups, Cloud Run, Cloud Storage backend buckets, Cloud SQL (MySQL, PostgreSQL, SQL Server), Cloud Load Balancing (L4/L7),
+    Interconnect and BGP routing, Cloud VPN (IKE/IPsec), Cloud CDN caching, cache key policy and origin management, Memorystore for Memcached, Cloud Audit Logs, Vertex AI (Gemini Cloud Assist), Compute Engine managed instance groups, Cloud Run, Cloud Storage backend buckets, Cloud SQL (MySQL, PostgreSQL, SQL Server), Cloud Load Balancing (L4/L7),
     and Network Intelligence Center connectivity testing. When investigating incidents, search for these GCP-specific identifiers
     in logs: VPC errors (VPC-ROUTE-LIMIT-EXCEEDED, VPC-SUBNET-IP-EXHAUSTION, VPC-FIREWALL-RULE-CONFLICT), Cloud Armor events
     (ARMOR-DDOS-ALERT, ARMOR-POLICY-SYNC-FAILURE, ARMOR-ROLLBACK-DENIED), NAT faults (NAT-PORT-EXHAUSTION, NAT-ENDPOINT-MAPPING-FAILURE,
     NAT-IP-ALLOCATION-ERROR), DNS issues (DNS-DNSSEC-VALIDATION-FAILURE, DNS-ZONE-PROPAGATION-DELAY), Interconnect faults
-    (INTERCONNECT-CIRCUIT-DOWN, INTERCONNECT-BGP-FLAP), CDN errors (CDN-ORIGIN-UNREACHABLE), Memorystore for Memcached faults (MEMCACHED-MISS-SPIKE), LB faults
-    (LB-BACKEND-UNHEALTHY, LB-SSL-CERT-EXPIRY), VPN errors (VPN-TUNNEL-DOWN, VPN-IKE-NEGOTIATION-FAILURE), and NIC events
+    (INTERCONNECT-CIRCUIT-DOWN, INTERCONNECT-BGP-FLAP), CDN errors (CDN-ORIGIN-UNREACHABLE, CDN-CACHE-KEY-MISS-SPIKE), LB faults
+    (LB-BACKEND-UNHEALTHY, LB-SSL-CERT-PROVISIONING-FAILED), VPN errors (VPN-TUNNEL-DOWN, VPN-IKE-NEGOTIATION-FAILURE), and NIC events
     (NI-GEMINI-THROTTLED). Log messages are in body.text — NEVER search the body field alone.'
 assessment_tool_config:
   id: network_health_assessment
@@ -418,9 +418,9 @@ generators:
   gcp_vertexai: true
   gcp_compute_otel: true
   gcp_cloudrun_otel: true
-  # media-assets first: it is the CDN backend bucket channel 15 faults.
+  # gcpnet-media-assets first: it is the bucket behind the CDN backend bucket channel 15 faults.
   gcp_cloudstorage_otel:
-    buckets: [media-assets, data-lake, backups]
+    buckets: [gcpnet-media-assets, gcpnet-data-lake, gcpnet-backups]
   gcp_cloudsql_mysql_otel: true
   gcp_cloudsql_postgresql_otel: true
   gcp_cloudsql_sqlserver_otel: true

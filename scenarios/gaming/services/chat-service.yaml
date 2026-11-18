@@ -25,11 +25,6 @@ constants:
   - match-lobby
   - trade-market
   - lfg-ranked
-  BITRATES:
-  - 48
-  - 64
-  - 96
-  - 128
 state:
   _messages_processed:
     init: 0
@@ -39,17 +34,125 @@ steps:
 - counter:
     state_key: _messages_processed
     by: 1
+# Channel 7: chat-ratelimits r42 dropped the per-channel aggregate limit (500 msg/s), so a bot
+# swarm that stays under the per-user limit floods global-en. After the rollback the aggregate
+# limit is back at once: delivered rate is capped at 500 msg/s and the bots' sends are
+# rejected, then the swarm backs off and both settle over ~90 s.
+- sample:
+    fl_fixed:
+      expr: "7 in fixed_channels and 7 not in all_active"
+    fl_ramp:
+      expr: "min(1.0, max(0.0, elapsed.get(7, 0) - lag.get(7, 0)) / 30.0)"
+    fl_conv:
+      expr: "min(1.0, since_fix.get(7, 0) / 90.0) if fl_fixed else 1.0"
+    fl_k:
+      expr: "fl_ramp if 7 in all_active else (1.0 - fl_conv)"
+    fl_base:
+      expr: "rand.uniform(40.0, 120.0)"
+    fl_peak:
+      expr: "rand.uniform(3000.0, 8000.0)"
+    rate_global:
+      expr: "round(fl_base + (fl_peak - fl_base) * fl_ramp) if 7 in all_active else (round(fl_base + max(0.0, 500.0 - fl_base) * (1.0 - fl_conv)) if fl_fixed else round(fl_base))"
+    rate_guild:
+      expr: "round(rand.uniform(5.0, 30.0))"
+    rate_lobby:
+      expr: "round(rand.uniform(60.0, 200.0))"
+    rate_trade:
+      expr: "round(rand.uniform(20.0, 80.0))"
+    rate_lfg:
+      expr: "round(rand.uniform(15.0, 60.0))"
+    rej_base:
+      expr: "rand.uniform(5.0, 30.0)"
+    rejections:
+      expr: "round(rej_base * (1.0 - fl_ramp)) if 7 in all_active else (round(rej_base + rand.uniform(3000.0, 6000.0) * (1.0 - fl_conv)) if fl_fixed else round(rej_base))"
+    fl_rev:
+      expr: "'r42' if 7 in all_active else 'r41'"
+    fl_status:
+      expr: "'DEGRADED' if (7 in all_active and fl_ramp > 0) or rate_global > 500 else 'OK'"
+- metric:
+    name: chat.message_rate
+    value:
+      var: rate_global
+    unit: msg/s
+    attrs:
+      chat.channel: global-en
+- metric:
+    name: chat.message_rate
+    value:
+      var: rate_guild
+    unit: msg/s
+    attrs:
+      chat.channel: guild-12345
+- metric:
+    name: chat.message_rate
+    value:
+      var: rate_lobby
+    unit: msg/s
+    attrs:
+      chat.channel: match-lobby
+- metric:
+    name: chat.message_rate
+    value:
+      var: rate_trade
+    unit: msg/s
+    attrs:
+      chat.channel: trade-market
+- metric:
+    name: chat.message_rate
+    value:
+      var: rate_lfg
+    unit: msg/s
+    attrs:
+      chat.channel: lfg-ranked
+- metric:
+    name: chat.ratelimit.rejections_per_s
+    value:
+      var: rejections
+    unit: msg/s
+- when: "7 in all_active"
+  log:
+    level: WARN
+    message: '[Chat] ratelimit_status configmap=chat-ratelimits revision={fl_rev} channel_aggregate_limit=none per_user_limit=5msg/s
+      global-en_rate={rate_global}msg/s rejected={rejections}msg/s status={fl_status}'
+    attrs:
+      operation: ratelimit_status
+      config.ratelimit_revision:
+        var: fl_rev
+      chat.ratelimit.channel_aggregate_limit: none
+      chat.ratelimit.per_user_limit: 5
+      chat.ratelimit.rejections_per_s:
+        var: rejections
+      chat.channel: global-en
+      chat.channel_rate:
+        var: rate_global
+      chat.status:
+        var: fl_status
+- when: "7 not in all_active"
+  log:
+    level: INFO
+    message: '[Chat] ratelimit_status configmap=chat-ratelimits revision={fl_rev} channel_aggregate_limit=500msg/s per_user_limit=5msg/s
+      global-en_rate={rate_global}msg/s rejected={rejections}msg/s status={fl_status}'
+    attrs:
+      operation: ratelimit_status
+      config.ratelimit_revision:
+        var: fl_rev
+      chat.ratelimit.channel_aggregate_limit: 500
+      chat.ratelimit.per_user_limit: 5
+      chat.ratelimit.rejections_per_s:
+        var: rejections
+      chat.channel: global-en
+      chat.channel_rate:
+        var: rate_global
+      chat.status:
+        var: fl_status
 - sample:
     channel:
       choice: CHANNELS
     chat_latency_ms:
-      uniform:
-      - 1.0
-      - 15.0
-      round: 1
+      expr: "round(rand.uniform(1.0, 15.0) + (rand.uniform(150.0, 600.0) * fl_k if channel == 'global-en' else 0.0), 1)"
 - log:
     level: INFO
-    message: '[Chat] msg_routed channel={channel} latency={chat_latency_ms}ms delivery=OK subscribers=247'
+    message: '[Chat] msg_routed channel={channel} latency={chat_latency_ms}ms delivery=OK'
     attrs:
       operation: message_routed
       chat.channel:
@@ -57,7 +160,40 @@ steps:
       chat.latency_ms:
         var: chat_latency_ms
       chat.delivery_status: OK
+# Channel 8: the voice-mixer CPU limit was cut 2000m -> 1000m. CFS throttling makes the mixer
+# miss its 20 ms frame deadline. The patch rolls new pods over ~60 s, so the readings converge
+# over that time.
 - sample:
+    vx_fixed:
+      expr: "8 in fixed_channels and 8 not in all_active"
+    vx_ramp:
+      expr: "min(1.0, max(0.0, elapsed.get(8, 0) - lag.get(8, 0)) / 20.0)"
+    vx_conv:
+      expr: "min(1.0, since_fix.get(8, 0) / 60.0) if vx_fixed else 1.0"
+    vx_k:
+      expr: "vx_ramp if 8 in all_active else (1.0 - vx_conv)"
+    vx_base_lat:
+      expr: "rand.uniform(4.0, 9.0)"
+    mix_latency_ms:
+      expr: "round(vx_base_lat + (rand.uniform(35.0, 80.0) - vx_base_lat) * vx_k, 1)"
+    vx_base_loss:
+      expr: "rand.uniform(0.0, 0.5)"
+    voice_loss_pct:
+      expr: "round(vx_base_loss + (rand.uniform(6.0, 15.0) - vx_base_loss) * vx_k, 2)"
+    vx_base_thr:
+      expr: "rand.uniform(0.0, 3.0)"
+    cpu_throttled_pct:
+      expr: "round(vx_base_thr + (rand.uniform(45.0, 75.0) - vx_base_thr) * vx_k, 1)"
+    missed_deadlines:
+      expr: "round(rand.uniform(0.0, 0.3) + rand.uniform(120.0, 400.0) * vx_k)"
+    vx_limit:
+      expr: "'1000m' if 8 in all_active else '2000m'"
+    vx_status:
+      expr: "'DEGRADED' if (8 in all_active and vx_ramp > 0) or mix_latency_ms > 20 else 'OK'"
+    bitrate_kbps:
+      expr: "64 if voice_loss_pct > 3.0 else 96"
+    mos:
+      expr: "round(4.3 - 2.0 * vx_k + rand.uniform(-0.1, 0.1), 1)"
     voice_id:
       format: VC-{n}
       n:
@@ -68,17 +204,25 @@ steps:
       randint:
       - 2
       - 20
-    bitrate_kbps:
-      choice: BITRATES
-    packet_loss:
-      uniform:
-      - 0.0
-      - 1.5
-      round: 2
+- metric:
+    name: chat.voice.mix_latency_ms
+    value:
+      var: mix_latency_ms
+    unit: ms
+- metric:
+    name: chat.voice.packet_loss_pct
+    value:
+      var: voice_loss_pct
+    unit: '%'
+- metric:
+    name: chat.voice.cpu_throttled_pct
+    value:
+      var: cpu_throttled_pct
+    unit: '%'
 - log:
     level: INFO
-    message: '[Voice] channel={voice_id} participants={participants} bitrate={bitrate_kbps}kbps loss={packet_loss}% codec=opus
-      MOS=4.2'
+    message: '[Voice] channel={voice_id} participants={participants} bitrate={bitrate_kbps}kbps loss={voice_loss_pct}% codec=opus
+      MOS={mos}'
     attrs:
       operation: voice_status
       voice.channel_id:
@@ -88,42 +232,60 @@ steps:
       voice.bitrate_kbps:
         var: bitrate_kbps
       voice.packet_loss_pct:
-        var: packet_loss
+        var: voice_loss_pct
+- when: "8 in all_active"
+  log:
+    level: WARN
+    message: '[VoiceMixer] deployment=voice-mixer cpu_limit={vx_limit} cpu_throttled={cpu_throttled_pct}% frame_deadline=20ms
+      mix_p99={mix_latency_ms}ms missed_deadlines={missed_deadlines}/s status={vx_status}'
+    attrs:
+      operation: mixer_status
+      voice.deployment: voice-mixer
+      deployment.cpu_limit:
+        var: vx_limit
+      voice.cpu_throttled_pct:
+        var: cpu_throttled_pct
+      voice.mix_latency_ms:
+        var: mix_latency_ms
+      voice.missed_deadlines_per_s:
+        var: missed_deadlines
+      voice.status:
+        var: vx_status
+- when: "8 not in all_active"
+  log:
+    level: INFO
+    message: '[VoiceMixer] deployment=voice-mixer cpu_limit={vx_limit} cpu_throttled={cpu_throttled_pct}% frame_deadline=20ms
+      mix_p99={mix_latency_ms}ms missed_deadlines={missed_deadlines}/s status={vx_status}'
+    attrs:
+      operation: mixer_status
+      voice.deployment: voice-mixer
+      deployment.cpu_limit:
+        var: vx_limit
+      voice.cpu_throttled_pct:
+        var: cpu_throttled_pct
+      voice.mix_latency_ms:
+        var: mix_latency_ms
+      voice.missed_deadlines_per_s:
+        var: missed_deadlines
+      voice.status:
+        var: vx_status
 - every:
     seconds: 10
     state_key: _last_channel_report
     steps:
     - log:
         level: INFO
-        message: '[Chat] summary msgs_processed={_messages_processed} channels=5 mod_queue=12 voice_active=84'
+        message: '[Chat] summary msgs_processed={_messages_processed} channels=5'
         attrs:
           operation: channel_summary
           summary.messages_processed:
             var: _messages_processed
           summary.channel_count: 5
 - sample:
-    msg_rate:
-      if_active:
-        randint:
-        - 800
-        - 5000
-      else:
-        randint:
-        - 50
-        - 400
     active_users:
-      randint:
-      - 5000
-      - 50000
+      expr: "round(rand.gauss(33000, 800))"
     voice_channels:
-      randint:
-      - 200
-      - 2000
-- metric:
-    name: chat.message_rate
-    value:
-      var: msg_rate
-    unit: msg/s
+      expr: "round(rand.gauss(1550, 40))"
 - metric:
     name: chat.active_users
     value:

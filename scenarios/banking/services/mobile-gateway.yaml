@@ -65,10 +65,8 @@ steps:
       - iPad_Air
       - Pixel_8
     api_latency_ms:
-      uniform:
-      - 20.0
-      - 200.0
-      round: 1
+      expr: round(rand.uniform(20.0, 200.0) + rand.uniform(4000.0, 12000.0) * (min(1.0, elapsed.get(16, 0) / 20.0) if 16
+        in all_active else (max(0.0, 1.0 - since_fix.get(16, 0) / 60.0) if 16 in fixed_channels else 0.0)), 1)
 - counter:
     state_key: _request_count
     by: 1
@@ -109,23 +107,6 @@ steps:
           gateway.total_requests:
             var: _request_count
           gateway.error_rate: 0.02
-- sample:
-    api_latency_metric:
-      if_active:
-        uniform:
-        - 2000.0
-        - 15000.0
-        round: 1
-      else:
-        uniform:
-        - 15.0
-        - 250.0
-        round: 1
-- metric:
-    name: mobile_gateway.api_latency_ms
-    value:
-      var: api_latency_metric
-    unit: ms
 - metric:
     name: mobile_gateway.active_sessions
     value:
@@ -141,3 +122,178 @@ steps:
       - 2400.0
       round: 1
     unit: req/s
+- sample:
+    f02:
+      expr: min(1.0, max(0.0, elapsed.get(2, 0) - lag.get(2, 0)) / 30.0) if 2 in all_active else (max(0.0, 1.0 - since_fix.get(2,
+        0) / 60.0) if 2 in fixed_channels else 0.0)
+    c02_dpi:
+      expr: 150 if 2 in all_active else 200
+    c02_rev:
+      expr: '''rev-14'' if 2 in all_active else (''rev-13'' if 2 in fixed_channels else ''rev-13'')'
+    c02_match:
+      expr: round(rand.uniform(96.5, 99.2) * (1.0 - f02) + rand.uniform(58.0, 72.0) * f02, 1)
+    c02_status:
+      expr: '''DEGRADED'' if 2 in all_active or f02 > 0.1 else ''NOMINAL'''
+- when: 2 in all_active
+  log:
+    level: WARN
+    message: '[MOBILE] deposit_pipeline capture_config={c02_rev} image_dpi={c02_dpi} car_lar_match={c02_match}% micr=OK duplicate_check=OK
+      status={c02_status}'
+    attrs: &id001
+      operation: deposit_pipeline
+      deposit.capture_config_rev:
+        var: c02_rev
+      deposit.image_dpi:
+        var: c02_dpi
+      deposit.car_lar_match_pct:
+        var: c02_match
+      deposit.status:
+        var: c02_status
+- when: 2 not in all_active
+  log:
+    level: INFO
+    message: '[MOBILE] deposit_pipeline capture_config={c02_rev} image_dpi={c02_dpi} car_lar_match={c02_match}% micr=OK duplicate_check=OK
+      status={c02_status}'
+    attrs: *id001
+- metric:
+    name: mobile_gateway.deposit_car_lar_match_pct
+    value:
+      var: c02_match
+    unit: '%'
+- sample:
+    f03:
+      expr: min(1.0, max(0.0, elapsed.get(3, 0) - lag.get(3, 0)) / 20.0) if 3 in all_active else (max(0.0, 1.0 - since_fix.get(3,
+        0) / 90.0) if 3 in fixed_channels else 0.0)
+    c03_group:
+      expr: '''notif-dispatcher-v2'' if 3 in all_active else ''notif-dispatcher'''
+    c03_version:
+      expr: '''3.4.0'' if 3 in all_active else ''3.3.2'''
+    c03_lag:
+      expr: int(max(0.0, 4200000 - 9000 * elapsed.get(3, 0))) if 3 in all_active else int(rand.uniform(0, 40))
+    c03_sends:
+      expr: round(round(rand.uniform(90.0, 160.0) * (1.0 - f03) + rand.uniform(2400.0, 4800.0) * f03, 0))
+    c03_dupes:
+      expr: round(rand.uniform(0.0, 0.3) * (1.0 - f03) + rand.uniform(55.0, 80.0) * f03, 2)
+    c03_status:
+      expr: '''DEGRADED'' if 3 in all_active or f03 > 0.1 else ''NOMINAL'''
+- when: 3 in all_active
+  log:
+    level: WARN
+    message: '[MOBILE] dispatcher_status deployment=notification-dispatcher version={c03_version} consumer_group={c03_group}
+      topic=txn-events consumer_lag={c03_lag} sends_per_min={c03_sends} duplicate_pct={c03_dupes} status={c03_status}'
+    attrs: &id002
+      operation: dispatcher_status
+      messaging.consumer.group:
+        var: c03_group
+      messaging.destination.name: txn-events
+      messaging.kafka.consumer.lag:
+        var: c03_lag
+      service.version:
+        var: c03_version
+      notification.status:
+        var: c03_status
+- when: 3 not in all_active
+  log:
+    level: INFO
+    message: '[MOBILE] dispatcher_status deployment=notification-dispatcher version={c03_version} consumer_group={c03_group}
+      topic=txn-events consumer_lag={c03_lag} sends_per_min={c03_sends} duplicate_pct={c03_dupes} status={c03_status}'
+    attrs: *id002
+- metric:
+    name: mobile_gateway.push_sends_per_min
+    value:
+      var: c03_sends
+    unit: sends/min
+- metric:
+    name: mobile_gateway.push_duplicate_pct
+    value:
+      var: c03_dupes
+    unit: '%'
+- sample:
+    f16:
+      expr: min(1.0, max(0.0, elapsed.get(16, 0) - lag.get(16, 0)) / 20.0) if 16 in all_active else (max(0.0, 1.0 - since_fix.get(16,
+        0) / 60.0) if 16 in fixed_channels else 0.0)
+    c16_release:
+      expr: '''2.9.1'' if 16 in all_active else ''2.9.0'''
+    c16_per_route:
+      expr: 5 if 16 in all_active else 200
+    c16_latency:
+      expr: round(rand.uniform(120.0, 260.0) * (1.0 - f16) + rand.uniform(4000.0, 12000.0) * f16, 1)
+    c16_pending:
+      expr: round(round(rand.uniform(0.0, 3.0) * (1.0 - f16) + rand.uniform(600.0, 1400.0) * f16, 0))
+    c16_status:
+      expr: '''DEGRADED'' if 16 in all_active or f16 > 0.1 else ''NOMINAL'''
+- when: 16 in all_active
+  log:
+    level: WARN
+    message: '[MOBILE] gateway_status release={c16_release} httpclient.max_per_route={c16_per_route} pending_leases={c16_pending}
+      p95_ms={c16_latency} status={c16_status}'
+    attrs: &id003
+      operation: gateway_status
+      gateway.release:
+        var: c16_release
+      httpclient.max_per_route:
+        var: c16_per_route
+      httpclient.pending_leases:
+        var: c16_pending
+      gateway.status:
+        var: c16_status
+- when: 16 not in all_active
+  log:
+    level: INFO
+    message: '[MOBILE] gateway_status release={c16_release} httpclient.max_per_route={c16_per_route} pending_leases={c16_pending}
+      p95_ms={c16_latency} status={c16_status}'
+    attrs: *id003
+- metric:
+    name: mobile_gateway.api_latency_ms
+    value:
+      var: c16_latency
+    unit: ms
+- metric:
+    name: mobile_gateway.http_client_pending_leases
+    value:
+      var: c16_pending
+    unit: requests
+- sample:
+    f19m:
+      expr: min(1.0, max(0.0, elapsed.get(19, 0) - lag.get(19, 0)) / 30.0) if 19 in all_active else (max(0.0, 1.0 - since_fix.get(19,
+        0) / 90.0) if 19 in fixed_channels else 0.0)
+    c19_stale:
+      expr: round(rand.uniform(0.0, 0.5) * (1.0 - f19m) + rand.uniform(28.0, 36.0) * f19m, 2)
+- metric:
+    name: mobile_gateway.stale_read_pct
+    value:
+      var: c19_stale
+    unit: '%'
+- sample:
+    f20m:
+      expr: min(1.0, max(0.0, elapsed.get(20, 0) - lag.get(20, 0)) / 10.0) if 20 in all_active else (max(0.0, min(1.0, 1.0
+        - (since_fix.get(20, 0) - 60) / 15.0)) if 20 in fixed_channels else 0.0)
+    c20_tls:
+      expr: round(round(rand.uniform(0.0, 4.0) * (1.0 - f20m) + rand.uniform(6000.0, 15000.0) * f20m, 0))
+    c20_cert_status:
+      expr: '''EXPIRED'' if 20 in all_active or (20 in fixed_channels and since_fix.get(20, 0) < 60) else ''VALID'''
+    c20_serial:
+      expr: '''04B7E2D91A6C3F08'' if 20 in fixed_channels and since_fix.get(20, 0) >= 60 else ''03F9A1C27B44E0D5'''
+- when: 20 in all_active
+  log:
+    level: WARN
+    message: '[MOBILE] tls_status host=api.retailbank.com certificate=edge/wildcard-retailbank-com serial={c20_serial} cert_status={c20_cert_status}
+      handshake_failures_per_min={c20_tls} status={c20_cert_status}'
+    attrs: &id004
+      operation: tls_status
+      tls.cert_status:
+        var: c20_cert_status
+      tls.cert_serial:
+        var: c20_serial
+      tls.server_name: api.retailbank.com
+- when: 20 not in all_active
+  log:
+    level: INFO
+    message: '[MOBILE] tls_status host=api.retailbank.com certificate=edge/wildcard-retailbank-com serial={c20_serial} cert_status={c20_cert_status}
+      handshake_failures_per_min={c20_tls} status={c20_cert_status}'
+    attrs: *id004
+- metric:
+    name: mobile_gateway.tls_handshake_failures_per_min
+    value:
+      var: c20_tls
+    unit: failures/min

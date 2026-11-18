@@ -57,13 +57,14 @@ steps:
       auth.latency_ms:
         var: auth_latency_ms
       auth.result: SUCCESS
+# Access tokens live for the policy TTL (60 min, 15 min under auth-token-policy r47).
 - sample:
+    policy_ttl_min:
+      expr: "15 if 11 in all_active else 60"
     token_age_min:
-      randint:
-      - 1
-      - 55
+      expr: "rand.randint(1, policy_ttl_min - 1)"
     token_ttl_min:
-      expr: 60 - token_age_min
+      expr: policy_ttl_min - token_age_min
     session_id:
       format: SESS-{n}
       n:
@@ -82,43 +83,35 @@ steps:
       token.ttl_min:
         var: token_ttl_min
       token.status: VALID
-- every:
-    seconds: 10
-    state_key: _last_auth_report
-    steps:
-    - log:
-        level: INFO
-        message: '[Auth] summary total_requests={_auth_requests} providers=5 active_sessions=84201 refresh_rate=412/s'
-        attrs:
-          operation: auth_summary
-          summary.total_requests:
-            var: _auth_requests
-          summary.provider_count: 5
+# Channel 11: auth-token-policy r47 (TTL 60 -> 15 min, refresh jitter 20% -> 0%). Clients
+# issued tokens in the post-maintenance login wave refresh in lockstep, in waves every
+# ~90 s, 6000-12000/s against ~4000/s of capacity. After the rollback the next refresh
+# hands out 60 min tokens with 20% jitter, so the herd spreads out over ~10 min.
 - sample:
-    auth_latency:
-      if_active:
-        uniform:
-        - 200.0
-        - 2000.0
-        round: 1
-      else:
-        uniform:
-        - 10.0
-        - 60.0
-        round: 1
+    tr_fixed:
+      expr: "11 in fixed_channels and 11 not in all_active"
+    tr_ramp:
+      expr: "min(1.0, max(0.0, elapsed.get(11, 0) - lag.get(11, 0)) / 45.0)"
+    tr_conv:
+      expr: "min(1.0, since_fix.get(11, 0) / 600.0) if tr_fixed else 1.0"
+    tr_wave:
+      expr: "1.0 - abs(2.0 * ((elapsed.get(11, 0) % 90) / 90.0) - 1.0)"
+    tr_base:
+      expr: "rand.uniform(320.0, 580.0)"
+    tr_fault:
+      expr: "6200.0 + 5400.0 * tr_wave + rand.uniform(-150.0, 150.0)"
     token_refresh_rate:
-      if_active:
-        randint:
-        - 5000
-        - 50000
-      else:
-        randint:
-        - 100
-        - 1500
+      expr: "round(tr_base + (tr_fault - tr_base) * tr_ramp) if 11 in all_active else round(tr_base + (rand.uniform(8500.0, 9500.0) - tr_base) * (1.0 - tr_conv))"
+    lat_base:
+      expr: "rand.uniform(32.0, 78.0)"
+    lat_fault:
+      expr: "450.0 + 950.0 * tr_wave + rand.uniform(-30.0, 30.0)"
+    auth_latency:
+      expr: "round(lat_base + (lat_fault - lat_base) * tr_ramp, 1) if 11 in all_active else round(lat_base + (rand.uniform(850.0, 950.0) - lat_base) * (1.0 - tr_conv) ** 2, 1)"
+    tr_status:
+      expr: "'DEGRADED' if (11 in all_active and tr_ramp > 0) or token_refresh_rate > 1500 else 'HEALTHY'"
     active_sessions:
-      randint:
-      - 20000
-      - 150000
+      expr: "round(84000 + rand.gauss(0, 900))"
 - metric:
     name: auth.request_latency_ms
     value:
@@ -139,3 +132,112 @@ steps:
     value:
       var: token_refresh_rate
     unit: req/s
+- when: "11 in all_active"
+  log:
+    level: INFO
+    message: '[Auth] token_policy configmap=auth-token-policy revision=r47 access_ttl=15m refresh_jitter=0% refresh_rate={token_refresh_rate}/s capacity=4000/s p99={auth_latency}ms status={tr_status}'
+    attrs:
+      operation: token_policy_status
+      config.token_policy_revision: r47
+      config.token_ttl_min: 15
+      config.refresh_jitter_pct: 0
+      auth.refresh_rate_per_s:
+        var: token_refresh_rate
+      auth.request_latency_p99_ms:
+        var: auth_latency
+      auth.status:
+        var: tr_status
+- when: "11 not in all_active"
+  log:
+    level: INFO
+    message: '[Auth] token_policy configmap=auth-token-policy revision=r46 access_ttl=60m refresh_jitter=20% refresh_rate={token_refresh_rate}/s capacity=4000/s p99={auth_latency}ms status={tr_status}'
+    attrs:
+      operation: token_policy_status
+      config.token_policy_revision: r46
+      config.token_ttl_min: 60
+      config.refresh_jitter_pct: 20
+      auth.refresh_rate_per_s:
+        var: token_refresh_rate
+      auth.request_latency_p99_ms:
+        var: auth_latency
+      auth.status:
+        var: tr_status
+# Channel 12: Cloud Armor auth-edge-armor revision 19 disabled rule 1000 (rate-based ban,
+# 20 POST /oauth/token per IP per minute). The ban stops at once (rate-limited 0/s); the
+# stuffing traffic it was absorbing reaches the token endpoint after ~15 s. After the
+# rollback the rule needs one 60 s interval to ban the botnet IPs: login failures fall over
+# ~90 s, rate-limited requests climb to 600-900/s, then fall back to 20-80/s by ~300 s as
+# the bots back off.
+- sample:
+    ato_fixed:
+      expr: "12 in fixed_channels and 12 not in all_active"
+    ato_ramp:
+      expr: "min(1.0, max(0.0, elapsed.get(12, 0) - lag.get(12, 0)) / 30.0)"
+    ato_since:
+      expr: "since_fix.get(12, 0) if ato_fixed else 0.0"
+    lf_base:
+      expr: "rand.uniform(2.5, 9.5)"
+    lf_fault:
+      expr: "rand.uniform(420.0, 1450.0)"
+    login_failures:
+      expr: "round(lf_base + (lf_fault - lf_base) * ato_ramp, 1) if 12 in all_active else (round(lf_base + (rand.uniform(850.0, 950.0) - lf_base) * max(0.0, 1.0 - ato_since / 90.0), 1) if ato_fixed else round(lf_base, 1))"
+    rl_base:
+      expr: "rand.uniform(22.0, 78.0)"
+    rl_peak:
+      expr: "rand.uniform(600.0, 900.0)"
+    rate_limited:
+      expr: "0 if 12 in all_active else (round(rl_peak * min(1.0, ato_since / 60.0)) if ato_fixed and ato_since < 60 else (round(rl_peak + (rl_base - rl_peak) * min(1.0, (ato_since - 60.0) / 240.0)) if ato_fixed else round(rl_base)))"
+    ato_status:
+      expr: "'DEGRADED' if (12 in all_active and ato_ramp > 0) or login_failures > 30 else 'HEALTHY'"
+- metric:
+    name: auth.login.failures_per_s
+    value:
+      var: login_failures
+    unit: req/s
+- metric:
+    name: auth.edge.rate_limited_requests_per_s
+    value:
+      var: rate_limited
+    unit: req/s
+- when: "12 in all_active"
+  log:
+    level: INFO
+    message: '[Auth] edge_policy policy=auth-edge-armor revision=19 rule_1000=rate_based_ban/disabled rate_limited={rate_limited}/s login_failures={login_failures}/s status={ato_status}'
+    attrs:
+      operation: edge_policy_status
+      security.armor_policy: auth-edge-armor
+      security.armor_policy_revision: '19'
+      security.ban_rule_state: disabled
+      auth.login_failures_per_s:
+        var: login_failures
+      auth.edge_rate_limited_per_s:
+        var: rate_limited
+      auth.status:
+        var: ato_status
+- when: "12 not in all_active"
+  log:
+    level: INFO
+    message: '[Auth] edge_policy policy=auth-edge-armor revision=18 rule_1000=rate_based_ban/enabled rate_limited={rate_limited}/s login_failures={login_failures}/s status={ato_status}'
+    attrs:
+      operation: edge_policy_status
+      security.armor_policy: auth-edge-armor
+      security.armor_policy_revision: '18'
+      security.ban_rule_state: enabled
+      auth.login_failures_per_s:
+        var: login_failures
+      auth.edge_rate_limited_per_s:
+        var: rate_limited
+      auth.status:
+        var: ato_status
+- every:
+    seconds: 10
+    state_key: _last_auth_report
+    steps:
+    - log:
+        level: INFO
+        message: '[Auth] summary total_requests={_auth_requests} providers=5 active_sessions={active_sessions} refresh_rate={token_refresh_rate}/s'
+        attrs:
+          operation: auth_summary
+          summary.total_requests:
+            var: _auth_requests
+          summary.provider_count: 5

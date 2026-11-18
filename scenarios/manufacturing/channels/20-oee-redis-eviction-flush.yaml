@@ -7,46 +7,107 @@ affected_services:
 - oee-analytics
 cascade_services:
 - shopfloor-portal
-description: OEE result Redis approaches maxmemory and mass-evicts computed windows, forcing analytics recompute storms
+description: A configuration drift run halved the OEE result cache's maxmemory; Redis evicts computed OEE windows and oee-analytics falls into recompute storms
 investigation_notes: |-
-  Root Cause: OEE result Redis has hit maxmemory (used memory above 90% of maxmemory and now at the limit). Once used_memory exceeds maxmemory, LRU eviction drops already-computed OEE windows; dashboards miss until oee-analytics recomputes. Memory-approaching-maxmemory and high-eviction-rate alerts fire together.
-  Remediation: 1) Raise maxmemory or reduce key TTL. 2) Recompute the affected window: `oee-admin recompute --line {line_id} --window {affected_window}`. 3) Confirm dashboards refresh within 30s after eviction rate falls.
+  Root cause: the configuration management run for the oee-results Redis applied maxmemory 2gb (the template default) over the plant setting of 4gb shortly before the first OEE-REDIS-EVICTION (drift remediation by platform-config, CHG-7406). The cache holds about 3.1 GB of computed OEE windows for the five lines with policy allkeys-lru, so as soon as the limit dropped Redis started evicting: evicted keys rise from 0 to 900-2,400 per minute and used memory sits at 98-100% of the new limit. Every portal request for an evicted window makes oee-analytics recompute it from the historian, so the cache hit rate drops from 94-98% to 35-60% and calculation latency rises from 40-90 ms to 600-1,800 ms. The Redis host has plenty of free RAM, the key count and value sizes are unchanged and there is no traffic spike; only maxmemory changed.
+  Confirm:
+    - oee-analytics cache_status lines show maxmemory=2gb (attributes.oee.redis_maxmemory); metric oee.redis_evicted_keys_per_min rises from 0 to 900-2,400 and oee.redis_used_memory_pct to 98-100
+    - the oee-analytics Redis config line (CHG-7406) comes before the first OEE-REDIS-EVICTION; the Redis integration stream shows evicted_keys climbing
+    - metric oee.cache_hit_rate_pct drops from 94-98 to 35-60 and oee.calc_latency_ms rises to 600-1,800
+  Remediation: restore the memory limit with opsctl patch redis/oee-results --maxmemory 4gb. Redis applies CONFIG SET maxmemory at once and evictions stop; the windows that were evicted are recomputed once and cached again, so the hit rate recovers over about two minutes and latency returns to normal. The 4gb value should be committed to the configuration template so the next drift run keeps it.
 remediation_action: resize_oee_redis
-error_message: '[OEE] OEE-REDIS-EVICTION: line={line_id} evicted_entries={stale_entries} correction_time={correction_time}
-  affected_window={affected_window}'
+remediation_command: |-
+  opsctl patch redis/oee-results --maxmemory 4gb
+error_message: '[OEE] OEE-REDIS-EVICTION: cache=oee-results maxmemory=2gb policy=allkeys-lru used_memory_pct={used_pct} evicted_keys_per_min={evicted_per_min} line={line_id} windows_recomputed={stale_entries} hit_rate={hit_rate}%'
 stack_trace: |-
-  === OEE RESULT REDIS — MASS EVICTION ===
-  Line: {line_id} | Eviction started: {correction_time}
+  === OEE RESULT CACHE — oee-results (Redis) ===
+  maxmemory: 2gb (plant setting 4gb) | policy: allkeys-lru | used: {used_pct}%
   ------------------------------------------------------------------------
-  WINDOW START      | KEY                          | EVICTED
+  WINDOW            | KEY                          | STATE
   ------------------------------------------------------------------------
-  13:00–14:00       | oee:{line_id}:13:00          | YES
-  14:00–15:00       | oee:{line_id}:14:00          | YES
-  15:00–16:00       | oee:{line_id}:15:00          | YES
+  shift-1 hour 3    | oee:{line_id}:s1:h3          | EVICTED -> recomputing
+  shift-1 hour 4    | oee:{line_id}:s1:h4          | EVICTED -> recomputing
+  shift-1 hour 5    | oee:{line_id}:s1:h5          | cached
   ------------------------------------------------------------------------
-  OEE-REDIS-EVICTION: {stale_entries} entries evicted; recompute required
+  evicted_keys: {evicted_per_min}/min | hit rate: {hit_rate}% | recompute from historian
+  OEE-REDIS-EVICTION: cache too small for the working set
 correlation_attr:
-  key: deployment.oee_redis_maxmemory
-  value: maxmemory-aggressive-2gb
+  key: oee.redis_maxmemory
+  value: 2gb
 fault_params:
-  line_id: {choice: [LINE-01, LINE-02, LINE-03, LINE-04, LINE-05]}
+  line_id: LINE-03
   stale_entries: {randint: [8, 80]}
-  correction_time: 2026-05-06T16:42:18Z
-  affected_window: "13:00–16:00"
+  used_pct: {uniform: [98.0, 100.0], round: 1}
+  evicted_per_min: {randint: [900, 2400]}
+  hit_rate: {randint: [35, 60]}
 rca_clues:
   oee-analytics:
-    oee.evicted_cache_entries: {randint: [8, 80]}
-    oee.recompute_window_min: {randint: [15, 240]}
-    oee.redis_used_memory_pct: {uniform: [95, 100], round: 1}
+    oee.redis_eviction_policy: allkeys-lru
+    oee.redis_keys_trend: flat
   shopfloor-portal:
     portal.oee_tile_recomputing: true
+cascade_messages:
+  shopfloor-portal:
+    - severity: WARN
+      message: '[PORTAL] GET /api/v1/oee/lines/LINE-03/history slow (1.4 s, upstream oee-analytics recomputing); dashboard tiles loading'
+fault_scope:
+  cluster: mfg-gke-cluster
+  workloads: [oee-analytics]
+infrastructure_events:
+  - service: oee-analytics
+    severity: INFO
+    offset_seconds: -60
+    body: '[OEE] redis config drift remediation oee-results: CONFIG SET maxmemory 4gb -> 2gb (template default), maxmemory-policy allkeys-lru; applied by platform-config (CHG-7406)'
+    attributes:
+      operation: config_change
+      user.name: platform-config
+      change.request: CHG-7406
+      oee.redis_maxmemory: 2gb
+      change.summary: 'oee-results Redis maxmemory: 4gb -> 2gb'
+service_lag_seconds:
+  shopfloor-portal: 20
+remediation_effects:
+  log_events:
+    - service: oee-analytics
+      severity: INFO
+      offset_seconds: 1
+      body: '[CHG] CHANGE APPLIED opsctl patch redis/oee-results --maxmemory 4gb by {actor}: CONFIG SET maxmemory 2gb -> 4gb'
+      attributes:
+        operation: change_applied
+        change.target: redis/oee-results
+  steady_attributes:
+    oee-analytics:
+      oee.redis_maxmemory: 4gb
+  log_taper_seconds: 20
+  verification:
+    - signal: oee.redis_evicted_keys_per_min
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "oee-analytics"'
+      field: 'metrics.oee.redis_evicted_keys_per_min'
+      expect: '0 (was 900-2,400)'
+      within_seconds: 30
+    - signal: oee.cache_hit_rate_pct
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "oee-analytics"'
+      field: 'metrics.oee.cache_hit_rate_pct'
+      expect: 'back above 90 (was 35-60)'
+      within_seconds: 150
+    - signal: OEE-REDIS-EVICTION lines
+      from: 'logs.otel.mfg'
+      where: 'body.text LIKE "*OEE-REDIS-EVICTION*"'
+      expect: '0 new lines'
+      within_seconds: 60
+    - signal: Redis maxmemory
+      from: 'logs.otel.mfg'
+      where: 'resource.attributes.service.name == "oee-analytics" AND body.text LIKE "*cache_status cache=oee-results*"'
+      field: 'attributes.oee.redis_maxmemory'
+      expect: '4gb on every line logged since the fix; 2gb stops appearing'
+      within_seconds: 60
 business_impact:
   - kpi: business.oee_overall_pct
-    factor: {uniform: [0.45, 0.75]}
+    factor: {uniform: [0.65, 0.80]}
   - kpi: business.oee_availability_pct
-    factor: {uniform: [0.45, 0.75]}
-  - kpi: business.throughput_units_per_hour
-    factor: {uniform: [0.45, 0.75]}
+    factor: {uniform: [0.80, 0.88]}
 generator_impact:
   redis_otel:
     high_eviction_rate: 200.0

@@ -21,6 +21,10 @@ constants:
   - ETL-BILLING-02
   - ETL-LAB-03
   - ETL-QUALITY-04
+  OTHER_PIPELINES:
+  - ETL-BILLING-02
+  - ETL-LAB-03
+  - ETL-QUALITY-04
   STAGES:
   - extract
   - transform
@@ -35,11 +39,79 @@ state:
   _etl_runs_completed:
     init: 0
   _last_audit_check:
-    init: now
+    init: 0
+# Before / during / after (schema 1.3):
+#   ch 4  phi-audit-writer sha256-chain-v2.1.0-rc3 commits audit entries asynchronously in batches;
+#         under PHI access load an entry is committed before its predecessor's hash is sealed
+#         (12-24 out-of-order writes/min) and chain AUDIT-4471 breaks. Storage I/O errors stay 0.
+#         After rolling the writer back to v2.0.6 (synchronous commit), out-of-order writes stop in
+#         ~30s and the audit-chain-rebuild job clears the open break ~20s after the fix.
+#   ch 18 etl-clinical-extractor 4.2.0 with hikari-pool-experimental-64conn leaks source connections
+#         (never returned on cursor close): pool 64/64 active, waiting threads climbing, extract
+#         throughput falls to ~0 in ~60s. Other pipelines use their own pools and keep running.
+#         After the rollback to 4.1.3, connections are returned and throughput recovers in ~90s.
 steps:
+# ── ch 18: clinical ETL extract ───────────────────────────────────────────
+- sample:
+    etl_rows_s:
+      expr: "int(15000 + (rand.uniform(0.0, 150.0) - 15000) * min(1.0, elapsed.get(18, 0) / 60.0)) if 18 in all_active
+        else (int(80 + (max(5000.0, min(25000.0, rand.gauss(15000.0, 2500.0))) - 80) * min(1.0, since_fix.get(18, 0) / 90.0)) if 18 in fixed_channels
+        else int(max(5000.0, min(25000.0, rand.gauss(15000.0, 2500.0)))))"
+    pool_active:
+      expr: "int(min(64.0, 12 + 52 * min(1.0, elapsed.get(18, 0) / 45.0))) if 18 in all_active
+        else (int(64 - (64 - rand.randint(8, 18)) * min(1.0, since_fix.get(18, 0) / 60.0)) if 18 in fixed_channels
+        else rand.randint(8, 18))"
+    pool_waiting:
+      expr: "int(rand.randint(20, 40) * min(1.0, elapsed.get(18, 0) / 45.0)) if 18 in all_active else 0"
+    pool_idle:
+      expr: "64 - pool_active"
+    pool_active_pct:
+      expr: "round(pool_active * 100.0 / 64.0, 1)"
+    etl_extractor:
+      expr: "'etl-clinical-extractor-4.2.0' if 18 in all_active else 'etl-clinical-extractor-4.1.3'"
+    etl_pool_cfg:
+      expr: "'hikari-pool-experimental-64conn' if 18 in all_active else 'hikari-pool-standard-64conn'"
+    etl_status:
+      expr: "'STALLED' if 18 in all_active else 'RUNNING'"
+- metric:
+    name: warehouse.etl_rows_per_second
+    value:
+      var: etl_rows_s
+    unit: rows/s
+- metric:
+    name: warehouse.etl_source_pool_active_pct
+    value:
+      var: pool_active_pct
+    unit: '%'
+- log:
+    level: INFO
+    message: 'HikariPool-etl-clinical - Pool stats (total=64, active={pool_active}, idle={pool_idle}, waiting={pool_waiting}) extractor={etl_extractor} config={etl_pool_cfg} rows_per_s={etl_rows_s} pipeline=ETL-CLINICAL-01 status={etl_status}'
+    attrs: &etl_attrs
+      operation: etl_source_pool
+      etl.pipeline_id: ETL-CLINICAL-01
+      etl.stage: extract
+      etl.source_db_pool_active_pct:
+        var: pool_active_pct
+      etl.source_db_pool_waiting:
+        var: pool_waiting
+      etl.rows_per_second:
+        var: etl_rows_s
+      etl.blocking_query_count: 0
+      deployment.etl_extractor_version:
+        var: etl_extractor
+      infra.etl_db_pool_config:
+        var: etl_pool_cfg
+      etl.status:
+        var: etl_status
+  when: "etl_status == 'RUNNING'"
+- log:
+    level: WARN
+    message: 'HikariPool-etl-clinical - Pool stats (total=64, active={pool_active}, idle={pool_idle}, waiting={pool_waiting}) extractor={etl_extractor} config={etl_pool_cfg} rows_per_s={etl_rows_s} pipeline=ETL-CLINICAL-01 status={etl_status}'
+    attrs: *etl_attrs
+  when: "etl_status != 'RUNNING'"
 - sample:
     pipeline:
-      choice: PIPELINES
+      expr: "rand.choice(OTHER_PIPELINES) if 18 in all_active else rand.choice(PIPELINES)"
     stage:
       choice: STAGES
     rows:
@@ -69,7 +141,19 @@ steps:
       etl.elapsed_seconds:
         var: elapsed_s
       etl.status: RUNNING
+# ── ch 4: PHI audit chain writer ───────────────────────────────────────────
 - sample:
+    ooo_writes:
+      expr: "int(rand.uniform(12.0, 24.0) * min(1.0, elapsed.get(4, 0) / 30.0)) if 4 in all_active
+        else (int(rand.uniform(0.0, 18.0) * max(0.0, 1.0 - since_fix.get(4, 0) / 30.0)) if 4 in fixed_channels else 0)"
+    chain_breaks:
+      expr: "5 if 4 in all_active or (4 in fixed_channels and since_fix.get(4, 0) < 20) else 0"
+    audit_writer:
+      expr: "'sha256-chain-v2.1.0-rc3' if 4 in all_active else 'sha256-chain-v2.0.6'"
+    commit_mode:
+      expr: "'async-batch' if 4 in all_active else 'synchronous'"
+    chain_state:
+      expr: "'BROKEN' if chain_breaks > 0 else 'INTACT'"
     audit_action:
       choice: AUDIT_ACTIONS
     audit_user:
@@ -78,6 +162,39 @@ steps:
       randint:
       - 1
       - 500
+- metric:
+    name: warehouse.audit_out_of_order_writes_per_min
+    value:
+      var: ooo_writes
+    unit: writes/min
+- metric:
+    name: warehouse.audit_chain_breaks_open
+    value:
+      var: chain_breaks
+    unit: breaks
+- log:
+    level: INFO
+    message: '[DW] audit_writer chain=AUDIT-4471 build={audit_writer} commit_mode={commit_mode} out_of_order_1m={ooo_writes} open_breaks={chain_breaks} storage_io_errors=0 chain={chain_state}'
+    attrs: &audit_attrs
+      operation: audit_writer_status
+      audit.chain_id: AUDIT-4471
+      deployment.audit_chain_version:
+        var: audit_writer
+      audit.commit_mode:
+        var: commit_mode
+      audit.out_of_order_writes:
+        var: ooo_writes
+      audit.open_chain_breaks:
+        var: chain_breaks
+      audit.storage_io_errors: 0
+      audit.integrity_status:
+        var: chain_state
+  when: "chain_state == 'INTACT'"
+- log:
+    level: WARN
+    message: '[DW] audit_writer chain=AUDIT-4471 build={audit_writer} commit_mode={commit_mode} out_of_order_1m={ooo_writes} open_breaks={chain_breaks} storage_io_errors=0 chain={chain_state}'
+    attrs: *audit_attrs
+  when: "chain_state != 'INTACT'"
 - log:
     level: INFO
     message: '[DW] hipaa_audit action={audit_action} user={audit_user} records={records_accessed} chain_hash=VERIFIED'
@@ -105,14 +222,15 @@ steps:
           - 2000000
     - log:
         level: INFO
-        message: '[DW] integrity_check chains_verified={chains_verified} total_entries={total_entries} hash_chain=INTACT'
+        message: '[DW] integrity_check chains_verified={chains_verified} total_entries={total_entries} broken_chains={chain_breaks} hash_chain={chain_state}'
         attrs:
           operation: integrity_check
           audit.chains_verified:
             var: chains_verified
           audit.total_entries:
             var: total_entries
-          audit.integrity_status: VALID
+          audit.integrity_status:
+            var: chain_state
 - counter:
     state_key: _etl_runs_completed
     by: 1
@@ -121,26 +239,8 @@ steps:
     value:
       var: _etl_runs_completed
     unit: runs
-- sample:
-    rows_per_sec:
-      if_active:
-        randint:
-        - 100
-        - 2000
-      else:
-        randint:
-        - 5000
-        - 25000
-- metric:
-    name: warehouse.etl_rows_per_second
-    value:
-      var: rows_per_sec
-    unit: rows/s
 - metric:
     name: warehouse.storage_used_tb
     value:
-      uniform:
-      - 8.0
-      - 25.0
-      round: 1
+      expr: "round(rand.gauss(18.4, 0.05), 2)"
     unit: TB

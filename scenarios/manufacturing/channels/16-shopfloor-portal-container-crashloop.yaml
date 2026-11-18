@@ -7,57 +7,124 @@ affected_services:
 - shopfloor-portal
 cascade_services:
 - mes-controller
-description: Operator portal Docker container in CrashLoopBackOff after a bad image push, NGINX returning 5xx to operator kiosks; auto-rollback eligible
+description: A new operator portal image fails at startup with a missing class; with the Recreate strategy every replica is down and NGINX returns 5xx to the line kiosks
 investigation_notes: |-
-  Root Cause: A container that exits non-zero on startup multiple times in a short window enters CrashLoopBackOff. The most common manufacturing-floor cause is a bad image push (missing config map, broken migration on the embedded SQLite, or a dependency mismatch from a hot-fix build that left a JAR out of the image). Exit code 1 with java.lang.NoClassDefFoundError at startup marks the dependency mismatch; a missing config map fails with CreateContainerConfigError and a broken migration logs SQLITE errors instead. Auto-rollback to the prior image tag is safe when the previous tag was healthy in production.
-  Remediation (auto-remediate eligible): 1) Confirm the prior image was healthy: `kubectl rollout history deploy/shopfloor-portal -n mfg`. 2) Roll back: `kubectl rollout undo deploy/shopfloor-portal -n mfg`. 3) Verify operator kiosks recover within 60s. 4) File a build issue against {image_tag} for the dev team to investigate.
+  Root cause: the shopfloor-portal Deployment was rolled from image 1.18.3 to {image_tag} shortly before the first PORTAL-CONTAINER-CRASHLOOP (by portal-team, CHG-7395). 1.18.4 bumped the reporting library but the image was built without its transitive dependency, so the JVM fails at startup with java.lang.NoClassDefFoundError: org/apache/commons/io/input/BOMInputStream and exits with code 1. The Deployment uses strategy Recreate (the portal keeps a local session store on a ReadWriteOnce volume), so all three old pods were stopped before the new ones started, and 0 of 3 replicas are ready. Kubernetes restarts the containers with growing CrashLoopBackOff delays; NGINX has no healthy upstream and returns 502/503 to the operator kiosks on every line. Nodes, the volume and the database are healthy; only the image changed.
+  Confirm:
+    - shopfloor-portal deployment_status lines show image={image_tag} (attributes.container.image.tag); metric portal.ready_replicas drops from 3 to 0 and portal.container_restarts climbs
+    - the shopfloor-portal rollout line (CHG-7395) comes before the first PORTAL-CONTAINER-CRASHLOOP
+    - metric portal.http_5xx_pct rises from under 0.5% to 95-100%; the NGINX integration logs show upstream connect errors for shopfloor-portal
+  Remediation: roll the Deployment back with opsctl rollback deployment/shopfloor-portal --to-revision previous. The rollback recreates the pods with image 1.18.3; they pass readiness in about 30-40 s, 3/3 become ready and the 5xx rate returns to normal. The 1.18.4 build needs its dependency fixed before it is re-released.
 remediation_action: rollback_container_image
-error_message: '[PORTAL-K8S] PORTAL-CONTAINER-CRASHLOOP: pod={pod_name} image={image_tag} restarts={restart_count} reason=CrashLoopBackOff
-  exit_code={exit_code}'
+remediation_command: |-
+  opsctl rollback deployment/shopfloor-portal --to-revision previous
+error_message: '[PORTAL-K8S] PORTAL-CONTAINER-CRASHLOOP: pod={pod_name} image={image_tag} restarts={restart_count} reason=CrashLoopBackOff exit_code={exit_code} ready=0/3 last_error="java.lang.NoClassDefFoundError: org/apache/commons/io/input/BOMInputStream"'
 stack_trace: |-
   === KUBERNETES DEPLOYMENT — shopfloor-portal ===
-  Namespace: mfg | Replicas: 3 (desired) / 0 (ready)
+  Namespace: mfg | Strategy: Recreate | Replicas: 3 desired / 0 ready
   ------------------------------------------------------------------------
   POD                              | STATUS              | RESTARTS  | IMAGE
   ------------------------------------------------------------------------
   {pod_name}                       | CrashLoopBackOff    | {restart_count}        | {image_tag}
-  shopfloor-portal-7c8d9f4b6-aa1bb | CrashLoopBackOff    | {restart_count}        | {image_tag}
-  shopfloor-portal-7c8d9f4b6-cc2dd | CrashLoopBackOff    | {restart_count}        | {image_tag}
+  shopfloor-portal-5f7b8c9d4-k2m8q | CrashLoopBackOff    | {restart_count}        | {image_tag}
+  shopfloor-portal-5f7b8c9d4-w7x3n | CrashLoopBackOff    | {restart_count}        | {image_tag}
   ------------------------------------------------------------------------
+  Last log lines:
+    Exception in thread "main" java.lang.NoClassDefFoundError: org/apache/commons/io/input/BOMInputStream
+      at com.mfg.portal.reports.CsvExporter.<clinit>(CsvExporter.java:41)
+      at com.mfg.portal.PortalApplication.main(PortalApplication.java:22)
   Last State: Terminated | Exit Code: {exit_code} | Reason: Error
-  PORTAL-CONTAINER-CRASHLOOP: rollback to prior image tag eligible
+  PORTAL-CONTAINER-CRASHLOOP: 0/3 replicas ready
 correlation_attr:
-  key: deployment.shopfloor_portal_image
-  value: shopfloor-portal:1.18.3-broken
+  key: container.image.tag
+  value: 1.18.4
 fault_params:
   pod_name:
-    format: "shopfloor-portal-{suffix}-{rand:06x}"
-    suffix: {choice: [7c8d9f4b6, 6b9c8e3d2]}
-    rand: {randint: [0, 16777215]}
-  image_tag: registry.mfg.internal/shopfloor-portal:1.18.3-broken
-  restart_count: {randint: [5, 25]}
+    format: "shopfloor-portal-5f7b8c9d4-{rand:05x}"
+    rand: {randint: [0, 1048575]}
+  image_tag: registry.mfg.internal/shopfloor-portal:1.18.4
+  restart_count: {randint: [3, 9]}
   exit_code: 1
 rca_clues:
   shopfloor-portal:
-    k8s.crashloopbackoff: true
-    k8s.restart_count: {randint: [5, 25]}
-    k8s.image_tag: 1.18.3-broken
-    k8s.last_exit_code: 1
+    k8s.deployment_strategy: Recreate
     portal.startup_error: NoClassDefFoundError
   mes-controller:
     mes.operator_action_lag_s: {randint: [30, 240]}
+cascade_messages:
+  mes-controller:
+    - severity: WARN
+      message: '[MES] operator confirmations from kiosks stopped on all lines (no POST /api/v1/operations/confirm in 60 s); shopfloor-portal unavailable'
+fault_scope:
+  cluster: mfg-aks-cluster
+  workloads: [shopfloor-portal]
+infrastructure_events:
+  - service: shopfloor-portal
+    severity: INFO
+    offset_seconds: -60
+    body: '[PORTAL-K8S] rollout deployment/shopfloor-portal image registry.mfg.internal/shopfloor-portal:1.18.3 -> 1.18.4 strategy=Recreate (3 pods terminated); deployed by portal-team (CHG-7395)'
+    attributes:
+      operation: config_change
+      user.name: portal-team
+      change.request: CHG-7395
+      container.image.tag: 1.18.4
+      change.summary: 'shopfloor-portal image: 1.18.3 -> 1.18.4'
+service_lag_seconds:
+  mes-controller: 20
+remediation_effects:
+  log_events:
+    - service: shopfloor-portal
+      severity: INFO
+      offset_seconds: 1
+      body: '[CHG] CHANGE APPLIED opsctl rollback deployment/shopfloor-portal --to-revision previous by {actor}: image 1.18.4 -> 1.18.3'
+      attributes:
+        operation: change_applied
+        change.target: deployment/shopfloor-portal
+    - service: shopfloor-portal
+      severity: INFO
+      offset_seconds: 40
+      body: '[PORTAL-K8S] deployment shopfloor-portal rollout complete: 3/3 ready, image 1.18.3'
+      attributes:
+        operation: rollout_status
+  steady_attributes:
+    shopfloor-portal:
+      container.image.tag: 1.18.3
+  log_taper_seconds: 30
+  verification:
+    - signal: portal.ready_replicas
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "shopfloor-portal"'
+      field: 'metrics.portal.ready_replicas'
+      expect: '3 (was 0)'
+      within_seconds: 90
+    - signal: portal.http_5xx_pct
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "shopfloor-portal"'
+      field: 'metrics.portal.http_5xx_pct'
+      expect: 'back under 0.5% (was 95-100%)'
+      within_seconds: 90
+    - signal: PORTAL-CONTAINER-CRASHLOOP lines
+      from: 'logs.otel.mfg'
+      where: 'body.text LIKE "*PORTAL-CONTAINER-CRASHLOOP*"'
+      expect: '0 new lines'
+      within_seconds: 60
+    - signal: portal image tag
+      from: 'logs.otel.mfg'
+      where: 'resource.attributes.service.name == "shopfloor-portal" AND body.text LIKE "*deployment_status*"'
+      field: 'attributes.container.image.tag'
+      expect: '1.18.3 on every line logged since the fix; 1.18.4 stops appearing'
+      within_seconds: 60
 business_impact:
   - kpi: business.throughput_units_per_hour
-    factor: {uniform: [0.35, 0.65]}
+    factor: {uniform: [0.55, 0.75]}
   - kpi: business.oee_overall_pct
-    factor: {uniform: [0.40, 0.70]}
+    factor: {uniform: [0.60, 0.80]}
   - kpi: business.rework_hours_per_shift
-    factor: {uniform: [1.8, 3.5]}
-  - kpi: business.unplanned_downtime_min_per_shift
-    factor: {uniform: [1.5, 3.0]}
+    factor: {uniform: [1.5, 2.5]}
 generator_impact:
   kubernetes_otel:
     pod_crashloopbackoff: 0.8
     deployment_unavailable_replicas: 0.5
   nginx_otel:
     high_5xx_error_rate: 700.0
+generator_hold_seconds: {kubernetes_otel: 60, nginx_otel: 45}

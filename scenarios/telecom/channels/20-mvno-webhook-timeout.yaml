@@ -1,72 +1,112 @@
 name: MVNO Webhook Timeout
 subsystem: notifications
 vehicle_section: partner_integration
-error_type: NOTIF-MVNO-WEBHOOK-TIMEOUT
+error_type: partner callback failed
 sensor_type: webhook
 affected_services:
 - notification-service
 - api-gateway
 cascade_services:
 - bss-billing
-description: MVNO partner webhook endpoints timing out preventing activation status callbacks
-investigation_notes: |
-  1. Check MVNO webhook endpoint health — partner webhook endpoint returning timeout after configured ms. This is the partner's infrastructure, not Meridian's.
-  2. MVNO partners (Lycamobile, Lebara, etc.) depend on webhook callbacks for activation confirmations. Without callbacks, MVNO subscribers show 'activation pending' indefinitely.
-  3. Webhook retry policy: 3 attempts with exponential backoff between them (30s, 300s). After 3 failed attempts, the notification is queued for manual reconciliation.
-  4. Enable webhook circuit breaker — if a partner endpoint fails >50% of calls in a 5-minute window, stop sending to avoid overwhelming their recovering system.
-  5. BSS-billing is affected because MVNO wholesale billing reconciliation depends on successful webhook delivery confirmations. Unacknowledged activations cannot be billed to the MVNO partner.
-remediation_action: enable_webhook_circuit_breaker
-error_message: '[NOTIF] NOTIF-MVNO-WEBHOOK-TIMEOUT: partner={mvno_partner} endpoint={webhook_endpoint} timeout_ms={webhook_timeout_ms} failed={webhook_failures} pending={webhook_pending}'
-stack_trace: |
-  === MVNO WEBHOOK STATUS ===
-  partner={mvno_partner}  integration=REST_WEBHOOK
-  --- ENDPOINT STATUS ---
-    endpoint={webhook_endpoint}
-    timeout_ms={webhook_timeout_ms}  sla_ms=5000
-    success_rate={webhook_success_rate}%  threshold=95%
-  --- DELIVERY METRICS ---
-    ATTEMPT     STATUS      ELAPSED
-    1/3         TIMEOUT     {webhook_timeout_ms}ms
-    2/3         TIMEOUT     {webhook_timeout_ms}ms
-    3/3         TIMEOUT     {webhook_timeout_ms}ms
-    circuit_breaker=OPEN  cooldown=300s
-  --- BILLING IMPACT ---
-    unacknowledged_activations={webhook_pending}
-    wholesale_billing=BLOCKED  reconciliation=MANUAL_REQUIRED
-    partner_sla_breach_risk=HIGH
-  ACTION: circuit_breaker=true  queue_for_reconciliation=true  alert=NOTIF-MVNO-WEBHOOK-TIMEOUT
-infrastructure_events:
-- body: '[CloudWatch] MVNOWebhookTimeout: partner=Lycamobile endpoint=api.lycamobile.eu/v1/activation/callback timeout_ms=15000 sla_ms=5000 circuit_breaker=OPEN region=eu-central-1'
-  severity: ERROR
-  event_name: aws.cloudwatch.alarm.MVNOWebhookTimeout
-  service: api-gateway
-  attributes:
-    cloud.provider: aws
-    cloud.service: cloudwatch
-    aws.cloudwatch.alarm_name: mvno-webhook-health
-    aws.cloudwatch.state: ALARM
-    infrastructure.source: CloudWatch
+description: the webhook client timeout was cut from 15 s to 1.5 s and callbacks to the slower MVNO partner endpoint time out
+investigation_notes: |-
+  Root cause: a notification-service configuration change about 30 seconds before the first error (config/notification-webhooks revision 19, "reduce worker pile-up") set the partner webhook timeout to 1500 ms instead of 15000 ms. Lycamobile's activation callback endpoint normally answers in 3-6 s (p95 about 4.8 s), so almost every callback to it now times out after 1.5 s and is retried until it gives up ({webhook_fail_per_min}/min). Lebara's endpoint answers in about 300 ms and is unaffected. Lycamobile then polls the activation status API to find out what happened, which raises partner traffic on api-gateway.
+  Confirm:
+    - the notification-service line "config notification-webhooks reloaded revision 19 ... timeout_ms 15000 -> 1500" comes before the first "partner callback failed", and webhook status lines carry attributes.webhook.timeout_ms 1500
+    - metric notification_service.webhook_timeouts_per_min rises from 0 to about {webhook_fail_per_min} and notification_service.webhook_success_pct falls from about 99.6% to under 60%
+    - every failure names partner=lycamobile with elapsed_ms at the timeout, while callbacks to lebara succeed, which rules out a notification-service outage
+  Remediation: revert the webhook configuration with opsctl rollback config/notification-webhooks --to-revision previous. The client picks up the 15 s timeout within about 10 seconds; callbacks succeed again and Lycamobile's polling falls back to normal within a couple of minutes. A circuit breaker would stop the errors by not sending the callbacks at all.
+remediation_action: revert_webhook_timeout
+error_message: 'partner callback failed partner=lycamobile url=https://hooks.lycamobile.eu/meridian/activation event=activation.completed status=timeout elapsed_ms={elapsed_ms} timeout_ms=1500 attempt={attempt}/3'
+stack_trace: |-
+  Traceback (most recent call last):
+    File "/app/notify/webhooks/sender.py", line 57, in deliver
+      resp = await self._client.post(hook.url, json=event, timeout=hook.timeout)
+    File "/usr/local/lib/python3.12/site-packages/httpx/_client.py", line 1859, in post
+      return await self.request(
+    File "/usr/local/lib/python3.12/site-packages/httpx/_transports/default.py", line 118, in map_httpcore_exceptions
+      raise mapped_exc(message) from exc
+  httpx.ReadTimeout: timed out (partner=lycamobile elapsed_ms={elapsed_ms} timeout_ms=1500)
 correlation_attr:
-  key: notification.webhook_client_version
-  value: webhook-v2.3.0-timeout-patch
+  key: webhook.timeout_ms
+  value: '1500'
 fault_params:
-  mvno_partner: Lycamobile
-  webhook_endpoint: 'https://api.lycamobile.eu/v1/activation/callback'
-  webhook_timeout_ms: {randint: [5500, 30000]}
-  webhook_failures: {randint: [50, 500]}
-  webhook_pending: {randint: [20, 200]}
-  webhook_success_rate: {uniform: [10.0, 45.0], round: 1}
+  elapsed_ms: {randint: [1500, 1512]}
+  attempt: {randint: [1, 3]}
+  webhook_fail_per_min: {randint: [90, 160]}
+  poll_rps: {uniform: [18.0, 40.0], round: 1}
 rca_clues:
   notification-service:
-    notification.webhook_circuit_breaker: OPEN
-    notification.failed_callbacks: {randint: [50, 500]}
-    notification.webhook_success_rate_pct: {uniform: [10.0, 45.0], round: 1}
+    webhook.partner: lycamobile
+    webhook.timeout_ms: 1500
+    webhook.timeouts_per_min: {randint: [90, 160]}
   api-gateway:
-    gateway.mvno_status_queries_spike: {randint: [500, 3000]}
-    gateway.partner_api_errors: true
+    gateway.partner_client: lycamobile
+    gateway.partner_poll_rps: {uniform: [18.0, 40.0], round: 1}
   bss-billing:
-    billing.unacknowledged_activations: {randint: [20, 200]}
-    billing.wholesale_reconciliation: BLOCKED
+    billing.mvno_settlement_pending: {randint: [200, 900]}
+remediation_command: |-
+  opsctl rollback config/notification-webhooks --to-revision previous
+fault_scope:
+  cluster: meridian-gke-cluster
+  workloads: [notification-service]
+error_services: [notification-service]
+cascade_messages:
+  api-gateway:
+    - severity: WARN
+      message: 'partner client lycamobile polling GET /api/v1/customer/status at {poll_rps} req/s (baseline 2 req/s)'
+  bss-billing:
+    - severity: INFO
+      message: 'MVNO settlement: activation records for partner lycamobile waiting for callback acknowledgement; wholesale invoice line held'
+infrastructure_events:
+  - service: notification-service
+    severity: INFO
+    offset_seconds: -30
+    event_name: config.reload
+    body: 'config notification-webhooks reloaded revision 19 (was 18) by notify-ops/j.meyer: partner_webhooks.timeout_ms 15000 -> 1500, max_attempts 3'
+    attributes:
+      operation: config_reload
+      user.name: notify-ops/j.meyer
+      webhook.timeout_ms: 1500
+      change.summary: 'webhook timeout_ms 15000 -> 1500'
+remediation_effects:
+  log_taper_seconds: 10
+  log_events:
+    - service: notification-service
+      severity: INFO
+      offset_seconds: 1
+      body: '[NOC-CHG] executed opsctl rollback config/notification-webhooks --to-revision previous actor={actor}: revision 19 -> 18 (timeout_ms 15000)'
+      attributes:
+        operation: change_executed
+        change.target: config/notification-webhooks
+        webhook.timeout_ms: 15000
+  steady_attributes:
+    notification-service:
+      webhook.timeout_ms: 15000
+  verification:
+    - signal: notification_service.webhook_timeouts_per_min
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "notification-service"'
+      field: 'metrics.notification_service.webhook_timeouts_per_min'
+      expect: '0 (was 90-160)'
+      within_seconds: 60
+    - signal: notification_service.webhook_success_pct
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "notification-service"'
+      field: 'metrics.notification_service.webhook_success_pct'
+      expect: 'back above 99% (was under 60%)'
+      within_seconds: 90
+    - signal: partner callback failed lines
+      from: 'logs.otel.meridian'
+      where: 'body.text LIKE "*partner callback failed*"'
+      expect: '0 new lines'
+      within_seconds: 60
+    - signal: webhook timeout
+      from: 'logs.otel.meridian'
+      where: 'resource.attributes.service.name == "notification-service"'
+      field: 'attributes.webhook.timeout_ms'
+      expect: '15000 on every webhook status line since the rollback'
+      within_seconds: 60
 business_impact:
   - kpi: business.mvno_net_adds_per_min
     value: {uniform: [27.2, 31.3]}
@@ -76,3 +116,4 @@ business_impact:
     factor: {uniform: [0.25, 0.55]}
   - kpi: business.trouble_to_billing_ratio_pct
     factor: {uniform: [2.5, 5.0]}
+service_lag_seconds: {api-gateway: 30, bss-billing: 60}

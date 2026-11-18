@@ -11,8 +11,12 @@ cascade_services:
 - billing-processor
 description: Electronic prescription transmission to external pharmacy via NCPDP SCRIPT fails
 investigation_notes: |-
-  Root Cause: NCPDP SCRIPT 2017071 NewRx transmission failures are typically caused by pharmacy NPI validation errors at the Surescripts network, expired DEA registrations for controlled substances, or SCRIPT message formatting issues in the XML Header (To/From/MessageID). A 900 (transaction rejected) ERROR with the Surescripts link connected, the DEA registration active and the message Header passing schema validation isolates the failure to pharmacy NPI validation.
-  Remediation: 1) Verify the pharmacy NPI against the NPPES registry: `ncpdp-admin npi-lookup --npi {pharmacy_npi}`. 2) Check the Surescripts connection status: `ncpdp-admin connection-test --endpoint surescripts-prod`. 3) Restart the pharmacy transmission queue: `systemctl restart eprescribe-gateway`. 4) Review the NCPDP response codes — STATUS 000/010=accepted; ERROR 600=communication problem (retry), 601/602=receiver unable to process/receiver system error, 900=transaction rejected. 5) For controlled substances (Schedule II-V), verify EPCS two-factor authentication tokens are valid. 6) Resubmit failed prescriptions: `ncpdp-admin resubmit --rx {prescription_id} --force-npi-refresh`.
+  Root cause: surescripts-adapter-v6.0.3-rc1 was rolled out shortly before the first NCPDP-SCRIPT-FAIL. It puts the pharmacy NPI in the NewRx To identifier instead of the NCPDPID, so Surescripts rejects each NewRx with status {ncpdp_status}: prescription {prescription_id} for patient {patient_id} to pharmacy {pharmacy_npi}. Renewals and cancels still use the old mapping, so about half of all transmissions fail (48-62%, normally 0.2-1%). The Surescripts link is connected, envelope validation passes and the DEA registration is active, which rules out a network, certificate or registration problem.
+  Confirm:
+    - pharmacy-system logs [PHARM] surescripts_link endpoint=surescripts-prod adapter=surescripts-adapter-v6.0.3-rc1 to_identifier=NPI ... status=DEGRADED (attributes.infra.ncpdp_gateway_version, attributes.ncpdp.to_identifier)
+    - metric pharmacy.erx_reject_pct rises from 0.2-1% to 48-62% after the rollout
+    - the pharmacy-system line "surescripts-adapter rolled out v6.0.3-rc1" comes before the first rejection
+  Remediation: roll the adapter back to v6.0.2 (NCPDPID mapping) with opsctl rollback deployment/surescripts-adapter --to-revision previous. The reject rate is back under 1% within about 60 seconds. Prescriptions rejected during the incident stay in the eRx error queue and must be resent. Restarting the adapter or re-registering with Surescripts does not change the identifier mapping.
 remediation_action: restart_pharmacy_queue
 error_message: '[PHARM] NCPDP-SCRIPT-FAIL: rx={prescription_id} patient={patient_id} pharmacy_npi={pharmacy_npi} ncpdp_status={ncpdp_status}'
 stack_trace: |-
@@ -63,6 +67,74 @@ rca_clues:
   billing-processor:
     billing.rx_claim_pending: {randint: [5, 20]}
     billing.ncpdp_d0_queue: {randint: [10, 50]}
+remediation_command: |-
+  opsctl rollback deployment/surescripts-adapter --to-revision previous
+error_services: [pharmacy-system]
+service_lag_seconds:
+  ehr-system: 15
+  clinical-alerts: 30
+  billing-processor: 45
+cascade_messages:
+  ehr-system:
+    - severity: WARN
+      message: '[EHR] erx_status rx={prescription_id} patient={patient_id} status=TRANSMISSION_FAILED code={ncpdp_status}; prescriber notified'
+  clinical-alerts:
+    - severity: WARN
+      message: '[CDS] erx_failure rx={prescription_id} patient={patient_id} pharmacy_npi={pharmacy_npi} code={ncpdp_status}; discharge medications delayed'
+  billing-processor:
+    - severity: WARN
+      message: '[CLAIMS] ncpdp_claim_pending rx={prescription_id} patient={patient_id} reason=NO_PHARMACY_ACK'
+fault_scope:
+  workloads: [pharmacy-system]
+infrastructure_events:
+  - service: pharmacy-system
+    severity: INFO
+    offset_seconds: -120
+    body: '[PHARM] deployment surescripts-adapter rolled out surescripts-adapter-v6.0.3-rc1 (was surescripts-adapter-v6.0.2): NewRx To identifier mapping refactored by pharmacy-integration-release (CHG0032044)'
+    attributes:
+      user.name: pharmacy-integration-release
+      change.request: CHG0032044
+      operation: deployment
+      infra.ncpdp_gateway_version: surescripts-adapter-v6.0.3-rc1
+      change.summary: 'surescripts-adapter: v6.0.2 -> v6.0.3-rc1'
+remediation_effects:
+  log_events:
+    - service: pharmacy-system
+      severity: INFO
+      offset_seconds: 1
+      body: '[CHG] CHANGE IMPLEMENTED opsctl rollback deployment/surescripts-adapter --to-revision previous by {actor}: surescripts-adapter-v6.0.3-rc1 -> surescripts-adapter-v6.0.2'
+      attributes:
+        operation: change_implemented
+        change.target: deployment/surescripts-adapter
+    - service: pharmacy-system
+      severity: INFO
+      offset_seconds: 15
+      body: '[PHARM] surescripts_link adapter=surescripts-adapter-v6.0.2 to_identifier=NCPDPID started; NewRx accepted by surescripts-prod'
+      attributes:
+        operation: erx_link_status
+        infra.ncpdp_gateway_version: surescripts-adapter-v6.0.2
+        ncpdp.to_identifier: NCPDPID
+  steady_attributes:
+    pharmacy-system:
+      infra.ncpdp_gateway_version: surescripts-adapter-v6.0.2
+  verification:
+    - signal: pharmacy.erx_reject_pct
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "pharmacy-system"'
+      field: 'metrics.pharmacy.erx_reject_pct'
+      expect: 'back under 1% (was 48-62%) within about 60 seconds'
+      within_seconds: 120
+    - signal: NCPDP-SCRIPT-FAIL lines
+      from: 'logs.otel.healthcare'
+      where: 'body.text LIKE "*NCPDP-SCRIPT-FAIL*"'
+      expect: '0 new lines'
+      within_seconds: 120
+    - signal: infra.ncpdp_gateway_version
+      from: 'logs.otel.healthcare'
+      where: 'resource.attributes.service.name == "pharmacy-system"'
+      field: 'attributes.infra.ncpdp_gateway_version'
+      expect: 'surescripts-adapter-v6.0.2 on every surescripts_link line since the fix; v6.0.3-rc1 stops appearing'
+      within_seconds: 120
 business_impact:
   - kpi: business.medication_reconciliation_rate_pct
     factor: {uniform: [0.2, 0.5]}

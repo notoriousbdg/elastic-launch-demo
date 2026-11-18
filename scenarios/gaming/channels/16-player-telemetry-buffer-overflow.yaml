@@ -6,60 +6,141 @@ sensor_type: buffer_monitor
 affected_services:
 - analytics-pipeline
 - game-server
-cascade_services:
-- matchmaking-engine
-description: Player telemetry ring buffer overflows causing event data loss for analytics and anti-cheat systems
+error_services:
+- analytics-pipeline
+cascade_services: []
+description: A game telemetry sampling change multiplies player_move events, overflowing the analytics ingest buffer so
+  telemetry events are rejected and lost
+onset_delay_seconds: 10
+ramp_seconds: 20
 investigation_notes: |-
-  Root cause: the ring buffer consumer (analytics pipeline) is draining slower than the producer (game server) — drain latency above 250ms means the consumer cannot keep up — and the buffer has no backpressure mechanism — when full, new events silently overwrite the oldest 20%, creating gaps in anti-cheat telemetry.
-  1. Check event breakdown: player_move at 42.1% of buffer is the largest category — consider downsampling movement events (every 5th tick instead of every tick).
-  2. Review drop rate: 12.4% sustained drop rate means anti-cheat is blind to ~1 in 8 player actions — this creates exploitable detection gaps.
-  3. Inspect buffer sizing: current max of 100,000 slots may be undersized for peak concurrent players; calculate required capacity as `events_per_second * drain_latency_s`.
-  4. Remediate: issue `resize_telemetry_buffer` to increase capacity to 500,000 slots and `restart_buffer_consumers` to clear the current overflow condition.
-  5. Implement backpressure: when buffer hits 80%, throttle low-priority event types (player_move, state_snapshot) while preserving combat_event for anti-cheat integrity.
-remediation_action: resize_telemetry_buffer
-error_message: '[Analytics] ANALYTICS-TELEMETRY-OVERFLOW: buffer={buffer_id} usage={buffer_usage_pct}% capacity={buffer_size}/{max_buffer_size}
-  dropped={dropped_events}'
+  Root cause: Argo CD synced ConfigMap game-telemetry-sampling revision 17 (CHG0061616) to the game-server fleet, changing player_move sampling from 1/5 to {sample_rate}. At 1/5, player_move was about 42% of the ingest volume; at {sample_rate} it is five times that, so total ingest rises about 2.7x, from 5000-7000 to {received_per_s} events/s. That is past the {flush_rate} events/s the ingest buffer can flush to Kafka, so buffer {buffer_id} is full and the ingest API rejects the overflow with HTTP 503. Nothing changed in analytics-pipeline: its flush rate is at its normal ceiling, and all of the extra volume is player_move.
+  Confirm:
+    - the analytics-pipeline ingest-buffer lines show usage 95-100% (baseline 20-45%) with attributes.config.player_move_sample_rate = 1/1 (was 1/5); game-server logs the game-telemetry-sampling sync (change.request CHG0061616) before the first overflow
+    - metrics.analytics.events_received_per_s is 13000-19000 (baseline 5000-7000) while metrics.analytics.throughput stays at its 7800-8000 ceiling, and metrics.analytics.events_dropped_per_s is 5000-11000 (baseline 0)
+    - player_move is {player_move_share_pct}% of the buffered events (about 42% normally), and the game-server telemetry-exporter logs 503 rejections from the ingest API
+  Remediation: run `opsctl rollback configmap/game-telemetry-sampling --to-revision previous`. The game servers reload the 1/5 sampling within about 30 s, so the received volume falls back to 5000-7000 events/s and rejections stop within about 30 s. The buffer stays full for about 20 s, then drains back to 20-45% within about 120 s of the rollback. Restarting analytics-pipeline would not help: the buffer empties for a few seconds, then fills again at 2.7x volume. Resizing the buffer only delays the overflow.
+remediation_action: rollback_telemetry_sampling
+remediation_command: |-
+  opsctl rollback configmap/game-telemetry-sampling --to-revision previous
+error_message: '[Analytics] ANALYTICS-TELEMETRY-OVERFLOW: buffer={buffer_id} usage={buffer_usage_pct}% received={received_per_s}/s
+  flush_rate={flush_rate}/s rejected={dropped_per_s}/s player_move_share={player_move_share_pct}% player_move_sample_rate={sample_rate}'
 stack_trace: |-
-  === RING BUFFER DIAGNOSTIC ===
-  buffer={buffer_id}
-  ----------- buffer state ------------
-    usage        = {buffer_usage_pct}%
-    size         = {buffer_size}/{max_buffer_size}
-    head_offset  = 48,299,847
-    tail_offset  = 48,200,201
-    writable     = {writable_slots} slots
-  ----------- drop statistics ---------
-    dropped_total   = {dropped_events}
-    dropped_1min    = 1,204
-    dropped_5min    = 4,821
-    drop_rate       = 12.4%
-  ----------- event breakdown ---------
-    player_move     : 42.1% of buffer
-    combat_event    : 28.4% of buffer
-    state_snapshot  : 18.7% of buffer
-    misc            : 10.8% of buffer
-  ----------- action ------------------
-    EVICT oldest 20%  ALERT anti-cheat (data gap)
-  ANALYTICS-TELEMETRY-OVERFLOW: buffer {buffer_id} at {buffer_usage_pct}% — {dropped_events} events lost
+  === INGEST BUFFER {buffer_id} ===
+    usage        = {buffer_usage_pct}% of 100000 slots
+    received     = {received_per_s} events/s
+    flush rate   = {flush_rate} events/s (Kafka producer, 16 partitions)
+    rejected     = {dropped_per_s} events/s (HTTP 503 to producers)
+  --- volume by event type (last 60s) ---
+    player_move     : {player_move_share_pct}% (sample_rate {sample_rate})
+    combat_event    : 9%
+    state_snapshot  : 7%
+    other           : 4%
+  --- producers ---
+    game-server telemetry-exporter: 600/600 servers sending
+  ANALYTICS-TELEMETRY-OVERFLOW: {buffer_id} full, {dropped_per_s} events/s rejected
 correlation_attr:
-  key: deployment.ring_buffer_config
-  value: ringbuf-v2.0.0-no-backpressure
+  key: config.player_move_sample_rate
+  value: '1/1'
 fault_params:
-  buffer_id: {choice: [buf-player-events, buf-game-state, buf-combat-log]}
+  buffer_id: buf-player-events
   buffer_usage_pct: {uniform: [95.0, 100.0], round: 1}
-  buffer_size: {randint: [99000, 99900]}
-  max_buffer_size: 100000
-  dropped_events: {randint: [100, 10000]}
-  writable_slots: {randint: [100, 1000]}
+  received_per_s: {randint: [13400, 18800]}
+  flush_rate: {randint: [7800, 8000]}
+  dropped_per_s: {randint: [5400, 11000]}
+  player_move_share_pct: {randint: [78, 82]}
+  sample_rate: '1/1'
 rca_clues:
   analytics-pipeline:
-    analytics.ring_buffer_writable_slots: {randint: [100, 1000]}
-    analytics.consumer_drain_lag_ms: {randint: [500, 5000]}
+    analytics.player_move_share_pct: {randint: [78, 82]}
+    analytics.events_rejected_per_s: {randint: [5400, 11000]}
+    config.player_move_sample_rate: '1/1'
   game-server:
-    game.anticheat_data_gap: true
-    game.movement_events_dropped_pct: {uniform: [5.0, 25.0], round: 1}
-  matchmaking-engine:
-    matchmaking.player_stats_stale: true
+    telemetry.export_rejected_pct: {uniform: [40.0, 60.0], round: 1}
+    config.player_move_sample_rate: '1/1'
+cascade_messages:
+  game-server:
+    - severity: WARN
+      message: 'telemetry-exporter: POST /api/v1/analytics/ingest returned 503 (ingest buffer {buffer_id} full) after 3 retries;
+        dropped batch of 500 events, player_move_sample_rate={sample_rate}'
+fault_scope:
+  workloads: [analytics-pipeline, game-server]
+service_lag_seconds: {game-server: 10}
+infrastructure_events:
+  - service: game-server
+    severity: INFO
+    offset_seconds: -90
+    body: 'argocd-application-controller: level=info msg="Sync operation to 3e9b0d2 succeeded" application=argocd/game-server-prod
+      resource=ConfigMap/game-telemetry-sampling revision=17 initiatedBy=gameplay-analytics (player_move sample_rate: 1/5 -> 1/1, CHG0061616)'
+    attributes:
+      operation: config_change
+      change.request: CHG0061616
+      user.name: gameplay-analytics
+      change.summary: 'game-telemetry-sampling player_move sample_rate: 1/5 -> 1/1'
+      config.player_move_sample_rate: '1/1'
+  - service: game-server
+    severity: INFO
+    offset_seconds: -30
+    body: 'telemetry-exporter: reloaded sampling config game-telemetry-sampling revision 17 on 600/600 servers (player_move=1/1)'
+    attributes:
+      operation: config_change
+      change.request: CHG0061616
+      config.player_move_sample_rate: '1/1'
+remediation_effects:
+  transition_seconds: 120
+  log_events:
+    - service: game-server
+      severity: INFO
+      offset_seconds: 1
+      body: 'level=info logger=changelog msg="change applied" cmd="opsctl rollback configmap/game-telemetry-sampling --to-revision previous"
+        actor={actor} result="configmap/game-telemetry-sampling revision 17 -> 16, player_move sample_rate 1/1 -> 1/5"'
+      attributes:
+        operation: change_applied
+        event.action: rollback
+        change.target: configmap/game-telemetry-sampling
+        user.name: '{actor}'
+        config.player_move_sample_rate: '1/5'
+    - service: game-server
+      severity: INFO
+      offset_seconds: 30
+      body: 'telemetry-exporter: reloaded sampling config game-telemetry-sampling revision 16 on 600/600 servers (player_move=1/5)'
+      attributes:
+        operation: config_change
+        config.player_move_sample_rate: '1/5'
+    - service: analytics-pipeline
+      severity: INFO
+      offset_seconds: 120
+      body: '[Analytics] ingest-buffer buffer=buf-player-events drained below 50%, 0 events rejected in the last 60s'
+      attributes:
+        operation: buffer_status
+        analytics.buffer: buf-player-events
+  steady_attributes:
+    analytics-pipeline:
+      config.player_move_sample_rate: '1/5'
+  verification:
+    - signal: ingest buffer usage
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "analytics-pipeline"'
+      field: 'metrics.analytics.buffer_usage_pct'
+      expect: 'full for about 20 s, then back in 20-45% within about 120 s (was 95-100%)'
+      within_seconds: 180
+    - signal: rejected events
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "analytics-pipeline"'
+      field: 'metrics.analytics.events_dropped_per_s'
+      expect: '0 within about 30 s (was 5000-11000 events/s), with metrics.analytics.events_received_per_s back in 5000-7000 (was 13000-19000)'
+      within_seconds: 120
+    - signal: ANALYTICS-TELEMETRY-OVERFLOW lines
+      from: 'logs.otel.gaming'
+      where: 'body.text LIKE "*ANALYTICS-TELEMETRY-OVERFLOW*"'
+      expect: '0 new lines'
+      within_seconds: 120
+    - signal: observed player_move sample rate
+      from: 'logs.otel.gaming'
+      where: 'resource.attributes.service.name == "analytics-pipeline" AND attributes.operation == "buffer_status"'
+      field: 'attributes.config.player_move_sample_rate'
+      expect: '1/5 on every ingest-buffer line since the rollback (was 1/1)'
+      within_seconds: 120
 business_impact:
   - kpi: business.matches_played_per_min
     value: {uniform: [229.71, 264.29]}

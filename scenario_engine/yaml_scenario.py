@@ -86,7 +86,7 @@ class YamlScenario(BaseScenario):
                     "business_impact", "generator_impact", "infra_impact",
                     # schema 1.3: realism + verifiable remediation
                     "remediation_command", "cascade_messages", "fault_scope",
-                    "onset_delay_seconds", "ramp_seconds", "k8s_events",
+                    "onset_delay_seconds", "service_lag_seconds", "generator_hold_seconds", "ramp_seconds", "k8s_events",
                     "fault_state", "remediation_effects", "error_services",
                 )
                 if k in ch
@@ -165,6 +165,14 @@ class YamlScenario(BaseScenario):
                 "specs": [tuple(s) for s in section.get("specs", [])],
             })
         return result
+
+    @property
+    def dashboard_log_error_services(self) -> list[str]:
+        return list(self._data.get("dashboard_log_error_services", []))
+
+    @property
+    def dashboard_cluster_health_tiles(self) -> bool:
+        return bool(self._data.get("dashboard_cluster_health_tiles", False))
 
     @property
     def executive_trend_charts(self) -> list[dict]:
@@ -297,6 +305,28 @@ class YamlScenario(BaseScenario):
     @property
     def k8s_clusters(self) -> list[dict[str, Any]]:
         return self._data.get("k8s_clusters", [])
+
+    @property
+    def ops_profile(self) -> dict[str, Any]:
+        """The scenario's opsctl profile: engine presets + ``<scenario_dir>/ops.yaml``.
+
+        Verbs, kinds, audit format, actors, auto-remediated channels, runbook phrasing
+        and the telemetry guide (see ``app/ops_profile.py``). Neutral when the scenario
+        has no ops.yaml; an invalid file is logged and falls back to neutral (the
+        verifier reports it).
+        """
+        cached = self.__dict__.get("_ops_profile_cache")
+        if cached is not None:
+            return cached
+        from app import ops_profile
+
+        try:
+            prof = ops_profile.load_profile(self._scenario_dir)
+        except Exception as exc:  # bad YAML or unknown preset
+            logger.warning("scenario %s: ops.yaml ignored: %s", self._data.get("scenario_id"), exc)
+            prof = ops_profile.neutral()
+        self.__dict__["_ops_profile_cache"] = prof
+        return prof
 
     @property
     def k8s_topology(self) -> dict[str, Any] | None:

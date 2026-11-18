@@ -36,10 +36,80 @@ state:
     init: 0
   _last_relay_summary:
     init: now
+  # AWS-GCP-01 link status every few seconds (0: the first cycle reports).
+  _last_link_status:
+    init: 0
 steps:
 - counter:
     state_key: _frame_count
     by: 1
+# The aws->gcp hop runs over link AWS-GCP-01.
+# Latency: ~60 ms on the primary BGP path. When the path moves to transit AS 64513
+# (64512-64513-64515) it climbs to 500-3000 ms over ~45 s; on the backup path it
+# settles at 70-110 ms within ~60 s.
+# CRC failures: ~0 on a healthy SFP; the failing transceiver corrupts 2-20% of the
+# frames (ramps in over ~30 s); the spare clears them within ~30 s.
+- sample:
+    lat_fault:
+      expr: 16 in all_active
+    lat_fixed:
+      expr: 16 in fixed_channels and 16 not in all_active
+    hop_latency:
+      expr: "round(60.0 + (rand.uniform(600.0, 2800.0) - 60.0) * min(1.0, elapsed.get(16, 0) / 45.0), 1) if lat_fault
+        else (round(1500.0 + (rand.uniform(70.0, 110.0) - 1500.0) * min(1.0, since_fix.get(16, 0) / 60.0), 1)
+        if lat_fixed else round(rand.uniform(45.0, 75.0), 1))"
+    hop_path:
+      expr: "'backup' if lat_fixed else 'primary'"
+    hop_as_path:
+      expr: "'64512-64513-64515' if lat_fault else ('64512-64516-64515' if lat_fixed else '64512-64514-64515')"
+    crc_fault:
+      expr: 13 in all_active
+    crc_fixed:
+      expr: 13 in fixed_channels and 13 not in all_active
+    crc_pct:
+      expr: "round(rand.uniform(4.0, 18.0) * min(1.0, elapsed.get(13, 0) / 30.0), 2) if crc_fault else (round(max(rand.uniform(0.0,
+        0.05), 10.0 * (1.0 - min(1.0, since_fix.get(13, 0) / 30.0))), 2) if crc_fixed else round(rand.uniform(0.0, 0.05), 2))"
+    sfp_rx:
+      expr: "round(rand.uniform(-21.5, -18.6), 1) if crc_fault else round(rand.uniform(-6.4, -5.6), 1)"
+    sfp_serial:
+      expr: "'FTRJ1319P1BTL-B2204' if crc_fixed else 'FTRJ1319P1BTL-A7731'"
+    link_status:
+      expr: "'ANOMALY' if lat_fault or crc_fault or hop_latency > 200 or crc_pct > 1.0 else 'NOMINAL'"
+- metric:
+    name: relay.latency_ms
+    value:
+      var: hop_latency
+    unit: ms
+- metric:
+    name: relay.corrupted_frames_pct
+    value:
+      var: crc_pct
+    unit: pct
+- every:
+    seconds: 5
+    state_key: _last_link_status
+    steps:
+    - log:
+        level: INFO
+        message: '[RLY] link_status link=AWS-GCP-01 hop=aws->gcp path={hop_path} as_path={hop_as_path} latency={hop_latency}ms
+          crc_fail={crc_pct}% sfp_rx={sfp_rx}dBm transceiver={sfp_serial} status={link_status}'
+        attrs:
+          operation: link_status
+          relay.route_id: AWS-GCP-01
+          relay.route_path:
+            var: hop_path
+          network.bgp_as_path:
+            var: hop_as_path
+          relay.latency_ms:
+            var: hop_latency
+          relay.corrupted_frames_pct:
+            var: crc_pct
+          relay.sfp_rx_power_dbm:
+            var: sfp_rx
+          relay.transceiver_serial:
+            var: sfp_serial
+          sensor.status:
+            var: link_status
 - sample:
     sampled_routes:
       sample:
@@ -53,10 +123,7 @@ steps:
     steps:
     - sample:
         latency:
-          uniform:
-          - 5.0
-          - 45.0
-          round: 1
+          expr: "hop_latency if (source == 'aws' and dest == 'gcp') else round(rand.uniform(30.0, 75.0), 1)"
         packets:
           randint:
           - 100
@@ -65,6 +132,8 @@ steps:
           randint:
           - 0
           - 2
+        route_status:
+          expr: "'DEGRADED' if latency > 200 else 'NOMINAL'"
     - metric:
         name:
           expr: f'relay.latency_{source}_{dest}'
@@ -73,7 +142,7 @@ steps:
         unit: ms
     - log:
         level: INFO
-        message: '[RLY] route={source}->{dest} packets={packets} latency={latency}ms dropped={dropped} status=NOMINAL'
+        message: '[RLY] route={source}->{dest} packets={packets} latency={latency}ms dropped={dropped} status={route_status}'
         attrs:
           relay.source_cloud:
             var: source

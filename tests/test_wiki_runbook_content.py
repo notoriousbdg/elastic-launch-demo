@@ -81,11 +81,23 @@ def test_without_verification_the_generic_recovery_sentence_stays():
 
 def test_fault_scope_fact():
     text = _runbook(fault_scope={"cluster": "prod-use1", "node_pool": "edge-c6i"})
+    # the trailing note is the scenario's ops profile runbook.scope_note (neutral here)
     assert (
-        "- Scope: cluster prod-use1, node pool edge-c6i. Other clusters, pools and zones are "
+        "- Scope: cluster prod-use1, node pool edge-c6i. Other components are "
         "unaffected and make a useful comparison." in text
     )
     assert "- Scope:" not in _runbook()
+
+
+def test_fault_scope_note_comes_from_the_ops_profile():
+    from app.ops_profile import resolve
+    from elastic_config.deployer_kb import _scope_fact
+
+    k8s = resolve({"extends": ["kubernetes"]})
+    assert _scope_fact({"cluster": "prod-use1"}, k8s).endswith(
+        "Other clusters, pools and zones are unaffected and make a useful comparison.\n")
+    own = resolve({"runbook": {"scope_note": "Other pads are nominal."}})
+    assert "Other pads are nominal." in _scope_fact({"workloads": ["fuel-system"]}, own)
 
 
 def test_evidence_section_leads_with_log_attributes():

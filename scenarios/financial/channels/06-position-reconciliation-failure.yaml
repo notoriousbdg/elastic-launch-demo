@@ -6,29 +6,40 @@ sensor_type: reconciliation
 affected_services:
 - risk-calculator
 - settlement-processor
+error_services:
+- risk-calculator
 cascade_services:
 - audit-logger
 description: Position records diverge between real-time and end-of-day systems
+onset_delay_seconds: 10
+service_lag_seconds:
+  risk-calculator: 30
+  audit-logger: 45
 investigation_notes: |-
-  1. Check risk-calculator logs for RISK-POSITION-RECON — note instrument, account_id, and position_delta between realtime and EOD systems.
-  2. Query FROM logs.otel.financial.* | WHERE body.text LIKE "*RISK-POSITION-RECON*" | STATS sum(position_delta) BY instrument to find largest breaks.
-  3. Inspect settlement-processor for missing_fills and late_cancels — these are the most common root causes of reconciliation breaks (more than 3 missing fills with zero late cancels points at missing fills).
-  4. Check audit-logger for amendment records around the last_match timestamps to identify any unbooked cancel-replace pairs.
-  5. If break is MATERIAL (delta > 1000 shares or $500K notional), block settlement for the account and escalate to operations for manual resolution.
-remediation_action: block_settlement_and_escalate_ops
+  Root cause: streaming-platform increased the Kafka topic fills from 12 to 24 partitions (CR-5307) to absorb fill volume. settlement-processor's trade-capture consumer does not subscribe through its consumer group: it pins partitions with a manual assign() of 0-11 (FILLS_ASSIGNMENT=manual:0-11), so it never reads partitions 12-23. The OMS producer hashes fills by order key across all 24 partitions, so about half of the new fills (about 20 of the 40 fills/s) are never booked. risk-calculator's realtime position (OMS-REALTIME) keeps counting them and the booked position does not, so the break grows by about 20 fills a second. Everything else looks healthy, which is what makes this easy to miss: consumer group settlement-fills reports lag near zero because it has no committed offsets on 12-23 (there is nothing to lag on), the OMS drop copy is complete, late cancels and amendment lag are 0, and fills on partitions 0-11 book normally (every missing fill is on 12-23).
+  Confirm:
+    - risk-calculator lines with body.text LIKE "*RISK-POSITION-RECON*": delta={position_delta} is exactly realtime_qty - eod_qty, missing_fills={missing_fills} with late_cancels=0, and all missing fills are on fills partitions 12-23 (attributes.risk.missing_fills_partition_range)
+    - metrics.settlement.unbooked_fills on settlement-processor: 0-3 before, climbing by about 20 a second (about 12,000 after 10 minutes)
+    - settlement-processor "trade_capture_health" lines: attributes.kafka.consumer.assignment = manual:0-11 and attributes.kafka.topic.partitions_seen = 12 while attributes.kafka.topic.partitions = 24; group_lag stays low, so lag dashboards stay green
+    - the settlement-processor line "kafka topic change observed: topic=fills partitions 12 -> 24" (attributes.operation config_change, attributes.change.request CR-5307) comes before the first break
+  Remediation: opsctl patch deployment/settlement-processor --fills-assignment subscribe switches trade capture to a group subscription. The pods roll in about 30 s; the consumer joins settlement-fills, is assigned all 24 partitions and, with auto.offset.reset=earliest, reads 12-23 from the start at about 400 fills/s, so unbooked_fills drains at about 380/s and is under 5 within about 90 s for a 10-minute break; the recon break closes as the booked position catches up. Reducing the topic back to 12 partitions is not possible in Kafka (partitions can only be added), and blocking settlement for the account and escalating to operations only contains the break while fills keep going unbooked.
+remediation_action: subscribe_settlement_consumer_to_all_partitions
+remediation_command: |-
+  opsctl patch deployment/settlement-processor --fills-assignment subscribe
 error_message: '[RISK] RISK-POSITION-RECON: instrument={instrument} realtime_qty={realtime_qty} eod_qty={eod_qty} delta={position_delta}
-  account={account_id}'
+  account={account_id} missing_fills={missing_fills} late_cancels=0'
 stack_trace: |-
-  === POSITION RECONCILIATION TABLE ===
-  account={account_id}  instrument={instrument}
-  SOURCE          QTY        AVG_PX      NOTIONAL
-  realtime        {realtime_qty}     $244.52     $12,430,100
-  eod_system      {eod_qty}     $244.50     $11,918,550
-  DELTA           {position_delta}                 $511,550
+  === POSITION RECONCILIATION (OMS realtime vs booked) ===
+  account={account_id}  instrument={instrument}  book=EQ-PROP
+  SOURCE              QTY
+  oms_realtime        {realtime_qty}
+  settlement_booked   {eod_qty}
+  DELTA               {position_delta}
   --- BREAK ANALYSIS ---
-    missing_fills={missing_fills}  late_cancels=0  amendment_lag=0
-    last_match_rt=14:32:07.112  last_match_eod=14:31:54.890
-    rt_source=OMS-REALTIME  eod_source=DTCC-NSCC-CNS
+    missing_fills={missing_fills}  late_cancels=0  amendment_lag=0  duplicate_fills=0
+    missing fills by topic partition: fills-0..fills-11=0  fills-12..fills-23={missing_fills}
+    last_unbooked_fill=fills-{fill_partition}  oms_dropcopy_gaps=0
+    rt_source=OMS-REALTIME  booked_source=settlement-processor/trade-capture
   recon_status=BREAK  severity=MATERIAL  auto_resolve=false
   ACTION: escalate_ops=true  block_settlement=true  alert=RISK-POSITION-RECON
 correlation_attr: {}
@@ -37,20 +48,118 @@ fault_params:
   realtime_qty: 50834
   eod_qty: 48746
   position_delta: 2088
-  missing_fills: {randint: [5, 20]}
+  missing_fills: {randint: [18, 30]}
+  fill_partition: {randint: [12, 23]}
   account_id:
     format: "ACC-{n}"
     n: {randint: [10000, 99999]}
 rca_clues:
   risk-calculator:
     risk.recon_break_delta_shares: 2088
-    risk.missing_fills_count: {randint: [5, 20]}
+    risk.missing_fills_count: {randint: [18, 30]}
+    risk.missing_fills_partition_range: '12-23'
+    risk.late_cancel_count: 0
   settlement-processor:
-    settlement.blocked_on_recon_break: true
-    settlement.late_cancel_count: 0
+    kafka.consumer.assignment: manual:0-11
+    kafka.topic.partitions_unassigned: 12
+    kafka.consumer.group_lag: {randint: [0, 40]}
   audit-logger:
     audit.amendment_lag_count: 0
     audit.unbooked_cancel_replace: 0
+cascade_messages:
+  settlement-processor:
+    - severity: WARN
+      message: '[SETTLE] settlement_hold account={account_id} instrument={instrument}: position break delta={position_delta} reported
+        by risk-calculator; trade_capture consumer_group=settlement-fills reports no lag'
+  audit-logger:
+    - severity: INFO
+      message: '[AUDIT] event_logged stream=risk-events type=POSITION_BREAK account={account_id} instrument={instrument} delta={position_delta}
+        missing_fills={missing_fills} severity=MATERIAL'
+fault_scope:
+  cluster: finserv-gke-cluster
+  workloads: [risk-calculator, settlement-processor]
+infrastructure_events:
+  - service: settlement-processor
+    severity: INFO
+    offset_seconds: -150
+    body: '[SETTLE] kafka topic change observed: topic=fills partitions 12 -> 24 (CreatePartitions by streaming-platform, CR-5307:
+      absorb fill volume); trade_capture consumer FILLS_ASSIGNMENT=manual:0-11'
+    attributes:
+      user.name: streaming-platform
+      change.request: CR-5307
+      operation: config_change
+      change.summary: 'fills partitions: 12 -> 24'
+      kafka.topic: fills
+      kafka.topic.partitions: 24
+      kafka.consumer.assignment: manual:0-11
+remediation_effects:
+  log_taper_seconds: 60
+  log_events:
+    - service: audit-logger
+      severity: INFO
+      offset_seconds: 1
+      body: '[AUDIT] event_logged stream=change-mgmt type=CHANGE_APPLIED cmd="opsctl patch deployment/settlement-processor --fills-assignment subscribe" actor={actor}: trade_capture FILLS_ASSIGNMENT manual:0-11 -> subscribe (group settlement-fills)'
+      attributes:
+        operation: change_applied
+        audit.stream: change-mgmt
+        change.target: deployment/settlement-processor
+    - service: settlement-processor
+      severity: INFO
+      offset_seconds: 12
+      body: 'deployment settlement-processor patched (FILLS_ASSIGNMENT=subscribe): rolling update in progress, 1/3 pods updated'
+      attributes:
+        operation: deployment_rollout
+        deploy.updated_replicas: 1
+    - service: settlement-processor
+      severity: INFO
+      offset_seconds: 30
+      body: 'deployment settlement-processor patched (FILLS_ASSIGNMENT=subscribe): 3/3 pods updated and available'
+      attributes:
+        operation: deployment_rollout
+        deploy.updated_replicas: 3
+    - service: settlement-processor
+      severity: INFO
+      offset_seconds: 32
+      body: '[SETTLE] trade_capture joined group settlement-fills: assigned fills-0..fills-23; no committed offset for fills-12..fills-23,
+        auto.offset.reset=earliest, replaying'
+      attributes:
+        operation: consumer_rebalance
+        kafka.consumer.assignment: group:settlement-fills
+        kafka.topic.partitions_seen: 24
+    - service: settlement-processor
+      severity: INFO
+      offset_seconds: 65
+      body: '[SETTLE] trade_capture replay of fills-12..fills-23 caught up; booked position matches OMS realtime'
+      attributes:
+        operation: trade_capture_replay
+        kafka.consumer.assignment: group:settlement-fills
+  steady_attributes:
+    settlement-processor:
+      kafka.consumer.assignment: group:settlement-fills
+  verification:
+    - signal: settlement.unbooked_fills
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "settlement-processor"'
+      field: 'metrics.settlement.unbooked_fills'
+      expect: 'back under 5 (was climbing by about 20 a second, about 12,000 after 10 minutes)'
+      within_seconds: 180
+    - signal: RISK-POSITION-RECON lines
+      from: 'logs.otel.finserv'
+      where: 'body.text LIKE "*RISK-POSITION-RECON*"'
+      expect: '0 new lines'
+      within_seconds: 180
+    - signal: trade capture partition assignment
+      from: 'logs.otel.finserv'
+      where: 'resource.attributes.service.name == "settlement-processor" AND body.text LIKE "*trade_capture_health*"'
+      field: 'attributes.kafka.consumer.assignment'
+      expect: 'group:settlement-fills on every line since the fix; manual:0-11 stops appearing'
+      within_seconds: 180
+    - signal: trade capture partitions read
+      from: 'logs.otel.finserv'
+      where: 'resource.attributes.service.name == "settlement-processor" AND body.text LIKE "*trade_capture_health*"'
+      field: 'attributes.kafka.topic.partitions_seen'
+      expect: '24 (was 12 of 24)'
+      within_seconds: 180
 business_impact:
   - kpi: business.reconciliation_breaks
     factor: {uniform: [3.0, 7.0]}

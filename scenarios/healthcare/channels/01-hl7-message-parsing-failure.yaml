@@ -11,8 +11,12 @@ cascade_services:
 - clinical-alerts
 description: HL7 v2.x message parsing fails due to malformed segments or unsupported message types in the ADT interface
 investigation_notes: |-
-  Root Cause: Malformed HL7 v2.x segments typically originate from upstream ADT/ORM source systems sending non-standard field encodings or unsupported Z-segments. Check the MSH-9 message type and MSH-12 version against the interface specification. An inbound MSH-12 version of 2.3.1 against the 2.5.1 interface specification, with no Z-segments present, means the source system is sending non-standard v2.3.1 field encodings rather than unsupported Z-segments.
-  Remediation: 1) Review the ACK/NAK disposition — AE (Application Error) vs AR (Application Reject) determines retry eligibility. 2) Inspect the Mirth Connect or Rhapsody channel logs for the failing message ID. 3) After the source system corrects its field encoding, reprocess the errored messages instead of discarding them (Mirth Administrator > Message Browser on ADT-INBOUND, filter status ERROR, Reprocess). 4) If messages are stuck, restart the HL7 listener: `systemctl restart mirth-hl7-listener`. 5) Verify segment encoding with: `hl7-validator --file /tmp/failed_msg.hl7 --version 2.5.1`. 6) Reconcile message control IDs in the MSA segment to ensure no duplicate deliveries after recovery.
+  Root cause: Mirth channel ADT-INBOUND revision r42 was deployed shortly before the first HL7-ACK-AE. r42 turned on strict HL7 v2.5.1 inbound validation, but the registration system still sends v2.3.1 (MSH-12 = 2.3.1). Every {msg_type} whose {hl7_segment} uses a v2.3.1 field encoding now gets an AE acknowledgment at position {position}. The messages are valid for the version they declare: there are no Z-segments and the source system has not changed. The ADT-FEED channels and ORU result traffic parse normally.
+  Confirm:
+    - ehr-system logs [EHR] hl7_interface channel=ADT-INBOUND revision=r42 validation=strict-2.5.1 ... status=DEGRADED (attributes.hl7.channel_revision); metric ehr.hl7_ack_ae_pct rises from under 0.5% to 35-45% after the deploy
+    - the ehr-system line "Mirth channel ADT-INBOUND deployed revision r42" comes before the first HL7-ACK-AE
+    - rca attributes hl7.msh_version 2.3.1 and hl7.z_segment_count 0 on the error lines
+  Remediation: roll the channel back to r41 (lenient validation) with opsctl rollback channel/adt-inbound --to-revision previous. The AE rate falls back under 0.5% within about 60 seconds. Restarting the HL7 listener does not help: it comes back on r42 with the same validation. Getting the registration vendor onto v2.5.1 is the long-term fix, not an incident action. Messages that errored during the incident stay in the Mirth error queue and are reprocessed after the rollback.
 remediation_action: restart_hl7_interface
 error_message: '[EHR] HL7-ACK-AE: msg_type={msg_type} segment={hl7_segment} position={position} patient={mrn}'
 stack_trace: |-
@@ -25,11 +29,11 @@ stack_trace: |-
   MSA|AE|MSG-{mrn}.001|HL7-ACK-AE: Segment {hl7_segment} at position {position} contains invalid field encoding
   ERR||{hl7_segment}^1^{position}|102^Data type error^HL70357|E||||Invalid field encoding
 correlation_attr:
-  key: deployment.ehr_hl7_version
-  value: mirth-3.12.0-hotfix7
+  key: hl7.channel_revision
+  value: r42
 fault_params:
-  msg_type: {choice: ["ADT^A01", "ADT^A03", "ADT^A08", "ORU^R01", "ORM^O01"]}
-  hl7_segment: {choice: [PID, PV1, OBX, OBR, MSH, NK1, DG1]}
+  msg_type: {choice: ["ADT^A01", "ADT^A03", "ADT^A04", "ADT^A08"]}
+  hl7_segment: {choice: [PID, PV1, NK1, DG1]}
   position: {randint: [1, 25]}
   mrn:
     format: "MRN-{n}"
@@ -51,6 +55,75 @@ rca_clues:
   clinical-alerts:
     alerts.ehr_integration_status: stale_data
     alerts.suppressed_count: {randint: [5, 30]}
+remediation_command: |-
+  opsctl rollback channel/adt-inbound --to-revision previous
+error_services: [ehr-system]
+service_lag_seconds:
+  lab-integration: 20
+  patient-monitor: 30
+  clinical-alerts: 45
+cascade_messages:
+  lab-integration:
+    - severity: WARN
+      message: '[LIS] adt_update_rejected source=EHR-CORE msg_type={msg_type} patient={mrn} reason=PATIENT_NOT_REGISTERED; specimen labels held'
+  patient-monitor:
+    - severity: WARN
+      message: '[MONITOR] adt_admit_pending patient={mrn} encounter={encounter_id} reason=NO_ADT_FROM_EHR; bed assignment not updated'
+  clinical-alerts:
+    - severity: WARN
+      message: '[CDS] patient_context_stale patient={mrn} encounter={encounter_id} reason=ADT_UPDATE_MISSING; rules evaluated on last known location'
+fault_scope:
+  workloads: [ehr-system]
+infrastructure_events:
+  - service: ehr-system
+    severity: INFO
+    offset_seconds: -120
+    body: '[EHR] Mirth channel ADT-INBOUND deployed revision r42 (was r41): inbound validation strict-2.5.1 enabled by integration-release (CHG0031842)'
+    attributes:
+      user.name: integration-release
+      change.request: CHG0031842
+      operation: channel_deploy
+      hl7.channel_revision: r42
+      hl7.inbound_validation: strict-2.5.1
+      change.summary: 'ADT-INBOUND: r41 -> r42 (strict v2.5.1 validation)'
+remediation_effects:
+  log_events:
+    - service: ehr-system
+      severity: INFO
+      offset_seconds: 1
+      body: '[CHG] CHANGE IMPLEMENTED opsctl rollback channel/adt-inbound --to-revision previous by {actor}: ADT-INBOUND r42 -> r41, inbound validation lenient'
+      attributes:
+        operation: change_implemented
+        change.target: channel/adt-inbound
+    - service: ehr-system
+      severity: INFO
+      offset_seconds: 15
+      body: '[EHR] Mirth channel ADT-INBOUND deployed revision r41: inbound validation lenient; listener 2575 accepting'
+      attributes:
+        operation: channel_deploy
+        hl7.channel_revision: r41
+        hl7.inbound_validation: lenient
+  steady_attributes:
+    ehr-system:
+      hl7.channel_revision: r41
+  verification:
+    - signal: ehr.hl7_ack_ae_pct
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "ehr-system"'
+      field: 'metrics.ehr.hl7_ack_ae_pct'
+      expect: 'back under 0.5% (was 35-45%) within about 60 seconds'
+      within_seconds: 120
+    - signal: HL7-ACK-AE lines
+      from: 'logs.otel.healthcare'
+      where: 'body.text LIKE "*HL7-ACK-AE*"'
+      expect: '0 new lines'
+      within_seconds: 120
+    - signal: hl7.channel_revision
+      from: 'logs.otel.healthcare'
+      where: 'resource.attributes.service.name == "ehr-system"'
+      field: 'attributes.hl7.channel_revision'
+      expect: 'r41 on every hl7_interface line since the fix; r42 stops appearing'
+      within_seconds: 120
 business_impact:
   - kpi: business.hl7_messages_per_min
     value: {uniform: [513.83, 591.18]}

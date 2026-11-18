@@ -32,162 +32,162 @@ topology:
 emit_fault_logs: true
 kpi_emitter: false
 state:
+  _hlr_peak:
+    init: 0.0
   _provision_count:
     init: 0
   _last_summary:
     init: now
 steps:
+# Spring Boot, 6 pods, HikariCP maximumPoolSize 50 per pod (values per pod).
+#   ch 1  2.14.0 holds connections idle in transaction: pool full within ~60s; the rollback replaces
+#         one pod at a time over ~60s.
+#   ch 2  statement timeouts on subscriber-db hold connections for 5s each.
+#   ch 10 hlr-fe-fra max-sessions 1: ~200 registrations/min arrive, ~40/min processed, so the queue
+#         grows ~160/min from the change (~30s before the trigger); 16 sessions drain ~450/min.
+#   ch 11 MNP client on the public NPDB endpoint: every lookup hits the 3s connect timeout.
 - sample:
+    r1:
+      expr: "min(1.0, elapsed.get(1, 0) / 60.0) if 1 in all_active else (max(0.0, 1.0 - since_fix.get(1, 0) / 60.0) if 1 in fixed_channels else 0.0)"
+    r2:
+      expr: "min(1.0, max(0.0, elapsed.get(2, 0) - lag.get(2, 0)) / 20.0) if 2 in all_active else 0.0"
+    hikari_active:
+      expr: "int(min(50, max(1, 12 + 38 * r1 + 22 * r2 + rand.gauss(0, 2.5 * (1.0 - r1)))))"
+    hikari_pending:
+      expr: "max(0, int(180 * r1 + 25 * r2 + rand.gauss(0, 12 * r1 + 3 * r2)))"
+    hikari_idle:
+      expr: "max(0, 50 - hikari_active) if r1 < 0.95 else 0"
+    image_tag:
+      expr: "'provisioning-service:2.14.0' if 1 in all_active else 'provisioning-service:2.13.4'"
+    pool_status:
+      expr: "'ANOMALY' if 1 in all_active or hikari_pending > 20 else 'NORMAL'"
+- metric:
+    name: provisioning_service.hikari_active_connections
+    value: {var: hikari_active}
+    unit: connections
+- metric:
+    name: provisioning_service.hikari_pending_threads
+    value: {var: hikari_pending}
+    unit: threads
+- log:
+    level: INFO
+    message: 'HikariPool-1 - Pool stats (total=50, active={hikari_active}, idle={hikari_idle}, waiting={hikari_pending}) image={image_tag} status={pool_status}'
+    attrs:
+      operation: pool_stats
+      hikari.active_connections: {var: hikari_active}
+      hikari.idle_connections: {var: hikari_idle}
+      hikari.pending_threads: {var: hikari_pending}
+      deployment.image_tag: {var: image_tag}
+      hikari.status: {var: pool_status}
+- sample:
+    hlr_live:
+      expr: "min(6000.0, 100.0 + 160.0 * elapsed.get(10, 0) / 60.0)"
+- counter:
+    state_key: _hlr_peak
+    by: {expr: "hlr_live - _hlr_peak"}
+  when: "10 in all_active"
+- sample:
+    hlr_peak:
+      expr: "_hlr_peak if _hlr_peak > 0 else 1600.0"
+    hlr_queue:
+      expr: "int(hlr_live + rand.gauss(0, 15)) if 10 in all_active else (int(max(20.0, hlr_peak - 450.0 * since_fix.get(10, 0) / 60.0) + rand.gauss(0, 4)) if 10 in fixed_channels else int(20 + rand.gauss(0, 4)))"
+    hlr_max_sessions:
+      expr: "1 if 10 in all_active else 16"
+    hlr_sessions:
+      expr: "1 if 10 in all_active else (16 if hlr_queue > 60 else int(min(16, max(3, 6 + rand.gauss(0, 1.2)))))"
+    hlr_rate:
+      expr: "int(40 + rand.gauss(0, 2)) if 10 in all_active else (int(650 + rand.gauss(0, 15)) if hlr_queue > 60 else int(200 + rand.gauss(0, 8)))"
+    hlr_latency_ms:
+      expr: "int(1400 + rand.gauss(0, 90))"
+    hlr_status:
+      expr: "'ANOMALY' if 10 in all_active or hlr_queue > 200 else 'NORMAL'"
+- metric:
+    name: provisioning_service.hlr_queue_depth
+    value: {var: hlr_queue}
+    unit: requests
+- metric:
+    name: provisioning_service.hlr_sessions_in_use
+    value: {var: hlr_sessions}
+    unit: sessions
+- metric:
+    name: provisioning_service.hlr_request_latency_ms
+    value: {var: hlr_latency_ms}
+    unit: ms
+- metric:
+    name: provisioning_service.hlr_registrations_per_min
+    value: {var: hlr_rate}
+    unit: registrations/min
+- log:
+    level: INFO
+    message: 'connector hlr-fe-fra stats sessions={hlr_sessions}/{hlr_max_sessions} queue_depth={hlr_queue} processed_per_min={hlr_rate} req_latency_ms={hlr_latency_ms} status={hlr_status}'
+    attrs:
+      operation: hlr_status
+      hlr.connector: hlr-fe-fra
+      hlr.max_sessions: {var: hlr_max_sessions}
+      hlr.sessions_in_use: {var: hlr_sessions}
+      hlr.queue_depth: {var: hlr_queue}
+      hlr.request_latency_ms: {var: hlr_latency_ms}
+      hlr.status: {var: hlr_status}
+- sample:
+    r11:
+      expr: "min(1.0, elapsed.get(11, 0) / 5.0) if 11 in all_active else 0.0"
+    mnp_fail:
+      expr: "max(0, int(80 * r11 + rand.gauss(0, 8 * r11)))"
+    mnp_p95_ms:
+      expr: "int(3005 + rand.gauss(0, 3)) if 11 in all_active else int(45 + rand.gauss(0, 4))"
+    mnp_endpoint:
+      expr: "'api.npdb-gw.eu:8443' if 11 in all_active else 'npdb-ll.meridian.internal:8443'"
+    mnp_status:
+      expr: "'ANOMALY' if 11 in all_active else 'NORMAL'"
+- metric:
+    name: provisioning_service.mnp_lookup_failures_per_min
+    value: {var: mnp_fail}
+    unit: failures/min
+- metric:
+    name: provisioning_service.mnp_lookup_latency_p95_ms
+    value: {var: mnp_p95_ms}
+    unit: ms
+- log:
+    level: INFO
+    message: 'mnp-client endpoint={mnp_endpoint} lookups_failed_last_min={mnp_fail} p95_ms={mnp_p95_ms} status={mnp_status}'
+    attrs:
+      operation: mnp_status
+      mnp.endpoint: {var: mnp_endpoint}
+      mnp.lookup_failures_per_min: {var: mnp_fail}
+      mnp.lookup_latency_p95_ms: {var: mnp_p95_ms}
+      mnp.status: {var: mnp_status}
+- sample:
+    op_latency_center:
+      expr: "450.0 + 29500.0 * r1 + 4500.0 * r2"
+    op_latency_ms:
+      expr: "round(op_latency_center * (1.0 + rand.gauss(0, 0.04)), 1)"
+    activations_center:
+      expr: "140.0 * (1.0 - 0.85 * r1 - 0.6 * r2 - (0.7 if 10 in all_active else 0.0) - 0.3 * r11)"
+    sim_activations:
+      expr: "round(max(5.0, activations_center + rand.gauss(0, 4.0)), 1)"
     sim_type:
-      choice:
-      - physical_sim
-      - esim
-      - embedded_sim
-    hlr_operation:
-      choice:
-      - register
-      - update
-      - query
-    prov_status:
-      if_active:
-        choice:
-        - TIMEOUT
-        - SLOW
-      else: OK
-    prov_level:
-      if_active:
-        choice:
-        - ERROR
-        - WARN
-      else: INFO
-    db_wait_ms:
-      if_active:
-        randint:
-        - 3000
-        - 5000
-      else:
-        randint:
-        - 50
-        - 200
+      choice: [physical_sim, esim, embedded_sim]
 - counter:
     state_key: _provision_count
     by: 1
-- log:
-    level:
-      var: prov_level
-    message: '[PROV] provisioning_request sim_type={sim_type} hlr_operation={hlr_operation} apn=internet.meridian.eu status={prov_status} db_wait_ms={db_wait_ms}'
-    attrs:
-      operation: provisioning_request
-      provisioning.sim_type:
-        var: sim_type
-      provisioning.hlr_operation:
-        var: hlr_operation
-      provisioning.status:
-        var: prov_status
-      provisioning.db_wait_ms:
-        var: db_wait_ms
-- sample:
-    hlr_queue:
-      if_active:
-        randint:
-        - 3000
-        - 8000
-      else:
-        randint:
-        - 10
-        - 100
-    hlr_rate:
-      if_active:
-        randint:
-        - 20
-        - 50
-      else:
-        randint:
-        - 180
-        - 220
-    hlr_status:
-      if_active: DEGRADED
-      else: NORMAL
-    hlr_level:
-      if_active: WARN
-      else: INFO
-- log:
-    level:
-      var: hlr_level
-    message: '[PROV] hlr_status queue_depth={hlr_queue} processing_rate={hlr_rate}/min status={hlr_status}'
-    attrs:
-      operation: hlr_status
-      provisioning.hlr_queue:
-        var: hlr_queue
-      provisioning.hlr_rate:
-        var: hlr_rate
+- metric:
+    name: provisioning_service.operation_latency_ms
+    value: {var: op_latency_ms}
+    unit: ms
+- metric:
+    name: provisioning_service.sim_activations_per_min
+    value: {var: sim_activations}
+    unit: activations/min
 - every:
     seconds: 10
     state_key: _last_summary
     steps:
-    - sample:
-        prov_success_rate:
-          if_active:
-            uniform:
-            - 40.0
-            - 60.0
-            round: 1
-          else: 99.5
-        prov_avg_latency:
-          if_active: 8000
-          else: 450
-        prov_summary_status:
-          if_active: DEGRADED
-          else: NORMAL
-        prov_summary_level:
-          if_active: WARN
-          else: INFO
     - log:
-        level:
-          var: prov_summary_level
-        message: '[PROV] provisioning_summary total={_provision_count} success_rate={prov_success_rate}% avg_latency_ms={prov_avg_latency} status={prov_summary_status}'
+        level: INFO
+        message: 'provisioning summary total={_provision_count} sim_activations_per_min={sim_activations} op_latency_ms={op_latency_ms} last_sim_type={sim_type} image={image_tag}'
         attrs:
           operation: provisioning_summary
-          provisioning.total:
-            var: _provision_count
-          provisioning.success_rate:
-            var: prov_success_rate
-- sample:
-    op_latency_ms:
-      if_active:
-        uniform:
-        - 3000.0
-        - 15000.0
-        round: 1
-      else:
-        uniform:
-        - 100.0
-        - 800.0
-        round: 1
-    hlr_queue_metric:
-      if_active:
-        randint:
-        - 3000
-        - 8000
-      else:
-        randint:
-        - 10
-        - 100
-- metric:
-    name: provisioning_service.operation_latency_ms
-    value:
-      var: op_latency_ms
-    unit: ms
-- metric:
-    name: provisioning_service.hlr_queue_depth
-    value:
-      var: hlr_queue_metric
-    unit: entries
-- metric:
-    name: provisioning_service.sim_activations_per_min
-    value:
-      uniform:
-      - 80.0
-      - 200.0
-      round: 1
-    unit: activations/min
+          provisioning.total: {var: _provision_count}
+          provisioning.sim_activations_per_min: {var: sim_activations}
+          provisioning.operation_latency_ms: {var: op_latency_ms}
+          deployment.image_tag: {var: image_tag}

@@ -11,12 +11,16 @@ cascade_services:
 - cloud-interconnect
 description: Network Intelligence Center root-cause analysis calls to Vertex AI are throttled with 429s and respond slowly, delaying connectivity-test diagnosis
 investigation_notes: |-
-  Root cause: The network-intelligence service calls Gemini on Vertex AI to summarize Network Intelligence Center connectivity-test traces. gemini-2.5-pro runs on dynamic shared quota with no Provisioned Throughput behind it, and regional capacity contention means a large share of prediction requests return 429 RESOURCE_EXHAUSTED and the rest show elevated latency. Connectivity tests still run, but their AI-written root-cause summaries are missing or minutes late.
-  Diagnose with the Vertex AI prediction metrics (prediction count by response code, latency histogram) and check whether the project has Provisioned Throughput for the model (none means all traffic rides shared capacity):
-    Console > Vertex AI > Provisioned Throughput
-  The gcp_vertexai throttle_rate and latency_multiplier impacts drive the elevated 429 share and latency during the fault.
-  Remediation: Fail over the analysis traffic to a second region or a lighter Gemini model, then buy Provisioned Throughput for the primary region (dynamic shared quota cannot be raised with a quota request). Safe to automate: it only changes which endpoint serves the summarization calls.
+  Root cause: change ni-summarizer-v2 moved the connectivity-test summarizer of network-intelligence to {vertex_model} (deployment gemini-2.5-pro-ni-summarizer-v2) on endpoint {vertex_endpoint} in {gcp_region}. That model runs on dynamic shared quota with no Provisioned Throughput, so {vertex_throttle_pct}% of prediction requests return 429 RESOURCE_EXHAUSTED and the rest are slow (p95 {vertex_p95_ms} ms). Connectivity tests themselves still pass; only the AI-written root-cause summaries are missing or minutes late and {ni_pending_analyses} analyses are queued. The earlier deployment (gemini-2.5-flash-ni-summarizer-v1) did not throttle, which rules out a project-wide quota change or a Vertex AI regional outage, and the network paths under test are healthy.
+  Confirm:
+    - network-intelligence metric ni.ai_summary_throttle_pct rises from 0-2 to 35-45 and ni.pending_analyses climbs from under 10 to {ni_pending_analyses} after the change
+    - network-intelligence logs operation=ai_summary with attributes ni.model_deployment=gemini-2.5-pro-ni-summarizer-v2, ni.vertex_endpoint={vertex_endpoint} and ni.status=ANOMALY
+    - the network-intelligence log "ni-summarizer-v2 deployed" (user.name=ni-release, change.request=CR-4533) comes before the first 429
+    - the Vertex AI prediction metrics show the 429 share and latency elevated for the endpoint
+  Remediation: roll the endpoint back to the previous model deployment (gemini-2.5-flash-ni-summarizer-v1): opsctl rollback vertex-endpoint/{vertex_endpoint} --to-revision previous. Throttling falls to 0-2% within about a minute and the pending analyses drain over a couple of minutes. Provisioned Throughput for gemini-2.5-pro is the follow-up before the model is tried again. Safe to automate: it only changes which deployment serves the summarization calls.
 remediation_action: failover_vertex_endpoint
+remediation_command: |-
+  opsctl rollback vertex-endpoint/gcpnet-ni-assist-central1 --to-revision previous
 error_message: '[NIC] NI-GEMINI-THROTTLED endpoint={vertex_endpoint} model={vertex_model} region={gcp_region} throttled={vertex_throttle_pct}%
   p95_latency_ms={vertex_p95_ms} pending_analyses={ni_pending_analyses}'
 stack_trace: |-
@@ -29,7 +33,7 @@ stack_trace: |-
   P95 Latency:       {vertex_p95_ms} ms
   Pending Analyses:  {ni_pending_analyses}
   Quota:             dynamic shared quota (no Provisioned Throughput) - 429 RESOURCE_EXHAUSTED
-  Action: Fail over to a secondary region or model and add Provisioned Throughput
+  Action: Roll the endpoint back to the previous model deployment, then add Provisioned Throughput
 correlation_attr:
   key: deployment.ni_model_version
   value: gemini-2.5-pro-ni-summarizer-v2
@@ -43,6 +47,7 @@ fault_params:
 rca_clues:
   network-intelligence:
     ni.vertex_quota_exhausted: true
+    ni.model_deployment: gemini-2.5-pro-ni-summarizer-v2
     ni.vertex_throttle_pct: {uniform: [35.0, 45.0], round: 1}
     ni.summaries_delayed_min: {randint: [3, 20]}
   vpc-network-manager:
@@ -51,6 +56,66 @@ rca_clues:
     vpn.diagnosis_delayed: true
   cloud-interconnect:
     interconnect.diagnosis_delayed: true
+fault_scope:
+  cluster: gcpnet-gke-europe1
+  workloads: [network-intelligence, vpc-network-manager]
+cascade_messages:
+  cloud-vpn-gateway:
+    - severity: WARN
+      message: 'vpn: tunnel diagnosis summary from Network Intelligence delayed (Vertex AI throttled)'
+  cloud-interconnect:
+    - severity: WARN
+      message: 'interconnect: circuit diagnosis summary from Network Intelligence delayed (Vertex AI throttled)'
+infrastructure_events:
+  - service: network-intelligence
+    severity: INFO
+    offset_seconds: -90
+    body: 'nic: ni-summarizer-v2 deployed on endpoint={vertex_endpoint}: model gemini-2.5-flash-ni-summarizer-v1 -> gemini-2.5-pro-ni-summarizer-v2 (dynamic shared quota, no Provisioned Throughput); released by ni-release (CR-4533)'
+    attributes:
+      user.name: ni-release
+      change.request: CR-4533
+      operation: model_deploy
+      deployment.ni_model_version: gemini-2.5-pro-ni-summarizer-v2
+      change.summary: 'NI summarizer model: gemini-2.5-flash -> gemini-2.5-pro'
+remediation_effects:
+  log_events:
+    - service: vpc-network-manager
+      severity: INFO
+      offset_seconds: 2
+      body: 'gcp-audit: logName=cloudaudit.googleapis.com/activity serviceName=aiplatform.googleapis.com methodName=google.cloud.aiplatform.v1.EndpointService.UpdateEndpoint resourceName=projects/gcpnet-prod-001/locations/us-central1/endpoints/gcpnet-ni-assist-central1 principalEmail={actor} status=OK'
+      attributes:
+        operation: audit
+        command.target: vertex-endpoint/gcpnet-ni-assist-central1
+    - service: network-intelligence
+      severity: INFO
+      offset_seconds: 8
+      body: 'nic: endpoint={vertex_endpoint} traffic shifted to gemini-2.5-flash-ni-summarizer-v1; draining {ni_pending_analyses} pending analyses'
+      attributes:
+        operation: model_deploy
+        ni.model_deployment: gemini-2.5-flash-ni-summarizer-v1
+  steady_attributes:
+    network-intelligence:
+      ni.model_deployment: gemini-2.5-flash-ni-summarizer-v1
+  log_taper_seconds: 60
+  verification:
+    - signal: ni.ai_summary_throttle_pct
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "network-intelligence"'
+      field: 'metrics.ni.ai_summary_throttle_pct'
+      expect: 'back to 0-2 (was 35-45)'
+      within_seconds: 90
+    - signal: ni.pending_analyses
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "network-intelligence"'
+      field: 'metrics.ni.pending_analyses'
+      expect: 'drains to under 10 (was 20-300)'
+      within_seconds: 150
+    - signal: NI model deployment
+      from: 'logs.otel.gcpnet'
+      where: 'resource.attributes.service.name == "network-intelligence"'
+      field: 'attributes.ni.model_deployment'
+      expect: 'gemini-2.5-flash-ni-summarizer-v1 on every line logged since the fix; gemini-2.5-pro-ni-summarizer-v2 stops appearing'
+      within_seconds: 90
 business_impact:
   - kpi: business.incident_mttd_min
     factor: {uniform: [2.0, 4.5]}

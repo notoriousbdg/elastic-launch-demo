@@ -30,7 +30,7 @@ extract/verify (and any package fetch/extract/merge helpers present in this chec
 5. **SPEC** in `__init__.py` (`schema_version="1.1"`, `scope_aware`, `state_keys`, `coherence` — template in [TEMPLATES.md](TEMPLATES.md) §SPEC template — datasets, integrations, `identity_fields`, …). Every host, service, instance, database, URL, bucket, endpoint and cloud-account, subscription, tenant or project value comes from `ScenarioIdentity` (`generator_engine/identity.py`), so no two scenarios share it. Do not hardcode these or format `{namespace}-` prefixes in the generator. See guardrail 36 in [GUARDRAILS.md](GUARDRAILS.md) for the helper table; `tests/test_generator_identity.py` enforces it.
 6. **Impact keys (mandatory)** — see below
 7. **State keys, scope and coherence (generator schema 1.1)** — see below
-8. **Tests** + registry reload; remind **Refresh list**
+8. **Tests** + registry reload; remind **Refresh list**; regenerate the docs reference with `python3 scripts/gen_generator_docs.py` (`tests/test_generator_docs.py` fails when it is stale)
 
 Synthetics (`integrations=()`) skip package extract but still need impact_keys.
 
@@ -145,7 +145,10 @@ Scenario schema 1.3 channels describe a fault's scope, its timing and the state 
 3. **Onset and ramp.** `resolve_active_chaos` does not apply them. Use `chaos_controller.get_channel_elapsed(channel)` (None when inactive): no impact before `onset_delay_seconds`, then scale it in over `ramp_seconds`.
 4. **Coherence.** Couple related signals inside the generator (HPA at max ⇒ replicas = max and CPU above target; OOMKilled ⇒ memory at the limit before each kill and restarts rising; node CPU and memory = sum of its pods) and list each coupling in `SPEC.coherence`.
 5. **No demo bookkeeping.** Never emit `chaos.*` attributes (channel, fault type, callback URL, user email) or other demo fields such as `ops.*`, `system.status` or an `event_name` blob. Emit what the real receiver or integration emits.
-6. Tests: a fault with a `fault_scope` changes only in-scope entities; a `remediation_effects.state` row changes the reported value and it persists after the channel resolves; nothing is emitted under a `chaos.` key.
+6. **ops_bindings (optional, next to `state_keys`).** When the generator has `state_keys`, declare in `SPEC.ops_bindings` how an applied `opsctl` command changes them (`generator_engine/schema.yaml` 1.1 step 6). Without it a fix still lands through the channel's `remediation_effects.state`, but an opsctl change on its own (a wrong or partial fix) leaves no trace in this generator's telemetry. `app.ops.change_state` consults the scenario's `ops.yaml` `state_changes` first, then each enabled generator's bindings; first hit wins. Two forms (template in [TEMPLATES.md](TEMPLATES.md) §SPEC template):
+    - **Rules:** a list of `{verbs, kinds, when, state: {"<state_key>.<path>": "<template>"}, transition_seconds}`, rendered with the command context of `app/ops_profile.py` (`{name}`, `{flags.<flag>}`, `{=expr}`). The generator id is implied.
+    - **Callable:** `(scenario, cmd) -> (state, transition_seconds)` returning `({"<id>": {...}}, seconds)` or `({}, 0)`, for bindings that need the scenario's topology. Reference: `generators/kubernetes_otel/ops_bindings.py`.
+7. Tests: a fault with a `fault_scope` changes only in-scope entities; a `remediation_effects.state` row changes the reported value and it persists after the channel resolves; nothing is emitted under a `chaos.` key. With `ops_bindings`: apply a command through `app.ops.change_state` with a fake instance whose `ctx.scenario` enables the generator, and assert the returned state and transition (and `({}, 0.0)` for a command it should ignore); pattern in TEMPLATES.md §SPEC template.
 
 ---
 

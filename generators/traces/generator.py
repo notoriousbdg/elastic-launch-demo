@@ -519,7 +519,10 @@ def _generate_trace(client: OTLPClient, resources: dict, rng: random.Random,
     root_http_status = _get_cascade_http_status(entry_service, channel_registry, active_channels, rng) if root_status == STATUS_ERROR else 200
 
     # Helper: build extra scenario attrs for a span
-    def _extra_attrs(svc: str, is_err: bool) -> dict:
+    def _extra_attrs(svc: str, is_err: bool, owner: str | None = None) -> dict:
+        # *owner*: the service the span is reported by (a client span carries its
+        # callee's clues but is reported by the caller)
+        owner = owner or svc
         extra = {}
         if scenario:
             extra.update(scenario.get_trace_attributes(svc, rng))
@@ -532,6 +535,14 @@ def _generate_trace(client: OTLPClient, resources: dict, rng: random.Random,
                 # correlate with slow traces too, not just failed ones)
                 is_affected = bool(_svc_channels.get(svc))
                 for ch in active_channels:
+                    # Only the channel's affected services carry its correlated attribute
+                    # (the changed firmware, config or image runs there). Cascade and
+                    # unrelated services never report it, so the change doesn't look
+                    # like it reached them too.
+                    ch_entry = (channel_registry or {}).get(ch) or {}
+                    affected = set(ch_entry.get("affected_services") or [])
+                    if channel_registry and owner not in affected:
+                        continue
                     extra.update(scenario.get_correlation_attribute(ch, is_err or is_affected, rng))
         # Canonical channel join key — single attribute filterable across spans, logs, metrics
         if _svc_channels.get(svc) and channel_registry:
@@ -691,7 +702,8 @@ def _generate_trace(client: OTLPClient, resources: dict, rng: random.Random,
                 "net.peer.port": 8080,
             }
             # Tag with caller's channel if affected; falls back to callee if caller isn't
-            _client_attrs.update(_extra_attrs(entry_service if _svc_channels.get(entry_service) else callee_service, is_this_error))
+            _client_attrs.update(_extra_attrs(entry_service if _svc_channels.get(entry_service) else callee_service, is_this_error,
+                                               owner=entry_service))
             client_span = client.build_span(
                 name=f"{callee_method} {callee_endpoint}",
                 trace_id=trace_id,
@@ -835,7 +847,8 @@ def _generate_trace(client: OTLPClient, resources: dict, rng: random.Random,
                     "net.peer.name": f"{second_callee}-host",
                     "net.peer.port": 8080,
                 }
-                _second_client_attrs.update(_extra_attrs(callee_service if _svc_channels.get(callee_service) else second_callee, False))
+                _second_client_attrs.update(_extra_attrs(callee_service if _svc_channels.get(callee_service) else second_callee, False,
+                                                         owner=callee_service))
                 second_client_span = client.build_span(
                     name=f"{second_method} {second_endpoint}",
                     trace_id=trace_id,

@@ -38,17 +38,42 @@ steps:
       page: {choice: PAGES}
       tg: {choice: ALB_TARGET_GROUPS}
       render_ms:
-        if_active: {uniform: [900.0, 4200.0], round: 1}
-        else: {uniform: [35.0, 180.0], round: 1}
+        expr: "round(max(0.0, 107.0 + (2400.0 - 107.0) * min(1.0, elapsed.get(5, 0) / 60.0) + rand.gauss(0, 100.0) * min(1.0, elapsed.get(5, 0) / 60.0)), 1) if 5 in all_active
+          else (round(max(0.0, 2400.0 + (107.0 - 2400.0) * min(1.0, since_fix.get(5, 0) / 120.0) + rand.gauss(0, 100.0) * (1.0 - min(1.0, since_fix.get(5, 0) / 120.0)) + rand.gauss(0, 15.0) * min(1.0, since_fix.get(5, 0) / 120.0)), 1) if 5 in fixed_channels
+          else round(rand.uniform(35.0, 180.0), 1))"
       active_sessions: {randint: [850, 4200]}
       cart_adds_per_min: {randint: [120, 640]}
-      checkout_starts_per_min: {randint: [40, 260]}
+      checkout_starts_per_min:
+        expr: "round(max(0.0, 150.0 + (82.0 - 150.0) * min(1.0, elapsed.get(6, 0) / 30.0) + rand.gauss(0, 1.0) * min(1.0, elapsed.get(6, 0) / 30.0))) if 6 in all_active
+          else (round(max(0.0, 82.0 + (150.0 - 82.0) * min(1.0, since_fix.get(6, 0) / 60.0) + rand.gauss(0, 1.0) * (1.0 - min(1.0, since_fix.get(6, 0) / 60.0)) + rand.gauss(0, 20.0) * min(1.0, since_fix.get(6, 0) / 60.0))) if 6 in fixed_channels
+          else round(rand.uniform(40.0, 260.0)))"
+      waf_blocked_checkout_requests_per_min:
+        expr: "round(max(0.0, 1.0 + (70.0 - 1.0) * min(1.0, elapsed.get(6, 0) / 30.0) + rand.gauss(0, 8.0) * min(1.0, elapsed.get(6, 0) / 30.0))) if 6 in all_active
+          else (round(max(0.0, 70.0 + (1.0 - 70.0) * min(1.0, since_fix.get(6, 0) / 60.0) + rand.gauss(0, 8.0) * (1.0 - min(1.0, since_fix.get(6, 0) / 60.0)) + rand.gauss(0, 0.5) * min(1.0, since_fix.get(6, 0) / 60.0))) if 6 in fixed_channels
+          else rand.randint(0, 3))"
+      tls_handshake_failures_per_min:
+        expr: "round(max(0.0, 0.0 + (900.0 - 0.0) * min(1.0, elapsed.get(19, 0) / 45.0) + rand.gauss(0, 40.0) * min(1.0, elapsed.get(19, 0) / 45.0))) if 19 in all_active
+          else (round(max(0.0, 900.0 + (0.0 - 900.0) * min(1.0, since_fix.get(19, 0) / 180.0) + rand.gauss(0, 40.0) * (1.0 - min(1.0, since_fix.get(19, 0) / 180.0)) + rand.gauss(0, 0.0) * min(1.0, since_fix.get(19, 0) / 180.0))) if 19 in fixed_channels
+          else 0)"
+      c5_5xx_pct:
+        expr: "round(max(0.0, 0.2 + (10.0 - 0.2) * min(1.0, elapsed.get(5, 0) / 60.0) + rand.gauss(0, 0.5) * min(1.0, elapsed.get(5, 0) / 60.0)), 2) if 5 in all_active
+          else (round(max(0.0, 10.0 + (0.2 - 10.0) * min(1.0, since_fix.get(5, 0) / 120.0) + rand.gauss(0, 0.5) * (1.0 - min(1.0, since_fix.get(5, 0) / 120.0)) + rand.gauss(0, 0.05) * min(1.0, since_fix.get(5, 0) / 120.0)), 2) if 5 in fixed_channels
+          else round(rand.uniform(0.0, 0.4), 2))"
+      c19_5xx_pct: {uniform: [0.0, 0.4], round: 2}
       http_5xx_pct:
-        if_active: {uniform: [4.0, 18.0], round: 2}
-        else: {uniform: [0.0, 0.4], round: 2}
+        expr: "round(max(c5_5xx_pct, c19_5xx_pct), 2)"
       cpu_credit_balance:
-        if_active: {uniform: [0.0, 12.0], round: 1}
-        else: {uniform: [120.0, 576.0], round: 1}
+        expr: "round(max(0.0, 348.0 + (5.0 - 348.0) * min(1.0, elapsed.get(5, 0) / 90.0) + rand.gauss(0, 0.2) * min(1.0, elapsed.get(5, 0) / 90.0)), 1) if 5 in all_active
+          else (round(max(0.0, 3.0 + rand.gauss(0, 1.5)), 1) if 5 in fixed_channels
+          else round(rand.uniform(120.0, 576.0), 1))"
+      cpu_credits_mode:
+        expr: "'unlimited' if 5 in fixed_channels else 'standard'"
+      waf_rule_group_version:
+        expr: "'Version_2.0' if 6 in all_active else 'Version_1.2'"
+      cert_not_after:
+        expr: "'2026-11-16T23:59:59Z' if 19 in all_active else ('2027-12-17T23:59:59Z' if 19 in fixed_channels else '2027-03-02T23:59:59Z')"
+      web_status:
+        expr: "'ANOMALY' if 5 in all_active or 6 in all_active or 19 in all_active or (5 in fixed_channels and since_fix.get(5, 0) < 120) or (6 in fixed_channels and since_fix.get(6, 0) < 60) or (19 in fixed_channels and since_fix.get(19, 0) < 180) else 'NOMINAL'"
       cart_id: {format: "cart-{n}", n: {randint: [100000, 999999]}}
   - counter:
       state_key: _page_views
@@ -77,6 +102,14 @@ steps:
       name: storefront.ec2_cpu_credit_balance
       value: {var: cpu_credit_balance}
       unit: '{credits}'
+  - metric:
+      name: storefront.waf_blocked_checkout_requests_per_min
+      value: {var: waf_blocked_checkout_requests_per_min}
+      unit: '{requests}/min'
+  - metric:
+      name: storefront.tls_handshake_failures_per_min
+      value: {var: tls_handshake_failures_per_min}
+      unit: '{failures}/min'
   - log:
       level: INFO
       message: "[storefront] page={page} render={render_ms}ms cart={cart_id} alb_target_group={tg} sessions={active_sessions}"
@@ -86,15 +119,22 @@ steps:
         storefront.render_ms: {var: render_ms}
         storefront.cart_id: {var: cart_id}
         aws.elb.target_group: {var: tg}
+        aws.ec2.cpu_credits: {var: cpu_credits_mode}
+        aws.waf.rule_group_version: {var: waf_rule_group_version}
+        tls.server.cert_not_after: {var: cert_not_after}
   - every:
       seconds: 30
       state_key: _last_summary
       steps:
         - log:
             level: INFO
-            message: "[storefront] summary page_views={_page_views} checkout_starts_per_min={checkout_starts_per_min} cart_adds_per_min={cart_adds_per_min} http_5xx_pct={http_5xx_pct}% ec2_cpu_credit_balance={cpu_credit_balance}"
+            message: "[storefront] summary page_views={_page_views} checkout_starts_per_min={checkout_starts_per_min} cart_adds_per_min={cart_adds_per_min} http_5xx_pct={http_5xx_pct}% ec2_cpu_credit_balance={cpu_credit_balance} cpu_credits={cpu_credits_mode} waf_rule_group_version={waf_rule_group_version} waf_blocked_checkout={waf_blocked_checkout_requests_per_min}/min tls_handshake_failures={tls_handshake_failures_per_min}/min cert_not_after={cert_not_after} status={web_status}"
             attrs:
               operation: summary
               storefront.page_views: {var: _page_views}
               storefront.http_5xx_pct: {var: http_5xx_pct}
               aws.ec2.cpu_credit_balance: {var: cpu_credit_balance}
+              aws.ec2.cpu_credits: {var: cpu_credits_mode}
+              aws.waf.rule_group_version: {var: waf_rule_group_version}
+              tls.server.cert_not_after: {var: cert_not_after}
+              storefront.status: {var: web_status}

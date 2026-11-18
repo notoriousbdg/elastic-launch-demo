@@ -10,13 +10,18 @@ cascade_services:
 - mission-control
 - range-safety
 description: Inertial measurement unit loses time synchronization
-investigation_notes: 'Root cause: GPS 1PPS (one pulse-per-second) signal degradation or OCXO (oven-controlled crystal oscillator)
-  aging drift causing the IMU time base to decouple from mission time. Check PPS signal integrity at the IMU input connector
-  — signal amplitude <2.5V indicates cable or driver failure. Verify OCXO-A temperature stability (nominal 42C +/-0.5C). Single-axis
-  drift suggests gyro bias shift on that axis; multi-axis drift points to clock source. Remediation: initiate IMU realignment
-  sequence (GNC_IMU_ALIGN), switch PPS source to backup (PPS_SELECT GPS_1PPS_B), and verify drift converges below 3.0ms threshold.
-  If OCXO drift persists, switch to redundant IMU-B.'
+investigation_notes: |-
+  Root cause: the GPS_1PPS_A pulse at the IMU input connector fell from 3.3 V to about {pps_amplitude_v} V, below the 2.5 V detection threshold, shortly before the first sync loss. The IMU time base misses pulses and decouples from mission time, so all three axes drift together by {drift_ms} ms against a {threshold_ms} ms limit; a common drift on every axis points to the clock source, not a gyro bias shift on one axis. OCXO-A temperature stays at its nominal 42C +/-0.5C, which rules out oscillator aging.
+  Confirm:
+    - navigation logs the PPS monitor warning (GPS_1PPS_A amplitude 1.9 V) before the first GNC-IMU-SYNC-LOSS line
+    - navigation imu_timing lines: pps_source=GPS_1PPS_A, sync=LOST, status=ANOMALY; metrics.navigation.imu.sync_drift_ms between 5 and 25 ms (nominal under 1 ms)
+    - imu_reading lines on X, Y and Z all report sync=LOST at the same time (common clock)
+    - attributes.gnc.ocxo_temp_c stays at 41.7-42.3C
+  Remediation: switch the IMU PPS input to the backup source (opsctl patch timing/pps-select --source=gps-1pps-b), then run the IMU realignment sequence (opsctl run procedure/gnc-imu-align). The drift converges below the 3.0 ms threshold within about 75 seconds and imu_timing lines show pps_source=GPS_1PPS_B and sync=LOCKED. Flag the GPS_1PPS_A cable and driver for ground inspection; if the drift persists on PPS B, switch to the redundant IMU-B.
 remediation_action: reset_guidance
+remediation_command: |-
+  opsctl patch timing/pps-select --source=gps-1pps-b
+  opsctl run procedure/gnc-imu-align
 error_message: '[GNC] GNC-IMU-SYNC-LOSS: axis={axis} drift={drift_ms}ms threshold={threshold_ms}ms sync_state=LOST'
 stack_trace: |-
   == GN&C SYSTEM STATUS == IMU SYNCHRONIZATION ==
@@ -30,17 +35,17 @@ stack_trace: |-
   GNC-IMU-SYNC-LOSS: {axis}-axis clock drift {drift_ms}ms exceeds threshold
   ACTION: Initiate IMU realignment sequence, verify PPS signal integrity
 correlation_attr:
-  key: infra.ntp_source
-  value: gps-pps-backup
+  key: gnc.pps_source
+  value: GPS_1PPS_A
 fault_params:
   axis: {choice: [X, Y, Z]}
   drift_ms: {uniform: [5.0, 25.0], round: 1}
   threshold_ms: 3.0
-  pps_amplitude_v: {uniform: [1.4, 2.3], round: 2}
+  pps_amplitude_v: {uniform: [1.85, 1.95], round: 2}
 rca_clues:
   navigation:
     gnc.pps_source: GPS_1PPS_A
-    gnc.pps_amplitude_v: {uniform: [1.4, 2.3], round: 2}
+    gnc.pps_amplitude_v: {uniform: [1.85, 1.95], round: 2}
     gnc.ocxo_temp_c: {uniform: [41.7, 42.3], round: 1}
   sensor-validator:
     validation.imu_drift_axis: X,Y,Z
@@ -50,6 +55,56 @@ rca_clues:
     telemetry.imu_status: sync_loss
   range-safety:
     safety.nav_solution_status: degraded
+cascade_messages:
+  mission-control:
+    - severity: WARN
+      message: '[MCC] GNC IMU sync LOST on {axis}-axis (drift {drift_ms}ms > {threshold_ms}ms); attitude solution flagged DEGRADED'
+  range-safety:
+    - severity: WARN
+      message: '[RSO] vehicle inertial state stale: IMU time tag drift {drift_ms}ms; impact prediction confidence reduced'
+fault_scope:
+  workloads: [navigation, sensor-validator]
+infrastructure_events:
+  - service: navigation
+    severity: WARN
+    offset_seconds: -90
+    body: '[GNC] PPS monitor: GPS_1PPS_A amplitude 1.9V at IMU input J4 (was 3.3V, min 2.5V); pulses intermittently missed'
+    attributes:
+      gnc.pps_source: GPS_1PPS_A
+      gnc.pps_amplitude_v: 1.9
+      operation: pps_monitor
+remediation_effects:
+  log_events:
+    - service: mission-control
+      severity: INFO
+      offset_seconds: 2
+      body: '[MCC] CMD ACCEPTED opsctl patch timing/pps-select --source=gps-1pps-b from {actor}: PPS_SELECT GPS_1PPS_A -> GPS_1PPS_B'
+    - service: mission-control
+      severity: INFO
+      offset_seconds: 6
+      body: '[MCC] CMD ACCEPTED opsctl run procedure/gnc-imu-align from {actor}: GNC_IMU_ALIGN started on IMU-A'
+    - service: navigation
+      severity: INFO
+      offset_seconds: 50
+      body: '[GNC] GNC_IMU_ALIGN complete; PPS GPS_1PPS_B 3.3V; IMU sync_drift 0.9ms sync=LOCKED NOMINAL'
+  verification:
+    - signal: navigation.imu.sync_drift_ms
+      from: 'metrics-generic.otel-default'
+      field: 'metrics.navigation.imu.sync_drift_ms'
+      where: 'resource.attributes.service.name == "navigation"'
+      expect: 'below 3 ms (was 5-25 ms), converging over about 75 s'
+      within_seconds: 150
+    - signal: GNC-IMU-SYNC-LOSS errors
+      from: 'logs.otel.nova7'
+      where: 'body.text LIKE "*GNC-IMU-SYNC-LOSS*"'
+      expect: '0 new lines'
+      within_seconds: 150
+    - signal: IMU PPS source
+      from: 'logs.otel.nova7'
+      where: 'resource.attributes.service.name == "navigation"'
+      field: 'attributes.gnc.pps_source'
+      expect: 'GPS_1PPS_B on the latest imu_timing lines (was GPS_1PPS_A)'
+      within_seconds: 150
 business_impact:
   - kpi: business.maneuver_accuracy_pct
     factor: {uniform: [0.45, 0.72]}

@@ -8,49 +8,117 @@ affected_services:
 cascade_services:
 - mes-controller
 - oee-analytics
-description: Vision system camera or inference pipeline failure; defects flowing through unchecked
+description: A new defect-detection model expects RGB frames but the station camera pipeline delivers BGR; inference confidence collapses and parts pile up at manual review
 investigation_notes: |-
-  Root Cause: Vision pipeline failures fall into three buckets: (1) hardware (camera trigger lost, lighting drifting, lens fouled), (2) inference (model returns low confidence on every frame), (3) network (frames arrive late or out of order). The first sign is usually a confidence-score histogram skewing low for an entire shift. An average confidence below 0.80 with the camera trigger at full rate, under 20 dropped frames per 5 min and a passing calibration target puts the fault in inference (the model), not hardware or network.
-  Remediation: 1) Visual inspection of camera, lens, lighting at station {station_id}. 2) Run the calibration target: `vision-cli calibrate --station {station_id}`. 3) Check inference container health: `kubectl describe pods -n vision vision-inference`. 4) Reload the model: `vision-cli reload-model --station {station_id} --model {model_version}`. 5) If the issue persists, fall back to manual inspection and tag the lot for review per quality plan.
-remediation_action: reload_vision_model
-error_message: '[QC] VISION-INSPECT-FAIL: station={station_id} model={model_version} confidence_avg={confidence_avg} frames_dropped={frames_dropped}'
+  Root cause: station {station_id} was rolled to defect model {model_version} (from {model_baseline}) shortly before the first VISION-INSPECT-FAIL (by vision-ml, CHG-7371). v3.4.0 was exported from the new training pipeline with RGB channel order, while the {station_id} camera pipeline still delivers BGR frames, so every frame looks colour-swapped to the model: confidence on every class drops from 0.93-0.98 to {confidence_avg}. Parts scored below the 0.80 confidence threshold are diverted to the manual review lane rather than passed, so defects are not escaping, but the review lane cannot keep up and LINE-02 is slowed. Camera trigger rate, dropped frames, lighting and the calibration target are all normal, and inference latency is unchanged; only the model changed.
+  Confirm:
+    - quality-inspector vision_status lines for {station_id} show model={model_version} (attributes.vision.model_version); metric quality.vision_confidence_avg drops from 0.93-0.98 to 0.55-0.78
+    - the quality-inspector model rollout line (CHG-7371) comes before the first VISION-INSPECT-FAIL
+    - metric quality.manual_review_queue grows from 0-3 to tens of parts; quality.vision_frames_dropped stays at 0-5
+  Remediation: roll the station back to the previous model with opsctl rollback model/vis-02-defect --to-revision previous. The inference server swaps the model on the next frame batch; confidence returns to 0.93-0.98 at once and the manual review queue drains over about two minutes. Re-exporting v3.4.0 with the correct channel order is a follow-up for the ML team.
+remediation_action: rollback_vision_model
+remediation_command: |-
+  opsctl rollback model/vis-02-defect --to-revision previous
+error_message: '[QC] VISION-INSPECT-FAIL: station={station_id} model={model_version} confidence_avg={confidence_avg} threshold=0.80 diverted_to_review={diverted} frames_dropped={frames_dropped}'
 stack_trace: |-
   === VISION INSPECTION DIAGNOSTIC — {station_id} ===
-  Model: {model_version} | Window: 5 min
+  Model: {model_version} (previous {model_baseline}) | Window: 5 min
   ------------------------------------------------------------------------
   STAGE             | STATUS    | METRIC
   ------------------------------------------------------------------------
-  camera_trigger     | OK        | 220 fps
-  frame_capture      | OK        | {frames_dropped} dropped
-  preprocess         | OK        | mean 8ms
-  inference          | DEGRADED  | confidence_avg={confidence_avg}
-  postprocess        | OK        | mean 3ms
+  camera_trigger     | OK        | 12 fps (line rate)
+  frame_capture      | OK        | {frames_dropped} dropped, format BGR8
+  preprocess         | OK        | mean 8 ms, input 640x640
+  inference          | DEGRADED  | confidence_avg={confidence_avg} (threshold 0.80), latency 21 ms
+  postprocess        | OK        | {diverted} parts diverted to manual review
   ------------------------------------------------------------------------
-  VISION-INSPECT-FAIL: pipeline degraded — defects may be passing through
+  VISION-INSPECT-FAIL: confidence below threshold on most frames since model change
 correlation_attr:
-  key: deployment.vision_model_version
-  value: yolo-v8-mfg-v3.4-beta
+  key: vision.model_version
+  value: defect-yolov8s-v3.4.0
 fault_params:
-  station_id: {choice: [VIS-01, VIS-02, VIS-03, VIS-04]}
-  model_version: yolo-v8-mfg-v3.4-beta
+  station_id: VIS-02
+  model_version: defect-yolov8s-v3.4.0
+  model_baseline: defect-yolov8s-v3.3.2
   confidence_avg: {uniform: [0.55, 0.78], round: 3}
   frames_dropped: {randint: [0, 5]}
+  diverted: {randint: [40, 140]}
 rca_clues:
   quality-inspector:
-    vision.confidence_avg: {uniform: [0.55, 0.78], round: 3}
     vision.frames_dropped: {randint: [0, 5]}
-    vision.model_version: yolo-v8-mfg-v3.4-beta
     vision.calibration_status: PASS
+    vision.inference_latency_ms: {randint: [18, 24]}
   mes-controller:
-    mes.unverified_parts_count: {randint: [20, 300]}
+    mes.parts_in_manual_review: {randint: [20, 120]}
   oee-analytics:
-    oee.quality_pct: {uniform: [80.0, 92.0], round: 1}
+    oee.performance_pct: {uniform: [70.0, 82.0], round: 1}
+cascade_messages:
+  mes-controller:
+    - severity: WARN
+      message: '[MES] LINE-02 parts held at manual review lane after VIS-02; line speed reduced to avoid buffer overflow'
+  oee-analytics:
+    - severity: WARN
+      message: '[OEE] LINE-02 performance rate down (manual review bottleneck at VIS-02)'
+fault_scope:
+  cluster: mfg-gke-cluster
+  workloads: [quality-inspector]
+infrastructure_events:
+  - service: quality-inspector
+    severity: INFO
+    offset_seconds: -90
+    body: '[QC] model rollout station=VIS-02 defect-yolov8s-v3.3.2 -> defect-yolov8s-v3.4.0 (onnx, input 640x640, channel order RGB); rolled out by vision-ml (CHG-7371)'
+    attributes:
+      operation: config_change
+      user.name: vision-ml
+      change.request: CHG-7371
+      vision.model_version: defect-yolov8s-v3.4.0
+      change.summary: 'VIS-02 defect model: v3.3.2 -> v3.4.0'
+service_lag_seconds:
+  mes-controller: 30
+  oee-analytics: 45
+remediation_effects:
+  log_events:
+    - service: quality-inspector
+      severity: INFO
+      offset_seconds: 1
+      body: '[CHG] CHANGE APPLIED opsctl rollback model/vis-02-defect --to-revision previous by {actor}: VIS-02 defect-yolov8s-v3.4.0 -> defect-yolov8s-v3.3.2'
+      attributes:
+        operation: change_applied
+        change.target: model/vis-02-defect
+  steady_attributes:
+    quality-inspector:
+      vision.model_version: defect-yolov8s-v3.3.2
+  log_taper_seconds: 15
+  verification:
+    - signal: quality.vision_confidence_avg
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "quality-inspector"'
+      field: 'metrics.quality.vision_confidence_avg'
+      expect: 'back to 0.93-0.98 (was 0.55-0.78)'
+      within_seconds: 30
+    - signal: quality.manual_review_queue
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "quality-inspector"'
+      field: 'metrics.quality.manual_review_queue'
+      expect: 'back under 5 parts'
+      within_seconds: 180
+    - signal: VISION-INSPECT-FAIL lines
+      from: 'logs.otel.mfg'
+      where: 'body.text LIKE "*VISION-INSPECT-FAIL*"'
+      expect: '0 new lines'
+      within_seconds: 60
+    - signal: VIS-02 model version
+      from: 'logs.otel.mfg'
+      where: 'resource.attributes.service.name == "quality-inspector" AND body.text LIKE "*vision_status station=VIS-02*"'
+      field: 'attributes.vision.model_version'
+      expect: 'defect-yolov8s-v3.3.2 on every line logged since the fix'
+      within_seconds: 60
 business_impact:
   - kpi: business.oee_quality_pct
-    factor: {uniform: [0.25, 0.55]}
+    factor: {uniform: [0.60, 0.85]}
   - kpi: business.first_pass_yield_pct
-    factor: {uniform: [0.30, 0.60]}
-  - kpi: business.defect_ppm
-    factor: {uniform: [2.5, 5.5]}
-  - kpi: business.customer_complaints_per_day
-    factor: {uniform: [2.0, 4.5]}
+    factor: {uniform: [0.40, 0.70]}
+  - kpi: business.throughput_units_per_hour
+    factor: {uniform: [0.65, 0.85]}
+  - kpi: business.cycle_time_seconds
+    factor: {uniform: [1.5, 1.9]}

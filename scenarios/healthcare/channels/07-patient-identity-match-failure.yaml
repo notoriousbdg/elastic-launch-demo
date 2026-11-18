@@ -11,8 +11,12 @@ cascade_services:
 - pharmacy-system
 description: Master Patient Index fails to resolve patient identity, risking duplicate records
 investigation_notes: |-
-  Root Cause: EMPI probabilistic matching scores fall below threshold when patient demographics contain discrepancies (name spelling variants, transposed DOB digits, SSN mismatches). The matching algorithm (Jaro-Winkler + probabilistic weighting) requires tuning when registration workflows change. A top candidate whose last name, first name, DOB and SSN-last4 all agree but still scores below the 85% threshold rules out demographic discrepancies and points to mis-tuned matching weights.
-  Remediation: 1) Review the EMPI candidate match table for near-matches and manually adjudicate: `empi-admin review-queue --mrn {mrn}`. 2) Check if the matching algorithm weights need adjustment: `empi-admin config --show-weights`. 3) Run a patient index reconciliation report: `empi-admin reconcile --facility FACILITY-01 --threshold 40`. 4) For confirmed duplicates, merge records via HIM worklist: `empi-admin merge --source MRN-DUPLICATE --target MRN-PRIMARY --reason 'duplicate_registration'`. 5) Notify HIM (Health Information Management) department to review and finalize identity resolution. 6) Audit downstream systems (lab, pharmacy, billing) for orders linked to the duplicate MRN.
+  Root cause: EMPI match-weight config jaro-winkler-tuned-v3.2 was applied shortly before the first EMPI-MATCH-FAIL. It lowered the weights for date-of-birth and SSN-last-4 agreement, so a returning patient now scores {match_score}% against the {match_threshold}% auto-link threshold (MRN {mrn}, encounter {encounter_id}). The auto-link rate fell from 92-97% to 42-58%, and every miss becomes a manual review task. The top candidates have 0 field mismatches: they are the same people, and only the scoring changed.
+  Confirm:
+    - ehr-system logs [EHR] empi_match_summary config=jaro-winkler-tuned-v3.2 threshold=85 ... status=DEGRADED (attributes.deployment.empi_algorithm_config)
+    - metric ehr.empi_auto_link_pct drops from 92-97% to 42-58% after the config change
+    - the ehr-system line "EMPI config empi-match-weights updated to jaro-winkler-tuned-v3.2" comes before the first match failure; rca empi.top_candidate_field_mismatches is 0
+  Remediation: roll the weights back with opsctl rollback config/empi-match-weights --to-revision previous (jaro-winkler-v3.1). The auto-link rate is back above 90% within about 60 seconds. Lowering the threshold instead is wrong: it would auto-link genuinely different patients (overlays). The review tasks created during the incident stay on the HIM worklist and are worked by hand; they do not clear themselves.
 remediation_action: reconcile_patient_index
 error_message: '[EHR] EMPI-MATCH-FAIL: mrn={mrn} encounter={encounter_id} score={match_score}% threshold={match_threshold}%
   action=REVIEW_REQUIRED'
@@ -57,6 +61,73 @@ rca_clues:
   pharmacy-system:
     pharmacy.patient_merge_pending: true
     pharmacy.orders_held: {randint: [3, 12]}
+remediation_command: |-
+  opsctl rollback config/empi-match-weights --to-revision previous
+error_services: [ehr-system]
+service_lag_seconds:
+  patient-monitor: 20
+  lab-integration: 30
+  pharmacy-system: 30
+cascade_messages:
+  patient-monitor:
+    - severity: WARN
+      message: '[MONITOR] patient_band_mismatch mrn={mrn} encounter={encounter_id} reason=EMPI_UNRESOLVED; device association held'
+  lab-integration:
+    - severity: WARN
+      message: '[LIS] specimen_hold mrn={mrn} encounter={encounter_id} reason=POSSIBLE_DUPLICATE_MRN'
+  pharmacy-system:
+    - severity: WARN
+      message: '[PHARM] order_hold mrn={mrn} encounter={encounter_id} reason=PATIENT_MERGE_PENDING'
+fault_scope:
+  workloads: [ehr-system]
+infrastructure_events:
+  - service: ehr-system
+    severity: INFO
+    offset_seconds: -120
+    body: '[EHR] EMPI config empi-match-weights updated to jaro-winkler-tuned-v3.2 (was jaro-winkler-v3.1): dob_weight 0.30 -> 0.12, ssn4_weight 0.25 -> 0.10 by him-informatics (CHG0032078)'
+    attributes:
+      user.name: him-informatics
+      change.request: CHG0032078
+      operation: config_change
+      deployment.empi_algorithm_config: jaro-winkler-tuned-v3.2
+      change.summary: 'empi-match-weights: jaro-winkler-v3.1 -> jaro-winkler-tuned-v3.2'
+remediation_effects:
+  log_events:
+    - service: ehr-system
+      severity: INFO
+      offset_seconds: 1
+      body: '[CHG] CHANGE IMPLEMENTED opsctl rollback config/empi-match-weights --to-revision previous by {actor}: jaro-winkler-tuned-v3.2 -> jaro-winkler-v3.1'
+      attributes:
+        operation: change_implemented
+        change.target: config/empi-match-weights
+    - service: ehr-system
+      severity: INFO
+      offset_seconds: 5
+      body: '[EHR] EMPI config jaro-winkler-v3.1 loaded; matching resumed with standard weights'
+      attributes:
+        operation: config_change
+        deployment.empi_algorithm_config: jaro-winkler-v3.1
+  steady_attributes:
+    ehr-system:
+      deployment.empi_algorithm_config: jaro-winkler-v3.1
+  verification:
+    - signal: ehr.empi_auto_link_pct
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "ehr-system"'
+      field: 'metrics.ehr.empi_auto_link_pct'
+      expect: 'back above 90% auto-linked (was 42-58%) within about 60 seconds'
+      within_seconds: 120
+    - signal: EMPI-MATCH-FAIL lines
+      from: 'logs.otel.healthcare'
+      where: 'body.text LIKE "*EMPI-MATCH-FAIL*"'
+      expect: '0 new lines'
+      within_seconds: 120
+    - signal: deployment.empi_algorithm_config
+      from: 'logs.otel.healthcare'
+      where: 'resource.attributes.service.name == "ehr-system"'
+      field: 'attributes.deployment.empi_algorithm_config'
+      expect: 'jaro-winkler-v3.1 on every empi_match_summary line since the fix; jaro-winkler-tuned-v3.2 stops appearing'
+      within_seconds: 120
 business_impact:
   - kpi: business.ehr_response_time_ms
     factor: {uniform: [1.8, 3.5]}

@@ -23,89 +23,92 @@ topology:
 emit_fault_logs: true
 kpi_emitter: false
 state:
-  _request_count:
-    init: 0
   _last_summary:
     init: now
 steps:
+# NGINX edge (limit_req) in front of the Go gateway; mTLS client certificate meridian-mtls
+# (cert-manager, aws-privateca-issuer, 30-day validity) for calls to auth-service.
+#   ch 16 activation_api rate=50r/m: 429s from the first second; the rollback reloads in ~2s.
+#   ch 17 scheduled renewal at 10 days remaining issues the certificate from meridian-mtls-ca-2026,
+#         which auth-service does not trust; re-issued from ca-2025 ~22s after the fix and
+#         hot-reloaded.
 - sample:
-    endpoint:
-      choice:
-      - /api/v1/activate
-      - /api/v1/bundle/5g-home
-      - /api/v1/customer/status
-    latency_ms:
-      uniform:
-      - 15.0
-      - 180.0
-      round: 1
-- counter:
-    state_key: _request_count
-    by: 1
-- log:
-    level: INFO
-    message: '[GW] api_request endpoint={endpoint} method=POST latency_ms={latency_ms} status=200 protocol=HTTP/2'
-    attrs:
-      operation: api_request
-      api.endpoint:
-        var: endpoint
-      api.latency_ms:
-        var: latency_ms
-      api.status: 200
-- sample:
-    tokens:
-      randint:
-      - 600
-      - 1000
-- log:
-    level: INFO
-    message: '[GW] rate_limiter tokens_available={tokens} limit=1000/min burst=200 status=OK'
-    attrs:
-      operation: rate_limiter
-      rate_limiter.tokens:
-        var: tokens
-      rate_limiter.limit: 1000
-- every:
-    seconds: 10
-    state_key: _last_summary
-    steps:
-    - log:
-        level: INFO
-        message: '[GW] gateway_summary total_requests={_request_count} error_rate=0.01% tls_handshake_avg_ms=12 status=NORMAL'
-        attrs:
-          operation: gateway_summary
-          gateway.total_requests:
-            var: _request_count
-          gateway.error_rate: 0.01
-- sample:
-    request_latency_ms:
-      if_active:
-        uniform:
-        - 2000.0
-        - 12000.0
-        round: 1
-      else:
-        uniform:
-        - 10.0
-        - 200.0
-        round: 1
-- metric:
-    name: api_gateway.request_latency_ms
-    value:
-      var: request_latency_ms
-    unit: ms
-- metric:
-    name: api_gateway.active_connections
-    value:
-      randint:
-      - 500
-      - 2000
-    unit: connections
+    client_rps:
+      expr: "round(210.0 * (1.0 + rand.gauss(0, 0.03)), 1)"
+    r16:
+      expr: "min(1.0, elapsed.get(16, 0) / 5.0) if 16 in all_active else ((1.0 if since_fix.get(16, 0) < 3 else 0.0) if 16 in fixed_channels else 0.0)"
+    http_429:
+      expr: "round(max(0.0, 0.3 + 192.0 * r16 + rand.gauss(0, 0.1 + 5.0 * r16)), 1)"
+    upstream_rps:
+      expr: "round(max(1.0, client_rps * 0.975 - http_429), 1)"
+    limit_rate:
+      expr: "'50r/m' if 16 in all_active else '50r/s'"
+    rl_status:
+      expr: "'ANOMALY' if 16 in all_active or http_429 > 10.0 else 'NORMAL'"
+    p95_ms:
+      expr: "round((85.0 + 30.0 * len(active_channels)) * (1.0 + rand.gauss(0, 0.05)), 1)"
 - metric:
     name: api_gateway.requests_per_sec
-    value:
-      uniform:
-      - 400.0
-      - 1200.0
-      round: 1
+    value: {var: client_rps}
     unit: req/s
+- metric:
+    name: api_gateway.upstream_requests_per_sec
+    value: {var: upstream_rps}
+    unit: req/s
+- metric:
+    name: api_gateway.http_429_per_sec
+    value: {var: http_429}
+    unit: req/s
+- metric:
+    name: api_gateway.request_latency_ms
+    value: {var: p95_ms}
+    unit: ms
+- log:
+    level: INFO
+    message: 'edge stats server=api.meridian.eu rps={client_rps} upstream_rps={upstream_rps} 429_per_s={http_429} p95_ms={p95_ms} limit_req zone=activation_api rate={limit_rate} burst=20 status={rl_status}'
+    attrs:
+      operation: edge_stats
+      gateway.requests_per_sec: {var: client_rps}
+      gateway.upstream_requests_per_sec: {var: upstream_rps}
+      gateway.http_429_per_sec: {var: http_429}
+      gateway.limit_req_rate: {var: limit_rate}
+      gateway.status: {var: rl_status}
+- sample:
+    untrusted_cert:
+      expr: "bool(17 in all_active or (17 in fixed_channels and since_fix.get(17, 0) < 22))"
+    handshake_fail:
+      expr: "max(0, int(2200 * min(1.0, elapsed.get(17, 0) / 5.0) + rand.gauss(0, 80))) if 17 in all_active else (max(0, int(2200 + rand.gauss(0, 80))) if untrusted_cert else 0)"
+    cert_days:
+      expr: "30.0 if (17 in all_active or 17 in fixed_channels) else 10.0"
+    cert_serial:
+      expr: "'9c:3e:51:a0' if untrusted_cert else ('7b:21:e0:5d' if 17 in fixed_channels else '4f:9a:1c:e2')"
+    issuer_ca:
+      expr: "'meridian-mtls-ca-2026' if untrusted_cert else 'meridian-mtls-ca-2025'"
+    tls_status:
+      expr: "'ANOMALY' if untrusted_cert else 'NORMAL'"
+- metric:
+    name: api_gateway.mtls_handshake_failures_per_min
+    value: {var: handshake_fail}
+    unit: handshakes/min
+- metric:
+    name: api_gateway.client_cert_days_remaining
+    value: {var: cert_days}
+    unit: d
+- log:
+    level: INFO
+    message: 'tls client-cert name=meridian-mtls serial={cert_serial} issuer_ca={issuer_ca} days_remaining={cert_days} handshake_failures_last_min={handshake_fail} peer=auth-service.meridian.svc:8443 status={tls_status}'
+    attrs:
+      operation: tls_status
+      tls.client_cert: meridian-mtls
+      tls.client_cert_serial: {var: cert_serial}
+      tls.client_cert_issuer_ca: {var: issuer_ca}
+      tls.client_cert_days_remaining: {var: cert_days}
+      tls.handshake_failures_per_min: {var: handshake_fail}
+      tls.status: {var: tls_status}
+- sample:
+    active_conns:
+      expr: "int(3800 + rand.gauss(0, 120))"
+- metric:
+    name: api_gateway.active_connections
+    value: {var: active_conns}
+    unit: connections

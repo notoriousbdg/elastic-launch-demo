@@ -9,58 +9,134 @@ affected_services:
 cascade_services:
 - mobile-gateway
 - auth-gateway
-description: Fraud detection model generating excessive false positives blocking legitimate member transactions
+description: The card fraud model promoted to champion declines legitimate member card transactions, mostly members relocating on PCS orders.
 investigation_notes: |-
-  1. Check the drift trigger the model reports. PCS_SEASON (Permanent Change of Station moves) causes large geographic velocity changes that the fraud model can read as account takeover. This is a known seasonal pattern; confirm it with the feature drift in step 2.
-  2. Feature drift analysis: geo_velocity_feature at 0.92 drift and ip_diversity at 0.87 drift confirm the model's geographic features are firing on legitimate PCS relocations.
-  3. With 4,200 active PCS orders, the model needs a PCS whitelist — members with active PCS orders should have relaxed geo-velocity thresholds. Query: SELECT member_id FROM pcs_orders WHERE status='ACTIVE'.
-  4. Revenue impact at $892K/hr blocked is severe. Precision under 15% (8 true frauds among all blocks) means more than 85% of blocks are false positives. Immediately raise the fraud score threshold from current to 75/100 for PCS-flagged members.
-  5. Initiate emergency model retrain with PCS-labeled training data. Include features: has_active_pcs, days_since_pcs_order, destination_matches_new_duty_station.
-  6. Short-term fix: exempt members with active PCS orders from the geo-velocity and IP-diversity rules only (other fraud rules stay on). INSERT INTO fraud_rule_exemption (member_id, rule) SELECT member_id, 'geo_velocity' FROM pcs_orders WHERE status='ACTIVE' AND effective_date > CURRENT_DATE - 90.
-remediation_action: recalibrate_fraud_model
-error_message: '[FRAUD] FRAUD-FP-SURGE: blocked={fraud_blocked} window={fraud_window_s}s fp_rate={fraud_fp_rate}% model={fraud_model}
-  pattern={fraud_pattern}'
+  1. Search logs.otel.banking for body.text containing FRAUD-FP-SURGE on fraud-sentinel: {fraud_blocked} declines in a {fraud_window_s}s window with an estimated false positive rate of {fraud_fp_rate}% for model={fraud_model}, pattern={fraud_pattern}. Compare metrics.fraud_sentinel.decline_rate_pct with its own history: it normally sits at 0.2-0.6% of scored card transactions and is now above 5%.
+  2. Find what changed on fraud-sentinel just before the first FRAUD-FP-SURGE line: the model registry promoted FraudNet-v5.3 to the champion alias of fraudnet-card-auth (replacing FraudNet-v5.2). The model_health status line carries attributes.fraud.model_version; it reads FraudNet-v5.3 on every line since the promotion.
+  3. Confirm the new model is the cause and not a real fraud wave: metrics.fraud_sentinel.block_precision_pct (confirmed fraud among blocks, normally 32-45%) has dropped below 10%, and the declined members are concentrated in PCS relocations (fraud.trigger_pattern=PCS_SEASON, geo_velocity feature attribution above 0.85). Confirmed fraud volume is flat, so this is false positives, not more fraud.
+  4. Follow the cascade: payment-engine card authorization returns ISO 8583 response code 59 (suspected fraud) for those transactions, metrics.payment_engine.card_auth_approval_pct drops from 94-96.5% to about 88%, while card_auth_response_ms stays normal, which separates this from a card network or issuer host problem. mobile-gateway sees the retries and declined-card complaints.
+  5. Do not raise the score threshold or add PCS exemptions in the rules engine: both widen the hole for real account takeover and leave the regressed model in place. The fix is to put the previous champion back: opsctl rollback model/fraudnet-card-auth -n fraud --to-revision previous. Scoring switches on the next request; the decline rate drains back under 1% within about a minute as the scoring window rolls over.
+  6. Recovery: model_version reads FraudNet-v5.2 on fraud-sentinel, decline_rate_pct back in 0.2-0.6%, card_auth_approval_pct back above 94%, and no new FRAUD-FP-SURGE lines. Retrain FraudNet-v5.3 with PCS-labelled data (has_active_pcs_order, days_since_pcs_order) before promoting it again.
+remediation_action: rollback_fraud_model
+remediation_command: |-
+  opsctl rollback model/fraudnet-card-auth -n fraud --to-revision previous
+error_message: '[FRAUD] FRAUD-FP-SURGE: blocked={fraud_blocked} window={fraud_window_s}s fp_rate={fraud_fp_rate}% model={fraud_model} pattern={fraud_pattern}'
 stack_trace: |-
   === FRAUD MODEL PERFORMANCE ===
-  model={fraud_model}  pattern={fraud_pattern}  window={fraud_window_s}s
-  --- CLASSIFICATION MATRIX ---
+  model={fraud_model}  alias=champion  pattern={fraud_pattern}  window={fraud_window_s}s
+  --- CLASSIFICATION (sampled, labelled by case review) ---
                       PREDICTED_FRAUD   PREDICTED_LEGIT
     ACTUAL_FRAUD           8               1
     ACTUAL_LEGIT          {fraud_blocked}              (approved, not sampled)
   --- METRICS ---
-    true_positive_rate    88.9%
-    false_positive_rate   {fraud_fp_rate}%  <<< SURGE THRESHOLD
+    false_positive_rate   {fraud_fp_rate}%  <<< SURGE THRESHOLD 5%
     precision             8/(8+{fraud_blocked})  (TP / all blocked)
     blocked_txns          {fraud_blocked}
-    member_impact         $892,000/hr revenue blocked
-  --- DRIFT ANALYSIS ---
-    trigger=PCS_SEASON  (military relocation spike)
-    geo_velocity_feature=0.92_drift  ip_diversity=0.87_drift
-    pcs_orders_active=4,200  geolocation_changes=HIGH
-  ACTION: whitelist_pcs=true  retrain_model=true  alert=FRAUD-FP-SURGE
+  --- TOP DECLINE FEATURES ---
+    geo_velocity  attribution={geo_attribution}
+    ip_diversity  attribution={ip_attribution}
+    pcs_orders_active=4,200  confirmed_fraud_rate=flat
+  ACTION: alert=FRAUD-FP-SURGE
 correlation_attr:
-  key: runtime.fraud_model_weights
-  value: FraudNet-v5.3-canary-weights
+  key: fraud.model_version
+  value: FraudNet-v5.3
 fault_params:
-  fraud_blocked: {randint: [50, 500]}
-  fraud_window_s: {randint: [60, 600]}
-  fraud_fp_rate: {uniform: [15.0, 65.0], round: 1}
-  fraud_model: {choice: [FraudNet-v5.2, DeepFraud-v3.1, RiskScore-v4.0]}
+  fraud_blocked: {randint: [180, 500]}
+  fraud_window_s: {randint: [60, 300]}
+  fraud_fp_rate: {uniform: [5.8, 8.4], round: 1}
+  fraud_model: FraudNet-v5.3
   fraud_pattern: PCS_GEO_VELOCITY
+  geo_attribution: {uniform: [0.86, 0.95], round: 2}
+  ip_attribution: {uniform: [0.6, 0.75], round: 2}
 rca_clues:
   fraud-sentinel:
-    fraud.false_positive_rate_pct: {uniform: [15.0, 65.0], round: 1}
-    fraud.geo_velocity_feature_drift: {uniform: [0.85, 0.95], round: 2}
+    fraud.model_version: FraudNet-v5.3
+    fraud.geo_velocity_attribution: {uniform: [0.86, 0.95], round: 2}
     fraud.trigger_pattern: PCS_SEASON
   payment-engine:
-    payment.blocked_txn_revenue_per_hr: {randint: [500000, 1200000]}
-    payment.auto_decline_count: {randint: [200, 800]}
+    payment.iso8583_response_code: '59'
+    payment.card_auth_decline_source: fraud_screen
   mobile-gateway:
-    gateway.member_block_complaints: {randint: [100, 400]}
+    gateway.declined_card_complaints: {randint: [100, 400]}
     gateway.txn_retry_surge: true
   auth-gateway:
-    auth.pcs_whitelist_status: NOT_APPLIED
-    auth.geo_velocity_alerts: {randint: [500, 2000]}
+    auth.step_up_challenges_per_min: {randint: [500, 2000]}
+    auth.step_up_reason: fraud_score
+error_services:
+- fraud-sentinel
+service_lag_seconds:
+  payment-engine: 15
+  mobile-gateway: 45
+  auth-gateway: 45
+cascade_messages:
+  payment-engine:
+  - severity: WARN
+    message: '[PAY] card_auth declined rc=59 reason=SUSPECTED_FRAUD source=fraud-sentinel model={fraud_model} response_ms=142 status=DECLINED'
+  mobile-gateway:
+  - severity: WARN
+    message: '[MOBILE] card_txn_retry member_retries=3 last_rc=59 endpoint=/api/v1/mobile/transfer status=DECLINED'
+  auth-gateway:
+  - severity: WARN
+    message: '[AUTH] step_up_challenge reason=fraud_score model={fraud_model} method=mfa_sms status=CHALLENGED'
+fault_scope:
+  cluster: banking-gke-cluster
+  workloads: [fraud-sentinel, payment-engine]
+infrastructure_events:
+- service: fraud-sentinel
+  severity: INFO
+  offset_seconds: -120
+  body: '[FRAUD] model_registry alias=champion model=fraudnet-card-auth version=FraudNet-v5.3 previous=FraudNet-v5.2 promoted_by=mlops-release-pipeline approval=CHG0048213 status=PROMOTED'
+  attributes:
+    operation: model_promotion
+    fraud.model_version: FraudNet-v5.3
+    fraud.model_previous_version: FraudNet-v5.2
+    user.name: mlops-release-pipeline
+    change.request: CHG0048213
+remediation_effects:
+  transition_seconds: 60
+  log_events:
+  - service: fraud-sentinel
+    severity: INFO
+    offset_seconds: 1
+    body: '[change-audit] change applied action=rollback target=model/fraudnet-card-auth namespace=fraud cmd="opsctl rollback model/fraudnet-card-auth -n fraud --to-revision previous" actor={actor} result="champion alias FraudNet-v5.3 -> FraudNet-v5.2"'
+    attributes:
+      operation: change_applied
+      change.target: model/fraudnet-card-auth
+      fraud.model_version: FraudNet-v5.2
+  - service: fraud-sentinel
+    severity: INFO
+    offset_seconds: 5
+    body: '[FRAUD] model_registry alias=champion model=fraudnet-card-auth version=FraudNet-v5.2 loaded replicas=6/6 status=SERVING'
+    attributes:
+      operation: model_load
+      fraud.model_version: FraudNet-v5.2
+  steady_attributes:
+    fraud-sentinel:
+      fraud.model_version: FraudNet-v5.2
+  verification:
+  - signal: fraud_sentinel.decline_rate_pct
+    from: metrics-generic.otel-default
+    where: resource.attributes.service.name == "fraud-sentinel"
+    field: metrics.fraud_sentinel.decline_rate_pct
+    expect: back in 0.2-0.6% (was 5.8-8.4%)
+    within_seconds: 120
+  - signal: payment_engine.card_auth_approval_pct
+    from: metrics-generic.otel-default
+    where: resource.attributes.service.name == "payment-engine"
+    field: metrics.payment_engine.card_auth_approval_pct
+    expect: back above 94% (was about 88%)
+    within_seconds: 120
+  - signal: champion fraud model version
+    from: logs.otel.banking
+    where: resource.attributes.service.name == "fraud-sentinel" AND attributes.operation == "model_health"
+    field: attributes.fraud.model_version
+    expect: FraudNet-v5.2 on every line logged since the fix; FraudNet-v5.3 stops appearing
+    within_seconds: 120
+  - signal: FRAUD-FP-SURGE lines
+    from: logs.otel.banking
+    where: body.text LIKE "*FRAUD-FP-SURGE*"
+    expect: 0 new lines
+    within_seconds: 120
 business_impact:
   - kpi: business.fee_revenue_usd_per_min
     value: {uniform: [4464.0, 5136.0], round: 1}

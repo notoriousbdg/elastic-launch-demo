@@ -9,14 +9,17 @@ affected_services:
 cascade_services:
 - mission-control
 description: Star tracker optical alignment exceeds tolerance
-investigation_notes: 'Root cause: boresight error from optical contamination (outgassing deposits on CCD window), thermal
-  distortion of the star tracker mounting bracket, or stale star catalog. Only 8/22 catalog matches (minimum 12 required)
-  suggests the field of view is shifted or obscured. Check CCD temperature (-28.4C nominal, should be <-25C for low dark current).
-  Verify no thruster plume impingement on the optics baffle. Review attitude quaternion for sudden discontinuities indicating
-  a bracket shift. Remediation: run optics bakeout heater cycle (ST_BAKEOUT 60s), reload backup star catalog (ST_CATALOG LOAD
-  B), and attempt recalibration (ST_RECAL). If boresight error persists, switch to Star Tracker B and flag unit A for ground
-  inspection.'
+investigation_notes: |-
+  Root cause: Star Tracker A was loaded with software image star-tracker-v3.1.0-beta (was star-tracker-v3.0.4) shortly before the first alignment fault. The beta image applies a new boresight calibration table in its centroiding step, so every star position is shifted: the boresight error reads {error_arcsec} arcsec against a {limit_arcsec} arcsec limit and only 5-11 of 22 catalog stars match (minimum 12). The optics are not the cause: CCD temperature stays near -28C (under -25C, low dark current), integration time is nominal, there is no thruster plume impingement and the attitude quaternion shows no discontinuity from a bracket shift.
+  Confirm:
+    - navigation logs the ST-A software load of star-tracker-v3.1.0-beta before the first GNC-STAR-TRACKER-ALIGN line
+    - navigation star_tracker lines: image=star-tracker-v3.1.0-beta, catalog_matches under 12, status=ANOMALY; attributes.deployment.image_tag
+    - metrics.navigation.star_tracker.alignment_arcsec at 10-45 arcsec (nominal under 3)
+    - GPS and IMU readings stay NOMINAL
+  Remediation: roll Star Tracker A back to the previous image (opsctl rollback image/star-tracker-a --to-revision previous). The tracker restarts on star-tracker-v3.0.4, reacquires the catalog and the boresight error converges back under 5 arcsec within about a minute. Hold the beta image until its calibration table is checked; switch to Star Tracker B only if the error persists on v3.0.4.
 remediation_action: recalibrate_navigation
+remediation_command: |-
+  opsctl rollback image/star-tracker-a --to-revision previous
 error_message: '[GNC] GNC-STAR-TRACKER-ALIGN: boresight_error={error_arcsec}arcsec limit={limit_arcsec}arcsec catalog_match=DEGRADED'
 stack_trace: |-
   == GN&C SYSTEM STATUS == STAR TRACKER ASSEMBLY ==
@@ -28,9 +31,9 @@ stack_trace: |-
   CCD_TEMP             -28.4C       -25.0C     NOMINAL
   INTEGRATION_TIME     250ms        500ms      NOMINAL
   ---------------------------------------------------------------
-  ATTITUDE_SOURCE: STAR_TRACKER_A | QUATERNION: [0.707, 0.0, 0.707, 0.0]
+  IMAGE: star-tracker-v3.1.0-beta | ATTITUDE_SOURCE: STAR_TRACKER_A | QUATERNION: [0.707, 0.0, 0.707, 0.0]
   GNC-STAR-TRACKER-ALIGN: Boresight error {error_arcsec} arcsec exceeds {limit_arcsec} limit
-  ACTION: Verify optics cleanliness, attempt recalibration with backup catalog
+  ACTION: Check the tracker software image and calibration table
 correlation_attr:
   key: deployment.image_tag
   value: star-tracker-v3.1.0-beta
@@ -43,9 +46,54 @@ rca_clues:
     gnc.ccd_temp_c: {uniform: [-30, -25], round: 1}
   sensor-validator:
     validation.boresight_error_arcsec: {uniform: [8.0, 40.0], round: 1}
-    validation.optics_contamination: true
+    validation.optics_contamination: false
+    validation.st_image: star-tracker-v3.1.0-beta
   mission-control:
     upstream.degraded_subsystem: guidance
+cascade_messages:
+  mission-control:
+    - severity: WARN
+      message: '[MCC] GNC attitude source STAR_TRACKER_A boresight error {error_arcsec}arcsec > {limit_arcsec}arcsec; attitude knowledge DEGRADED'
+fault_scope:
+  workloads: [navigation, sensor-validator]
+infrastructure_events:
+  - service: navigation
+    severity: INFO
+    offset_seconds: -120
+    body: '[GNC] ST-A software load complete: image star-tracker-v3.1.0-beta (was star-tracker-v3.0.4), checksum verified, tracker restarted; loaded by gnc-flight-sw-ci (CR-2310, beta validation)'
+    attributes:
+      user.name: gnc-flight-sw-ci
+      change.request: CR-2310
+      deployment.image_tag: star-tracker-v3.1.0-beta
+      operation: software_load
+remediation_effects:
+  log_events:
+    - service: mission-control
+      severity: INFO
+      offset_seconds: 2
+      body: '[MCC] CMD ACCEPTED opsctl rollback image/star-tracker-a --to-revision previous from {actor}: ST-A image star-tracker-v3.1.0-beta -> star-tracker-v3.0.4'
+    - service: navigation
+      severity: INFO
+      offset_seconds: 40
+      body: '[GNC] ST-A image star-tracker-v3.0.4 loaded; catalog_matches 21/22 boresight 2.1arcsec NOMINAL'
+  verification:
+    - signal: navigation.star_tracker.alignment_arcsec
+      from: 'metrics-generic.otel-default'
+      field: 'metrics.navigation.star_tracker.alignment_arcsec'
+      where: 'resource.attributes.service.name == "navigation"'
+      expect: 'below 5 arcsec (was 10-45), converging over about a minute'
+      within_seconds: 120
+    - signal: GNC-STAR-TRACKER-ALIGN errors
+      from: 'logs.otel.nova7'
+      where: 'body.text LIKE "*GNC-STAR-TRACKER-ALIGN*"'
+      expect: '0 new lines'
+      within_seconds: 120
+    - signal: Star Tracker A image
+      from: 'logs.otel.nova7'
+      where: 'resource.attributes.service.name == "navigation"'
+      field: 'attributes.deployment.image_tag'
+      expect: 'star-tracker-v3.0.4 on the latest star_tracker lines (was star-tracker-v3.1.0-beta)'
+      within_seconds: 120
 business_impact:
   - kpi: business.maneuver_accuracy_pct
     factor: {uniform: [0.50, 0.75]}

@@ -1,68 +1,131 @@
 name: Billing Mediation Failure
 subsystem: billing
 vehicle_section: mediation
-error_type: BSS-MEDIATION-FAIL
+error_type: No space left on device
 sensor_type: billing_mediation
 affected_services:
 - bss-billing
 cascade_services:
-- activation-service
-- provisioning-service
-description: Billing mediation node failure leaving its CDR Kafka partitions unconsumed, causing CDR deduplication errors and incorrect charge application
-investigation_notes: |
-  1. Check mediation node health — the failed node's partitions (P2,P3) stay unconsumed (consumer lag grows) until a surviving node takes them over. That node replays from the last checkpoint without the failed node's dedup state, so CDRs rated before the crash can be charged again.
-  2. CDR deduplication uses a 24-hour sliding window with SHA-256 hash of (MSISDN, timestamp, duration, APN). Node failure loses the in-memory dedup window for that node's partition.
-  3. Duplicate charge detection: SELECT msisdn, COUNT(*) FROM cdr_rated WHERE ts > NOW() - INTERVAL 1 HOUR GROUP BY msisdn, event_hash HAVING COUNT(*) > 1. Flag these for reversal.
-  4. Provisioning-service and activation-service are impacted because new activations require a billing validation step — if mediation is unhealthy, the validation returns errors.
-  5. Initiate CDR replay for the failed node's partition after recovery — replay from the last checkpoint ensures no CDRs are lost. Monitor for duplicates during replay.
-remediation_action: failover_mediation_node
-error_message: '[BSS] BSS-MEDIATION-FAIL: node={mediation_node} partition={mediation_partition} duplicate_cdrs={duplicate_cdr_count} checkpoint_age_min={checkpoint_age_min}'
-stack_trace: |
-  === BILLING MEDIATION STATUS ===
-  cluster=meridian-mediation  mode=active-active
-  --- NODE STATUS ---
-    NODE              STATUS      PARTITION    LAST_CHECKPOINT
-    mediation-01      OK          P0,P1        2min ago
-    mediation-02      FAILED      P2,P3        {checkpoint_age_min}min ago  <<< DOWN
-    mediation-03      OK          P4,P5        1min ago
-  --- IMPACT ---
-    dedup_window_lost=true  partition={mediation_partition}
-    duplicate_cdrs_detected={duplicate_cdr_count}
-    cdrs_at_risk={cdrs_at_risk}  replay_required=true
-    billing_validation=DEGRADED  new_activations=DELAYED
-  ACTION: failover_partition=true  replay_from_checkpoint=true  alert=BSS-MEDIATION-FAIL
-infrastructure_events:
-- body: '[AzureMonitor] BillingMediationFailure: pipeline=cdr-mediation stage=rating error_rate=40% revenue_impact=EUR_45000/hr region=westeurope'
-  severity: ERROR
-  event_name: azure.monitor.BillingMediationFailure
-  service: bss-billing
-  attributes:
-    cloud.provider: azure
-    cloud.service: monitor
-    azure.health.status: Critical
-    infrastructure.source: AzureMonitor
+- notification-service
+description: a longer deduplication window made mediation reopen its dedup store with a full compaction, which filled mediation-02's state volume; the pod crash-loops and its two Kafka partitions are not consumed
+investigation_notes: |-
+  Root cause: a mediation configuration change (CR-88102) raised dedup.window from 24h to 168h. On reload each mediation pod reopened its RocksDB deduplication store with the new TTL and ran a full manual compaction, which rewrites every SST file and needs free space about the size of the store until the old files are deleted. mediation-02 holds the busiest pair of partitions and its 100Gi volume (data-mediation-02) was already 71% full, so it ran out of space about 2 minutes into the compaction. RocksDB fails writes with "No space left on device", the pod crash-loops (restarts {restarts} so far), and because mediation uses static partition assignment, partitions 2 and 3 of cdr.mediation are not consumed by anyone: their lag is {mediation_lag} and growing. mediation-00 and mediation-01 hold less data, finished the compaction with room to spare and process their partitions normally.
+  Confirm:
+    - the bss-billing line "config mediation-dedup revision ... dedup.window 24h -> 168h" comes before the first "No space left on device", and mediation status lines carry attributes.mediation.dedup_window 168h from the reload on
+    - metric bss_billing.mediation_volume_used_pct (mediation-02) climbs from about 71% to 100% in the two minutes after the reload, then bss_billing.mediation_pods_ready drops to 2 of 3
+    - metric bss_billing.mediation_unconsumed_lag (partitions 2 and 3) grows while the other partitions stay near 0, which rules out a broker or topic problem
+  Remediation: revert the window and give mediation-02 room to start: opsctl rollback config/mediation-dedup --to-revision previous, then opsctl expand pvc/data-mediation-02 --size 200Gi. The volume grows online in about 20 seconds; mediation-02 starts on the next restart (about 40 seconds), consumes partitions 2 and 3 again, and RocksDB TTL compaction under the 24h window brings volume usage back to about 35% of 200Gi. Expanding alone would let the 168h compaction run again on the next start and fill the volume over the following days.
+remediation_action: restore_mediation_dedup_window
+error_message: 'mediation-02 dedup-store: RocksDBException: IO error: No space left on device: While appending to file: /data/dedup/{sst_file}.log: No space left on device (volume=data-mediation-02 used=100%)'
+stack_trace: |-
+  org.rocksdb.RocksDBException: IO error: No space left on device: While appending to file: /data/dedup/{sst_file}.log: No space left on device
+  	at org.rocksdb.RocksDB.put(Native Method)
+  	at org.rocksdb.RocksDB.put(RocksDB.java:943)
+  	at eu.meridian.mediation.dedup.RocksDedupStore.markSeen(RocksDedupStore.java:77)
+  	at eu.meridian.mediation.pipeline.CdrNormalizer.process(CdrNormalizer.java:132)
+  	at eu.meridian.mediation.pipeline.PartitionWorker.run(PartitionWorker.java:58)
 correlation_attr:
-  key: billing.mediation_node_config
-  value: mediation-v3.0.0-rc2
+  key: mediation.dedup_window
+  value: 168h
 fault_params:
-  mediation_node: mediation-02
-  mediation_partition: 'P2,P3'
-  duplicate_cdr_count: {randint: [100, 1000]}
-  checkpoint_age_min: {randint: [5, 60]}
-  cdrs_at_risk: {randint: [5000, 50000]}
+  sst_file: {randint: [184200, 184999]}
+  restarts: {randint: [1, 7]}
+  mediation_lag: {randint: [1000, 12000]}
+  usage_delay_min: {randint: [2, 10]}
 rca_clues:
   bss-billing:
-    billing.mediation_node_status: FAILED
-    billing.duplicate_cdr_count: {randint: [100, 1000]}
-  activation-service:
-    activation.billing_validation_error: true
-    activation.new_activations_delayed: true
-  provisioning-service:
-    provisioning.billing_check_failed: true
-    provisioning.queue_depth: {randint: [100, 500]}
+    mediation.dedup_window: 168h
+    mediation.failed_pod: mediation-02
+    mediation.volume_used_pct: 100
+    mediation.unconsumed_partitions: '2,3'
+    kafka.unconsumed_lag: {randint: [1000, 12000]}
+  notification-service:
+    notification.usage_alert_delay_min: {randint: [15, 45]}
+remediation_command: |-
+  opsctl rollback config/mediation-dedup --to-revision previous
+  opsctl expand pvc/data-mediation-02 --size 200Gi
+fault_scope:
+  cluster: meridian-aks-cluster
+  workloads: [bss-billing]
+cascade_messages:
+  notification-service:
+    - severity: WARN
+      message: 'usage alerts incomplete: no rated usage from mediation partitions 2,3 for {usage_delay_min} min (about 1 in 12 subscribers)'
+infrastructure_events:
+  - service: bss-billing
+    severity: INFO
+    offset_seconds: -20
+    event_name: config.reload
+    body: 'config mediation-dedup reloaded revision 23 (was 22) by billing-ops/r.novak CR-88102: dedup.window 24h -> 168h (late-arriving roaming CDRs)'
+    attributes:
+      operation: config_reload
+      user.name: billing-ops/r.novak
+      change.request: CR-88102
+      mediation.dedup_window: 168h
+      change.summary: 'mediation dedup.window 24h -> 168h'
+  - service: bss-billing
+    severity: WARN
+    offset_seconds: 240
+    event_name: k8s.event
+    body: 'kubelet: Back-off restarting failed container mediation in pod mediation-02_meridian (restartCount=3, reason=Error, exitCode=1)'
+    attributes:
+      operation: pod_restart
+      mediation.failed_pod: mediation-02
+remediation_effects:
+  log_taper_seconds: 40
+  log_events:
+    - service: bss-billing
+      severity: INFO
+      offset_seconds: 1
+      body: '[NOC-CHG] executed opsctl rollback config/mediation-dedup --to-revision previous actor={actor}: revision 23 -> 22 (dedup.window 24h)'
+      attributes:
+        operation: change_executed
+        change.target: config/mediation-dedup
+        mediation.dedup_window: 24h
+    - service: bss-billing
+      severity: INFO
+      offset_seconds: 3
+      body: '[NOC-CHG] executed opsctl expand pvc/data-mediation-02 --size 200Gi actor={actor}: capacity 100Gi -> 200Gi'
+      attributes:
+        operation: change_executed
+        change.target: pvc/data-mediation-02
+    - service: bss-billing
+      severity: INFO
+      offset_seconds: 40
+      body: 'mediation-02 started: assigned partitions [2, 3] of cdr.mediation, dedup store opened (window 24h, volume 51% of 200Gi)'
+      attributes:
+        operation: partition_assign
+        mediation.dedup_window: 24h
+  steady_attributes:
+    bss-billing:
+      mediation.dedup_window: 24h
+  verification:
+    - signal: bss_billing.mediation_pods_ready
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "bss-billing"'
+      field: 'metrics.bss_billing.mediation_pods_ready'
+      expect: '3 (was 2)'
+      within_seconds: 90
+    - signal: bss_billing.mediation_unconsumed_lag
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "bss-billing"'
+      field: 'metrics.bss_billing.mediation_unconsumed_lag'
+      expect: 'falling and back under 500 (was 1,000-12,000)'
+      within_seconds: 240
+    - signal: No space left on device lines
+      from: 'logs.otel.meridian'
+      where: 'body.text LIKE "*No space left on device*"'
+      expect: '0 new lines'
+      within_seconds: 90
+    - signal: dedup window
+      from: 'logs.otel.meridian'
+      where: 'resource.attributes.service.name == "bss-billing"'
+      field: 'attributes.mediation.dedup_window'
+      expect: '24h on every mediation status line since the rollback'
+      within_seconds: 90
 business_impact:
   - kpi: business.revenue_usd_per_min
-    factor: {uniform: [0.20, 0.45]}
+    factor: {uniform: [0.2, 0.45]}
   - kpi: business.activations_per_min
     factor: {uniform: [0.25, 0.55]}
   - kpi: business.trouble_to_billing_ratio_pct
@@ -72,3 +135,7 @@ business_impact:
 generator_impact:
   kafka_otel:
     high_consumer_lag_per_partition: 20000.0
+generator_hold_seconds:
+  kafka_otel: 120
+onset_delay_seconds: 120
+service_lag_seconds: {notification-service: 60}

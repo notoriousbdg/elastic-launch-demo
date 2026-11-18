@@ -97,21 +97,6 @@ steps:
           pipeline.processed:
             var: _claims_processed
           pipeline.avg_cycle_days: 7.2
-- sample:
-    queue_depth:
-      if_active:
-        randint:
-        - 200
-        - 2000
-      else:
-        randint:
-        - 5
-        - 50
-- metric:
-    name: claims_processor.queue_depth
-    value:
-      var: queue_depth
-    unit: claims
 - metric:
     name: claims_processor.avg_cycle_time_days
     value:
@@ -127,3 +112,124 @@ steps:
       - 2
       - 30
     unit: estimates
+- sample:
+    f08:
+      expr: min(1.0, max(0.0, elapsed.get(8, 0) - lag.get(8, 0)) / 60.0) if 8 in all_active else (max(0.0, 1.0 - since_fix.get(8,
+        0) / 240.0) if 8 in fixed_channels else 0.0)
+    c08_intake:
+      expr: round(rand.uniform(30.0, 45.0), 1) if 8 in all_active else (round(rand.uniform(8.0, 14.0) + rand.uniform(22.0,
+        31.0) * max(0.0, min(1.0, 1.0 - (since_fix.get(8, 0) - 900) / 1800.0)), 1) if 8 in fixed_channels else round(rand.uniform(8.0,
+        14.0), 1))
+    c08_max:
+      expr: 24 if 8 in fixed_channels else 6
+    c08_replicas:
+      expr: 6 if 8 in all_active else (min(20, 6 + int(since_fix.get(8, 0) / 3)) if 8 in fixed_channels and since_fix.get(8,
+        0) < 300 else max(3, min(c08_max, int(c08_intake / 2.4) + 1)))
+    c08_limited:
+      expr: True if 8 in all_active else False
+    c08_lag:
+      expr: round(round(rand.uniform(20.0, 150.0) * (1.0 - f08) + rand.uniform(52000.0, 80000.0) * f08, 0))
+    c08_status:
+      expr: '''DEGRADED'' if 8 in all_active or f08 > 0.02 else ''NOMINAL'''
+    queue_depth:
+      expr: round(rand.uniform(5, 50) + c08_lag / 40.0)
+- when: 8 in all_active
+  log:
+    level: WARN
+    message: '[CLAIMS] fnol_intake_status hpa=fnol-intake replicas={c08_replicas} max_replicas={c08_max} scaling_limited={c08_limited}
+      consumer_lag={c08_lag} intake_per_min={c08_intake} status={c08_status}'
+    attrs: &id001
+      operation: fnol_intake_status
+      k8s.hpa.name: fnol-intake
+      k8s.hpa.max_replicas:
+        var: c08_max
+      k8s.hpa.scaling_limited:
+        var: c08_limited
+      k8s.deployment.replicas:
+        var: c08_replicas
+      messaging.kafka.consumer.lag:
+        var: c08_lag
+      claims.status:
+        var: c08_status
+- when: 8 not in all_active
+  log:
+    level: INFO
+    message: '[CLAIMS] fnol_intake_status hpa=fnol-intake replicas={c08_replicas} max_replicas={c08_max} scaling_limited={c08_limited}
+      consumer_lag={c08_lag} intake_per_min={c08_intake} status={c08_status}'
+    attrs: *id001
+- metric:
+    name: claims_processor.fnol_consumer_lag
+    value:
+      var: c08_lag
+    unit: messages
+- metric:
+    name: claims_processor.fnol_intake_per_min
+    value:
+      var: c08_intake
+    unit: claims/min
+- metric:
+    name: claims_processor.fnol_consumer_replicas
+    value:
+      var: c08_replicas
+    unit: replicas
+- metric:
+    name: claims_processor.queue_depth
+    value:
+      var: queue_depth
+    unit: claims
+- sample:
+    f09c:
+      expr: min(1.0, max(0.0, elapsed.get(9, 0) - lag.get(9, 0)) / 30.0) if 9 in all_active else (max(0.0, 1.0 - since_fix.get(9,
+        0) / 120.0) if 9 in fixed_channels else 0.0)
+    c09_p95:
+      expr: round(rand.uniform(1800.0, 3200.0) * (1.0 - f09c) + rand.uniform(11000.0, 26000.0) * f09c, 0)
+    c09_gpu:
+      expr: round(rand.uniform(45.0, 70.0) * (1.0 - f09c) + rand.uniform(96.0, 99.0) * f09c, 1)
+- metric:
+    name: claims_processor.photo_estimate_p95_ms
+    value:
+      var: c09_p95
+    unit: ms
+- metric:
+    name: claims_processor.estimator_gpu_util_pct
+    value:
+      var: c09_gpu
+    unit: '%'
+- sample:
+    f10:
+      expr: min(1.0, max(0.0, elapsed.get(10, 0) - lag.get(10, 0)) / 30.0) if 10 in all_active else (max(0.0, min(1.0, 1.0
+        - (since_fix.get(10, 0) - 60) / 60.0)) if 10 in fixed_channels else 0.0)
+    c10_version:
+      expr: '''drp-payee-sync-2.1.0'' if 10 in all_active else ''drp-payee-sync-2.0.4'''
+    c10_zero:
+      expr: False if 10 in all_active or (10 in fixed_channels and since_fix.get(10, 0) < 60) else True
+    c10_fail:
+      expr: round(rand.uniform(0.2, 0.6) * (1.0 - f10) + rand.uniform(22.0, 34.0) * f10, 2)
+    c10_status:
+      expr: '''DEGRADED'' if 10 in all_active or f10 > 0.1 else ''NOMINAL'''
+- when: 10 in all_active
+  log:
+    level: WARN
+    message: '[CLAIMS] payee_sync_status deployment=drp-payee-sync version={c10_version} leading_zero_preserved={c10_zero}
+      disbursement_failure_pct={c10_fail} status={c10_status}'
+    attrs: &id002
+      operation: payee_sync_status
+      claims.payee_sync_version:
+        var: c10_version
+      claims.payee_acct_leading_zero_preserved:
+        var: c10_zero
+      claims.disbursement_failure_pct:
+        var: c10_fail
+      claims.status:
+        var: c10_status
+- when: 10 not in all_active
+  log:
+    level: INFO
+    message: '[CLAIMS] payee_sync_status deployment=drp-payee-sync version={c10_version} leading_zero_preserved={c10_zero}
+      disbursement_failure_pct={c10_fail} status={c10_status}'
+    attrs: *id002
+- metric:
+    name: claims_processor.disbursement_failure_pct
+    value:
+      var: c10_fail
+    unit: '%'

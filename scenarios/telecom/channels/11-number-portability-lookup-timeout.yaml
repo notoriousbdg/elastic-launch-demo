@@ -1,65 +1,109 @@
 name: Number Portability Lookup Timeout
 subsystem: provisioning
 vehicle_section: number_mgmt
-error_type: PROV-NP-TIMEOUT
+error_type: MNP lookup failed
 sensor_type: number_port
 affected_services:
 - provisioning-service
 cascade_services:
 - activation-service
-description: MNP (Mobile Number Portability) database query timeout delaying ported number activations
-investigation_notes: |
-  1. Check MNP central database connectivity — the national CRDB (Central Reference Database) timeout at 5000ms indicates the external MNP service is degraded. This is outside Meridian's control.
-  2. MNP lookups are required for all ported numbers to verify the current operator. Without CRDB response, provisioning-service cannot determine if the number is eligible for activation.
-  3. Non-ported numbers (new MSISDN allocations) are NOT affected — only customers porting from another carrier experience delays. Approximately 15% of activations involve number portability.
-  4. Enable MNP cache fallback — provisioning-service maintains a 24-hour cache of recent MNP lookups. For repeat lookups (e.g., retry after initial failure), cached results can be served.
-  5. Contact CRDB operations center for status update. If prolonged outage, consider accepting activations without MNP verification and reconciling asynchronously (regulatory risk — requires approval).
-remediation_action: enable_mnp_cache_fallback
-error_message: '[PROV] PROV-NP-TIMEOUT: msisdn={msisdn} donor_operator={donor_operator} crdb_timeout_ms={crdb_timeout_ms} cache_hit={mnp_cache_hit} port_type={port_type}'
-stack_trace: |
-  === MNP LOOKUP FAILURE ===
-  msisdn={msisdn}  port_type={port_type}
-  --- PORTABILITY CHECK ---
-    STEP                    STATUS      ELAPSED_MS
-    msisdn_format_check     COMPLETE    5
-    crdb_query              TIMEOUT     {crdb_timeout_ms}  <<< EXTERNAL
-    donor_verification      SKIPPED     ---
-    port_eligibility        SKIPPED     ---
-  --- CRDB STATUS ---
-    endpoint=crdb.telecom-regulator.eu  response=TIMEOUT
-    donor_operator={donor_operator}  cache_hit={mnp_cache_hit}
-    ported_activations_affected=15%  new_msisdn_unaffected=true
-  ACTION: enable_cache_fallback=true  contact_crdb_ops=true  alert=PROV-NP-TIMEOUT
-infrastructure_events:
-- body: '[GCP-Monitoring] NumberPortabilityTimeout: npdb_endpoint=crdb.telecom-regulator.eu response_time_ms=12000 threshold_ms=5000 region=europe-west3'
-  severity: WARN
-  event_name: gcp.monitoring.NumberPortabilityTimeout
-  service: provisioning-service
-  attributes:
-    cloud.provider: gcp
-    cloud.service: monitoring
-    gcp.resource_type: gke_container
-    infrastructure.source: GCP-Monitoring
+description: the number portability client was switched to the NPDB gateway's public endpoint, where Meridian's egress address is not allowlisted
+investigation_notes: |-
+  Root cause: a provisioning-service configuration change about 30 seconds before the first error (config/provisioning-mnp revision 58, "migrate to NPDB API v2") pointed the number portability client at the public endpoint https://api.npdb-gw.eu:8443 instead of the leased-line endpoint npdb-ll.meridian.internal:8443. The NPDB gateway only accepts Meridian on the leased line; on the public endpoint the GKE Cloud NAT address 34.159.22.81 is not allowlisted and SYNs are dropped, so every lookup waits for the 3 s connect timeout. Only port-in activations need an MNP lookup ({mnp_fail_per_min}/min failing); activations with a new Meridian number are normal, and the NPDB gateway status page shows no incident.
+  Confirm:
+    - the provisioning-service line "config provisioning-mnp reloaded revision 58 ... endpoint npdb-ll.meridian.internal:8443 -> api.npdb-gw.eu:8443" comes before the first "MNP lookup failed", and MNP status lines carry attributes.mnp.endpoint api.npdb-gw.eu:8443
+    - metric provisioning_service.mnp_lookup_failures_per_min rises from 0 to about {mnp_fail_per_min} and provisioning_service.mnp_lookup_latency_p95_ms sits at the 3,000 ms timeout (normally about 45 ms)
+    - metric provisioning_service.operation_latency_ms for non-port activations stays normal, which rules out the provisioning pipeline as a whole
+  Remediation: revert the client configuration with opsctl rollback config/provisioning-mnp --to-revision previous. provisioning-service reloads the configuration within about 10 seconds and lookups go back over the leased line. Enabling a cache fallback would activate port-ins against stale routing data.
+remediation_action: revert_mnp_endpoint
+error_message: 'MNP lookup failed msisdn=+49151{msisdn_suffix} endpoint=https://api.npdb-gw.eu:8443/v2/routing error=java.net.SocketTimeoutException: Connect timed out connectTimeoutMs=3000 attempt=2/2'
+stack_trace: |-
+  java.net.SocketTimeoutException: Connect timed out
+  	at java.base/sun.nio.ch.NioSocketImpl.timedFinishConnect(NioSocketImpl.java:551)
+  	at java.base/sun.nio.ch.NioSocketImpl.connect(NioSocketImpl.java:602)
+  	at java.base/java.net.Socket.connect(Socket.java:633)
+  	at java.base/sun.security.ssl.SSLSocketImpl.connect(SSLSocketImpl.java:304)
+  	at org.apache.hc.client5.http.impl.io.DefaultHttpClientConnectionOperator.connect(DefaultHttpClientConnectionOperator.java:188)
+  	at eu.meridian.provisioning.mnp.NpdbClient.lookup(NpdbClient.java:92)
+  	at eu.meridian.provisioning.port.PortInService.resolveDonor(PortInService.java:47)
 correlation_attr:
-  key: provisioning.crdb_client_version
-  value: crdb-client-v1.8.0-rc3
+  key: mnp.endpoint
+  value: api.npdb-gw.eu:8443
 fault_params:
-  msisdn: {choice: ['+4915110000000', '+4916010000000', '+4917010000000']}
-  donor_operator: {choice: [Vodafone DE, Deutsche Telekom, 1&1, Telefonica DE]}
-  crdb_timeout_ms: {randint: [5000, 15000]}
-  mnp_cache_hit: false
-  port_type: port_in
+  msisdn_suffix: {randint: [1000000, 9999999]}
+  mnp_fail_per_min: {randint: [55, 110]}
 rca_clues:
   provisioning-service:
-    provisioning.crdb_timeout_ms: {randint: [5000, 15000]}
-    provisioning.mnp_cache_hit: false
+    mnp.endpoint: api.npdb-gw.eu:8443
+    mnp.connect_timeout_ms: 3000
+    mnp.lookup_failures_per_min: {randint: [55, 110]}
+    net.egress_ip: 34.159.22.81
   activation-service:
-    activation.ported_number_blocked: true
-    activation.new_msisdn_ok: true
+    upstream.degraded_subsystem: provisioning
+    activation.port_in_failures_per_min: {randint: [55, 110]}
+remediation_command: |-
+  opsctl rollback config/provisioning-mnp --to-revision previous
+fault_scope:
+  cluster: meridian-gke-cluster
+  workloads: [provisioning-service]
+cascade_messages:
+  activation-service:
+    - severity: WARN
+      message: 'port-in activation failed at donor_lookup (provisioning-service 504); order moved to manual queue'
+infrastructure_events:
+  - service: provisioning-service
+    severity: INFO
+    offset_seconds: -30
+    event_name: config.reload
+    body: 'config provisioning-mnp reloaded revision 58 (was 57) by provisioning-ops/s.keller: npdb.endpoint npdb-ll.meridian.internal:8443 -> api.npdb-gw.eu:8443, npdb.api_version v1 -> v2'
+    attributes:
+      operation: config_reload
+      user.name: provisioning-ops/s.keller
+      mnp.endpoint: api.npdb-gw.eu:8443
+      change.summary: 'npdb endpoint npdb-ll.meridian.internal:8443 -> api.npdb-gw.eu:8443'
+remediation_effects:
+  log_taper_seconds: 10
+  log_events:
+    - service: provisioning-service
+      severity: INFO
+      offset_seconds: 1
+      body: '[NOC-CHG] executed opsctl rollback config/provisioning-mnp --to-revision previous actor={actor}: revision 58 -> 57 (npdb.endpoint npdb-ll.meridian.internal:8443)'
+      attributes:
+        operation: change_executed
+        change.target: config/provisioning-mnp
+        mnp.endpoint: npdb-ll.meridian.internal:8443
+  steady_attributes:
+    provisioning-service:
+      mnp.endpoint: npdb-ll.meridian.internal:8443
+  verification:
+    - signal: provisioning_service.mnp_lookup_failures_per_min
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "provisioning-service"'
+      field: 'metrics.provisioning_service.mnp_lookup_failures_per_min'
+      expect: '0 (was 55-110)'
+      within_seconds: 60
+    - signal: provisioning_service.mnp_lookup_latency_p95_ms
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "provisioning-service"'
+      field: 'metrics.provisioning_service.mnp_lookup_latency_p95_ms'
+      expect: 'back near 45 ms (was 3,000 ms)'
+      within_seconds: 60
+    - signal: MNP lookup failed lines
+      from: 'logs.otel.meridian'
+      where: 'body.text LIKE "*MNP lookup failed*"'
+      expect: '0 new lines'
+      within_seconds: 60
+    - signal: MNP endpoint
+      from: 'logs.otel.meridian'
+      where: 'resource.attributes.service.name == "provisioning-service"'
+      field: 'attributes.mnp.endpoint'
+      expect: 'npdb-ll.meridian.internal:8443 on every MNP status line since the rollback'
+      within_seconds: 60
 business_impact:
   - kpi: business.port_ins_per_min
-    factor: {uniform: [0.10, 0.35]}
+    factor: {uniform: [0.1, 0.35]}
   - kpi: business.activations_per_min
-    factor: {uniform: [0.30, 0.60]}
+    factor: {uniform: [0.3, 0.6]}
   - kpi: business.voluntary_churn_rate_pct
     factor: {uniform: [1.5, 3.0]}
+service_lag_seconds: {activation-service: 10}

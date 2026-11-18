@@ -33,20 +33,27 @@ steps:
       intent: {choice: INTENTS}
       session_id: {format: "sess-{n}", n: {randint: [100000, 999999]}}
       agent_latency_ms:
-        if_active: {uniform: [6500.0, 24000.0], round: 1}
-        else: {uniform: [900.0, 3200.0], round: 1}
+        expr: "round(max(0.0, 2050 + (15000 - 2050) * min(1.0, elapsed.get(9, 0) / 30.0) + rand.gauss(0, 600)), 1) if 9 in all_active
+          else (round(max(0.0, 15000 + (rand.uniform(900.0, 3200.0) - 15000) * min(1.0, since_fix.get(9, 0) / 90.0) + rand.gauss(0, 600 * (1.0 - min(1.0, since_fix.get(9, 0) / 90.0)))), 1) if 9 in fixed_channels
+          else round(rand.uniform(900.0, 3200.0), 1))"
       gateway_tool_latency_ms:
-        if_active: {uniform: [3000.0, 15000.0], round: 1}
-        else: {uniform: [80.0, 450.0], round: 1}
+        expr: "round(max(0.0, 265 + (9000 - 265) * min(1.0, elapsed.get(9, 0) / 30.0) + rand.gauss(0, 360)), 1) if 9 in all_active
+          else (round(max(0.0, 9000 + (rand.uniform(80.0, 450.0) - 9000) * min(1.0, since_fix.get(9, 0) / 90.0) + rand.gauss(0, 360 * (1.0 - min(1.0, since_fix.get(9, 0) / 90.0)))), 1) if 9 in fixed_channels
+          else round(rand.uniform(80.0, 450.0), 1))"
       memory_retrieval_ms:
-        if_active: {uniform: [150.0, 900.0], round: 1}
-        else: {uniform: [12.0, 60.0], round: 1}
+        expr: "round(rand.uniform(12.0, 60.0), 1)"
       gateway_errors:
-        if_active: {randint: [8, 60]}
-        else: {randint: [0, 1]}
+        expr: "int(round(max(0, 0.3 + (40 - 0.3) * min(1.0, elapsed.get(9, 0) / 30.0) + rand.gauss(0, 1.6)))) if 9 in all_active
+          else (int(round(max(0, 40 + (rand.randint(0, 1) - 40) * min(1.0, since_fix.get(9, 0) / 90.0) + rand.gauss(0, 1.6 * (1.0 - min(1.0, since_fix.get(9, 0) / 90.0)))))) if 9 in fixed_channels
+          else rand.randint(0, 1))"
       tool_success_rate_pct:
-        if_active: {uniform: [38.0, 74.0], round: 2}
-        else: {uniform: [97.5, 99.8], round: 2}
+        expr: "round(max(0.0, 98.65 + (56.0 - 98.65) * min(1.0, elapsed.get(9, 0) / 30.0) + rand.gauss(0, 2.2)), 1) if 9 in all_active
+          else (round(max(0.0, 56.0 + (rand.uniform(97.5, 99.8) - 56.0) * min(1.0, since_fix.get(9, 0) / 90.0) + rand.gauss(0, 2.2 * (1.0 - min(1.0, since_fix.get(9, 0) / 90.0)))), 1) if 9 in fixed_channels
+          else round(rand.uniform(97.5, 99.8), 1))"
+      gateway_stage:
+        expr: "'AWSPREVIOUS' if 9 in all_active else 'AWSCURRENT'"
+      support_status:
+        expr: "'ANOMALY' if 9 in all_active or (9 in fixed_channels and since_fix.get(9, 0) < 90) else 'NOMINAL'"
       memory_events: {randint: [3, 28]}
       input_tokens: {randint: [640, 2400]}
       output_tokens: {randint: [90, 520]}
@@ -85,13 +92,14 @@ steps:
         gen_ai.usage.output_tokens: {var: output_tokens}
   - log:
       level: INFO
-      message: 'support.gateway_tool_call session={session_id} tool={tool} latency={gateway_tool_latency_ms}ms success_rate={tool_success_rate_pct}% gateway_errors={gateway_errors}'
+      message: 'support.gateway_tool_call session={session_id} tool={tool} latency={gateway_tool_latency_ms}ms success_rate={tool_success_rate_pct}% gateway_errors={gateway_errors} secret_stage={gateway_stage}'
       attrs:
         operation: gateway_tool_call
         support.session_id: {var: session_id}
         aws.bedrock.agentcore.gateway.tool: {var: tool}
         aws.bedrock.agentcore.gateway.latency_ms: {var: gateway_tool_latency_ms}
         aws.bedrock.agentcore.gateway.errors: {var: gateway_errors}
+        aws.secretsmanager.version_stage: {var: gateway_stage}
   - log:
       level: INFO
       message: 'support.memory_retrieve session={session_id} events={memory_events} latency={memory_retrieval_ms}ms'
@@ -106,8 +114,9 @@ steps:
       steps:
         - log:
             level: INFO
-            message: 'support.summary sessions={_sessions} tool_success_rate={tool_success_rate_pct}% status=NOMINAL'
+            message: 'support.summary sessions={_sessions} tool_success_rate={tool_success_rate_pct}% gateway_errors={gateway_errors} status={support_status}'
             attrs:
               operation: support_summary
               support.total_sessions: {var: _sessions}
               support.tool_success_rate_pct: {var: tool_success_rate_pct}
+              aws.secretsmanager.version_stage: {var: gateway_stage}

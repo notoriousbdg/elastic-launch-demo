@@ -11,8 +11,12 @@ cascade_services:
 - billing-processor
 description: HIPAA-mandated audit log chain integrity check fails, indicating possible tampering or data loss
 investigation_notes: |-
-  Root Cause: HIPAA audit chain integrity failures (SHA-256 hash mismatches) indicate either log record tampering, storage corruption, or an out-of-order write during high-volume PHI access logging. Out-of-order sequence writes above zero with zero storage I/O errors and the preceding entries still VALID point to a write-ordering race, not storage corruption or tampering. Per 45 CFR 164.312(b), audit controls must maintain an unbroken chain of custody for all PHI access events.
-  Remediation: 1) Identify the break point: `audit-admin chain-verify --chain {chain_id} --from-sequence {sequence_number} --range 100`. 2) Recover audit records from the write-ahead log: `audit-admin recover-wal --chain {chain_id} --sequence {sequence_number}`. 3) Rebuild the hash chain from the last valid entry: `audit-admin rebuild-chain --chain {chain_id} --from-last-valid`. 4) Check for storage I/O errors: `audit-admin storage-health --volume audit-vol-01`. 5) Close the compliance gap: open a security incident per the security incident procedures (45 CFR 164.308(a)(6)) and let the Privacy Officer assess whether breach notification (45 CFR 164.404/164.408) applies. 6) Enable write verification: `audit-admin set-write-verify --chain {chain_id} --mode synchronous`.
+  Root cause: phi-audit-writer sha256-chain-v2.1.0-rc3 was rolled out shortly before the first HIPAA-AUDIT-FAIL. It commits audit entries asynchronously in batches (commit_mode async-batch). Under PHI access load, an entry is committed before its predecessor's hash is sealed, so chain {chain_id} breaks at sequence {sequence_number}: the stored hash {actual_hash} does not match the expected {expected_hash}. Storage I/O errors are 0, the preceding entries verify and the write-ahead log holds every entry. This is a write-ordering race, not tampering or storage corruption, and no audit data is lost.
+  Confirm:
+    - data-warehouse logs [DW] audit_writer chain=AUDIT-4471 build=sha256-chain-v2.1.0-rc3 commit_mode=async-batch ... storage_io_errors=0 chain=BROKEN (attributes.deployment.audit_chain_version)
+    - metric warehouse.audit_out_of_order_writes_per_min rises from 0 to 12-24 after the rollout; warehouse.audit_chain_breaks_open goes from 0 to 5
+    - the data-warehouse line "phi-audit-writer rolled out sha256-chain-v2.1.0-rc3" comes before the first chain break
+  Remediation: two steps, in order. opsctl rollback deployment/phi-audit-writer --to-revision previous returns the writer to sha256-chain-v2.0.6 (synchronous commit) and stops new out-of-order writes within about 30 seconds. opsctl run job/audit-chain-rebuild then re-seals {chain_id} from the write-ahead log, and the open breaks drop to 0 about 20 seconds later. Running the rebuild alone is wrong: rc3 breaks the chain again. Because the WAL is intact, the Privacy Officer records a security incident but no breach assessment is needed for lost entries.
 remediation_action: rebuild_audit_chain
 error_message: '[DW] HIPAA-AUDIT-FAIL: chain={chain_id} sequence={sequence_number} expected_hash={expected_hash} actual_hash={actual_hash}'
 stack_trace: |-
@@ -35,9 +39,7 @@ correlation_attr:
   key: deployment.audit_chain_version
   value: sha256-chain-v2.1.0-rc3
 fault_params:
-  chain_id:
-    format: "AUDIT-{n}"
-    n: {randint: [1000, 9999]}
+  chain_id: AUDIT-4471
   sequence_number: {randint: [1, 100000]}
   expected_hash:
     format: "sha256:{a:016x}{b:016x}{c:016x}{d:016x}"
@@ -55,7 +57,7 @@ rca_clues:
   data-warehouse:
     audit.chain_break_detected: true
     audit.wal_recovery_available: true
-    audit.out_of_order_writes: {randint: [3, 40]}
+    audit.out_of_order_writes: {randint: [12, 24]}
     audit.storage_io_errors: 0
   ehr-system:
     ehr.phi_access_logging: degraded
@@ -66,6 +68,89 @@ rca_clues:
   billing-processor:
     billing.audit_gap_in_claims: true
     billing.cms_reporting_risk: high
+remediation_command: |-
+  opsctl rollback deployment/phi-audit-writer --to-revision previous
+  opsctl run job/audit-chain-rebuild
+error_services: [data-warehouse]
+service_lag_seconds:
+  ehr-system: 15
+  clinical-alerts: 30
+  billing-processor: 45
+cascade_messages:
+  ehr-system:
+    - severity: WARN
+      message: '[EHR] phi_access_audit_ack_delayed chain={chain_id} sequence={sequence_number} reason=AUDIT_CHAIN_BROKEN; access events buffered locally'
+  clinical-alerts:
+    - severity: WARN
+      message: '[CDS] compliance_alert rule=HIPAA-AUDIT-CHAIN chain={chain_id} sequence={sequence_number} status=FIRED notify=privacy-office'
+  billing-processor:
+    - severity: WARN
+      message: '[CLAIMS] audit_reference_unverified chain={chain_id} sequence={sequence_number}; claim export held for audit trail'
+fault_scope:
+  workloads: [data-warehouse]
+infrastructure_events:
+  - service: data-warehouse
+    severity: INFO
+    offset_seconds: -120
+    body: '[DW] deployment phi-audit-writer rolled out sha256-chain-v2.1.0-rc3 (was sha256-chain-v2.0.6): commit_mode=async-batch by dw-platform-release (CHG0031955)'
+    attributes:
+      user.name: dw-platform-release
+      change.request: CHG0031955
+      operation: deployment
+      deployment.audit_chain_version: sha256-chain-v2.1.0-rc3
+      audit.commit_mode: async-batch
+      change.summary: 'phi-audit-writer: sha256-chain-v2.0.6 -> sha256-chain-v2.1.0-rc3'
+remediation_effects:
+  log_events:
+    - service: data-warehouse
+      severity: INFO
+      offset_seconds: 1
+      body: '[CHG] CHANGE IMPLEMENTED opsctl rollback deployment/phi-audit-writer --to-revision previous by {actor}: phi-audit-writer sha256-chain-v2.1.0-rc3 -> sha256-chain-v2.0.6, commit_mode synchronous'
+      attributes:
+        operation: change_implemented
+        change.target: deployment/phi-audit-writer
+    - service: data-warehouse
+      severity: INFO
+      offset_seconds: 2
+      body: '[CHG] CHANGE IMPLEMENTED opsctl run job/audit-chain-rebuild by {actor}: re-sealing chain AUDIT-4471 from the write-ahead log'
+      attributes:
+        operation: change_implemented
+        change.target: job/audit-chain-rebuild
+    - service: data-warehouse
+      severity: INFO
+      offset_seconds: 20
+      body: '[DW] audit-chain-rebuild chain=AUDIT-4471 re-sealed from WAL: all entries verified, open_breaks=0 hash_chain=INTACT'
+      attributes:
+        operation: integrity_check
+        audit.chain_id: AUDIT-4471
+        audit.integrity_status: INTACT
+  steady_attributes:
+    data-warehouse:
+      deployment.audit_chain_version: sha256-chain-v2.0.6
+  verification:
+    - signal: warehouse.audit_out_of_order_writes_per_min
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "data-warehouse"'
+      field: 'metrics.warehouse.audit_out_of_order_writes_per_min'
+      expect: 'back to 0 (was 12-24) within about 30 seconds'
+      within_seconds: 90
+    - signal: warehouse.audit_chain_breaks_open
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "data-warehouse"'
+      field: 'metrics.warehouse.audit_chain_breaks_open'
+      expect: '0 open breaks (was 5) once audit-chain-rebuild has run'
+      within_seconds: 90
+    - signal: HIPAA-AUDIT-FAIL lines
+      from: 'logs.otel.healthcare'
+      where: 'body.text LIKE "*HIPAA-AUDIT-FAIL*"'
+      expect: '0 new lines'
+      within_seconds: 90
+    - signal: deployment.audit_chain_version
+      from: 'logs.otel.healthcare'
+      where: 'resource.attributes.service.name == "data-warehouse"'
+      field: 'attributes.deployment.audit_chain_version'
+      expect: 'sha256-chain-v2.0.6 on every audit_writer line since the fix; v2.1.0-rc3 stops appearing'
+      within_seconds: 90
 business_impact:
   - kpi: business.staff_compliance_rate_pct
     factor: {uniform: [0.2, 0.5]}

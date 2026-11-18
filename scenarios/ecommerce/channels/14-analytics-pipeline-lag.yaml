@@ -5,59 +5,149 @@ error_type: ANALYTICS-PIPELINE-LAG
 sensor_type: pipeline_latency
 affected_services:
 - analytics-pipeline
+error_services:
+- analytics-pipeline
 cascade_services:
 - ad-platform
 - order-management
-description: Real-time analytics pipeline falling behind — dashboards showing stale data, ad optimization running on outdated
-  metrics
+description: Real-time analytics falls minutes behind because analytics-collector revision 64 keys clickstream events by event_type, sending every page_view to one Kafka partition whose single consumer cannot keep up.
+onset_delay_seconds: 15
 investigation_notes: |-
-  1. Check analytics-pipeline logs for ANALYTICS-PIPELINE-LAG — pipeline_lag_ms={pipeline_lag_ms}ms vs acceptable {max_pipeline_lag_ms}ms.
-  2. Check consumer group lag on the analytics Kafka topic: if consumer_lag={consumer_lag} events, the pipeline is not keeping up with ingest volume (ingest within ±10% of baseline rules out a volume surge).
-  3. Identify the slow stage: ETL transforms, aggregation, or index writes — each has distinct latency signatures in the pipeline metrics.
-  4. Check for a data skew issue: if one partition has {hot_partition_events}x more events than others, the partition key is not evenly distributed (a skew above 3x confirms it).
-  5. Ad-platform's budget optimization queries rely on fresh analytics — with {pipeline_lag_ms}ms lag, spend data is stale and bidding may over- or under-spend.
-  6. Fix the partition key (salt it or use a higher-cardinality key) so events spread across partitions. Adding consumers will not help: one partition is read by only one consumer in the group. To drain the existing backlog on {hot_partition} within {eta_drain_min}min, raise per-key processing parallelism inside the consumer for that partition.
+  Root cause: analytics-collector was rolled out to revision 64 (v2.14.0, CR-4471), which changed the Kafka producer partition key for clickstream-events from session_id to event_type. Kafka hashes the key to pick a partition, so with only six event types every event of one type lands on one partition, and page_view is about 60% of traffic: partition 7 of 32 now receives about 24,000 of the ~40,000 events/s instead of its usual 1,250/s. A partition is read by exactly one consumer in analytics-consumer-group, and that consumer processes about 6,000 events/s, so partition 7's backlog grows by about 18,000 events/s while the other 31 partitions are nearly idle. The windowed aggregator cannot close a window until every partition's watermark has passed it, so the whole pipeline (every dashboard, the ad spend aggregates, the realtime GMV view) is as stale as partition 7. Total ingest is normal (analytics.events_per_sec stays within 5% of 40,000/s), so this is not a traffic surge, and scaling the consumer group does not help: the group already has 32 members for 32 partitions, and an extra consumer would sit idle because one partition cannot be shared. Unlike the other Kafka lag problems on this platform, the consumer count is normal, there are no rebalances and no deserialization errors; only one partition is behind.
+  Confirm:
+    - analytics-pipeline "analytics.health" lines carry partition_key=event_type and hot_partition=partition-7 (attributes.analytics.partition_key, attributes.analytics.hot_partition) and status=ANOMALY; before the rollout they read partition_key=session_id, hot_partition=none
+    - metrics.analytics.partition_skew_ratio (busiest partition rate / mean partition rate) climbs from 1.1 to about 19.2 within 30s of onset; metrics.analytics.consumer_group_members stays at 32 and metrics.analytics.events_per_sec stays near 40,000
+    - metrics.analytics.pipeline_lag_ms rises from about 1,200 ms by about 3,000 ms every second and levels off near 134,000 ms; metrics.analytics.consumer_lag_events follows the partition 7 backlog (about 800,000 events); metrics.analytics.processed_events_per_sec drops to about 22,000 because partition 7 is capped at its consumer's 6,000/s
+    - the analytics-pipeline line "[Deploy] rollout of analytics-collector to revision 64 ... partitioner key session_id -> event_type" comes before the first ANALYTICS-PIPELINE-LAG line, and the lag lines all name partition=7
+    - ad-platform logs that the budget optimizer's spend aggregates are {spend_data_age_s}s old and holds pacing for campaigns such as {campaign_id}; order-management logs "realtime GMV window not closed" with watermark_age_s={gmv_watermark_age_s}. Both follow the pipeline lag about 30s later
+  Remediation: roll the collector back with opsctl rollback deployment/analytics-collector --to-revision previous. The rollback is a rolling update of about 30s: while old and new collector pods both produce, partition 7 still receives part of the page_view stream, so the backlog and the lag keep rising for about 20s (to about 170,000 ms). Once all pods are back on revision 63 (key session_id), new events spread evenly again and partition_skew_ratio is back to about 1.1. Partition 7's existing backlog then drains at the consumer rate minus its new share (6,000 - 1,250 = about 4,750 events/s), so pipeline_lag_ms falls steadily and is back near 1,200 ms about 240s after the rollback; the pipeline processes about 45,000 events/s until it has caught up. No events are lost, and no consumer change or offset reset is needed.
 remediation_action: restart_analytics_pipeline
-error_message: '[AnalyticsPipeline] ANALYTICS-PIPELINE-LAG: lag={pipeline_lag_ms}ms (max {max_pipeline_lag_ms}ms) consumer_lag={consumer_lag}
-  events_per_sec={events_per_sec} hot_partition={hot_partition}'
-stack_trace: |-
-  Traceback (most recent call last):
-    File "/app/analytics/pipeline.py", line 203, in process_batch
-      self.consumer.check_lag(group="analytics-consumer-group")
-    File "/app/analytics/consumer.py", line 118, in check_lag
-      raise PipelineLagError("ANALYTICS-PIPELINE-LAG")
-  analytics.errors.PipelineLagError: ANALYTICS-PIPELINE-LAG
-  Batch:             {batch_id}
-  Pipeline lag:      {pipeline_lag_ms}ms
-  Consumer lag:      {consumer_lag} events
-  Events/sec:        {events_per_sec}
-  Hot partition:     {hot_partition}
-  Partition skew:    {hot_partition_events}x
-  Stages behind:     etl_transform, aggregation
+remediation_command: |-
+  opsctl rollback deployment/analytics-collector --to-revision previous
+error_message: 'WARNING analytics.pipeline.watermark: ANALYTICS-PIPELINE-LAG window close blocked by one partition topic={topic} partition={hot_partition_id}
+  group={consumer_group} consumer={hot_consumer_id} partition_lag={partition_lag_events} watermark_delay_ms={watermark_delay_ms}
+  partitions_behind=1/{partition_count}'
+stack_trace: ""
 correlation_attr:
-  key: analytics.pipeline_lagging
-  value: true
+  key: analytics.partition_key
+  value: event_type
 fault_params:
-  pipeline_lag_ms: {randint: [60000, 600000]}
-  max_pipeline_lag_ms: 5000
-  consumer_lag: {randint: [50000, 500000]}
-  events_per_sec: {randint: [10000, 100000]}
-  hot_partition: {format: "partition-{n}", n: {randint: [0, 31]}}
-  batch_id: {format: "BATCH-{n}", n: {randint: [10000, 99999]}}
-  hot_partition_events: {randint: [5, 15]}
-  eta_drain_min: {randint: [10, 60]}
+  topic: clickstream-events
+  consumer_group: analytics-consumer-group
+  hot_partition_id: 7
+  partition_count: 32
+  hot_consumer_id: analytics-consumer-7f4c9-p7
+  partition_lag_events: {randint: [300000, 1000000]}
+  watermark_delay_ms: {randint: [50000, 170000]}
+  spend_data_age_s: {randint: [60, 170]}
+  campaign_id: {format: "CMP-{n}", n: {randint: [10000, 99999]}}
+  gmv_watermark_age_s: {randint: [60, 170]}
 rca_clues:
   analytics-pipeline:
-    analytics.pipeline_lag_ms: {randint: [60000, 600000]}
-    analytics.consumer_lag_events: {randint: [50000, 500000]}
-    analytics.partition_skew_ratio: {randint: [5, 15]}
-    analytics.ingest_rate_delta_pct: {uniform: [-5, 8], round: 1}
+    analytics.partition_key: event_type
+    analytics.hot_partition: partition-7
+    analytics.partition_skew_ratio: {uniform: [18.8, 19.4], round: 2}
+    analytics.hot_partition_inflow_per_sec: {randint: [23500, 24500]}
+    analytics.hot_partition_consume_per_sec: {randint: [5900, 6100]}
+    analytics.idle_partition_lag_events: {randint: [0, 300]}
+    analytics.ingest_rate_delta_pct: {uniform: [-3.0, 3.0], round: 1}
+    analytics.consumer_group_members: 32
+    analytics.rebalances_last_15m: 0
+    analytics.deserialization_errors: 0
   ad-platform:
+    ads.budget_optimizer_input_age_s: {randint: [60, 170]}
     ads.budget_optimization_stale: true
-    ads.bid_using_lag_min: {randint: [10, 120]}
   order-management:
-    order.gmv_dashboard_stale_min: {randint: [5, 60]}
+    order.gmv_dashboard_freshness_s: {randint: [60, 170]}
     order.realtime_reporting_delayed: true
+cascade_messages:
+  ad-platform:
+    - severity: WARN
+      message: 'WARNING adplatform.budget.optimizer: spend aggregates from analytics-pipeline are {spend_data_age_s}s old (freshness limit 30s); holding pacing multipliers at last computed values for campaign={campaign_id}'
+  order-management:
+    - severity: WARN
+      message: 'level=warn caller=reporting/gmv_realtime.go:142 msg="realtime GMV window not closed" source=analytics-pipeline topic={topic} watermark_age_s={gmv_watermark_age_s} dashboard=gmv-realtime action=serving_last_closed_window'
+fault_scope:
+  cluster: ecommerce-aks-cluster
+  workloads: [analytics-pipeline, analytics-collector]
+infrastructure_events:
+  - service: analytics-pipeline
+    severity: INFO
+    offset_seconds: -90
+    body: '[Deploy] rollout of analytics-collector to revision 64 started: v2.13.4 -> v2.14.0, producer partitioner key session_id -> event_type (topic clickstream-events, 32 partitions), 6 replicas, maxSurge=1; deployed by data-platform (CR-4471)'
+    attributes:
+      user.name: data-platform
+      change.request: CR-4471
+      operation: deployment_rollout
+      deploy.revision: 64
+      change.summary: 'analytics-collector v2.13.4 -> v2.14.0: partitioner key session_id -> event_type'
+      analytics.partition_key: event_type
+service_lag_seconds: {ad-platform: 30, order-management: 30}
+remediation_effects:
+  log_taper_seconds: 40
+  log_events:
+    - service: analytics-pipeline
+      severity: INFO
+      offset_seconds: 1
+      body: '[CHG] CHANGE APPLIED opsctl rollback deployment/analytics-collector --to-revision previous by {actor}: rollout undo from revision 64 to revision 63 (analytics-collector v2.14.0 -> v2.13.4, partitioner key event_type -> session_id)'
+      attributes:
+        operation: change_applied
+        change.target: deployment/analytics-collector
+    - service: analytics-pipeline
+      severity: INFO
+      offset_seconds: 15
+      body: 'deployment analytics-collector rolled back to revision 63: rolling update in progress, 3/6 pods on v2.13.4 (partitioner key session_id)'
+      attributes:
+        operation: deployment_rollout
+        deploy.revision: 63
+        deploy.updated_replicas: 3
+    - service: analytics-pipeline
+      severity: INFO
+      offset_seconds: 30
+      body: 'deployment analytics-collector rolled back to revision 63: 6/6 pods updated and available, partitioner key session_id; clickstream-events partition skew back to 1.1'
+      attributes:
+        operation: deployment_rollout
+        deploy.revision: 63
+        deploy.updated_replicas: 6
+        analytics.partition_key: session_id
+    - service: analytics-pipeline
+      severity: INFO
+      offset_seconds: 120
+      body: 'INFO analytics.pipeline.watermark: partition 7 backlog draining topic=clickstream-events group=analytics-consumer-group partition_lag=590000 consume_rate=6000/s inflow=1250/s'
+      attributes:
+        operation: backlog_drain
+        analytics.hot_partition: partition-7
+    - service: analytics-pipeline
+      severity: INFO
+      offset_seconds: 245
+      body: 'INFO analytics.pipeline.watermark: analytics-consumer-group caught up on clickstream-events: all 32 partitions within 5000 events, watermark delay 1200ms, windows closing on time'
+      attributes:
+        operation: backlog_drain
+        analytics.hot_partition: none
+  verification:
+    - signal: analytics.pipeline_lag_ms
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "analytics-pipeline"'
+      field: 'metrics.analytics.pipeline_lag_ms'
+      expect: 'keeps rising for about 20s while the rollback rolls out (to about 170000ms), then falls steadily and is back near 1200ms about 240s after the rollback (was about 134000ms)'
+      within_seconds: 360
+    - signal: analytics.partition_skew_ratio
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "analytics-pipeline"'
+      field: 'metrics.analytics.partition_skew_ratio'
+      expect: 'back to about 1.1 within about 30s of the rollback (was about 19.2)'
+      within_seconds: 90
+    - signal: ANALYTICS-PIPELINE-LAG lines
+      from: 'logs.otel.ecommerce'
+      where: 'body.text LIKE "*ANALYTICS-PIPELINE-LAG*"'
+      expect: 'stop within about 40s, once every collector pod is back on key session_id; partition 7 then drains (pipeline_lag_ms back near 1,200 ms after about 240s) with "backlog draining" INFO lines, not new ANALYTICS-PIPELINE-LAG lines'
+      within_seconds: 120
+    - signal: collector partition key
+      from: 'logs.otel.ecommerce'
+      where: 'resource.attributes.service.name == "analytics-pipeline"'
+      field: 'attributes.analytics.partition_key'
+      expect: 'both values appear while collector pods roll; only session_id once the rollout is complete (about 30s)'
+      within_seconds: 90
 business_impact:
   - kpi: business.ad_revenue_usd_per_min
     value: {uniform: [10416.0, 11984.0], round: 1}
@@ -70,3 +160,4 @@ generator_impact:
   kafka_otel:
     high_consumer_lag_by_topic: 250000.0
     high_consumer_lag_per_partition: 60000.0
+generator_hold_seconds: {kafka_otel: 240}

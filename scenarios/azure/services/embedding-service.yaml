@@ -25,37 +25,50 @@ state:
 
 steps:
   - sample:
-      embedding_model:
-        choice: [text-embedding-3-large, text-embedding-3-large, text-embedding-3-small]
+      embedding_model: text-embedding-3-large
       source_corpus:
         choice: [support-articles, product-manuals, policy-documents, release-notes]
       batch_size:
         randint: [16, 96]
-      vector_dimension:
-        if_active:
-          choice: [1536, 3072, 1024]
-        else:
-          choice: [3072]
-      queue_depth:
-        if_active:
-          randint: [1800, 9500]
-        else:
-          randint: [0, 60]
       embed_latency_ms:
-        if_active:
-          uniform: [900.0, 6500.0]
-          round: 1
-        else:
-          uniform: [45.0, 240.0]
-          round: 1
+        uniform: [45.0, 240.0]
+        round: 1
       tokens_embedded:
         randint: [4000, 52000]
+  # ch6: embed-prod-large lost its dimensions=1536 setting and returns 3072-dim vectors against a 1536-dim index.
+  # The worker fleet restarts in a rolling fashion after the fix, so the reported dimension converges over ~60 s.
+  - sample:
+      configured_dimensions:
+        expr: "3072 if 6 in all_active else 1536"
+      vector_dimension:
+        expr: "3072 if 6 in all_active else (1536 if rand.uniform(0.0, 1.0) < min(1.0, since_fix.get(6, 0) / 60.0) else 3072) if 6 in fixed_channels else 1536"
+      dimension_check:
+        expr: "'FAIL' if vector_dimension != 1536 else 'PASS'"
+      dimension_status:
+        expr: "'ANOMALY' if vector_dimension != 1536 else 'NOMINAL'"
+  # ch13: the reindex job queues a large backlog and the batch worker pool is capped at 4 workers.
+  # The backlog builds up over ~15 minutes; after max_workers is raised it drains over ~150 s.
+  - sample:
+      base_queue_depth:
+        randint: [0, 60]
+      queue_depth:
+        expr: "base_queue_depth + int((4000.0 + 55900.0 * min(1.0, elapsed.get(13, 0) / 900.0) * rand.uniform(0.85, 1.0)) * min(1.0, elapsed.get(13, 0) / 45.0)) if 13 in all_active
+          else (base_queue_depth + int(36000.0 * (1.0 - min(1.0, since_fix.get(13, 0) / 150.0))) if 13 in fixed_channels
+          else base_queue_depth)"
+      batch_max_workers:
+        expr: "16 if 13 in fixed_channels else 4"
+      batch_active_workers:
+        expr: "4 if 13 in all_active else (rand.randint(6, 16) if 13 in fixed_channels and queue_depth > 1000 else rand.randint(1, 3))"
+      queue_status:
+        expr: "'ANOMALY' if 13 in all_active or queue_depth > 1000 else 'NOMINAL'"
+      index_lag:
+        expr: "'BEHIND' if queue_status == 'ANOMALY' else 'NORMAL'"
   - counter:
       state_key: _batch_count
       by: 1
   - log:
       level: INFO
-      message: '[EMBEDDING] batch_embedded model={embedding_model} corpus={source_corpus} batch_size={batch_size} dimension={vector_dimension} tokens={tokens_embedded} latency={embed_latency_ms}ms'
+      message: '[EMBEDDING] batch_embedded deployment=embed-prod-large model={embedding_model} corpus={source_corpus} batch_size={batch_size} dimension={vector_dimension} tokens={tokens_embedded} latency={embed_latency_ms}ms'
       attrs:
         operation: batch_embedded
         embed.model:
@@ -72,20 +85,37 @@ steps:
           var: embed_latency_ms
   - log:
       level: INFO
-      message: '[EMBEDDING] queue_health depth={queue_depth} expected_dimension=3072 index=kb-passages-v4 ai_search_index_lag=NORMAL status=NORMAL'
+      message: '[EMBEDDING] embedding_config deployment=embed-prod-large dimensions={configured_dimensions} index=kb-passages-v4 index_dimensions=1536 dimension_check={dimension_check} status={dimension_status}'
+      attrs:
+        operation: embedding_config
+        embedding.deployment: embed-prod-large
+        embedding.dimensions:
+          var: configured_dimensions
+        embedding.index_dimensions: 1536
+        embedding.status:
+          var: dimension_status
+  - log:
+      level: INFO
+      message: '[EMBEDDING] queue_health queue=reindex-embed-batch depth={queue_depth} workers={batch_active_workers}/{batch_max_workers} index=kb-passages-v4 ai_search_index_lag={index_lag} status={queue_status}'
       attrs:
         operation: queue_health
         embed.queue_depth:
           var: queue_depth
-        embed.expected_dimension: 3072
+        embed.queue: reindex-embed-batch
         embed.index: kb-passages-v4
+        batch.max_workers:
+          var: batch_max_workers
+        batch.active_workers:
+          var: batch_active_workers
+        embed.status:
+          var: queue_status
   - every:
       seconds: 10
       state_key: _last_summary
       steps:
         - log:
             level: INFO
-            message: '[EMBEDDING] embedding_summary batches_total={_batch_count} deployment=embeddings-prod-eastus2 dimension_check=PASS status=NORMAL'
+            message: '[EMBEDDING] embedding_summary batches_total={_batch_count} deployment=embed-prod-large dimension_check={dimension_check} status={dimension_status}'
             attrs:
               operation: embedding_summary
               embed.batches_total:

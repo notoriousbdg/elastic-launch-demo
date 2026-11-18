@@ -3,62 +3,110 @@ subsystem: commerce
 vehicle_section: catalog_system
 error_type: CATALOG_SYNC_FAILURE
 sensor_type: catalog_sync
-affected_services:
-- digital-marketplace
-- card-printing-system
-cascade_services:
-- auction-engine
 description: Product catalog replication between marketplace and printing system failing
+affected_services: [digital-marketplace, card-printing-system]
+cascade_services: [auction-engine]
 investigation_notes: |-
-  1. Check the catalog_replicator logs for the specific error detail — 'schema version mismatch' means a migration ran on one side but not the other — if a migration (for example schema v5.3.0) is still pending on the source, that is the cause.
-  2. For 'primary key conflict on sku column', identify the duplicate SKUs: `SELECT sku, COUNT(*) FROM products GROUP BY sku HAVING COUNT(*) > 1`.
-  3. 'Connection reset by peer' during sync indicates a network interruption — check network stability between the printing system and the marketplace DB inside the EKS VPC.
-  4. 'Timeout waiting for lock on products table' means a long-running transaction is holding a row lock — find it with `SELECT * FROM information_schema.innodb_trx`.
-  5. If sync has been broken for hours, do not attempt a full resync during business hours — schedule it for the maintenance window to avoid locking the catalog.
-  6. As a workaround, enable the read-only cache mode on the marketplace so users see stale-but-consistent data while the sync recovers.
+  Root cause: the catalog schema migration v5.3.0 was applied to the source ({catalog_source} products_master) in a change window (CR-3325 step 1 of 2), but the matching migration on the replica ({catalog_destination}) was never run, so the replica still has the old table layout. Every replicated batch fails with "{catalog_error_detail}": {catalog_sync_failed}/{catalog_sync_total} records rejected and the last good sync was {catalog_last_sync_min} minutes ago. Nothing is lost, the records queue at the source change rate (about 4 per second), so sync lag grows linearly, by about one second per second, and the backlog (marketplace.catalog_sync_backlog_records) grows with it. The network and database are healthy: no connection resets (marketplace.sync_connection_resets is 0), lock waits on products stay at a few ms, and the failure is an unknown column, not a timeout or a key conflict.
+  Confirm:
+    - digital-marketplace logs marketplace.catalog_sync status=ANOMALY with schema=schema-v5.3.0-migration-pending (attributes.deployment.catalog_schema_ver); marketplace.catalog_sync_lag_s rises steadily while the backlog grows by about 4 records per second
+    - the card-printing-system line "[CatalogReplicator] schema migration v5.3.0 applied to source ... replica migration ... not yet run" comes before the first CATALOG_SYNC_FAILURE, and card-printing-system reports schema=schema-v5.3.0 on its source schema line (attributes.print.catalog_schema_ver)
+    - auction-engine keeps serving cached listings while the replica is behind; the source database and the marketplace database host are otherwise healthy
+  Remediation: run the pending replica migration with opsctl run migration/catalog-schema-v5.3.0. The ALTER finishes in about 30 seconds; the replica then replays the backlog at roughly 14 records per second against 4 arriving, so lag falls over several minutes (about backlog / 10 seconds), not instantly. Do not run a full resync: the data is intact and a resync would lock the catalog.
 remediation_action: resync_catalog
-error_message: '[CatalogReplicator] CATALOG_SYNC_FAILURE: {catalog_sync_failed}/{catalog_sync_total} records failed syncing
-  {catalog_source} -> {catalog_destination}, last_sync={catalog_last_sync_min}m ago, error="{catalog_error_detail}"'
+remediation_command: |-
+  opsctl run migration/catalog-schema-v5.3.0
+error_message: '[CatalogReplicator] CATALOG_SYNC_FAILURE: batch of {catalog_sync_failed}/{catalog_sync_total} records rejected {catalog_source} -> {catalog_destination}, last_sync={catalog_last_sync_min}m ago, error="{catalog_error_detail}"'
 stack_trace: |-
   Traceback (most recent call last):
     File "/app/marketplace/sync/catalog_replicator.py", line 267, in sync_catalog
       result = await self.replicate_batch(source, dest, batch)
     File "/app/marketplace/sync/catalog_replicator.py", line 245, in replicate_batch
-      async for record in batch:
-    File "/app/marketplace/db/connector.py", line 134, in execute_batch
-      raise DBSyncError("{catalog_error_detail}")
-  marketplace.exceptions.CatalogSyncError: CATALOG_SYNC_FAILURE — {catalog_sync_failed}/{catalog_sync_total} records failed
+      await dest.executemany(INSERT_PRODUCT_SQL, rows)
+    File "/app/venv/lib/python3.11/site-packages/aiomysql/cursors.py", line 245, in executemany
+      raise OperationalError(1054, "Unknown column 'variant_code' in 'field list'")
+  marketplace.exceptions.CatalogSyncError: CATALOG_SYNC_FAILURE: {catalog_sync_failed}/{catalog_sync_total} records rejected
     Source: {catalog_source}
     Destination: {catalog_destination}
     Last successful sync: {catalog_last_sync_min} minutes ago
+    Error: {catalog_error_detail}
 correlation_attr:
   key: deployment.catalog_schema_ver
   value: schema-v5.3.0-migration-pending
 fault_params:
-  catalog_sync_failed: {randint: [50, 500]}
-  catalog_sync_total: {randint: [1000, 5000]}
+  catalog_sync_failed: 500
+  catalog_sync_total: 500
   catalog_source: card-printing-system
-  catalog_destination: {choice: [digital-marketplace, auction-engine]}
-  catalog_last_sync_min: {randint: [30, 360]}
-  catalog_error_detail:
-    choice:
-    - "schema version mismatch"
+  catalog_destination: digital-marketplace
+  catalog_last_sync_min: {randint: [2, 8]}
+  catalog_error_detail: "ERROR 1054 (42S22): Unknown column 'variant_code' in 'field list'"
 rca_clues:
   digital-marketplace:
-    marketplace.catalog_staleness_min: {randint: [30, 360]}
-    marketplace.sku_mismatch_count: {randint: [20, 500]}
     marketplace.sync_connection_resets: 0
     marketplace.products_lock_wait_ms: {randint: [1, 15]}
   card-printing-system:
-    print.catalog_version:
-      format: "v{a}.{b}.{c}"
-      a: {randint: [1, 5]}
-      b: {randint: [0, 9]}
-      c: {randint: [0, 9]}
     print.schema_migration_pending: true
   auction-engine:
-    auction.listing_sync_gap: {randint: [10, 200]}
-    auction.phantom_listings: {randint: [2, 30]}
+    auction.listing_cache_stale: true
+cascade_messages:
+  auction-engine:
+    - severity: WARN
+      message: '[ListingSync] listing refresh skipped: catalog replica {catalog_destination} is {catalog_last_sync_min}m behind {catalog_source}; serving cached listings'
+fault_scope:
+  cluster: fanatics-eks-cluster
+  workloads: [digital-marketplace, card-printing-system]
+infrastructure_events:
+  - service: card-printing-system
+    severity: INFO
+    offset_seconds: -110
+    body: '[CatalogReplicator] schema migration v5.3.0 applied to source products_master (CR-3325 step 1 of 2); replica migration for digital-marketplace not yet run'
+    attributes:
+      user.name: catalog-dba
+      change.request: CR-3325
+      operation: schema_migration
+      deployment.catalog_schema_ver: schema-v5.3.0-migration-pending
+      change.summary: 'products_master schema: v5.2.4 -> v5.3.0 (replica pending)'
+remediation_effects:
+  log_taper_seconds: 30
+  log_events:
+    - service: digital-marketplace
+      severity: INFO
+      offset_seconds: 1
+      body: '[CHG] CHANGE APPLIED opsctl run migration/catalog-schema-v5.3.0 by {actor}: schema migration v5.2.4 -> v5.3.0 started on replica digital-marketplace (ALTER TABLE products ADD COLUMN variant_code)'
+      attributes:
+        operation: change_applied
+        change.target: migration/catalog-schema-v5.3.0
+    - service: digital-marketplace
+      severity: INFO
+      offset_seconds: 30
+      body: '[CatalogReplicator] schema migration v5.3.0 applied on replica; replication resumed, replaying backlog'
+      attributes:
+        operation: schema_migration
+        deployment.catalog_schema_ver: schema-v5.3.0
+  verification:
+    - signal: marketplace.catalog_sync_lag_s
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "digital-marketplace"'
+      field: 'metrics.marketplace.catalog_sync_lag_s'
+      expect: 'stops growing after the migration (about 30s), then falls over several minutes to under 30s (was rising about 1s per second)'
+      within_seconds: 600
+    - signal: marketplace.catalog_sync_backlog_records
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "digital-marketplace"'
+      field: 'metrics.marketplace.catalog_sync_backlog_records'
+      expect: 'drains to 0 (the replay is faster than new changes arrive)'
+      within_seconds: 600
+    - signal: CATALOG_SYNC_FAILURE lines
+      from: 'logs.otel.fanatics'
+      where: 'body.text LIKE "*CATALOG_SYNC_FAILURE*"'
+      expect: '0 new lines once the migration has applied (about 30s)'
+      within_seconds: 120
+    - signal: replica catalog schema
+      from: 'logs.otel.fanatics'
+      where: 'resource.attributes.service.name == "digital-marketplace"'
+      field: 'attributes.deployment.catalog_schema_ver'
+      expect: 'schema-v5.3.0 on every sync line logged since the migration; schema-v5.3.0-migration-pending stops appearing'
+      within_seconds: 120
 business_impact:
   - kpi: business.page_views_per_min
     value: {uniform: [66960.0, 77040.0]}
@@ -68,3 +116,5 @@ business_impact:
     factor: {uniform: [0.3, 0.6]}
   - kpi: business.churn_risk_index_0_100
     factor: {uniform: [1.5, 3.5]}
+# dependents degrade after the component at fault, in dependency order
+service_lag_seconds: {card-printing-system: 60, auction-engine: 150}

@@ -52,26 +52,18 @@ steps:
 - sample:
     fr:
       choice: FORWARDING_RULES
+    s16:
+      expr: "min(1.0, elapsed.get(16, 0) / 30.0) if 16 in all_active else (1.0 - min(1.0, since_fix.get(16, 0) / 120.0) if 16 in fixed_channels else 0.0)"
     requests_per_sec:
-      randint:
-      - 5000
-      - 25000
+      expr: round(max(15000, min(21000, rand.gauss(18000, 700))))
     latency_p50:
-      uniform:
-      - 5.0
-      - 25.0
+      gauss: [12.0, 1.5]
+      clamp: [5.0, 25.0]
       round: 1
+    p99_base:
+      expr: max(50.0, min(200.0, rand.gauss(110.0, 12.0)))
     latency_p99:
-      if_active:
-        uniform:
-        - 500.0
-        - 3000.0
-        round: 1
-      else:
-        uniform:
-        - 50.0
-        - 200.0
-        round: 1
+      expr: round(p99_base + (max(500.0, min(3000.0, rand.gauss(1200.0, 300.0))) - p99_base) * s16, 1)
 - metric:
     name: lb.requests_per_sec
     value:
@@ -104,15 +96,11 @@ steps:
     bs:
       choice: BACKEND_SERVICES
     total_backends:
-      randint:
-      - 6
-      - 12
-- sample:
+      expr: "10 if bs == 'gcpnet-bs-web' else rand.randint(6, 12)"
     healthy:
-      if_active:
-        expr: rand.randint(1, max(1, total_backends - 2))
-      else:
-        var: total_backends
+      expr: "total_backends - round(4 * s16) if bs == 'gcpnet-bs-web' else total_backends"
+    bs_status:
+      expr: "'ANOMALY' if healthy < total_backends else 'OK'"
 - metric:
     name: lb.backends_healthy
     value:
@@ -125,7 +113,7 @@ steps:
     unit: instances
 - log:
     level: INFO
-    message: 'cloud-lb: backend_service={bs} healthy={healthy}/{total_backends} health_check=hc-http-8080 protocol=HTTP2'
+    message: 'cloud-lb: backend_service={bs} healthy={healthy}/{total_backends} health_check=hc-http-8080 protocol=HTTP2 status={bs_status}'
     attrs:
       operation: backend_health
       lb.backend_service:
@@ -134,15 +122,85 @@ steps:
         var: healthy
       lb.total_backends:
         var: total_backends
+      lb.backend_status:
+        var: bs_status
 - sample:
+    web_healthy:
+      expr: "10 - round(4 * s16)"
+    web_status:
+      expr: "'ANOMALY' if 16 in all_active or web_healthy < 10 else 'OK'"
+    web_template:
+      expr: "'web-frontend-v3-8-0' if 16 in all_active else 'web-frontend-v3-7-4'"
+    cpu_base:
+      expr: max(45.0, min(65.0, rand.gauss(55.0, 4.0)))
+    web_cpu:
+      expr: round(cpu_base + (rand.uniform(92.0, 99.0) - cpu_base) * s16, 1)
+- metric:
+    name: lb.healthy_backends
+    value:
+      var: web_healthy
+    unit: instances
+- metric:
+    name: lb.backend_cpu_max_pct
+    value:
+      var: web_cpu
+    unit: '%'
+- when: "web_status == 'OK'"
+  log:
+    level: INFO
+    message: 'cloud-lb: mig=gcpnet-web-mig region=us-central1 backend_service=gcpnet-bs-web healthy={web_healthy}/10 instance_template={web_template} backend_cpu_max={web_cpu}% health_check=hc-http-8080 status={web_status}'
+    attrs: &web_mig_attrs
+      operation: backend_health
+      lb.backend_service: gcpnet-bs-web
+      lb.mig: gcpnet-web-mig
+      lb.healthy_backends:
+        var: web_healthy
+      lb.total_backends: 10
+      lb.instance_template:
+        var: web_template
+      lb.backend_cpu_pct:
+        var: web_cpu
+      lb.backend_status:
+        var: web_status
+- when: "web_status != 'OK'"
+  log:
+    level: WARN
+    message: 'cloud-lb: mig=gcpnet-web-mig region=us-central1 backend_service=gcpnet-bs-web healthy={web_healthy}/10 instance_template={web_template} backend_cpu_max={web_cpu}% health_check=hc-http-8080 status={web_status}'
+    attrs: *web_mig_attrs
+- sample:
+    ssl_new_ip:
+      expr: "'34.149.212.91'"
+    ssl_old_ip:
+      expr: "'34.120.173.58'"
+    t17:
+      expr: "since_fix.get(17, 0) if 17 in fixed_channels else 0"
+    s17:
+      expr: "min(1.0, elapsed.get(17, 0) / 20.0) if 17 in all_active else (1.0 if 17 in fixed_channels and t17 < 180 else 0.0)"
+    cw17:
+      expr: "s17 if 17 in all_active or t17 < 180 else (1.0 - min(1.0, (t17 - 180) / 60.0) if 17 in fixed_channels else 0.0)"
+    cert_status:
+      expr: "'PROVISIONING' if 17 in all_active or (17 in fixed_channels and t17 < 180) else 'ACTIVE'"
+    domain_status:
+      expr: "'FAILED_NOT_VISIBLE' if 17 in all_active or (17 in fixed_channels and t17 < 30) else ('PROVISIONING' if 17 in fixed_channels and t17 < 180 else 'ACTIVE')"
+    dns_a:
+      expr: "ssl_old_ip if 17 in all_active or (17 in fixed_channels and t17 < 30) else ssl_new_ip"
+    cert_active:
+      expr: "0 if cert_status != 'ACTIVE' else 1"
+    hs_base:
+      expr: max(0, min(2, round(rand.gauss(0.6, 0.7))))
+    hs_fault:
+      expr: max(300, min(1500, round(rand.gauss(900, 220))))
+    handshake_fail:
+      expr: "round(hs_base + (hs_fault - hs_base) * s17)"
+    cert_health:
+      expr: "'OK' if cert_status == 'ACTIVE' else 'ANOMALY'"
+    conn_base:
+      expr: round(max(2000, min(10000, rand.gauss(6000, 300))))
     ssl_connections:
-      randint:
-      - 2000
-      - 10000
+      expr: round(conn_base * (1.0 - 0.65 * cw17))
     ssl_handshake_ms:
-      uniform:
-      - 2.0
-      - 8.0
+      gauss: [5.0, 0.6]
+      clamp: [2.0, 8.0]
       round: 1
 - metric:
     name: lb.ssl_connections
@@ -154,6 +212,16 @@ steps:
     value:
       var: ssl_handshake_ms
     unit: ms
+- metric:
+    name: lb.ssl_cert_active
+    value:
+      var: cert_active
+    unit: '1'
+- metric:
+    name: lb.tls_handshake_failures
+    value:
+      var: handshake_fail
+    unit: failures
 - log:
     level: INFO
     message: 'cloud-lb: ssl_active_connections={ssl_connections} handshake_latency={ssl_handshake_ms}ms tls_version=TLS1.3'
@@ -163,18 +231,34 @@ steps:
         var: ssl_connections
       lb.ssl_handshake_ms:
         var: ssl_handshake_ms
+- when: "cert_health == 'OK'"
+  log:
+    level: INFO
+    message: 'cloud-lb: ssl_cert=gcpnet-managed-cert-02 domain=api.gcpnet.example.com managed_status={cert_status} domain_status={domain_status} dns_a_record={dns_a} handshake_failures={handshake_fail} status={cert_health}'
+    attrs: &cert_attrs
+      operation: ssl_cert_status
+      lb.ssl_cert: gcpnet-managed-cert-02
+      lb.cert_domain: api.gcpnet.example.com
+      lb.ssl_managed_status:
+        var: cert_status
+      lb.ssl_domain_status:
+        var: domain_status
+      lb.ssl_dns_a_record:
+        var: dns_a
+      lb.tls_handshake_failures:
+        var: handshake_fail
+      lb.cert_status:
+        var: cert_health
+- when: "cert_health != 'OK'"
+  log:
+    level: WARN
+    message: 'cloud-lb: ssl_cert=gcpnet-managed-cert-02 domain=api.gcpnet.example.com managed_status={cert_status} domain_status={domain_status} dns_a_record={dns_a} handshake_failures={handshake_fail} status={cert_health}'
+    attrs: *cert_attrs
 - sample:
+    err_base:
+      expr: max(0.0, min(0.5, rand.gauss(0.2, 0.08)))
     error_rate_5xx:
-      if_active:
-        uniform:
-        - 5.0
-        - 25.0
-        round: 2
-      else:
-        uniform:
-        - 0.0
-        - 0.5
-        round: 2
+      expr: round(err_base + (max(5.0, min(15.0, rand.gauss(9.0, 2.5))) - err_base) * s16, 2)
 - metric:
     name: lb.error_rate_5xx_pct
     value:

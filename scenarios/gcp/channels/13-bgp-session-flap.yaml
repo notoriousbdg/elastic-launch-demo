@@ -11,42 +11,40 @@ cascade_services:
 - cloud-nat-gateway
 description: Cloud Router BGP session repeatedly flapping on interconnect attachment
 investigation_notes: |-
-  Root cause: BGP session flapping indicates the Cloud Router is repeatedly establishing and dropping the BGP peering with the on-premises router. Common causes: MTU mismatch (VLAN attachments support 1440, 1460, 1500 or 8896-byte MTU; both sides must match), hold timer too aggressive, route advertisement exceeding peer capacity, or unstable physical link causing BFD to trigger fast failover. Diagnose:
-    gcloud compute routers describe <router> --region=<region> --format='value(bgpPeers)'
-    gcloud compute routers get-status <router> --region=<region>
-    Console > Hybrid Connectivity > Cloud Routers > <router> > BGP Sessions tab
-  Remediation: Set BFD on both sides to timers Cloud Router supports:
-    gcloud compute routers update-bgp-peer <router> --region=<region> --peer-name=<peer> --bfd-min-transmit-interval=1000 --bfd-min-receive-interval=1000 --bfd-multiplier=5
-  then align the on-premises router's BFD profile to the same values (detect multiplier 5 or higher).
-  Each BFD side times out its neighbour using the multiplier the neighbour advertises. Cloud Router's own multiplier is 5-16 (default 5), so a peer BFD detect multiplier of 2 at 1000 ms means Cloud Router drops the session after only two lost BFD packets, and brief packet loss on the attachment flaps BGP. A peer multiplier of 2 with BFD Status DOWN, peer MTU 1440, the default 60s hold timer and fewer than 100 advertised routes points to the over-aggressive peer BFD multiplier. Disable BFD temporarily to confirm if physical link instability is the trigger. Verify peer ASN and IP configuration match on both sides. Reduce advertised routes with custom route advertisements to stay under peer import limits.
+  Root cause: change onprem-bfd-multiplier-2 set the on-premises router's BFD detect multiplier to 2 (the peer is not a Google-managed device and Cloud Router cannot change it) for BGP peer onprem-peer-1 ({bgp_peer_ip}, AS{bgp_peer_asn}) on {cloud_router}. BFD detection time on the Cloud Router side is the peer's multiplier times the negotiated interval, here 2 x 1000 ms, so two lost BFD packets (ordinary packet loss on the attachment) tear the BGP session down and it re-establishes, over and over ({bgp_flap_count} flaps in {bgp_flap_window}s, state {bgp_state}, advertised_routes {bgp_advertised_routes}). The physical link is healthy (rx light about -2.5 dBm, link_up 1 on gcpnet-interconnect-primary, so this is not the optic fault), the hold timer is the default 60s, and the peer MTU of 1440 matches the attachment, which rules out an MTU mismatch, a hold-timer problem and route-limit overflow (fewer than 100 routes).
+  Confirm:
+    - cloud-interconnect metrics.bgp.session_flaps rises from 0 to 5-30 per 10 minutes; metrics.bgp.session_uptime_s keeps resetting to under 90 seconds
+    - cloud-router log "bgp_check" attributes.bgp.peer_bfd_multiplier = 2 and attributes.bgp.bfd_min_rx_interval_ms = 1000 (bgp.peer_name onprem-peer-1) with attributes.bgp.status ANOMALY; the cause event onprem-bfd-multiplier-2 precedes the first flap
+    - metrics.interconnect.link_up stays 1 and interconnect.rx_light_dbm stays near -2.5 dBm while the session flaps
+  Remediation: the Cloud Router side can stretch the negotiated interval, which stretches the detection time of the peer's multiplier of 2. Raise the Cloud Router BFD min receive and transmit intervals for the peer from 1000 ms to 5000 ms: opsctl patch bgp-peer/onprem-peer-1 --router {cloud_router} --region us-central1 --bfd-min-transmit-interval 5000 --bfd-min-receive-interval 5000. Detection time becomes 2 x 5000 ms = 10 s, the session re-establishes and stays up (uptime grows without resets). Disabling BFD would hide the problem rather than fix it. Follow-up for netops-onprem: restore their multiplier to 5 (the peer still shows peer_bfd_multiplier=2 after this change, which is expected).
 remediation_action: restart_bgp_session
+remediation_command: |-
+  opsctl patch bgp-peer/onprem-peer-1 --router gcpnet-router-central1 --region us-central1 --bfd-min-transmit-interval 5000 --bfd-min-receive-interval 5000
 error_message: '[CloudRouter] INTERCONNECT-BGP-FLAP router={cloud_router} peer={bgp_peer_ip} peer_asn={bgp_peer_asn} flaps={bgp_flap_count}
-  window={bgp_flap_window}s state={bgp_state} advertised_routes={bgp_advertised_routes}'
+  window={bgp_flap_window}s state={bgp_state} advertised_routes={bgp_advertised_routes} peer_bfd_multiplier=2 bfd_min_rx_interval=1000ms'
 stack_trace: |-
   Cloud Router BGP Session Report
   ----------------------------------
   Router:            {cloud_router}
+  Peer:              onprem-peer-1
   Peer IP:           {bgp_peer_ip}
   Peer ASN:          {bgp_peer_asn}
   Flap Count:        {bgp_flap_count} in {bgp_flap_window}s
   Current State:     {bgp_state}
   Advertised Routes: {bgp_advertised_routes}
-  BFD Status:        DOWN
-  Action: Check peer configuration and physical link
+  BFD Status:        DOWN (peer detect multiplier 2, interval 1000ms, detection time 2s)
+  Action: Raise the Cloud Router BFD min receive/transmit interval (and have on-prem restore a multiplier of 5)
 correlation_attr:
   key: network.bgp_timer_profile
   value: onprem-bfd-multiplier-2
 fault_params:
-  cloud_router: {choice: [gcpnet-router-central1, gcpnet-router-east1, gcpnet-router-europe1]}
-  bgp_peer_ip:
-    format: "169.254.{a}.{b}"
-    a: {randint: [0, 255]}
-    b: {randint: [1, 254]}
-  bgp_peer_asn: {choice: [65001, 65010, 65020, 65100]}
-  bgp_flap_count: {randint: [5, 30]}
-  bgp_flap_window: {randint: [60, 600]}
-  bgp_state: {choice: [IDLE, ACTIVE, CONNECT, OPEN_SENT]}
-  bgp_advertised_routes: {randint: [0, 50]}
+  cloud_router: gcpnet-router-central1
+  bgp_peer_ip: 169.254.21.1
+  bgp_peer_asn: 65010
+  bgp_flap_count: 18
+  bgp_flap_window: 600
+  bgp_state: ACTIVE
+  bgp_advertised_routes: 0
 rca_clues:
   cloud-interconnect:
     interconnect.bgp_hold_timer: 60
@@ -62,6 +60,69 @@ rca_clues:
     vpc.stale_routes: {randint: [5, 20]}
   cloud-nat-gateway:
     nat.outbound_path_flapping: true
+cascade_messages:
+  cloud-nat-gateway:
+    - severity: WARN
+      message: 'cloud-nat: outbound path to on-prem prefixes learned from {cloud_router} keeps changing, new connections to on-prem may take the backup route'
+  vpc-network-manager:
+    - severity: WARN
+      message: 'vpc-network-manager: routes learned from {cloud_router} peer {bgp_peer_ip} withdrawn and re-learned, route table oscillating'
+fault_scope:
+  cluster: gcpnet-gke-europe1
+  workloads: [cloud-interconnect]
+infrastructure_events:
+  - service: cloud-interconnect
+    severity: INFO
+    offset_seconds: -90
+    body: 'cloud-router: peer {bgp_peer_ip} (onprem-peer-1) peer BFD profile changed by netops-onprem (change onprem-bfd-multiplier-2): detect multiplier 5 -> 2, interval 1000ms'
+    attributes:
+      user.name: netops-onprem
+      change.request: onprem-bfd-multiplier-2
+      operation: bfd_profile_change
+      network.bgp_timer_profile: onprem-bfd-multiplier-2
+      change.summary: 'onprem-peer-1 BFD multiplier: 5 -> 2'
+# dependents see the flapping routes after Cloud Router, nearest first
+service_lag_seconds: {cloud-vpn-gateway: 30, vpc-network-manager: 50, cloud-nat-gateway: 80}
+remediation_effects:
+  transition_seconds: 90
+  log_events:
+    - service: vpc-network-manager
+      severity: INFO
+      offset_seconds: 2
+      body: 'gcp-audit: logName=cloudaudit.googleapis.com/activity serviceName=compute.googleapis.com methodName=v1.compute.routers.patch resourceName=projects/gcpnet-prod-001/regions/us-central1/routers/gcpnet-router-central1 principalEmail={actor} status=OK'
+      attributes:
+        operation: command
+        command.target: bgp-peer/onprem-peer-1
+    - service: cloud-interconnect
+      severity: INFO
+      offset_seconds: 10
+      body: 'cloud-router: router=gcpnet-router-central1 peer=169.254.21.1 BFD min receive/transmit interval 5000ms applied, session ESTABLISHED'
+      attributes:
+        operation: bfd_profile_change
+        bgp.bfd_min_rx_interval_ms: 5000
+  steady_attributes:
+    cloud-interconnect:
+      bgp.bfd_min_rx_interval_ms: 5000
+  log_taper_seconds: 60
+  verification:
+    - signal: bgp.session_flaps
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "cloud-interconnect"'
+      field: 'metrics.bgp.session_flaps'
+      expect: '0 (was 5-30 per 10 minutes)'
+      within_seconds: 120
+    - signal: bgp.session_uptime_s
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "cloud-interconnect"'
+      field: 'metrics.bgp.session_uptime_s'
+      expect: 'grows monotonically without resets (was resetting to under 90 s)'
+      within_seconds: 120
+    - signal: BFD min receive interval
+      from: 'logs.otel.gcpnet'
+      where: 'resource.attributes.service.name == "cloud-interconnect" AND attributes.bgp.peer_name == "onprem-peer-1"'
+      field: 'attributes.bgp.bfd_min_rx_interval_ms'
+      expect: '5000 on every line logged since the fix (was 1000)'
+      within_seconds: 120
 business_impact:
   - kpi: business.interconnect_utilization_pct
     value: {uniform: [8.18, 9.42], round: 2}

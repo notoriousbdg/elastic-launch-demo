@@ -3,23 +3,22 @@ subsystem: cloud_ops
 vehicle_section: asset_management
 error_type: CLOUD-ORPHANED-RESOURCE
 sensor_type: cloud_asset
-affected_services:
-- cloud-inventory-scanner
-- network-controller
-cascade_services:
-- firewall-gateway
 description: Cloud resources detected without owner tags or associated workloads
+affected_services: [cloud-inventory-scanner, network-controller]
+error_services: [cloud-inventory-scanner]
+cascade_services: [firewall-gateway]
 investigation_notes: |-
-  1. Query the cloud-inventory-scanner report for full orphan details: resource type, region, age, and daily cost.
-  2. Cross-reference the resource ID with Terraform state: `terraform state list | grep <resource_id>` — if present, the tag was stripped by a manual edit; here it is absent, so the resource was created outside Terraform while the tag policy was unenforced.
-  3. Check CloudTrail/Activity Log/Audit Log for who created the resource: `aws cloudtrail lookup-events --lookup-attributes AttributeKey=ResourceName,AttributeValue=<id>`.
-  4. If the resource has no security group rules allowing inbound traffic and no associated ENI/NIC, it is likely safe to terminate.
-  5. For resources older than 30 days with no owner, follow the governance runbook: tag as `pending-termination`, notify via Slack, terminate after 7-day grace.
-  6. Prevent recurrence by enforcing AWS SCP / Azure Policy / GCP Organization Policy that denies resource creation without required `owner` and `team` tags.
+  Root cause: the organization tag policy was changed to org-policy-v2.4.0 with enforcement switched off (mode=audit, deny disabled) in a governance release (CR-3340). Since then resources created without owner and cost-center tags are no longer denied at creation, so untagged resources accumulate slowly across AWS, GCP and Azure, about 3 new ones per minute (cloud_inventory.untagged_resources; for example {cloud_resource_type} {cloud_resource_id} in {cloud_resource_region}, {cloud_resource_age_days} days old at ${cloud_resource_cost_daily}/day). The daily cost of the orphans (cloud_inventory.orphan_daily_cost_usd) rises in proportion, about $21 per resource. They were created outside Terraform (cloud_scan.in_terraform_state is false), so this is not a stripped tag on managed infrastructure, and the previous policy version enforced the rule. The scanner, the cloud APIs and the VPN tunnels are healthy.
+  Confirm:
+    - cloud-inventory-scanner logs "custodian.policy: policy:require-cost-center ... mode:audit version:org-policy-v2.4.0-unenforced ... status:ANOMALY" (attributes.infra.cloud_policy_ver, attributes.governance.policy_mode) and cloud_scan.tag_policy_enforced is false
+    - the cloud-inventory-scanner line "[Governance] org tag policy require-cost-center updated v2.3.2 -> v2.4.0 (mode=audit ...)" comes before the first CLOUD-ORPHANED-RESOURCE
+    - cloud_inventory.untagged_created_total climbs steadily on all three providers at once (cloud_inventory.aws.orphaned_count, cloud_inventory.gcp.orphaned_count and cloud_inventory.azure.orphaned_count), which points at the policy, not at one team or account
+  Remediation: enforce the policy again and clean up the orphans: opsctl apply policy/require-cost-center --mode enforce, then opsctl run job/orphan-cleanup. Enforcement stops the growth immediately. The cleanup job starts a few seconds later and removes orphans at about 12 per minute, so the count falls over a few minutes back to the 2 legacy exemptions, and the cost falls with it. cloud_inventory.orphans_removed_total only ever increases.
 remediation_action: tag_or_terminate_resource
-error_message: cloud-governance CLOUD-ORPHANED-RESOURCE resource_type={cloud_resource_type} resource_id={cloud_resource_id}
-  provider={cloud_resource_provider} region={cloud_resource_region} age_days={cloud_resource_age_days} cost=${cloud_resource_cost_daily}/day
-  security_group={cloud_resource_sg} owner=NONE
+remediation_command: |-
+  opsctl apply policy/require-cost-center --mode enforce
+  opsctl run job/orphan-cleanup
+error_message: 'custodian.policy: CLOUD-ORPHANED-RESOURCE policy:require-cost-center resource:{cloud_resource_type} id:{cloud_resource_id} provider:{cloud_resource_provider} region:{cloud_resource_region} age_days:{cloud_resource_age_days} cost_usd_per_day:{cloud_resource_cost_daily} security_group:{cloud_resource_sg} owner:NONE'
 stack_trace: |-
   Cloud Governance Scan Report
   -----------------------------
@@ -30,9 +29,9 @@ stack_trace: |-
   Daily Cost:     ${cloud_resource_cost_daily}
   Security Group: {cloud_resource_sg}
   Owner Tag:      MISSING
-  Team Tag:       MISSING
-  Compliance:     FAIL — no owner tag after 14-day grace period
-  Action:         Schedule for termination review
+  Cost-Center Tag: MISSING
+  Policy:         require-cost-center (mode=audit, deny disabled)
+  Action:         none taken in audit mode
 correlation_attr:
   key: infra.cloud_policy_ver
   value: org-policy-v2.4.0-unenforced
@@ -48,16 +47,88 @@ fault_params:
   cloud_resource_sg: sg-0abc1234
 rca_clues:
   cloud-inventory-scanner:
-    cloud_scan.orphan_daily_cost_usd: {uniform: [50, 2000], round: 2}
-    cloud_scan.oldest_orphan_days: {randint: [14, 180]}
     cloud_scan.in_terraform_state: false
     cloud_scan.tag_policy_enforced: false
   network-controller:
-    network.orphan_security_group_rules: {randint: [5, 50]}
-    network.untagged_eni_count: {randint: [3, 30]}
+    network.untagged_eni_attached: true
   firewall-gateway:
-    firewall.orphan_nat_rules: {randint: [2, 20]}
-    firewall.stale_address_objects: {randint: [10, 100]}
+    firewall.stale_address_objects_present: true
+cascade_messages:
+  network-controller:
+    - severity: WARN
+      message: '[NetController] inventory: security group {cloud_resource_sg} attached to untagged {cloud_resource_type} {cloud_resource_id}; no owner on record for change review'
+  firewall-gateway:
+    - severity: WARN
+      message: '1,{iso_now},007200001234,SYSTEM,general,0,addr-object-audit,address object for {cloud_resource_id} has no owner tag; NAT rule retained'
+fault_scope:
+  cluster: fanatics-gke-cluster
+  workloads: [cloud-inventory-scanner, network-controller]
+infrastructure_events:
+  - service: cloud-inventory-scanner
+    severity: INFO
+    offset_seconds: -120
+    body: '[Governance] org tag policy require-cost-center updated v2.3.2 -> v2.4.0 (mode=audit, deny on missing tags disabled) by cloud-governance (CR-3340)'
+    attributes:
+      user.name: cloud-governance
+      change.request: CR-3340
+      operation: policy_change
+      infra.cloud_policy_ver: org-policy-v2.4.0-unenforced
+      governance.policy_mode: audit
+      change.summary: 'tag policy: v2.3.2 (enforce) -> v2.4.0 (audit)'
+remediation_effects:
+  log_events:
+    - service: cloud-inventory-scanner
+      severity: INFO
+      offset_seconds: 1
+      body: '[CHG] CHANGE APPLIED opsctl apply policy/require-cost-center --mode enforce by {actor}: tag policy require-cost-center set to enforce (deny on missing owner and cost-center tags)'
+      attributes:
+        operation: change_applied
+        change.target: policy/require-cost-center
+    - service: cloud-inventory-scanner
+      severity: INFO
+      offset_seconds: 2
+      body: '[CHG] CHANGE APPLIED opsctl run job/orphan-cleanup by {actor}: orphan-cleanup job started for aws, gcp and azure'
+      attributes:
+        operation: change_applied
+        change.target: job/orphan-cleanup
+    - service: cloud-inventory-scanner
+      severity: INFO
+      offset_seconds: 5
+      body: 'custodian.policy: policy:require-cost-center mode:enforce version:org-policy-v2.4.0 deny on missing owner and cost-center tags active'
+      attributes:
+        operation: policy_change
+        infra.cloud_policy_ver: org-policy-v2.4.0
+        governance.policy_mode: enforce
+  verification:
+    - signal: cloud_inventory.untagged_resources
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "cloud-inventory-scanner"'
+      field: 'metrics.cloud_inventory.untagged_resources'
+      expect: 'stops rising at once, then falls over a few minutes to under 5 (was rising about 3 per minute)'
+      within_seconds: 420
+    - signal: cloud_inventory.orphan_daily_cost_usd
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "cloud-inventory-scanner"'
+      field: 'metrics.cloud_inventory.orphan_daily_cost_usd'
+      expect: 'falls with the orphan count to under $100 per day (about $21 per untagged resource)'
+      within_seconds: 420
+    - signal: cloud_inventory.orphans_removed_total
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "cloud-inventory-scanner"'
+      field: 'metrics.cloud_inventory.orphans_removed_total'
+      expect: 'a cumulative counter: it increases while the cleanup runs and never falls'
+      within_seconds: 420
+    - signal: CLOUD-ORPHANED-RESOURCE lines
+      from: 'logs.otel.fanatics'
+      where: 'body.text LIKE "*CLOUD-ORPHANED-RESOURCE*"'
+      expect: '0 new lines'
+      within_seconds: 120
+    - signal: tag policy version
+      from: 'logs.otel.fanatics'
+      where: 'resource.attributes.service.name == "cloud-inventory-scanner"'
+      field: 'attributes.infra.cloud_policy_ver'
+      expect: 'org-policy-v2.4.0 on every policy line logged since the fix; org-policy-v2.4.0-unenforced stops appearing'
+      within_seconds: 120
 business_impact:
   - kpi: business.api_data_partner_revenue_usd_per_min
     value: {uniform: [2232.0, 2568.0], round: 1}
@@ -65,3 +136,5 @@ business_impact:
     value: {uniform: [51382.0, 59118.0], round: 1}
   - kpi: business.sponsored_inventory_seconds_per_min
     value: {uniform: [148.8, 171.2]}
+# dependents degrade after the component at fault, in dependency order
+service_lag_seconds: {network-controller: 60, firewall-gateway: 120}

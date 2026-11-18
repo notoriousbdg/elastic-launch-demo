@@ -9,59 +9,119 @@ affected_services:
 cascade_services:
 - member-portal
 - auth-gateway
-description: Wire transfer held due to OFAC SDN list match requiring manual BSA review
+description: Outgoing wires are held for sanctions review at many times the normal rate because the name-matching threshold of the wire screening policy was lowered.
 investigation_notes: |-
-  1. Review the OFAC match score and algorithm — JARO_WINKLER scores above 85% require BSA officer review within 24 hours per bank policy. Scores 75-85% may be false positives from common name patterns.
-  2. Check the SDN list version — if the match is against a recently added entry, verify the member's identity against the actual SDN record. Military members with common names frequently trigger false matches.
-  3. Wire destination analysis: PCS_RELOCATION and DEPLOYMENT_EXPENSE purposes to allied nations (DE, JP, KR, GB) are typically legitimate. Cross-reference with member's duty station assignment orders.
-  4. BSA/AML compliance requirements: Evaluate SAR filing (due within 30 calendar days of detection; 24h is the internal review SLA). CTRs apply only to cash over $10K, so none applies to a wire; if the wire is blocked or rejected, file the OFAC blocked/rejected report within 10 business days. Check for open 314(a) requests from FinCEN (314(b) is voluntary sharing between institutions).
-  5. Do NOT release the wire without BSA officer sign-off — OFAC violations carry strict-liability civil penalties (under IEEPA, the greater of about $377K per violation or twice the transaction value). Escalate to BSA team: bsa-review@bankops.internal with wire reference number.
-remediation_action: escalate_bsa_review
-error_message: '[PAY] PAY-OFAC-BLOCK: wire={wire_id} amount=${wire_amount} member={member_id} match_score={ofac_score} list={ofac_list}'
+  1. Search logs.otel.banking for body.text containing PAY-OFAC-BLOCK on payment-engine: wire={wire_id} for ${wire_amount} held with match_score={ofac_score} against list={ofac_list}. One hold is routine; the incident is the rate. metrics.payment_engine.wire_ofac_hold_pct normally reads 0.2-0.6% of outgoing wires and is now 14-22%, and metrics.fraud_sentinel.screening_alerts_per_min has risen from 1-4 to 60-110.
+  2. Read the held scores: they sit between the new threshold and the old one (0.85-0.91 Jaro-Winkler), on common name patterns, and the beneficiaries are ordinary PCS and family-support destinations. That is a tuning change, not new sanctioned parties.
+  3. Find the change: the sanctions_screening status line on fraud-sentinel carries attributes.screening.match_threshold and attributes.screening.policy_rev. Policy ofac-wire-screening rev-42 lowered the threshold from 0.92 to 0.85 just before the first hold. attributes.screening.sdn_list_version did not change, which rules out a new SDN delta as the cause.
+  4. Do not release held wires to clear the queue: every hold needs an analyst disposition, and releasing a true match is a strict-liability OFAC violation. The held wires stay in the BSA review queue after the fix.
+  5. Fix the policy: opsctl rollback screening-policy/ofac-wire-screening -n fraud --to-revision previous restores rev-41 (threshold 0.92). The change is pre-approved by BSA under the tuning change record; new wires are screened against the restored threshold immediately, and the hold rate falls back as the one-minute window rolls over.
+  6. Recovery: screening.match_threshold reads 0.92 on the screening lines, wire_ofac_hold_pct back under 1%, screening_alerts_per_min back to a few per minute, and no new PAY-OFAC-BLOCK lines. Give BSA the list of wires held during the window so they can be dispositioned first.
+remediation_action: rollback_screening_policy
+remediation_command: |-
+  opsctl rollback screening-policy/ofac-wire-screening -n fraud --to-revision previous
+error_message: '[PAY] PAY-OFAC-BLOCK: wire={wire_id} amount=${wire_amount} member={member_id} match_score={ofac_score} list={ofac_list} threshold=0.85 policy_rev=rev-42'
 stack_trace: |-
   === OFAC SCREENING RESULT ===
   wire={wire_id}  member={member_id}  amount=${wire_amount}
   --- SDN LIST MATCH ---
-    list={ofac_list}  match_score={ofac_score}%
-    match_type=NAME_SIMILARITY  algorithm=JARO_WINKLER
+    list={ofac_list}  sdn_list_version=sdn-2026-11-14  match_score={ofac_score}
+    match_type=NAME_SIMILARITY  algorithm=JARO_WINKLER  threshold=0.85 (policy ofac-wire-screening rev-42)
     member_name='{member_name}'  sdn_entry='{ofac_match_name}'
-    country={wire_country}  program=SDGT
+    country={wire_country}
   --- WIRE DETAILS ---
-    originator=RETAIL_BANK_FSB  beneficiary_bank={beneficiary_bank}
-    swift_code={swift_code}  purpose={wire_purpose}
-    fedwire_ref=FW{wire_id}
-  --- BSA REQUIREMENTS ---
-    sar_filing=PENDING  ctr_threshold=false  314b_request=false
-    bsa_officer_review=REQUIRED  sla_hours=24
+    beneficiary_bank={beneficiary_bank}  swift_code={swift_code}  purpose={wire_purpose}
+  --- BSA ---
+    disposition=PENDING_ANALYST  sla_hours=24
   ACTION: hold_wire=true  escalate_bsa=true  alert=PAY-OFAC-BLOCK
 correlation_attr:
-  key: infra.ofac_sdn_list_version
-  value: sdn-2026-02-15-delta
+  key: screening.policy_rev
+  value: rev-42
 fault_params:
   wire_id: {format: "WR-{n}", n: {randint: [100000, 999999]}}
   wire_amount: {uniform: [1000.0, 100000.0], round: 2}
-  member_id: {format: "{p}-{n}", p: {choice: [M, MBR, USR]}, n: {randint: [1000000, 9999999]}}
-  ofac_score: {uniform: [86.0, 98.0], round: 1}
-  ofac_list: {choice: [SDN, CONSOLIDATED, SSI, FSE]}
-  member_name: {choice: [Mohammed Rashid, Mohamed Al Rashid, Muhammad Rashid]}
-  ofac_match_name: {choice: ["AL-RASHID, Mohammed", "RASHID, Mohamed Ali"]}
-  wire_country: {choice: [AE, DE, JP, KR, GB, IT]}
-  beneficiary_bank: {choice: [Deutsche Bank, Barclays, MUFG Bank, Kookmin Bank, Emirates NBD, UniCredit]}
-  swift_code: {choice: [DEUTDEFF, BARCGB22, BOTKJPJT, CZNBKRSE, EBILAEAD, UNCRITMM]}
-  wire_purpose: {choice: [PCS_RELOCATION, FAMILY_SUPPORT, DEPLOYMENT_EXPENSE, EDUCATION, REAL_ESTATE]}
+  member_id: {format: "{p}-{n}", p: {choice: [M, MBR]}, n: {randint: [1000000, 9999999]}}
+  ofac_score: {uniform: [0.85, 0.91], round: 3}
+  ofac_list: SDN
+  member_name: {choice: [Mohammed Rashid, Jose Hernandez, Ali Hassan, Maria Gonzalez, David Lee, Omar Khan]}
+  ofac_match_name: {choice: ["AL-RASHID, Mohammed", "HERNANDEZ, Jose Luis", "HASSAN, Ali Ahmed", "GONZALEZ, Maria Elena", "LI, Da Wei", "KHAN, Omar Farooq"]}
+  wire_country: {choice: [DE, JP, KR, GB, IT, MX]}
+  beneficiary_bank: {choice: [Deutsche Bank, Barclays, MUFG Bank, Kookmin Bank, UniCredit, BBVA Mexico]}
+  swift_code: {choice: [DEUTDEFF, BARCGB22, BOTKJPJT, CZNBKRSE, UNCRITMM, BCMRMXMM]}
+  wire_purpose: {choice: [PCS_RELOCATION, FAMILY_SUPPORT, EDUCATION, REAL_ESTATE]}
 rca_clues:
   payment-engine:
-    payment.wire_hold_reason: OFAC_SDN_MATCH
-    payment.bsa_review_sla_hours: 24
+    payment.wire_hold_reason: OFAC_NAME_MATCH
+    screening.match_score: {uniform: [0.85, 0.91], round: 3}
   fraud-sentinel:
-    fraud.ofac_match_algorithm: JARO_WINKLER
-    fraud.match_score_pct: {uniform: [86, 98], round: 1}
+    screening.match_threshold: 0.85
+    screening.policy_rev: rev-42
+    screening.sdn_list_version: sdn-2026-11-14
   member-portal:
     portal.wire_status_display: HELD_FOR_REVIEW
-    portal.member_notification: PENDING
   auth-gateway:
-    auth.wire_authorization_level: BSA_OFFICER_REQUIRED
-    auth.dual_control_status: AWAITING_SECOND
+    auth.wire_release_requests: {randint: [20, 80]}
+error_services:
+- payment-engine
+service_lag_seconds:
+  member-portal: 30
+  auth-gateway: 60
+cascade_messages:
+  fraud-sentinel:
+  - severity: WARN
+    message: '[FRAUD] sanctions_alert wire={wire_id} list={ofac_list} score={ofac_score} threshold=0.85 policy=ofac-wire-screening rev=rev-42 disposition=PENDING_ANALYST'
+  member-portal:
+  - severity: INFO
+    message: '[PORTAL] page_view page=/payments/wires wire={wire_id} wire_status=HELD_FOR_REVIEW status=200'
+  auth-gateway:
+  - severity: INFO
+    message: '[AUTH] step_up_challenge reason=wire_status_inquiry method=mfa_totp status=VERIFIED'
+fault_scope:
+  cluster: banking-gke-cluster
+  workloads: [fraud-sentinel, payment-engine]
+infrastructure_events:
+- service: fraud-sentinel
+  severity: INFO
+  offset_seconds: -90
+  body: '[FRAUD] screening_policy_update policy=ofac-wire-screening rev-41 -> rev-42 jaro_winkler_threshold 0.92 -> 0.85 sdn_list_version=sdn-2026-11-14 approved_by=bsa-tuning change=CHG0048377 status=ACTIVE'
+  attributes:
+    operation: screening_policy_update
+    screening.policy_rev: rev-42
+    screening.match_threshold: 0.85
+    user.name: bsa-tuning
+    change.request: CHG0048377
+remediation_effects:
+  transition_seconds: 60
+  log_events:
+  - service: fraud-sentinel
+    severity: INFO
+    offset_seconds: 1
+    body: '[change-audit] change applied action=rollback target=screening-policy/ofac-wire-screening namespace=fraud cmd="opsctl rollback screening-policy/ofac-wire-screening -n fraud --to-revision previous" actor={actor} result="rev-42 -> rev-41 (threshold 0.92)"'
+    attributes:
+      operation: change_applied
+      change.target: screening-policy/ofac-wire-screening
+      screening.policy_rev: rev-41
+  steady_attributes:
+    fraud-sentinel:
+      screening.policy_rev: rev-41
+  verification:
+  - signal: payment_engine.wire_ofac_hold_pct
+    from: metrics-generic.otel-default
+    where: resource.attributes.service.name == "payment-engine"
+    field: metrics.payment_engine.wire_ofac_hold_pct
+    expect: back in 0.2-0.6% (was 14-22%)
+    within_seconds: 120
+  - signal: wire screening threshold
+    from: logs.otel.banking
+    where: resource.attributes.service.name == "fraud-sentinel" AND attributes.operation == "sanctions_screening"
+    field: attributes.screening.match_threshold
+    expect: 0.92 on every line logged since the fix; 0.85 stops appearing
+    within_seconds: 60
+  - signal: PAY-OFAC-BLOCK lines
+    from: logs.otel.banking
+    where: body.text LIKE "*PAY-OFAC-BLOCK*"
+    expect: 0 new lines
+    within_seconds: 120
 business_impact:
   - kpi: business.fee_revenue_usd_per_min
     value: {uniform: [4464.0, 5136.0], round: 1}

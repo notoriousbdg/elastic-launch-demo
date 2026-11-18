@@ -54,6 +54,12 @@ A new package under `generators/<id>/` with:
   through `generator_engine.platform_topology.effective_platform` for
   Kubernetes-shaped values or from the `fixes` / `faults` rows directly, with
   transition progress applied. Scenario Check 38 rejects undeclared keys.
+- **ops_bindings (optional):** with `state_keys`, `SPEC.ops_bindings` says how
+  applied `opsctl` commands change them: rules `{verbs, kinds, when,
+  state: {"<state_key>.<path>": "<template>"}, transition_seconds}` or a callable
+  `(scenario, cmd) -> (state, transition_seconds)` (`generators/kubernetes_otel/ops_bindings.py`).
+  Only `state_keys` may be set. A test applies a command via `app.ops.change_state`
+  and asserts the returned state. No schema bump (1.1 step 6).
 - **scope:** honour a channel's `fault_scope` (cluster, node_pool, nodes, az,
   workloads) and set `SPEC.scope_aware=True`; entities outside it stay healthy.
 - **ramps:** honour `onset_delay_seconds` / `ramp_seconds` via

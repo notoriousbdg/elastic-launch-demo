@@ -8,55 +8,130 @@ affected_services:
 cascade_services:
 - storefront-gateway
 - product-catalog
-description: Recommendation model inference process running out of heap memory, so the pod is OOMKilled and recommendations fall back to non-personalized
-  results
+description: Recommendation pods are OOMKilled every few minutes because config revision 22 set EMBEDDING_CACHE_MAX_MB to 0, which leaves the in-process embedding cache unbounded.
+onset_delay_seconds: 15
 investigation_notes: |-
-  1. Check recommendation-engine logs for RECO-ENGINE-OOM — heap_used_mb={heap_used_mb} vs heap_max_mb={heap_max_mb} gives the margin.
-  2. The model embedding cache is likely bloated — check cache_size_mb metric (a cache above 6,144MB, 60% of the 10,240MB heap, indicates cache bloat). A cold-start after a pod restart causes aggressive cache backfill.
-  3. Review the model version: v{model_version} may have a larger embedding dimension than the previous version, requiring more heap (an embedding_dim_delta of 0 against the previous version rules this out).
-  4. Check GC pause metrics — CPython generation-2 collections above 2s over the multi-GB embedding object graph indicate the memory limit is too small for current traffic; target 75% memory utilization.
-  5. Immediate mitigation: reduce batch_size from {batch_size} to half — this trades throughput for stability under memory pressure.
-  6. Scale the recommendation-engine horizontally (add pods) and reduce per-instance model cache size to distribute memory load.
+  Root cause: config reco-inference revision 22 (CR-4462, ml-infra) changed EMBEDDING_CACHE_MAX_MB from 4096 to 0. The intent was to skip the size check, but 0 means unbounded: the in-process embedding cache never evicts. Each CPython worker backfills its hot items right after start (RSS about 6,200MB) and then keeps growing by about 24MB/s until the container reaches its 10Gi cgroup memory limit (10,240MB). The kernel OOM killer ends the process (OOMKilled, exit code 137), the pod restarts cold and grows again, so RSS draws a sawtooth with a kill about every 165s; while a pod restarts, its requests fail over and recommendations fall back to trending items. This is resident memory of a Python process, not a heap or garbage-collection problem. The model is unchanged (reco.embedding_dim_delta 0, still reco-ranker-v8), traffic is flat, and the Redis result cache is healthy, which rules out a bigger model, a load spike or a cold result cache. Scaling out or raising the memory limit only delays the next kill, because each pod still grows without bound; halving the batch size does not bound the cache either.
+  Confirm:
+    - the recommendation-engine line "[reco.config] config reco-inference revision 22 applied: EMBEDDING_CACHE_MAX_MB 4096 -> 0" (attributes.change.request CR-4462) comes before the first RECO-ENGINE-OOM line
+    - metrics.recommendations.memory_rss_mb leaves its 6,150MB baseline (plus or minus 60) and climbs from about 6,200 to the 10,240MB limit about every 165s, then drops back after each kill
+    - metrics.recommendations.container_restarts goes up by one at each kill
+    - "reco.model_health" status lines show attributes.reco.embedding_cache_max_mb 0, attributes.reco.memory_utilization_pct close to 100 and status=ANOMALY
+    - storefront-gateway logs connection resets from restarting recommendation-engine pods and serves the trending fallback to {fallback_count} requests a minute; product-catalog returns featured products instead of similar items
+  Remediation: opsctl rollback config/reco-inference --to-revision previous restores EMBEDDING_CACHE_MAX_MB=4096 and restarts the pods once. Within about 60s all 6 pods run with the bounded cache, RSS levels off around 6,150-6,200MB and the restart counter stops increasing.
 remediation_action: scale_recommendation_engine
-error_message: '[RecommendationEngine] RECO-ENGINE-OOM: heap_used={heap_used_mb}MB heap_max={heap_max_mb}MB model_version=v{model_version}
-  batch_size={batch_size} cache_size={cache_size_mb}MB gc_pause_ms={gc_pause_ms}'
-stack_trace: |-
-  Traceback (most recent call last):
-    File "/app/reco/service.py", line 112, in get_recs
-      scores = self.inference.predict(batch)
-    File "/app/reco/inference.py", line 234, in predict
-      vectors = self.embedding_cache.load(item_ids)
-    File "/app/reco/embedding_cache.py", line 178, in load
-      block = np.empty((len(item_ids), self.dim), dtype=np.float32)
-  MemoryError: RECO-ENGINE-OOM: unable to allocate embedding block
-  Memory used:  {heap_used_mb}MB / {heap_max_mb}MB
-  Model:        v{model_version}
-  Batch size:   {batch_size}
-  Cache size:   {cache_size_mb}MB
-  GC pause:     {gc_pause_ms}ms
+remediation_command: |-
+  opsctl rollback config/reco-inference --to-revision previous
+error_message: '[reco.memory_guard] RECO-ENGINE-OOM pod={pod_name} rss={rss_mb}MB cgroup_limit=10240MB embedding_cache={cache_mb}MB
+  entries={cache_entries} EMBEDDING_CACHE_MAX_MB=0; previous container terminated reason=OOMKilled exit_code=137 restart_count={restart_count}'
+stack_trace: ''
 correlation_attr:
-  key: reco.engine_degraded
-  value: true
+  key: reco.embedding_cache_max_mb
+  value: 0
 fault_params:
-  heap_used_mb: {randint: [9250, 10140]}
-  heap_max_mb: 10240
-  model_version: {randint: [7, 10]}
-  batch_size: {randint: [64, 512]}
-  cache_size_mb: {randint: [6500, 8000]}
-  gc_pause_ms: {randint: [2000, 8000]}
+  pod_name: {choice: [recommendation-engine-6c9d7f5b8-2xkqp, recommendation-engine-6c9d7f5b8-7hm4t, recommendation-engine-6c9d7f5b8-b9wzn,
+      recommendation-engine-6c9d7f5b8-fq2lr, recommendation-engine-6c9d7f5b8-kd8vs, recommendation-engine-6c9d7f5b8-tn5jc]}
+  rss_mb: {randint: [9600, 10200]}
+  cache_mb: {randint: [7550, 8150]}
+  cache_entries: {randint: [1900000, 2100000]}
+  restart_count: {randint: [1, 8]}
+  fallback_count: {randint: [40, 400]}
 rca_clues:
   recommendation-engine:
-    reco.heap_utilization_pct: {uniform: [90, 99], round: 1}
-    reco.gc_pause_ms: {randint: [2000, 8000]}
-    reco.embedding_cache_mb: {randint: [6500, 8000]}
+    reco.memory_utilization_pct: {uniform: [94.0, 99.6], round: 1}
+    reco.embedding_cache_mb: {randint: [7550, 8150]}
+    reco.embedding_cache_max_mb: 0
     reco.embedding_dim_delta: 0
-    reco.serving_fallback: trending
+    k8s.container.last_terminated_reason: OOMKilled
   storefront-gateway:
     storefront.personalization_disabled: true
     storefront.generic_reco_serving: true
   product-catalog:
     catalog.reco_lookup_errors: {randint: [100, 1000]}
     catalog.featured_fallback_active: true
+cascade_messages:
+  storefront-gateway:
+    - severity: WARN
+      message: 'storefront.reco_client upstream recommendation-engine connection reset (pod {pod_name} restarting); served trending fallback
+        to {fallback_count} requests in the last minute'
+  product-catalog:
+    - severity: WARN
+      message: 'WARN [http-nio-8080-exec-14] c.e.catalog.related.RecommendationClient - GET /api/v1/recommendations/similar failed:
+        java.net.SocketException: Connection reset (pod {pod_name}); returning featured products'
+fault_scope:
+  cluster: ecommerce-gke-cluster
+  workloads: [recommendation-engine]
+infrastructure_events:
+  - service: recommendation-engine
+    severity: INFO
+    offset_seconds: -150
+    body: '[reco.config] config reco-inference revision 22 applied: EMBEDDING_CACHE_MAX_MB 4096 -> 0 (note: disable cache size check);
+      rolling restart of recommendation-engine, 6 pods; changed by ml-infra (CR-4462)'
+    attributes:
+      user.name: ml-infra
+      change.request: CR-4462
+      operation: config_change
+      config.name: reco-inference
+      config.revision: 22
+      reco.embedding_cache_max_mb: 0
+      change.summary: 'EMBEDDING_CACHE_MAX_MB: 4096 -> 0'
+remediation_effects:
+  log_taper_seconds: 45
+  log_events:
+    - service: recommendation-engine
+      severity: INFO
+      offset_seconds: 1
+      body: '[CHG] CHANGE APPLIED opsctl rollback config/reco-inference --to-revision previous by {actor}: config reco-inference revision 22 -> 21 (EMBEDDING_CACHE_MAX_MB 0 -> 4096); rolling restart of recommendation-engine'
+      attributes:
+        operation: change_applied
+        change.target: config/reco-inference
+    - service: recommendation-engine
+      severity: INFO
+      offset_seconds: 25
+      body: '[reco.config] rolling restart in progress: 3/6 pods running with EMBEDDING_CACHE_MAX_MB=4096'
+      attributes:
+        operation: config_reload
+        config.revision: 21
+        reco.embedding_cache_max_mb: 4096
+    - service: recommendation-engine
+      severity: INFO
+      offset_seconds: 55
+      body: '[reco.config] rolling restart complete: 6/6 pods running with EMBEDDING_CACHE_MAX_MB=4096'
+      attributes:
+        operation: config_reload
+        config.revision: 21
+        reco.embedding_cache_max_mb: 4096
+    - service: recommendation-engine
+      severity: INFO
+      offset_seconds: 90
+      body: '[reco.embedding_cache] cache at its 4096MB bound, LRU eviction active; RSS steady at about 6,150MB of 10,240MB on all pods'
+      attributes:
+        operation: embedding_cache
+        reco.embedding_cache_max_mb: 4096
+  verification:
+    - signal: recommendations.memory_rss_mb
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "recommendation-engine"'
+      field: 'metrics.recommendations.memory_rss_mb'
+      expect: 'no longer climbs to the 10,240MB limit; after one restart it levels off at about 6,150-6,200MB within about 60s'
+      within_seconds: 180
+    - signal: recommendations.container_restarts
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "recommendation-engine"'
+      field: 'metrics.recommendations.container_restarts'
+      expect: 'stops increasing (it went up by one at each OOM kill, about every 165s)'
+      within_seconds: 300
+    - signal: embedding cache bound
+      from: 'logs.otel.ecommerce'
+      where: 'resource.attributes.service.name == "recommendation-engine"'
+      field: 'attributes.reco.embedding_cache_max_mb'
+      expect: 'only 4096 once the restart completes (about 60s); was 0'
+      within_seconds: 120
+    - signal: RECO-ENGINE-OOM lines
+      from: 'logs.otel.ecommerce'
+      where: 'body.text LIKE "*RECO-ENGINE-OOM*"'
+      expect: 'no new lines after the rollback (they fade out within about 45s)'
+      within_seconds: 120
 business_impact:
   - kpi: business.conversion_rate_pct
     value: {uniform: [0.67, 0.77], round: 2}
@@ -71,3 +146,6 @@ generator_impact:
   kubernetes_otel:
     oomkilled_containers: 0.8
     container_memory_near_limit: 0.97
+generator_hold_seconds: {kubernetes_otel: 120}
+# dependents degrade after the component at fault, in dependency order
+service_lag_seconds: {storefront-gateway: 20, product-catalog: 30}

@@ -7,56 +7,130 @@ affected_services:
 - mes-controller
 cascade_services:
 - quality-inspector
-- ot-historian
-description: Batch genealogy records lose link between raw material lots and finished goods, breaking traceability for IATF
-  16949 / FDA 21 CFR Part 11
+description: Batches close before their raw-material consumption scans arrive, so operations lose their parent lot and the IATF 16949 / 21 CFR Part 11 genealogy is incomplete
 investigation_notes: |-
-  Root Cause: Genealogy gaps appear when the consumption event for a raw-material lot is recorded after the finished-goods batch is closed, or when a partial-substitution swap is executed without the operator scanning the new lot. The `parent_lot` foreign key on the consumption record ends up NULL for some operations. A consumption event lag above 60s after batch close confirms the late-event path; zero lot substitution events rules out an unscanned swap.
-  Remediation: 1) Identify orphan operations: `mes-admin genealogy-gaps --batch {batch_id}`. 2) Reconcile from the historian event stream: `mes-admin reconstruct-genealogy --batch {batch_id} --from-historian`. 3) Re-link orphan operations to the correct upstream lot: `mes-admin link-lot --operation {operation_id} --lot {raw_lot_id}`. 4) Revalidate completeness: `mes-admin verify-traceability --batch {batch_id}`. 5) File a quality deviation if the batch has already shipped, per IATF 16949 8.5.2.1 (traceability) and 8.7.1.6 (customer notification).
+  Root cause: config/mes-genealogy went from revision 7 to 8 shortly before the first MES-BATCH-GENEALOGY-BREAK, cutting batch_close_grace_s from 900 to 60. Lot consumption scans from the line scanners reach MES through the historian event bridge 90-300 s after the operation. With a 60 s grace the genealogy engine closes the batch first; the late consumption record finds a closed batch and its parent_lot link is never written. Operators are scanning correctly: there are no lot substitution events, and the scans are in the historian event stream with the right lot ids.
+  Confirm:
+    - mes-controller batch_genealogy lines show traceability=INCOMPLETE and close_grace_s=60 (attributes.mes.batch_close_grace_s); metric mes.batch_traceability_complete_pct falls from 100 to 70-86 and mes.genealogy_orphan_operations climbs from 0
+    - the mes-controller config_change line for config/mes-genealogy (revision 7 -> 8, CHG-7355) comes before the first genealogy break
+    - rca attribute mes.consumption_event_lag_s on the break lines is 90-300 s, longer than the 60 s grace; mes.lot_substitution_events is 0
+    - quality-inspector holds the certificate of conformance for the affected batches
+  Remediation: two steps. 1) opsctl rollback config/mes-genealogy --to-revision previous restores the 900 s grace, so new batches wait for their consumption scans. 2) opsctl run job/genealogy-reconcile re-links the orphaned operations of the batches closed under revision 8 from the historian event stream (the scans are there). Orphaned operations drop to 0 and traceability returns to 100% within about 90 s. Batches that already shipped need a quality deviation record, but no rework: the material was correct, only the link was missing.
 remediation_action: reconstruct_genealogy
-error_message: '[MES] MES-BATCH-GENEALOGY-BREAK: batch={batch_id} product={product_code} missing_links={missing_link_count}
-  compliance_risk=HIGH'
+remediation_command: |-
+  opsctl rollback config/mes-genealogy --to-revision previous
+  opsctl run job/genealogy-reconcile
+error_message: '[MES] MES-BATCH-GENEALOGY-BREAK: batch={batch_id} product={product_code} operations={linked_count} missing_parent_lot={missing_link_count} first_orphan={operation_id} closed_after_s=60 consumption_lag_s={consumption_lag_s} compliance_risk=HIGH'
 stack_trace: |-
   === BATCH GENEALOGY VERIFICATION — {batch_id} ===
-  Product: {product_code} | Linked: {linked_count} | Missing: {missing_link_count}
+  Product: {product_code} | Operations: {linked_count} | Missing parent lot: {missing_link_count}
   ------------------------------------------------------------------------
   OPERATION   | EQUIPMENT  | RAW LOT          | LINK STATUS
   ------------------------------------------------------------------------
   OP-010      | LINE-03-A  | LOT-RM-447821    | OK
   OP-020      | LINE-03-A  | LOT-RM-447821    | OK
-  OP-030      | LINE-03-B  | NULL             | MISSING
+  {operation_id}      | LINE-03-B  | NULL             | MISSING (consumption scan arrived {consumption_lag_s}s after close)
   OP-040      | LINE-03-B  | LOT-RM-{raw_lot_id}    | OK
   OP-050      | PACK-01    | NULL             | MISSING
   ------------------------------------------------------------------------
-  MES-BATCH-GENEALOGY-BREAK: {missing_link_count} operations missing parent lot — IATF 16949 risk — first orphan: {operation_id}
+  batch closed by genealogy engine after close_grace_s=60 (config/mes-genealogy rev 8)
+  MES-BATCH-GENEALOGY-BREAK: {missing_link_count} operations missing parent lot — IATF 16949 8.5.2.1 traceability gap
 correlation_attr:
-  key: deployment.mes_genealogy_engine
-  value: genealogy-v2.7.0-experimental
+  key: mes.batch_close_grace_s
+  value: '60'
 fault_params:
   batch_id:
     format: "BATCH-{n}"
     n: {randint: [100000, 999999]}
   product_code: {choice: [PRD-A100, PRD-A200, PRD-B450, PRD-B475, PRD-C901]}
-  missing_link_count: {randint: [2, 14]}
+  missing_link_count: {randint: [2, 6]}
   linked_count: {randint: [8, 12]}
   raw_lot_id:
     format: "{n}"
     n: {randint: [100000, 999999]}
   operation_id: OP-030
+  consumption_lag_s: {randint: [90, 300]}
 rca_clues:
   mes-controller:
-    mes.orphan_operations: {randint: [2, 14]}
-    mes.consumption_event_lag_s: {randint: [90, 900]}
+    mes.orphan_operations: {randint: [2, 6]}
+    mes.consumption_event_lag_s: {randint: [90, 300]}
     mes.lot_substitution_events: 0
+    mes.batch_close_grace_s: 60
   quality-inspector:
     quality.batch_under_review: true
-  ot-historian:
-    historian.consumption_event_gap: true
+cascade_messages:
+  quality-inspector:
+    - severity: WARN
+      message: '[QC] batch_release batch={batch_id} product={product_code} certificate of conformance held: genealogy INCOMPLETE ({missing_link_count} operations without parent lot)'
+fault_scope:
+  cluster: mfg-eks-cluster
+  workloads: [mes-controller]
+infrastructure_events:
+  - service: mes-controller
+    severity: INFO
+    offset_seconds: -150
+    body: '[MES] config_change config/mes-genealogy revision 7 -> 8: batch_close_grace_s 900 -> 60 (faster batch close for the end-of-shift report); applied by mes-release (CHG-7355)'
+    attributes:
+      operation: config_change
+      user.name: mes-release
+      change.request: CHG-7355
+      mes.batch_close_grace_s: 60
+      change.summary: 'config/mes-genealogy: rev 7 -> 8'
+service_lag_seconds:
+  quality-inspector: 30
+remediation_effects:
+  log_events:
+    - service: mes-controller
+      severity: INFO
+      offset_seconds: 1
+      body: '[CHG] CHANGE APPLIED opsctl rollback config/mes-genealogy --to-revision previous by {actor}: revision 8 -> 7 (batch_close_grace_s 900)'
+      attributes:
+        operation: change_applied
+        change.target: config/mes-genealogy
+    - service: mes-controller
+      severity: INFO
+      offset_seconds: 2
+      body: '[CHG] CHANGE APPLIED opsctl run job/genealogy-reconcile by {actor}: re-linking orphaned operations from the historian event stream'
+      attributes:
+        operation: change_applied
+        change.target: job/genealogy-reconcile
+    - service: mes-controller
+      severity: INFO
+      offset_seconds: 60
+      body: '[MES] genealogy_reconcile finished: batches=14 operations_relinked=37 unresolved=0; traceability COMPLETE for all open and closed batches'
+      attributes:
+        operation: genealogy_reconcile
+  steady_attributes:
+    mes-controller:
+      mes.batch_close_grace_s: 900
+  log_taper_seconds: 20
+  verification:
+    - signal: mes.genealogy_orphan_operations
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "mes-controller"'
+      field: 'metrics.mes.genealogy_orphan_operations'
+      expect: '0 (was climbing)'
+      within_seconds: 120
+    - signal: mes.batch_traceability_complete_pct
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "mes-controller"'
+      field: 'metrics.mes.batch_traceability_complete_pct'
+      expect: '100 (was 70-86)'
+      within_seconds: 120
+    - signal: MES-BATCH-GENEALOGY-BREAK lines
+      from: 'logs.otel.mfg'
+      where: 'body.text LIKE "*MES-BATCH-GENEALOGY-BREAK*"'
+      expect: '0 new lines'
+      within_seconds: 90
+    - signal: batch close grace
+      from: 'logs.otel.mfg'
+      where: 'resource.attributes.service.name == "mes-controller" AND body.text LIKE "*batch_genealogy*"'
+      field: 'attributes.mes.batch_close_grace_s'
+      expect: '900 on every line logged since the fix; 60 stops appearing'
+      within_seconds: 90
 business_impact:
-  - kpi: business.first_pass_yield_pct
-    factor: {uniform: [0.35, 0.65]}
-  - kpi: business.customer_complaints_per_day
-    factor: {uniform: [2.5, 5.5]}
+  - kpi: business.rework_hours_per_shift
+    factor: {uniform: [2.0, 3.5]}
   - kpi: business.cost_of_poor_quality_usd_per_min
     factor: {uniform: [2.0, 4.0]}
   - kpi: business.on_time_delivery_pct

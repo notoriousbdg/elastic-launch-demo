@@ -1,68 +1,129 @@
 name: Identity DB Replication Lag
 subsystem: database
 vehicle_section: identity_data
-error_type: DB-REPLICATION-LAG
+error_type: session lookup returned no row
 sensor_type: replication
 affected_services:
 - identity-db
 - auth-service
 cascade_services:
 - api-gateway
-description: Azure PostgreSQL read-replica replication lag causing stale authentication reads and session failures
-investigation_notes: |
-  1. Check Azure PostgreSQL replication metrics — replica lag exceeding 5000ms causes stale session reads where auth-service validates expired tokens as active.
-  2. WAL replay rate deficit indicates the replica cannot keep up with write throughput. Check disk IOPS saturation on the replica (above 95% utilization): az monitor metrics list --resource <identity-db-replica resource id> --metric disk_iops_consumed_percentage.
-  3. Auth-service reads from replica for session validation — stale reads cause 30% of sessions to appear invalid, triggering unnecessary re-authentication storms on the primary.
-  4. Route all reads to primary immediately: point auth-service's read connection string at identity-db-primary (or turn off replica reads in its DB config) and roll the pods. This increases primary load but prevents stale authentication data.
-  5. Scale replica compute tier: az postgres flexible-server update --resource-group meridian-rg --name identity-db-replica --tier MemoryOptimized --sku-name Standard_E4s_v3 to increase IOPS capacity and reduce WAL replay deficit.
-remediation_action: failover_identity_db
-error_message: '[DB] DB-REPLICATION-LAG: lag_ms={repl_lag_ms} max_ms={repl_max_ms} replica={repl_node} pending_txns={repl_pending_txns} stale_reads_pct={stale_reads_pct}%'
-stack_trace: |
-  === IDENTITY DB REPLICATION STATUS ===
-  cluster=identity-db  engine=Azure_PostgreSQL_15
-  --- REPLICATION TOPOLOGY ---
-    NODE                ROLE        LAG_MS    STATUS
-    identity-db-primary PRIMARY     0         OK
-    identity-db-replica REPLICA     {repl_lag_ms}     BEHIND  <<< ALERT
-  --- LAG ANALYSIS ---
-    current_lag={repl_lag_ms}ms  max_allowed={repl_max_ms}ms  breach=true
-    pending_txns={repl_pending_txns}  wal_send_rate=8MB/s  wal_replay_rate=5MB/s
-    disk_iops=SATURATED  cpu_replica=91%
-  --- AUTH IMPACT ---
-    stale_session_reads={stale_reads_pct}%  invalid_token_rate=elevated
-    reauth_storm_risk=HIGH  read_routing=ROUND_ROBIN
-  ACTION: route_reads_primary=true  scale_replica=true  alert=DB-REPLICATION-LAG
-infrastructure_events:
-- body: '[AzureHealth] ReplicationLagExceeded: resource=identity-db-replica lag_ms=15000 threshold_ms=5000 region=westeurope cause=IOPS_SATURATION'
-  severity: WARN
-  event_name: azure.health.ReplicationLagExceeded
-  service: identity-db
-  attributes:
-    cloud.provider: azure
-    cloud.service: postgresql
-    azure.health.status: Degraded
-    azure.health.cause: IOPS_SATURATION
-    infrastructure.source: AzureHealth
+description: a Terraform apply scaled the identity-db read replica down to a quarter of the primary's compute, and it cannot keep up with WAL replay and read traffic
+investigation_notes: |-
+  Root cause: a Terraform apply (a cost-saving change that dropped the replica's sku override, so it took the module default) scaled the read replica meridian-identity-db-replica-01 (Azure Database for PostgreSQL flexible server) in place from Standard_D8ds_v5 to Standard_D2ds_v5, while the primary stays on Standard_D8ds_v5. Azure restarted the replica for about 60 seconds to change compute; auth-service read from the primary meanwhile, and the replica came back already about 60 s behind. With 2 vCores it cannot replay WAL and serve auth-service's session reads at the same time: replica CPU is {replica_cpu_pct}% and replay lag keeps growing ({replica_lag_s} s). auth-service writes a new session to the primary and reads it back from the replica, so freshly issued sessions are not there yet and users are logged out right after login. The primary is healthy (CPU about 40%, normal write latency).
+  Confirm:
+    - the azure-activity record for Microsoft.DBforPostgreSQL/flexibleServers/write on meridian-identity-db-replica-01 (Terraform, sku Standard_D2ds_v5), then the replica's "ready to accept read-only connections" about 60 s later, come before the first "session lookup returned no row"
+    - identity-db replica status lines carry attributes.db.replica_sku Standard_D2ds_v5 from the scale operation on (Standard_D8ds_v5 before it; primary Standard_D8ds_v5)
+    - metric identity_db.replica_lag_s rises from under 1 s to {replica_lag_s} s and identity_db.replica_cpu_pct from about 35% to {replica_cpu_pct}%, while identity_db.primary_cpu_pct stays near 40%, which rules out a write surge on the primary
+  Remediation: scale the replica back to the primary's size with opsctl patch flexible-server/meridian-identity-db-replica-01 --sku-name Standard_D8ds_v5. Azure restarts the replica to change compute (about 75 seconds, during which auth-service reads go to the primary); after it, the replica catches up and lag is back under 1 s within about 2 more minutes. Promoting the replica or failing over would not help, because the new primary would have the same 2 vCores.
+remediation_action: scale_identity_db_replica
+error_message: 'level=error logger=auth.session msg="session lookup returned no row" source=meridian-identity-db-replica-01 session_age_ms={session_age_ms} replica_lag_s={replica_lag_s} action=reauthenticate'
+stack_trace: |-
+  Traceback (most recent call last):
+    File "/app/auth/session.py", line 142, in load_session
+      row = await replica.fetchrow(SESSION_BY_ID, session_id)
+    File "/app/auth/session.py", line 149, in load_session
+      raise SessionNotFound(session_id, source="meridian-identity-db-replica-01")
+  auth.errors.SessionNotFound: session lookup returned no row (session_age_ms={session_age_ms}, replica_lag_s={replica_lag_s})
 correlation_attr:
-  key: infra.azure_pg_replica_sku
-  value: flex-replica-v1.2.0-rc1
+  key: db.replica_sku
+  value: Standard_D2ds_v5
 fault_params:
-  repl_lag_ms: {randint: [5100, 30000]}
-  repl_max_ms: 5000
-  repl_node: identity-db-replica
-  repl_pending_txns: {randint: [5000, 50000]}
-  stale_reads_pct: {uniform: [20.0, 40.0], round: 1}
+  replica_lag_s: {uniform: [60.0, 140.0], round: 1}
+  replica_cpu_pct: {uniform: [96.0, 100.0], round: 1}
+  session_age_ms: {randint: [120, 2400]}
 rca_clues:
   identity-db:
-    db.replication_lag_ms: {randint: [5100, 30000]}
-    db.wal_replay_deficit_pct: {uniform: [36.0, 39.0], round: 0}
-    db.replica_disk_iops_util_pct: {uniform: [97, 100], round: 0}
+    db.replica_sku: Standard_D2ds_v5
+    db.primary_sku: Standard_D8ds_v5
+    db.replica_lag_s: {uniform: [60.0, 140.0], round: 1}
+    db.replica_cpu_pct: {uniform: [96.0, 100.0], round: 1}
   auth-service:
-    auth.stale_session_reads_pct: {uniform: [20.0, 40.0], round: 1}
-    auth.invalid_token_false_positive: true
+    auth.session_read_source: meridian-identity-db-replica-01
+    auth.forced_reauth_per_min: {randint: [300, 900]}
   api-gateway:
-    gateway.auth_failure_rate: {uniform: [0.1, 0.3], round: 2}
-    gateway.reauth_storm_risk: HIGH
+    upstream.degraded_subsystem: authentication
+    gateway.401_rate: {uniform: [0.08, 0.3], round: 2}
+remediation_command: |-
+  opsctl patch flexible-server/meridian-identity-db-replica-01 --sku-name Standard_D8ds_v5
+fault_scope:
+  workloads: [identity-db]
+error_services: [auth-service]
+cascade_messages:
+  identity-db:
+    - severity: ERROR
+      message: '{iso_now} [41877] auth_ro@identity ERROR:  canceling statement due to conflict with recovery'
+    - severity: INFO
+      message: '{iso_now} [41877] auth_ro@identity DETAIL:  User query might have needed to see row versions that must be removed.'
+  api-gateway:
+    - severity: WARN
+      message: 'auth-service rejected session cookie for GET /api/v1/customer/status: 401 session_not_found (user logged in {session_age_ms} ms earlier)'
+infrastructure_events:
+  - service: identity-db
+    severity: INFO
+    offset_seconds: -5
+    event_name: azure.activity.write
+    body: 'azure-activity: operationName=Microsoft.DBforPostgreSQL/flexibleServers/write resourceId=/subscriptions/12d8df88-df58-5730-b296-0c3e02ec0ec3/resourceGroups/meridian-rg/providers/Microsoft.DBforPostgreSQL/flexibleServers/meridian-identity-db-replica-01 caller=meridian-terraform-ci@meridian.eu status=Accepted category=Administrative properties.sku=Standard_D2ds_v5 previous.sku=Standard_D8ds_v5'
+    attributes:
+      cloud.provider: azure
+      azure.activity.operation_name: Microsoft.DBforPostgreSQL/flexibleServers/write
+      user.name: meridian-terraform-ci@meridian.eu
+      db.replica_sku: Standard_D2ds_v5
+      change.summary: 'meridian-identity-db-replica-01 sku Standard_D8ds_v5 -> Standard_D2ds_v5'
+  - service: identity-db
+    severity: INFO
+    offset_seconds: 60
+    event_name: postgres.replica_ready
+    body: '{iso_now} [52] LOG:  database system is ready to accept read-only connections'
+    attributes:
+      operation: replica_restart
+      db.replica_sku: Standard_D2ds_v5
+onset_delay_seconds: 60
+remediation_effects:
+  log_taper_seconds: 150
+  log_events:
+    - service: identity-db
+      severity: INFO
+      offset_seconds: 1
+      body: 'azure-activity: operationName=Microsoft.DBforPostgreSQL/flexibleServers/write resourceId=/subscriptions/12d8df88-df58-5730-b296-0c3e02ec0ec3/resourceGroups/meridian-rg/providers/Microsoft.DBforPostgreSQL/flexibleServers/meridian-identity-db-replica-01 caller={actor} status=Succeeded category=Administrative properties.sku=Standard_D8ds_v5'
+      attributes:
+        cloud.provider: azure
+        azure.activity.operation_name: Microsoft.DBforPostgreSQL/flexibleServers/write
+        db.replica_sku: Standard_D8ds_v5
+    - service: identity-db
+      severity: INFO
+      offset_seconds: 75
+      body: '{iso_now} [52] LOG:  database system is ready to accept read-only connections'
+      attributes:
+        operation: replica_restart
+        db.replica_sku: Standard_D8ds_v5
+  steady_attributes:
+    identity-db:
+      db.replica_sku: Standard_D8ds_v5
+  verification:
+    - signal: identity_db.replica_lag_s
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "identity-db"'
+      field: 'metrics.identity_db.replica_lag_s'
+      expect: 'under 1 s (was 60-140 s)'
+      within_seconds: 240
+    - signal: identity_db.replica_cpu_pct
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "identity-db"'
+      field: 'metrics.identity_db.replica_cpu_pct'
+      expect: 'under 50% (was 96-100%)'
+      within_seconds: 240
+    - signal: session lookup returned no row lines
+      from: 'logs.otel.meridian'
+      where: 'body.text LIKE "*session lookup returned no row*"'
+      expect: '0 new lines once the replica has caught up'
+      within_seconds: 240
+    - signal: replica SKU
+      from: 'logs.otel.meridian'
+      where: 'resource.attributes.service.name == "identity-db"'
+      field: 'attributes.db.replica_sku'
+      expect: 'Standard_D8ds_v5 on every status line since the scale operation'
+      within_seconds: 120
 business_impact:
   - kpi: business.activations_per_min
     factor: {uniform: [0.25, 0.55]}
@@ -71,4 +132,5 @@ business_impact:
   - kpi: business.support_tickets_per_min
     factor: {uniform: [2.0, 4.0]}
   - kpi: business.nps
-    factor: {uniform: [0.30, 0.60]}
+    factor: {uniform: [0.3, 0.6]}
+service_lag_seconds: {api-gateway: 15}

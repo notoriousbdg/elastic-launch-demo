@@ -1,0 +1,134 @@
+# opsctl profile for the Manufacturing Operations Platform (see app/ops_profile.py for the contract).
+# Changes go to the plant's OT integration layer (SCADA gateway profiles, tag groups, register maps,
+# certificates, sensor gateways) and to the IT applications around it (MES, OEE, quality, CMMS, the
+# SAP bridge, WMS, the shopfloor portal). The service that owns the target logs the applied change
+# with its change id; mes-controller is the fallback.
+extends: [neutral]
+
+banner: "opsctl applies changes to the plant's OT integration layer and the MES, quality, maintenance and ERP applications. Every applied change is written to the plant change log with a change id."
+
+actors:
+  default: plant-ops/oncall-console          # an engineer resolving from the Chaos UI
+  auto: plant-ops/auto-remediator             # the remediation workflow (approval skipped)
+
+auto_remediate_channels: [16, 17, 18, 19, 20]
+
+verbs:
+  rollback:
+    summary: "Revert a profile, configuration, model, calibration or deployment to an earlier revision (--to-revision N|previous)"
+    example: "opsctl rollback opcua-profile/<plc> --to-revision previous\n  opsctl rollback deployment/<name> --to-revision previous"
+    describe: "{ref} reverted to {rev_text}"
+  patch:
+    summary: "Change settings on a component (--memory-limit, --replicas, --maxmemory, --idle-timeout-s, --throughput ...)"
+    example: "opsctl patch deployment/<name> --memory-limit 1Gi\n  opsctl patch redis/<name> --maxmemory 4gb"
+    describe: "{ref} updated{settings_text}"
+  apply:
+    summary: "Load a map, table or profile version onto a component (--version)"
+    example: "opsctl apply regmap/<plc> --version <v>"
+    describe: "{ref} loaded{=(' version ' + flag('version')) if flag('version') else ''}"
+  renew:
+    summary: "Re-issue a certificate from the plant OT PKI and install it"
+    example: "opsctl renew certificate/<name>"
+    describe: "{ref} re-issued and installed"
+  restart:
+    summary: "Restart a service, pool or worker"
+    example: "opsctl restart rfc-pool/<name>"
+    describe: "{ref} restarted"
+  run:
+    summary: "Run a repair or replay job (reconcile, replay, recompute)"
+    example: "opsctl run job/<name>"
+    describe: "{ref} started{=(' (' + change_id + ')') if change_id else ''}"
+  # not used in this plant
+  restore: null
+  rotate: null
+  sync: null
+  drain: null
+  replace: null
+  expand: null
+  delete: null
+
+kinds:
+  opcua-profile: {aliases: [opcua-profiles]}
+  tag-group: {aliases: [tag-groups]}
+  regmap: {aliases: [regmaps, register-map]}
+  certificate: {aliases: [cert, certificates]}
+  session-pool: {aliases: [session-pools]}
+  routing-ruleset: {aliases: [routing-rulesets]}
+  config: {aliases: [cfg]}
+  shift-calendar: {aliases: [shift-calendars, calendar]}
+  calibration: {aliases: [calibrations, cal]}
+  model: {aliases: [models]}
+  sensor-profile: {aliases: [sensor-profiles]}
+  material-master: {aliases: [material-masters]}
+  volume: {aliases: [volumes, vol]}
+  deployment: {aliases: [deploy, deployments]}
+  windows-service: {aliases: [winsvc, windows-services]}
+  rfc-pool: {aliases: [rfc-pools]}
+  redis: {aliases: [redis-instance]}
+  job: {aliases: [jobs]}
+
+audit:
+  service: [mes-controller]
+  default: change_log
+  formats:
+    change_log:
+      body: '[CHG] CHANGE APPLIED opsctl {command} by {actor} change_id={change_id}'
+      attributes:
+        operation: change_applied
+        event.action: "{verb}"
+        change.target: "{target}"
+        change.command: "opsctl {command}"
+        user.name: "{actor}"
+        change.id: "{change_id}"
+        ops.target: null            # neutral preset's names; this scenario uses change.*
+        ops.command: null
+      match:
+        tokens: ["{target}"]
+
+runbook:
+  scope_note: "Other lines, PLCs and applications are unaffected and make a useful comparison."
+  recovery_note: "Each query names the fixed component's own service, so its result is the value to compare."
+  audit_label: "plant change log"
+
+guide:
+  scenario: |
+    ## Where the plant's telemetry is
+    The data is OpenTelemetry. Each application is a service (`resource.attributes.service.name`):
+    scada-gateway (OPC UA / Modbus TCP to the line PLCs), mes-controller, ot-historian (InfluxDB),
+    oee-analytics (with its Redis result cache), quality-inspector (CMM and vision stations),
+    maintenance-scheduler (CMMS and vibration monitoring), erp-bridge (SAP IDoc bridge on Windows
+    Server mfg-sap-bridge-01), inventory-sync (WMS) and shopfloor-portal (operator kiosks).
+
+    - **Logs:** `FROM logs.otel.mfg`. Message in `body.text` (never `body` alone), level in
+      `severity_text`. Fault codes (for example `PLC-COMM-LOSS`) are in `body.text` and
+      `attributes.error.type`. Each application logs a periodic status line with its readings and
+      the configuration it runs (profile revision, ruleset, model, calibration, image tag), for
+      example `attributes.scada.opcua_profile_rev` or `attributes.vision.model_version`.
+    - **Metrics:** `FROM metrics-generic.otel-default`, filtered by
+      `resource.attributes.service.name`, fields under `metrics.<area>.*`, for example
+      `metrics.scada.connected_plcs`, `metrics.mes.work_order_queue_depth`,
+      `metrics.historian.write_lag_seconds`, `metrics.oee.cache_hit_rate_pct`,
+      `metrics.quality.cpk`.
+    - **Changes:** every applied change is a log line from the application that owns the target,
+      `body.text LIKE "[CHG] CHANGE APPLIED*"`, with `attributes.change.id`. Changes that preceded
+      the incident are logged by the same application as `attributes.operation: config_change` (or
+      `deployment`, `firmware_load`) and carry `attributes.change.request` (MOC-* for OT changes,
+      CHG-* for IT changes).
+    - **Package streams:** InfluxDB, Redis, Kafka, SQL Server, NGINX and Kubernetes integration data
+      (`metrics-*.otel-*`) carry the same incidents at their own granularity and are useful context;
+      judge recovery on the application metrics and logs above.
+
+    Readings converge back over the recovery time the runbook states (a queue drains, a buffer
+    flushes, a rolling Cpk refills); they do not jump back instantly. Compare a short window after
+    the change's `change.id` with the window before it.
+
+    Example: connected PLCs per minute on the SCADA gateway over the last 15 minutes:
+
+    ```
+    FROM metrics-generic.otel-default
+    | WHERE @timestamp > NOW() - 15 minutes AND resource.attributes.service.name == "scada-gateway"
+      AND metrics.scada.connected_plcs IS NOT NULL
+    | STATS min = MIN(metrics.scada.connected_plcs), max = MAX(metrics.scada.connected_plcs)
+        BY minute = BUCKET(@timestamp, 1 minute)
+    | SORT minute DESC
+    ```

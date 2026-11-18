@@ -1,0 +1,124 @@
+# opsctl profile for Healthcare Systems (see app/ops_profile.py for the contract).
+# Changes go to the clinical applications, their interfaces and the integration platform.
+# The system that owns the target logs the implemented change with its change id;
+# ehr-system is the fallback.
+extends: [neutral]
+
+banner: "opsctl applies changes to the hospital's clinical applications, interface engine and integration services. Every implemented change is written to the change log with a change id."
+
+actors:
+  default: clinapps/oncall-console          # the clinical applications on-call engineer
+  auto: itops/auto-remediator               # the auto-remediation workflow
+
+auto_remediate_channels: [16, 17, 18, 19, 20]
+
+verbs:
+  rollback:
+    summary: "Revert a deployment, interface channel, configuration, rule set or driver to an earlier revision (--to-revision N|previous)"
+    example: "opsctl rollback deployment/<name> --to-revision previous\n  opsctl rollback channel/<interface> --to-revision previous"
+    describe: "{ref} reverted to {rev_text}"
+  patch:
+    summary: "Change settings on an interface channel, feature flag, route or schedule (--<setting> <value>)"
+    example: "opsctl patch channel/<interface> --queue-threads 8\n  opsctl patch flag/<name> --enabled false"
+    describe: "{ref} updated{settings_text}"
+  apply:
+    summary: "Load a profile or policy onto a unit or system (--profile <name>)"
+    example: "opsctl apply alarm-profile/<unit> --profile <name>"
+    describe: "{ref} loaded{settings_text}"
+  run:
+    summary: "Run a one-off job: reprocessing, resubmission, reconciliation, migration"
+    example: "opsctl run job/<name>"
+    describe: "{ref} started{=(' (' + change_id + ')') if change_id else ''}"
+  sync:
+    summary: "Force an immediate refresh of a cache or replica from its source of truth"
+    example: "opsctl sync cache/<name>"
+    describe: "{ref} reloaded from its source"
+  restart:
+    summary: "Restart a service or interface listener"
+    example: "opsctl restart deployment/<name>"
+    describe: "{ref} restarted"
+  # not used in this environment
+  restore: null
+  renew: null
+  rotate: null
+  drain: null
+  replace: null
+  expand: null
+  delete: null
+
+kinds:
+  deployment: {aliases: [deploy]}
+  channel: {}
+  config: {aliases: [cfg]}
+  ruleset: {}
+  alarm-profile: {}
+  flag: {}
+  route: {}
+  schedule: {}
+  job: {}
+  cache: {}
+  driver: {}
+
+audit:
+  service: [ehr-system]
+  default: change_log
+  formats:
+    change_log:
+      body: '[CHG] CHANGE IMPLEMENTED opsctl {command} by {actor} change_id={change_id}'
+      attributes:
+        operation: change_implemented
+        event.action: "{verb}"
+        change.target: "{target}"
+        change.command: "opsctl {command}"
+        user.name: "{actor}"
+        change.id: "{change_id}"
+        ops.target: null
+        ops.command: null
+      match:
+        tokens: ["{target}"]
+
+runbook:
+  scope_note: "Other units, interfaces and systems are unaffected and make a useful comparison."
+  recovery_note: "Each query names the system that was changed, so its result is the value to compare."
+  audit_label: "change log"
+
+guide:
+  scenario: |
+    ## Where the hospital's telemetry is
+    The data is OpenTelemetry. Each clinical system is a service
+    (`resource.attributes.service.name`): ehr-system (EHR, EMPI, Mirth interface channels),
+    patient-monitor (central monitoring stations, telehealth relays), lab-integration (LIS,
+    analyzer interfaces, blood bank), pharmacy-system (CPOE drug interaction screening,
+    Surescripts e-prescribing), imaging-service (PACS, DICOM gateway), scheduling-api (clinic
+    and OR scheduling, bed board), billing-processor (X12 eligibility and claims),
+    clinical-alerts (CDS rule engine, nurse call bridges), data-warehouse (ETL, HIPAA audit chain).
+
+    - **Logs:** `FROM logs.otel.healthcare`. Message in `body.text` (never `body` alone), level
+      in `severity_text`. Fault codes (for example `HL7-ACK-AE`, `DICOM-STORE-FAIL`) are in
+      `body.text` and `attributes.error.type`. Each system logs a periodic status line with the
+      running build or configuration as an attribute (for example
+      `attributes.infra.pacs_gateway_build`, `attributes.hl7.channel_revision`).
+    - **Metrics:** `FROM metrics-generic.otel-default`, filtered by
+      `resource.attributes.service.name`, fields under `metrics.<area>.*`, for example
+      `metrics.ehr.hl7_ack_ae_pct`, `metrics.lab.astm_results_per_min`,
+      `metrics.pharmacy.interaction_queue_depth`, `metrics.imaging.cstore_failure_pct`.
+    - **Changes:** every implemented change is a log line from the system that owns the target,
+      `body.text LIKE "[CHG] CHANGE IMPLEMENTED*"`, with `attributes.change.id`. Changes that
+      preceded an incident are logged by the system that received them and carry
+      `attributes.change.request`.
+    - **Hospital KPIs:** `metrics.business.*` from billing-processor.
+
+    Readings converge back over the recovery time the runbook states; queues drain and
+    backlogs replay, they do not reset instantly. Compare a short window after the change
+    with the window before it.
+
+    Example: HL7 application-error ACK rate on the ADT interface per minute, last 15 minutes:
+
+    ```
+    FROM metrics-generic.otel-default
+    | WHERE @timestamp > NOW() - 15 minutes AND resource.attributes.service.name == "ehr-system"
+      AND metrics.ehr.hl7_ack_ae_pct IS NOT NULL
+    | STATS max = MAX(metrics.ehr.hl7_ack_ae_pct)
+        BY minute = BUCKET(@timestamp, 1 minute)
+    | SORT minute DESC
+    ```

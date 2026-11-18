@@ -1,0 +1,163 @@
+# opsctl profile for the Meridian Telecom 5G platform (see app/ops_profile.py for the contract).
+# Changes go to three clouds and to the network: RDS on AWS, PostgreSQL flexible server and
+# Azure Firewall on Azure, service quotas on GCP, and application, packet core and RAN
+# configuration everywhere. Cloud resources leave their own audit record (CloudTrail, Azure
+# Activity Log, Cloud Audit Logs); everything else is written to the NOC change log by the
+# service that owns the target.
+extends: [aws-cloudtrail, gcp-audit, azure-activity]
+
+banner: "opsctl applies changes to the Meridian 5G platform (AWS eu-central-1, GCP europe-west3, Azure westeurope) and its packet core and RAN configuration. Every applied change is logged with a change id: cloud resources in their provider's audit log, everything else in the NOC change log."
+
+actors:
+  default: noc-fra/oncall-l2                # NOC engineer resolving from the incident console
+  auto: noc-automation/remediation-runner   # the remediation workflow (approval skipped)
+
+auto_remediate_channels: [16, 17, 18, 19, 20]
+
+verbs:
+  rollback:
+    summary: "Revert a deployment or a configuration (application, packet core, RAN, gateway) to its previous revision (--to-revision N|previous)"
+    example: "opsctl rollback deployment/<name> --to-revision previous\n  opsctl rollback config/<name> --to-revision previous"
+    describe: "{ref} reverted to {rev_text}"
+  patch:
+    summary: "Change settings on a resource (--replicas, --max-sessions, --enabled, --sku-name, --db-parameter-group ...)"
+    example: "opsctl patch deployment/<name> --replicas 12\n  opsctl patch db-instance/<id> --db-parameter-group <group>"
+    describe: "{ref} updated{settings_text}"
+  restore:
+    summary: "Put a secret back to an earlier version (--version vN)"
+    example: "opsctl restore secret/<name> --version v6"
+    describe:
+      - {when: "flag('version')", text: "{ref} restored to version {flags.version}"}
+      - {text: "{ref} restored to the last known-good version"}
+  sync:
+    summary: "Force a component to refresh cached state from its source of truth (JWKS, catalog)"
+    example: "opsctl sync jwks-cache/<service>"
+    describe: "{ref} refreshed from source"
+  run:
+    summary: "Run a migration or one-off job"
+    example: "opsctl run migration/<name>\n  opsctl run job/<name>"
+    describe: "{ref} started{=(' (' + change_id + ')') if change_id else ''}"
+  restart:
+    summary: "Restart (reboot) a database instance or component so it picks up pending configuration"
+    example: "opsctl restart db-instance/<id>"
+    describe: "{ref} restart requested"
+  expand:
+    summary: "Grow a persistent volume online (--size)"
+    example: "opsctl expand pvc/<name> --size 200Gi"
+    describe: "{ref} resize requested{=(' to ' + flag('size')) if flag('size') else ''}"
+  renew:
+    summary: "Re-issue a certificate (cert-manager Certificate)"
+    example: "opsctl renew certificate/<name>"
+    describe: "{ref} re-issue requested"
+  delete:
+    summary: "Delete an object (a quota override, a stale record)"
+    example: "opsctl delete quota-override/<name>"
+    describe: "{ref} deleted"
+  # not used on this platform
+  rotate: null
+  drain: null
+  replace: null
+  apply: null
+
+kinds:
+  deployment: {aliases: [deploy, deployments]}
+  config: {aliases: [cfg, configs]}
+  connector: {}
+  jwks-cache: {}
+  feature-flag: {aliases: [flag]}
+  migration: {}
+  job: {}
+  pvc: {aliases: [pvcs]}
+  secret: {aliases: [secrets]}
+  certificate: {aliases: [cert]}
+  db-instance:
+    aliases: [rds]
+    audit: cloudtrail
+    cloudtrail:
+      source: rds.amazonaws.com
+      event: {restart: RebootDBInstance, _: ModifyDBInstance}
+    params:
+      dBInstanceIdentifier: "{=name or kind}"
+      dBParameterGroupName: "{flags.db-parameter-group}"
+      applyImmediately: "{=('true' if verb == 'patch' else '')}"
+  flexible-server:
+    aliases: [pg-flex]
+    audit: azure_activity
+    azure:
+      provider: Microsoft.DBforPostgreSQL/flexibleServers
+      operation: {restart: restart/action, _: write}
+  firewall-policy:
+    audit: azure_activity
+    azure:
+      provider: Microsoft.Network/firewallPolicies/ruleCollectionGroups
+      operation: {_: write}
+  quota-override:
+    audit: gcp_audit
+    gcp:
+      service: serviceusage.googleapis.com
+      method:
+        delete: google.api.serviceusage.v1beta1.ServiceUsage.DeleteConsumerOverride
+        _: google.api.serviceusage.v1beta1.ServiceUsage.UpdateConsumerOverride
+      resource_prefix: "projects/meridian-project/services/fcm.googleapis.com/consumerQuotaMetrics/send-requests/limits/per-minute/consumerOverrides/"
+
+audit:
+  service: [api-gateway]
+  default: change_log
+  formats:
+    change_log:
+      body: '[NOC-CHG] executed opsctl {command} actor={actor} change_id={change_id}'
+      attributes:
+        operation: change_executed
+        event.action: "{verb}"
+        change.target: "{target}"
+        change.command: "opsctl {command}"
+        user.name: "{actor}"
+        change.id: "{change_id}"
+        ops.target: null
+        ops.command: null
+      match:
+        tokens: ["{target}"]
+
+runbook:
+  scope_note: "Other clusters, network elements and services were not changed and make a useful comparison."
+  recovery_note: "Each query names the changed component or the service that reports it, so its result is the value to compare."
+  audit_label: "change log"
+
+guide:
+  scenario: |
+    ## Where Meridian telemetry is
+    The data is OpenTelemetry. Each platform component is a service
+    (`resource.attributes.service.name`): api-gateway and activation-service (AWS EKS,
+    eu-central-1), subscriber-db (RDS PostgreSQL), provisioning-service, network-core
+    (5G/EPC packet core and RAN performance counters) and notification-service (GCP GKE,
+    europe-west3), auth-service, bss-billing and identity-db (Azure, westeurope).
+
+    - **Logs:** `FROM logs.otel.meridian`. Message in `body.text` (never `body` alone), level
+      in `severity_text`. Each component logs in its own format (Java logback, Python logfmt,
+      PostgreSQL, NGINX, MME/PGW). The running configuration (image tag, config revision,
+      parameter group, quota, credential version) is on each component's status line in
+      `attributes.*`, for example `attributes.deployment.image_tag` or `attributes.db.parameter_group`.
+    - **Metrics:** `FROM metrics-generic.otel-default`, filtered by
+      `resource.attributes.service.name`, fields under `metrics.<service>.*`, for example
+      `metrics.provisioning_service.hikari_active_connections`,
+      `metrics.network_core.prb_utilization_pct`, `metrics.identity_db.replica_lag_s`.
+    - **Changes:** changes to cloud resources are logged as `cloudtrail:`, `azure-activity:` or
+      `gcp-audit:` lines; every other change is a `[NOC-CHG]` line from the service that owns
+      the target. Both carry `attributes.change.id`. Changes that preceded an incident (Argo CD
+      syncs, OSS/CM pushes, flag flips, secret rotations) are logged by the component they changed.
+    - **Business KPIs:** `metrics.business.*` from bss-billing.
+
+    Readings converge back over the recovery time the runbook states (rolling restarts, queue
+    drains, cache warm-up); they do not jump back instantly. Compare a short window after the
+    command with the window before it.
+
+    Example: HikariCP active connections on provisioning-service per minute, last 15 minutes:
+
+    ```
+    FROM metrics-generic.otel-default
+    | WHERE @timestamp > NOW() - 15 minutes AND resource.attributes.service.name == "provisioning-service"
+      AND metrics.provisioning_service.hikari_active_connections IS NOT NULL
+    | STATS max = MAX(metrics.provisioning_service.hikari_active_connections)
+        BY minute = BUCKET(@timestamp, 1 minute)
+    | SORT minute DESC
+    ```

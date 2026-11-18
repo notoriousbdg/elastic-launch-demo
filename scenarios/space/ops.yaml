@@ -1,0 +1,113 @@
+# opsctl profile for NOVA-7 (see app/ops_profile.py for the contract).
+# Commands go to the vehicle and the ground segment through the flight control room;
+# Mission Control logs every accepted command with its change id.
+extends: [neutral]
+
+banner: "opsctl sends commands to the NOVA-7 vehicle and ground segment through the flight control room. Every accepted command is logged by Mission Control with a change id."
+
+actors:
+  default: flight-ops/fcr-console-3          # a flight controller resolving from the Chaos UI
+  auto: fdir/autonomy-manager                # on-board fault detection, isolation and recovery
+
+auto_remediate_channels: [16, 17, 18, 19, 20]
+
+verbs:
+  rollback:
+    summary: "Revert firmware, software or a configuration to an earlier revision (--to-revision N|previous)"
+    example: "opsctl rollback firmware/<unit> --to-revision previous\n  opsctl rollback config/<name> --to-revision previous"
+    describe: "{ref} reverted to {rev_text}"
+  patch:
+    summary: "Change settings on a subsystem: select a redundant unit, set a mode, trim, tap or power level"
+    example: "opsctl patch link/<name> --active <unit>\n  opsctl patch valve/<name> --trim-pct 6.5"
+    describe: "{ref} commanded{settings_text}"
+  apply:
+    summary: "Load a table or mask onto a subsystem (satellite masks, schedules, limits)"
+    example: "opsctl apply svmask/<name> --prns 12,17"
+    describe: "{ref} loaded{settings_text}"
+  run:
+    summary: "Run a procedure or one-off job (alignment, self-test, compaction)"
+    example: "opsctl run procedure/<name>"
+    describe: "{ref} started{=(' (' + change_id + ')') if change_id else ''}"
+  drain:
+    summary: "Isolate a unit and move its load to the redundant one"
+    example: "opsctl drain hydraulics/<unit>"
+    describe: "{ref} isolated; load moved to the redundant unit"
+  replace:
+    summary: "Swap a line-replaceable unit (transceiver, card, sensor) for a spare"
+    example: "opsctl replace transceiver/<route>"
+    describe: "{ref} swapped for a spare; link retrained"
+  sync:
+    summary: "Force a time or data resynchronisation from the reference source"
+    example: "opsctl sync clock/<sensor>"
+    describe: "{ref} resynchronised to the reference"
+  restore:
+    summary: "Restore a calibration or table to a reference version (--epoch, --version)"
+    example: "opsctl restore calibration/<sensor> --epoch reference"
+    describe: "{ref} restored{=(' to ' + (flag('epoch') or flag('version'))) if (flag('epoch') or flag('version')) else ' to the reference'}"
+  restart:
+    summary: "Power-cycle a unit"
+    example: "opsctl restart fts/<unit>"
+    describe: "{ref} power-cycled"
+  # not used on this vehicle
+  renew: null
+  rotate: null
+  expand: null
+
+kinds:
+  firmware: {aliases: [fw]}
+
+audit:
+  service: [mission-control]
+  default: command_log
+  formats:
+    command_log:
+      body: '[MCC] CMD ACCEPTED opsctl {command} from {actor} change_id={change_id}'
+      attributes:
+        operation: command
+        event.action: "{verb}"
+        command.target: "{target}"
+        command.text: "opsctl {command}"
+        user.name: "{actor}"
+        change.id: "{change_id}"
+        ops.target: null            # neutral preset's names; this scenario uses command.*
+        ops.command: null
+      match:
+        tokens: ["{target}"]
+
+runbook:
+  scope_note: "Other subsystems are nominal and make a useful comparison."
+  recovery_note: "Each query names the subsystem's own service, so its result is the value to compare."
+  audit_label: "Mission Control command log"
+
+guide:
+  scenario: |
+    ## Where NOVA-7 telemetry is
+    The data is OpenTelemetry. Each subsystem is a service (`resource.attributes.service.name`):
+    fuel-system (propulsion), navigation (GN&C), comms-array, payload-monitor,
+    telemetry-relay, ground-systems, sensor-validator, range-safety, mission-control.
+
+    - **Logs:** `FROM logs.otel.nova7`. Message in `body.text` (never `body` alone), level in
+      `severity_text`. Fault codes (e.g. `PMS-PRESS-ANOMALY`) appear in `body.text` and in
+      `attributes.error.type`; subsystem readings and states are in `attributes.*`
+      (for example `attributes.propulsion.regulator_mode`, `attributes.sensor.status`).
+    - **Sensor and subsystem metrics:** `FROM metrics-generic.otel-default`, filtered by
+      `resource.attributes.service.name`, fields under `metrics.<subsystem>.*`, for example
+      `metrics.fuel_system.lox_pressure`, `metrics.navigation.star_tracker.alignment_arcsec`,
+      `metrics.comms.sband.snr_db`, `metrics.relay.latency_ms`, `metrics.ground.power.bus_voltage`.
+    - **Commands:** every accepted command is a Mission Control log line,
+      `body.text LIKE "[MCC] CMD ACCEPTED*"`, with `attributes.change.id`.
+    - **Mission KPIs:** `metrics.business.*` from mission-control.
+
+    Compare a short window after the command with the window before it: readings converge
+    over the recovery time the runbook states, they do not jump back instantly.
+
+    Example: LOX tank pressure per minute over the last 15 minutes:
+
+    ```
+    FROM metrics-generic.otel-default
+    | WHERE @timestamp > NOW() - 15 minutes AND resource.attributes.service.name == "fuel-system"
+      AND metrics.fuel_system.lox_pressure IS NOT NULL
+    | STATS min = MIN(metrics.fuel_system.lox_pressure), max = MAX(metrics.fuel_system.lox_pressure)
+        BY minute = BUCKET(@timestamp, 1 minute)
+    | SORT minute DESC
+    ```

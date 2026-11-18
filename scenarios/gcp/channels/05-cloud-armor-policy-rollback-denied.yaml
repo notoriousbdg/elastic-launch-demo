@@ -10,10 +10,17 @@ cascade_services:
 - cloud-load-balancer
 description: Emergency rollback of a Cloud Armor security policy fails with IAM permission errors in Cloud Audit Logs while a bad rule keeps blocking legitimate API traffic
 investigation_notes: |-
-  Root cause: A preconfigured Cloud Armor rule (OWASP CRS) is blocking legitimate API traffic, and the on-call rollback of the security policy is rejected. Cloud Audit Logs show securityPolicies.patch calls failing with PERMISSION_DENIED because the deploy service account lost compute.securityAdmin during a recent IAM cleanup.
-  Diagnose with Cloud Audit Logs filtered by protoPayload.methodName="v1.compute.securityPolicies.patch" and status.code=7 (PERMISSION_DENIED). The gcp_audit_otel error_rate impact drives the elevated permission-error volume during the fault.
-  Remediation: Restore compute.securityAdmin on the deploy service account (or use a break-glass admin), re-apply the previous policy revision, then put the rule in preview mode while tuning sensitivity. Monitor audit-log error rate recovery after the change.
+  Root cause: the pipeline identity {audit_principal} pushed revision sqli-v33-stable-bad of {armor_policy} (it succeeded, the false positives start there), and then change iam-cleanup-2026-q3 (SetIamPolicy) removed roles/compute.securityAdmin from it. The on-call rollback of {armor_policy} (securityPolicies.patch) is therefore rejected with PERMISSION_DENIED, while rule {armor_rule_id} (revision sqli-v33-stable-bad) false-positives legitimate API traffic ({armor_fp_rate}% of blocked requests are legitimate). The bad revision is only the trigger; what keeps the outage going is the denied rollback. Policy {armor_policy} was not edited again after the push and the load balancer backends are healthy, which rules out a backend outage; a DDoS is ruled out because request volume is normal and blocks are concentrated on /api/v2/search and /graphql.
+  Confirm:
+    - cloud-armor-waf metric armor.false_positive_rate_pct is 15-60 (below 1 before) and armor.rollback_denied_per_min is 20-400 (0 before)
+    - cloud-armor-waf logs "gcp-audit:" lines with methodName=v1.compute.securityPolicies.patch, status=PERMISSION_DENIED (attributes gcp.audit.status) for principalEmail={audit_principal}
+    - cloud-armor-waf "false_positive_status" lines show armor.policy_revision=sqli-v33-stable-bad and armor.status=ANOMALY
+    - the vpc-network-manager audit line "gcp-audit: ... methodName=SetIamPolicy ... iam-cleanup-2026-q3" comes before the first PERMISSION_DENIED
+  Remediation: restore the role first, then roll the policy back. opsctl apply iam-binding/deploy-sa --role roles/compute.securityAdmin, then opsctl rollback security-policy/{armor_policy} --to-revision previous. IAM changes can take a few minutes to propagate, so allow time before the rollback is accepted; the false-positive rate then converges below 1% over about 60 seconds and the PERMISSION_DENIED lines stop; armor.policy_revision returns to sqli-v33-stable.
 remediation_action: restore_armor_policy_access
+remediation_command: |-
+  opsctl apply iam-binding/deploy-sa --role roles/compute.securityAdmin
+  opsctl rollback security-policy/gcpnet-web-policy --to-revision previous
 error_message: 'cloudaudit: ARMOR-ROLLBACK-DENIED policy={armor_policy} rule={armor_rule_id} method={audit_method} principal={audit_principal} denied_calls={audit_denied_count}/m
   blocked_requests={armor_blocked_count}/m false_positive_rate={armor_fp_rate}%'
 stack_trace: |-
@@ -30,11 +37,11 @@ stack_trace: |-
   Action: Restore compute.securityAdmin for the principal and re-apply the previous policy revision
 correlation_attr:
   key: iam.policy_cleanup_rev
-  value: iam-cleanup-2026-q3-untested
+  value: iam-cleanup-2026-q3
 fault_params:
-  armor_policy: {choice: [gcpnet-web-policy, gcpnet-ddos-policy, gcpnet-edge-policy]}
+  armor_policy: gcpnet-web-policy
   armor_rule_id: sqli-v33-stable
-  audit_method: compute.securityPolicies.patch
+  audit_method: v1.compute.securityPolicies.patch
   audit_principal: deploy-sa@gcpnet-project.iam.gserviceaccount.com
   audit_denied_count: {randint: [20, 400]}
   armor_blocked_count: {randint: [100, 5000]}
@@ -61,3 +68,75 @@ generator_impact:
   gcp_audit_otel:
     error_rate: 0.6
     records_per_cycle: 80
+fault_scope:
+  cluster: gcpnet-gke-east1
+  workloads: [cloud-armor-waf, cloud-cdn-service]
+infrastructure_events:
+  - service: vpc-network-manager
+    severity: INFO
+    offset_seconds: -150
+    body: 'gcp-audit: logName=cloudaudit.googleapis.com/activity serviceName=compute.googleapis.com methodName=v1.compute.securityPolicies.patch resourceName=projects/gcpnet-prod-001/global/securityPolicies/{armor_policy} principalEmail={audit_principal} status=OK revision=sqli-v33-stable-bad'
+    attributes:
+      user.name: deploy-sa
+      operation: audit
+      gcp.audit.method_name: v1.compute.securityPolicies.patch
+  - service: vpc-network-manager
+    severity: INFO
+    offset_seconds: -90
+    body: 'gcp-audit: logName=cloudaudit.googleapis.com/activity serviceName=cloudresourcemanager.googleapis.com methodName=SetIamPolicy resourceName=projects/gcpnet-prod-001/serviceAccounts/deploy-sa principalEmail=iam-cleanup-bot@gcpnet-project.iam.gserviceaccount.com status=OK change=iam-cleanup-2026-q3 removed=roles/compute.securityAdmin member={audit_principal}'
+    attributes:
+      user.name: iam-cleanup-bot
+      change.request: iam-cleanup-2026-q3
+      operation: audit
+      gcp.audit.method_name: SetIamPolicy
+      iam.policy_cleanup_rev: iam-cleanup-2026-q3
+cascade_messages:
+  cloud-load-balancer:
+    - severity: WARN
+      message: 'lb: legitimate API requests denied by Cloud Armor policy={armor_policy}; success rate dropping'
+remediation_effects:
+  log_events:
+    - service: vpc-network-manager
+      severity: INFO
+      offset_seconds: 1
+      body: 'gcp-audit: logName=cloudaudit.googleapis.com/activity serviceName=cloudresourcemanager.googleapis.com methodName=SetIamPolicy resourceName=projects/gcpnet-prod-001/serviceAccounts/deploy-sa principalEmail={actor} status=OK'
+      attributes:
+        operation: audit
+        command.target: iam-binding/deploy-sa
+    - service: vpc-network-manager
+      severity: INFO
+      offset_seconds: 3
+      body: 'gcp-audit: logName=cloudaudit.googleapis.com/activity serviceName=compute.googleapis.com methodName=v1.compute.securityPolicies.patch resourceName=projects/gcpnet-prod-001/global/securityPolicies/gcpnet-web-policy principalEmail={actor} status=OK'
+      attributes:
+        operation: audit
+        command.target: security-policy/gcpnet-web-policy
+    - service: cloud-armor-waf
+      severity: INFO
+      offset_seconds: 10
+      body: 'cloud-armor: policy=gcpnet-web-policy rolled back to revision sqli-v33-stable; rule sqli-v33-stable enforcing'
+      attributes:
+        operation: policy_rollback
+        armor.policy_revision: sqli-v33-stable
+  steady_attributes:
+    cloud-armor-waf:
+      armor.policy_revision: sqli-v33-stable
+  verification:
+    - signal: armor.false_positive_rate_pct
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "cloud-armor-waf"'
+      field: 'metrics.armor.false_positive_rate_pct'
+      expect: 'below 1 (was 15-60)'
+      within_seconds: 120
+    - signal: armor.rollback_denied_per_min
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "cloud-armor-waf"'
+      field: 'metrics.armor.rollback_denied_per_min'
+      expect: '0 (was 20-400)'
+      within_seconds: 120
+    - signal: armor policy revision
+      from: 'logs.otel.gcpnet'
+      where: 'resource.attributes.service.name == "cloud-armor-waf"'
+      field: 'attributes.armor.policy_revision'
+      expect: 'sqli-v33-stable on every line since the fix (was sqli-v33-stable-bad)'
+      within_seconds: 120
+  log_taper_seconds: 60

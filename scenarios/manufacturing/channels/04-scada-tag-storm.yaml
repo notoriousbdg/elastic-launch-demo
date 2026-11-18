@@ -9,45 +9,121 @@ affected_services:
 cascade_services:
 - mes-controller
 - oee-analytics
-description: Runaway tag-update rate floods the InfluxDB historian write path, exhausting buffers
+error_services:
+- scada-gateway
+description: A tag-group template change sets the deadband of 1,200 conveyor drive tags to 0; every noisy sample is published and the InfluxDB historian's write cache overflows
 investigation_notes: |-
-  Root Cause: Tag storms typically come from a sensor stuck in fast-change mode (e.g., a dead-band value of 0 on a noisy signal) or from a PLC firmware update that reset the publishing interval to the minimum allowed by the OPC-UA server. The downstream historian buffer fills faster than the compaction job can drain it. A dead-band of 0.0 on the storming tag confirms the stuck-sensor path; a publishing interval still at its configured 1000ms and no PLC firmware change rule out the firmware reset.
-  Remediation: 1) Identify offenders: `scada-admin top-publishers --window 60s`. 2) Apply a temporary dead-band: `scada-admin set-deadband --tag {tag_name} --pct 0.5`. 3) Reduce publishing rate: `scada-admin set-publish-interval --subscription {subscription_id} --ms 1000`. 4) Drain the historian buffer: `historian-admin flush-buffer --priority high`. 5) Open an instrumentation/maintenance ticket if a sensor is genuinely failing (constant noise above process limits).
+  Root cause: the scada-gateway tag group tag-group/conveyor-drives moved from template revision 8 to 9 shortly before the first SCADA-TAG-STORM. Revision 9 sets deadband_pct from 0.5 to 0.0 on its 1,200 {tag_name} / current / torque tags. These are analog VFD values that change by a few hundredths on every 100 ms sample, so with no deadband every sample is published: the gateway's publish rate goes from about 1,200 to about {tag_rate} updates/s. The historian's ingest is sized for about 9,000 points/s; above that its write cache fills and InfluxDB rejects writes. The sensors and the PLCs are fine: the publishing interval is still 1000 ms, no PLC firmware or program changed, and the other tag groups keep their 0.5% deadband.
+  Confirm:
+    - scada-gateway tag_group lines for conveyor-drives show deadband_pct=0.0 and template_rev=9 (attributes.scada.tag_template_rev); metric scada.tag_update_rate_per_s rises from about 1,200 to 30,000-40,000
+    - the scada-gateway config_change line for tag-group/conveyor-drives (revision 8 -> 9, MOC-2617) comes before the first storm line
+    - ot-historian logs "cache-max-memory-size exceeded"; metrics historian.buffer_utilization_pct (normally 10-25%) and historian.write_lag_seconds (normally under 1 s) climb, and the InfluxDB integration stream shows cache write errors and dropped writes
+  Remediation: roll the tag group's template back with opsctl rollback tag-group/conveyor-drives --to-revision previous. The 0.5% deadband applies from the next publish cycle, so the update rate drops to about 1,200/s within seconds; the historian then drains its write cache and the write lag returns under 1 s in about 60 s. Throttling the subscription or flushing the historian buffer would only hide the storm while the deadband stays at 0.
 remediation_action: throttle_subscription
-error_message: '[SCADA] SCADA-TAG-STORM: subscription={subscription_id} rate={tag_rate}/s baseline=1200/s tag={tag_name} affected_plcs={affected_plcs}'
+remediation_command: |-
+  opsctl rollback tag-group/conveyor-drives --to-revision previous
+error_message: '[SCADA] SCADA-TAG-STORM: tag_group=conveyor-drives rate={tag_rate}/s baseline=1200/s tags=1200 deadband_pct=0.0 top_tag={tag_name} subscription={subscription_id}'
 stack_trace: |-
-  === SCADA TAG PUBLISH RATE ANOMALY ===
-  Subscription: {subscription_id} | Window: 60s
+  === SCADA TAG PUBLISH RATE — top tag groups, 60 s window ===
   ------------------------------------------------------------------------
-  TAG NAME             | RATE/s   | BASELINE | RATIO    | DEADBAND
+  TAG GROUP           | TAGS  | RATE/s   | BASELINE | DEADBAND | TEMPLATE
   ------------------------------------------------------------------------
-  {tag_name}.* (all drives) | {tag_rate}    | 1200     | 12-50x   | 0.0
-  MotorSpeed            | 8        | 8        | 1.0x     | 0.5
-  OvenTempC             | 3        | 3        | 1.0x     | 0.5
+  conveyor-drives     | 1200  | {tag_rate}    | 310      | 0.0%     | conveyor-vfd rev 9
+  oven-zones          | 240   | 96       | 96       | 0.5%     | oven-zone rev 4
+  press-line          | 380   | 410      | 410      | 0.5%     | press rev 11
   ------------------------------------------------------------------------
-  SCADA-TAG-STORM: aggregate rate {tag_rate}/s exceeds historian buffer drain rate; backpressure imminent
+  SCADA-TAG-STORM: aggregate rate {tag_rate}/s exceeds historian ingest (9000 pts/s)
 correlation_attr:
-  key: infra.scada_publish_config
-  value: deadband-zero-experimental
+  key: scada.tag_template_rev
+  value: '9'
 fault_params:
   subscription_id:
     format: "sub-{n}"
     n: {randint: [1000, 9999]}
-  tag_rate: {randint: [15000, 60000]}
+  tag_rate: {randint: [30000, 40000]}
   tag_name: ConveyorRPM
-  affected_plcs: {randint: [1, 4]}
 rca_clues:
   scada-gateway:
-    scada.publish_rate_per_s: {randint: [15000, 60000]}
     scada.deadband_pct: 0.0
     scada.publish_interval_ms: 1000
     scada.plc_firmware_changed: false
-  ot-historian:
-    historian.buffer_high_watermark_pct: {uniform: [85.0, 99.5], round: 1}
   mes-controller:
     mes.tag_feed_lag_s: {randint: [5, 35]}
   oee-analytics:
     oee.event_intake_lag_s: {randint: [8, 45]}
+cascade_messages:
+  ot-historian:
+    - severity: ERROR
+      message: 'lvl=error msg="Write failed" service=write shard=1874 error="engine: cache-max-memory-size exceeded: (1073742102/1073741824)"'
+    - severity: WARN
+      message: '[HIST] ingest rate {tag_rate} pts/s above sustained capacity 9000 pts/s; write buffer filling'
+  mes-controller:
+    - severity: WARN
+      message: '[MES] tag_feed lag growing: historian range-query for LINE-01..LINE-05 returned data 20 s behind; equipment state from last cached values'
+  oee-analytics:
+    - severity: WARN
+      message: '[OEE] event_intake lag above 30 s on tag feed from ot-historian; window close delayed'
+fault_scope:
+  cluster: mfg-eks-cluster
+  workloads: [scada-gateway, ot-historian]
+infrastructure_events:
+  - service: scada-gateway
+    severity: INFO
+    offset_seconds: -90
+    body: '[SCADA] config_change tag-group/conveyor-drives template conveyor-vfd revision 8 -> 9: deadband_pct 0.5 -> 0.0 on 1200 tags (higher resolution for drive diagnostics); applied by ot-controls (MOC-2617)'
+    attributes:
+      operation: config_change
+      user.name: ot-controls
+      change.request: MOC-2617
+      scada.tag_template_rev: '9'
+      change.summary: 'tag-group/conveyor-drives: rev 8 -> 9'
+service_lag_seconds:
+  ot-historian: 10
+  mes-controller: 30
+  oee-analytics: 45
+remediation_effects:
+  log_events:
+    - service: scada-gateway
+      severity: INFO
+      offset_seconds: 1
+      body: '[CHG] CHANGE APPLIED opsctl rollback tag-group/conveyor-drives --to-revision previous by {actor}: template conveyor-vfd revision 9 -> 8 (deadband_pct 0.5)'
+      attributes:
+        operation: change_applied
+        change.target: tag-group/conveyor-drives
+    - service: ot-historian
+      severity: INFO
+      offset_seconds: 60
+      body: '[HIST] write cache drained: buffer 14% write_lag 0.4 s; ingest 1180 pts/s'
+      attributes:
+        operation: buffer_status
+  steady_attributes:
+    scada-gateway:
+      scada.tag_template_rev: '8'
+  log_taper_seconds: 15
+  verification:
+    - signal: scada.tag_update_rate_per_s
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "scada-gateway"'
+      field: 'metrics.scada.tag_update_rate_per_s'
+      expect: 'back in 1,100-1,300 (was 30,000-40,000)'
+      within_seconds: 60
+    - signal: historian.write_lag_seconds
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "ot-historian"'
+      field: 'metrics.historian.write_lag_seconds'
+      expect: 'back under 1 s (was 8-30 s)'
+      within_seconds: 120
+    - signal: SCADA-TAG-STORM lines
+      from: 'logs.otel.mfg'
+      where: 'body.text LIKE "*SCADA-TAG-STORM*"'
+      expect: '0 new lines'
+      within_seconds: 60
+    - signal: conveyor-drives template revision
+      from: 'logs.otel.mfg'
+      where: 'resource.attributes.service.name == "scada-gateway" AND body.text LIKE "*tag_group group=conveyor-drives*"'
+      field: 'attributes.scada.tag_template_rev'
+      expect: '8 on every line logged since the fix; 9 stops appearing'
+      within_seconds: 60
 business_impact:
   - kpi: business.oee_overall_pct
     factor: {uniform: [0.35, 0.65]}
@@ -61,3 +137,4 @@ generator_impact:
   influxdb_otel:
     cache_write_errors: 5.0
     dropped_writes: 5.0
+generator_hold_seconds: {influxdb_otel: 45}

@@ -9,57 +9,139 @@ affected_services:
 cascade_services:
 - member-portal
 - document-vault
-description: Claims settlement payment failing to disburse to member account or body shop
+description: Claim settlements to body shops fail account validation because the payee sync started storing bank account numbers without their leading zeros.
 investigation_notes: |-
-  1. Check the disbursement error type: PAYEE_ACCOUNT_MISMATCH means the body shop's banking details changed — verify with DRP (Direct Repair Program) network coordinator. Do not resubmit the same entry: an R03 return cannot be reinitiated until the account details are corrected. DAILY_LIMIT_EXCEEDED requires treasury approval for limit override.
-  2. For ROUTING_VALIDATION_FAIL, the payee's routing number failed ABA validation — cross-reference with the Federal Reserve's E-Payments routing directory: https://www.frbservices.org/EPaymentsDirectory.
-  3. FRAUD_HOLD_ACTIVE means fraud-sentinel flagged the disbursement — review the fraud alert and determine if the hold is legitimate or a false positive from the claims payment pattern.
-  4. Member impact: 12 days since loss with rental_extension=REQUIRED means the member's rental car coverage is expiring. Approve rental extension while disbursement is resolved to avoid out-of-pocket.
-  5. For body shop payees in the DRP network, contact the shop directly to verify banking details. Non-DRP shops may require updated W-9 and payment authorization forms.
-  6. Check 1099 generation — failed disbursements that were partially processed may need 1099 reversal to avoid incorrect tax reporting to the IRS.
-remediation_action: retry_claims_disbursement
-error_message: '[CLAIMS] CLAIMS-DISBURSEMENT-FAIL: claim={claim_id} amount=${claim_amount} payee={claim_payee} method={disbursement_method}
-  error={disbursement_error}'
+  1. Search logs.otel.banking for body.text containing CLAIMS-DISBURSEMENT-FAIL on claims-processor: claim={claim_id} for ${claim_amount} to {claim_payee} by {disbursement_method} fails with error={disbursement_error}. metrics.claims_processor.disbursement_failure_pct normally reads 0.2-0.6% and is now 22-34%.
+  2. Look at which payees fail: the failing account numbers are 3-4 digits shorter than the shop's account on file with the DRP network, and every failing number originally started with zero. Payees whose account numbers do not start with zero still pay normally, which rules out the ACH rail, the routing directory and treasury limits.
+  3. Find the change: drp-payee-sync 2.1.0 (namespace claims) rolled out shortly before the first failure. Its new CSV parser reads account_number as an integer, so 000123456789 is stored as 123456789. The payee_sync_status line carries attributes.claims.payee_sync_version and attributes.claims.payee_acct_leading_zero_preserved, which read drp-payee-sync-2.1.0 and false.
+  4. payment-engine is doing the right thing: its pre-disbursement account validation finds no open account for the truncated number and refuses the entry before it is sent, so nothing has to be returned or reversed. Do not bypass account validation to push the payments through.
+  5. Fix both the code and the data: opsctl rollback deployment/drp-payee-sync -n claims --to-revision previous restores 2.0.4, then opsctl run job/drp-payee-resync -n claims reloads the DRP payee file with the account numbers intact (about a minute). Failed disbursements retry on their next cycle and the failure rate converges back over about two minutes.
+  6. Recovery: claims.payee_acct_leading_zero_preserved reads true and payee_sync_version drp-payee-sync-2.0.4, disbursement_failure_pct back under 1%, and no new CLAIMS-DISBURSEMENT-FAIL lines. Approve rental extensions for members whose repair payments were delayed.
+remediation_action: restore_payee_sync
+remediation_command: |-
+  opsctl rollback deployment/drp-payee-sync -n claims --to-revision previous
+  opsctl run job/drp-payee-resync -n claims
+error_message: '[CLAIMS] CLAIMS-DISBURSEMENT-FAIL: claim={claim_id} amount=${claim_amount} payee={claim_payee} method={disbursement_method} error={disbursement_error} acct_len={acct_len}'
 stack_trace: |-
-  === CLAIMS DISBURSEMENT STATUS ===
-  claim={claim_id}  amount=${claim_amount}  payee={claim_payee}
-  --- PAYMENT ATTEMPT ---
-    method={disbursement_method}  attempt=3/3
+  === CLAIMS DISBURSEMENT ===
+  claim={claim_id}  payee={claim_payee}  amount=${claim_amount}
+  --- STEPS ---
     STEP                STATUS      DETAIL
-    claim_approved      COMPLETE    adjuster_id=ADJ-4827
-    amount_verified     COMPLETE    estimate=${claim_amount} deductible=$500
-    payee_validated     COMPLETE    {claim_payee}
-    funds_transfer      FAILED      {disbursement_error} (ACH return R03: account does not match payee)  <<< BLOCKED
-    1099_generation     SKIPPED     ---
-  --- PAYEE INFO ---
-    type=BODY_SHOP  routing={routing_number}  acct=****{acct_last4}
-    DRP_network=true  preferred_shop=true
-  rental_extension=REQUIRED  member_waiting=true  days_since_loss=12
-  ACTION: retry_payment=true  extend_rental=true  alert=CLAIMS-DISBURSEMENT-FAIL
+    settlement_calc     COMPLETE    estimate=${claim_amount} deductible=$500
+    payee_lookup        COMPLETE    source=drp-payee-sync-2.1.0
+    account_validation  FAILED      {disbursement_error}: no open account for routing={routing_number} acct=****{acct_last4} (len={acct_len}, DRP file len=12)  <<< BLOCKED
+    funds_transfer      SKIPPED     ---
+  --- PAYEE ---
+    type=BODY_SHOP  DRP_network=true  preferred_shop=true
+  rental_extension=REQUIRED  days_since_loss={days_since_loss}
+  ACTION: retry_payment=true  alert=CLAIMS-DISBURSEMENT-FAIL
 correlation_attr:
-  key: infra.disbursement_routing_table
-  value: pay-route-v2.1.0-rc3
+  key: claims.payee_sync_version
+  value: drp-payee-sync-2.1.0
 fault_params:
   claim_id: {format: "CLM-{n}", n: {randint: [100000, 999999]}}
   claim_amount: {uniform: [500.0, 50000.0], round: 2}
   claim_payee: {choice: [Caliber Collision, Crash Champions, ABRA Auto Body, Gerber Collision, Maaco]}
   disbursement_method: ACH_CREDIT
   disbursement_error: PAYEE_ACCOUNT_MISMATCH
-  routing_number: {format: "{n}", n: {randint: [100000000, 999999999]}}
-  acct_last4: {format: "{n}", n: {randint: [1000, 9999]}}
+  routing_number: {choice: ['111000025', '021000021', '026009593', '061000104', '121000358']}
+  acct_last4: {randint: [1000, 9999]}
+  acct_len: {randint: [8, 9]}
+  days_since_loss: {randint: [5, 30]}
 rca_clues:
   claims-processor:
-    claims.disbursement_error_type: PAYEE_ACCOUNT_MISMATCH
-    claims.days_since_loss: {randint: [5, 30]}
+    claims.payee_sync_version: drp-payee-sync-2.1.0
+    claims.payee_acct_leading_zero_preserved: false
+    claims.payee_acct_length: {randint: [8, 9]}
   payment-engine:
+    payment.account_validation_result: NO_OPEN_ACCOUNT
     payment.disbursement_retry_count: 3
-    payment.drp_payee_validation: FAILED
   member-portal:
     portal.rental_extension_needed: true
-    portal.member_outreach_status: PENDING
   document-vault:
-    document.w9_on_file: true
-    document.tax_1099_status: BLOCKED
+    document.tax_1099_status: DEFERRED
+error_services:
+- claims-processor
+service_lag_seconds:
+  payment-engine: 10
+  member-portal: 60
+  document-vault: 60
+cascade_messages:
+  payment-engine:
+  - severity: WARN
+    message: '[PAY] account_validation result=NO_OPEN_ACCOUNT routing={routing_number} acct=****{acct_last4} acct_len={acct_len} entry=claim_disbursement action=REFUSED'
+  member-portal:
+  - severity: WARN
+    message: '[PORTAL] page_view page=/claims/status claim={claim_id} payment_status=DELAYED rental_extension=REQUESTED status=200'
+  document-vault:
+  - severity: INFO
+    message: '[DOC] tax_form_generation type=1099-MISC claim={claim_id} reason=payment_not_sent status=DEFERRED'
+fault_scope:
+  cluster: banking-eks-cluster
+  workloads: [claims-processor]
+infrastructure_events:
+- service: claims-processor
+  severity: INFO
+  offset_seconds: -120
+  body: '[CLAIMS] deploy drp-payee-sync 2.0.4 -> 2.1.0 replicas=1/1 parser=csv-fast applied_by=argocd/claims status=AVAILABLE'
+  attributes:
+    operation: deploy
+    claims.payee_sync_version: drp-payee-sync-2.1.0
+    user.name: argocd/claims
+- service: claims-processor
+  severity: INFO
+  offset_seconds: -60
+  body: '[CLAIMS] payee_sync source=drp-network-daily.csv payees_updated=4812 account_number_type=int64 status=COMPLETE'
+  attributes:
+    operation: payee_sync
+    claims.payee_sync_version: drp-payee-sync-2.1.0
+remediation_effects:
+  transition_seconds: 120
+  log_events:
+  - service: claims-processor
+    severity: INFO
+    offset_seconds: 1
+    body: '[change-audit] change applied action=rollback target=deployment/drp-payee-sync namespace=claims cmd="opsctl rollback deployment/drp-payee-sync -n claims --to-revision previous" actor={actor} result="2.1.0 -> 2.0.4"'
+    attributes:
+      operation: change_applied
+      change.target: deployment/drp-payee-sync
+      claims.payee_sync_version: drp-payee-sync-2.0.4
+  - service: claims-processor
+    severity: INFO
+    offset_seconds: 2
+    body: '[change-audit] change applied action=run target=job/drp-payee-resync namespace=claims cmd="opsctl run job/drp-payee-resync -n claims" actor={actor} result="full payee reload started"'
+    attributes:
+      operation: change_applied
+      change.target: job/drp-payee-resync
+  - service: claims-processor
+    severity: INFO
+    offset_seconds: 60
+    body: '[CLAIMS] payee_sync source=drp-network-daily.csv payees_updated=4812 account_number_type=string leading_zeros_preserved=true status=COMPLETE'
+    attributes:
+      operation: payee_sync
+      claims.payee_sync_version: drp-payee-sync-2.0.4
+      claims.payee_acct_leading_zero_preserved: true
+  steady_attributes:
+    claims-processor:
+      claims.payee_sync_version: drp-payee-sync-2.0.4
+  verification:
+  - signal: claims_processor.disbursement_failure_pct
+    from: metrics-generic.otel-default
+    where: resource.attributes.service.name == "claims-processor"
+    field: metrics.claims_processor.disbursement_failure_pct
+    expect: back in 0.2-0.6% (was 22-34%)
+    within_seconds: 180
+  - signal: payee account numbers keep leading zeros
+    from: logs.otel.banking
+    where: resource.attributes.service.name == "claims-processor" AND attributes.operation == "payee_sync_status"
+    field: attributes.claims.payee_acct_leading_zero_preserved
+    expect: true on every line logged after the resync
+    within_seconds: 120
+  - signal: CLAIMS-DISBURSEMENT-FAIL lines
+    from: logs.otel.banking
+    where: body.text LIKE "*CLAIMS-DISBURSEMENT-FAIL*"
+    expect: 0 new lines
+    within_seconds: 180
 business_impact:
   - kpi: business.fee_revenue_usd_per_min
     value: {uniform: [4464.0, 5136.0], round: 1}

@@ -38,6 +38,11 @@ state:
     init: 0
   _last_device_status:
     init: now
+# Before / during / after (schema 1.3):
+#   ch 2  adult ICU alarm profile on MedSurg-4N: unit alarms climb to 60-110/min in ~30s (MedSurg-4S
+#         stays at 1-5/min); after the MedSurg profile is loaded latched alarms clear over ~90s.
+#   ch 20 coturn relay-threads=2 on 8-vCPU relays: two threads pinned at 95-100% while the host sits at
+#         ~25%; patient-side loss 8-16% in ~45s; back under 1% ~60s after the config rollback.
 steps:
 - sample:
     unit:
@@ -145,18 +150,117 @@ steps:
       - 60
       - 150
     unit: devices
+# ── ch 2: central station alarm profiles ───────────────────────────────────
 - sample:
+    ms4n_alarms_1m:
+      expr: "int(rand.uniform(1.0, 5.0) + (rand.uniform(60.0, 110.0) - 3.0) * min(1.0, elapsed.get(2, 0) / 30.0)) if 2 in all_active
+        else (int(85.0 + (rand.uniform(1.0, 5.0) - 85.0) * min(1.0, since_fix.get(2, 0) / 90.0)) if 2 in fixed_channels
+        else int(rand.uniform(1.0, 5.0)))"
+    ms4s_alarms_1m:
+      expr: "int(rand.uniform(1.0, 5.0))"
+    other_units_alarms_1m:
+      expr: "rand.randint(1, 4)"
     alert_rate:
-      if_active:
-        randint:
-        - 30
-        - 120
-      else:
-        randint:
-        - 1
-        - 8
+      expr: "ms4n_alarms_1m + ms4s_alarms_1m + other_units_alarms_1m"
+    ms4n_profile:
+      expr: "'adult-icu-v7' if 2 in all_active else 'medsurg-default'"
+    ms4n_hr_limits:
+      expr: "'50-110' if 2 in all_active else '40-150'"
+    ms4n_spo2_low:
+      expr: "94 if 2 in all_active else 90"
+    ms4n_status:
+      expr: "'ALARM_FLOOD' if 2 in all_active or ms4n_alarms_1m > 15 else 'OK'"
 - metric:
     name: patient_monitor.alerts_per_minute
     value:
       var: alert_rate
     unit: alerts/min
+- log:
+    level: INFO
+    message: '[MONITOR] central_station unit=MedSurg-4N profile={ms4n_profile} hr_limits={ms4n_hr_limits}bpm spo2_low={ms4n_spo2_low}% alarms_1m={ms4n_alarms_1m} probe_off_1m=0 status={ms4n_status}'
+    attrs: &ms4n_attrs
+      operation: central_station_status
+      vitals.unit: MedSurg-4N
+      vitals.alarm_profile:
+        var: ms4n_profile
+      vitals.hr_limits_bpm:
+        var: ms4n_hr_limits
+      vitals.spo2_low_limit_pct:
+        var: ms4n_spo2_low
+      vitals.alarms_per_min:
+        var: ms4n_alarms_1m
+      vitals.probe_disconnect_count: 0
+      vitals.station_status:
+        var: ms4n_status
+  when: "ms4n_status == 'OK'"
+- log:
+    level: WARN
+    message: '[MONITOR] central_station unit=MedSurg-4N profile={ms4n_profile} hr_limits={ms4n_hr_limits}bpm spo2_low={ms4n_spo2_low}% alarms_1m={ms4n_alarms_1m} probe_off_1m=0 status={ms4n_status}'
+    attrs: *ms4n_attrs
+  when: "ms4n_status != 'OK'"
+- log:
+    level: INFO
+    message: '[MONITOR] central_station unit=MedSurg-4S profile=medsurg-default hr_limits=40-150bpm spo2_low=90% alarms_1m={ms4s_alarms_1m} probe_off_1m=0 status=OK'
+    attrs:
+      operation: central_station_status
+      vitals.unit: MedSurg-4S
+      vitals.alarm_profile: medsurg-default
+      vitals.alarms_per_min:
+        var: ms4s_alarms_1m
+      vitals.station_status: OK
+# ── ch 20: telehealth TURN relays ──────────────────────────────────────────
+- sample:
+    th_loss_pct:
+      expr: "round(0.4 + (rand.uniform(8.0, 16.0) - 0.4) * min(1.0, elapsed.get(20, 0) / 45.0), 2) if 20 in all_active
+        else (round(12.0 + (rand.uniform(0.1, 0.8) - 12.0) * min(1.0, since_fix.get(20, 0) / 60.0), 2) if 20 in fixed_channels
+        else round(rand.uniform(0.1, 0.8), 2))"
+    turn_thread_cpu:
+      expr: "round(min(100.0, 32.0 + (rand.uniform(95.0, 100.0) - 32.0) * min(1.0, elapsed.get(20, 0) / 30.0)), 1) if 20 in all_active
+        else (round(97.0 + (rand.uniform(25.0, 40.0) - 97.0) * min(1.0, since_fix.get(20, 0) / 60.0), 1) if 20 in fixed_channels
+        else round(rand.uniform(25.0, 40.0), 1))"
+    turn_host_cpu:
+      expr: "round(rand.uniform(22.0, 34.0), 1)"
+    turn_sessions:
+      expr: "rand.randint(140, 180)"
+    turn_threads:
+      expr: "2 if 20 in all_active else 8"
+    turn_config:
+      expr: "'coturn-4.6.2-high-concurrency' if 20 in all_active else 'coturn-4.6.2-default'"
+    turn_status:
+      expr: "'DEGRADED' if 20 in all_active or th_loss_pct > 2.0 else 'OK'"
+- metric:
+    name: patient_monitor.telehealth_packet_loss_pct
+    value:
+      var: th_loss_pct
+    unit: '%'
+- metric:
+    name: patient_monitor.turn_relay_thread_cpu_pct
+    value:
+      var: turn_thread_cpu
+    unit: '%'
+- log:
+    level: INFO
+    message: '[MONITOR] turn_relay pool=turn-us-east-1 relay_threads={turn_threads} thread_cpu_max={turn_thread_cpu}% host_cpu={turn_host_cpu}% sessions={turn_sessions} client_loss={th_loss_pct}% config={turn_config} status={turn_status}'
+    attrs: &turn_attrs
+      operation: turn_relay_status
+      telehealth.turn_pool: turn-us-east-1
+      telehealth.relay_threads:
+        var: turn_threads
+      telehealth.turn_relay_cpu_pct:
+        var: turn_thread_cpu
+      telehealth.turn_host_cpu_pct:
+        var: turn_host_cpu
+      telehealth.sessions:
+        var: turn_sessions
+      telehealth.packet_loss_pct:
+        var: th_loss_pct
+      infra.turn_server_build:
+        var: turn_config
+      telehealth.status:
+        var: turn_status
+  when: "turn_status == 'OK'"
+- log:
+    level: WARN
+    message: '[MONITOR] turn_relay pool=turn-us-east-1 relay_threads={turn_threads} thread_cpu_max={turn_thread_cpu}% host_cpu={turn_host_cpu}% sessions={turn_sessions} client_loss={th_loss_pct}% config={turn_config} status={turn_status}'
+    attrs: *turn_attrs
+  when: "turn_status != 'OK'"

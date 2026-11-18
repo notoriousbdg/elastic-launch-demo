@@ -7,45 +7,115 @@ affected_services:
 - mes-controller
 cascade_services:
 - oee-analytics
-description: MES work-order Kafka topic consumer backlog exceeded soft watermark; auto-scale workers eligible
+description: A Helm upgrade dropped the replica override for the MES work-order workers; two workers cannot drain the shift-start release and the work-order queue grows past its watermark
 investigation_notes: |-
-  Root Cause: Queue depth growing past the soft watermark indicates inbound rate has temporarily exceeded the worker pool's drain rate. This is normal during shift change and during morning release windows. Queue depth counts work orders, while Kafka consumer lag counts messages (each work order fans out to about 15-30 operation/step events), so a depth of a few thousand shows as tens of thousands of messages of lag. Auto-scaling workers within the configured max is safe as long as the max does not exceed the topic's partition count; extra consumers beyond that sit idle.
-  Remediation (auto-remediate eligible): 1) Scale workers: `mes-admin scale-workers --pool WORK-ORDER --count {target_workers}`. 2) Confirm queue depth recovers within 5 min. 3) If recurring, raise the steady-state pool size in the deployment config.
+  Root cause: the mes-controller Helm release was upgraded shortly before the first MES-QUEUE-OVERFLOW (chart 4.12.0 -> 4.13.0, by mes-release, CHG-7402) without the plant values file, so the workorder.replicas: 6 override was dropped and the mes-workorder-workers Deployment scaled from 6 to the chart default of 2. Each worker drains about 240 work-order events per minute. At shift start the planner releases the shift's work orders at about 900 per minute, so two workers (480 per minute) fall behind by about 420 per minute and the WORK-ORDER queue passes the 2,000 soft watermark. The workers are healthy (CPU 55-65%, no errors, no restarts) and the Kafka brokers and SQL Server are normal; there are simply too few consumers.
+  Confirm:
+    - mes-controller workorder_pool lines show workers=2 desired=2 (attributes.mes.workorder_workers); metric mes.workorder_workers drops from 6 to 2
+    - the mes-controller helm upgrade line (CHG-7402) comes before the first MES-QUEUE-OVERFLOW
+    - metric mes.work_order_queue_depth climbs from 0-150 toward the 5,000 hard watermark at about 7 per second; the Kafka integration shows consumer lag growing on the work-order topic for group mes-workorder-workers
+  Remediation: restore the replica count with opsctl patch deployment/mes-workorder-workers --replicas 6. The four new workers join the consumer group within about 20 s; six workers drain about 1,440 per minute, so the queue falls below the soft watermark within about five minutes and back to normal after that. Adding the plant values file back to the release pipeline is a follow-up so the next upgrade does not drop the override again.
 remediation_action: scale_mes_workers
-error_message: '[MES] MES-QUEUE-OVERFLOW: queue=WORK-ORDER depth={queue_depth} soft_watermark=2000 hard_watermark=5000 workers={current_workers}'
+remediation_command: |-
+  opsctl patch deployment/mes-workorder-workers --replicas 6
+error_message: '[MES] MES-QUEUE-OVERFLOW: queue=WORK-ORDER depth={queue_depth} soft_watermark=2000 hard_watermark=5000 workers={current_workers} inbound_per_min=900 drain_per_min=480'
 stack_trace: |-
   === MES QUEUE STATUS — WORK-ORDER ===
   Depth: {queue_depth} | Soft watermark: 2000 | Hard watermark: 5000
-  Workers: {current_workers} (max: 16)
+  Workers: {current_workers} ready (deployment mes-workorder-workers, desired {current_workers}; was 6 before CHG-7402)
   ------------------------------------------------------------------------
   Recent rates:
-    Inbound:    480/min
-    Drain:      320/min
-    Net:        +160/min
+    Inbound:    900/min (shift-start release)
+    Drain:      480/min (240/min per worker)
+    Net:        +420/min
   ------------------------------------------------------------------------
-  MES-QUEUE-OVERFLOW: auto-scale workers from {current_workers} → {target_workers}
+  MES-QUEUE-OVERFLOW: queue growing; drain capacity below inbound rate
 correlation_attr:
-  key: deployment.mes_worker_pool_config
-  value: worker-pool-v2.5.0-low-concurrency
+  key: mes.workorder_workers
+  value: '2'
 fault_params:
   queue_depth: {randint: [2200, 4800]}
-  current_workers: {randint: [4, 8]}
-  target_workers: {randint: [10, 16]}
+  current_workers: 2
 rca_clues:
   mes-controller:
-    mes.queue_depth: {randint: [2200, 4800]}
-    mes.worker_count: {randint: [4, 8]}
+    mes.worker_cpu_pct: {randint: [55, 65]}
+    mes.worker_restarts: 0
+    helm.chart_version: 4.13.0
   oee-analytics:
     oee.event_intake_lag_s: {randint: [15, 75]}
+cascade_messages:
+  oee-analytics:
+    - severity: WARN
+      message: '[OEE] work-order events from mes-controller arriving {queue_depth} behind; production counts for the current window are provisional'
+fault_scope:
+  cluster: mfg-eks-cluster
+  workloads: [mes-controller]
+infrastructure_events:
+  - service: mes-controller
+    severity: INFO
+    offset_seconds: -300
+    body: '[MES] helm upgrade release=mes-controller chart 4.12.0 -> 4.13.0 values=values.yaml (values-p002.yaml not passed); deployment/mes-workorder-workers replicas 6 -> 2; by mes-release (CHG-7402)'
+    attributes:
+      operation: config_change
+      user.name: mes-release
+      change.request: CHG-7402
+      mes.workorder_workers: 2
+      change.summary: 'mes-workorder-workers replicas: 6 -> 2 (chart default)'
+service_lag_seconds:
+  oee-analytics: 30
+remediation_effects:
+  log_events:
+    - service: mes-controller
+      severity: INFO
+      offset_seconds: 1
+      body: '[CHG] CHANGE APPLIED opsctl patch deployment/mes-workorder-workers --replicas 6 by {actor}: replicas 2 -> 6'
+      attributes:
+        operation: change_applied
+        change.target: deployment/mes-workorder-workers
+    - service: mes-controller
+      severity: INFO
+      offset_seconds: 20
+      body: '[MES] consumer group mes-workorder-workers rebalanced: 6 members, drain rate 1440/min'
+      attributes:
+        operation: consumer_rebalance
+  steady_attributes:
+    mes-controller:
+      mes.workorder_workers: 6
+  log_taper_seconds: 30
+  verification:
+    - signal: mes.workorder_workers
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "mes-controller"'
+      field: 'metrics.mes.workorder_workers'
+      expect: '6 (was 2)'
+      within_seconds: 60
+    - signal: mes.work_order_queue_depth
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "mes-controller"'
+      field: 'metrics.mes.work_order_queue_depth'
+      expect: 'falling steadily and below the 2,000 soft watermark'
+      within_seconds: 330
+    - signal: MES-QUEUE-OVERFLOW lines
+      from: 'logs.otel.mfg'
+      where: 'body.text LIKE "*MES-QUEUE-OVERFLOW*"'
+      expect: '0 new lines'
+      within_seconds: 120
+    - signal: work-order worker count
+      from: 'logs.otel.mfg'
+      where: 'resource.attributes.service.name == "mes-controller" AND body.text LIKE "*workorder_pool*"'
+      field: 'attributes.mes.workorder_workers'
+      expect: '6 on every line logged since the fix'
+      within_seconds: 60
 business_impact:
   - kpi: business.throughput_units_per_hour
-    factor: {uniform: [0.30, 0.60]}
+    factor: {uniform: [0.60, 0.80]}
   - kpi: business.oee_performance_pct
-    factor: {uniform: [0.35, 0.65]}
+    factor: {uniform: [0.60, 0.80]}
   - kpi: business.cycle_time_seconds
-    factor: {uniform: [1.5, 3.0]}
+    factor: {uniform: [1.3, 1.8]}
   - kpi: business.on_time_delivery_pct
-    factor: {uniform: [0.40, 0.70]}
+    factor: {uniform: [0.60, 0.85]}
 generator_impact:
   kafka_otel:
     high_consumer_lag_by_topic: 70000.0
+generator_hold_seconds: {kafka_otel: 180}

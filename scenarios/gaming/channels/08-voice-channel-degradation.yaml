@@ -5,62 +5,125 @@ error_type: VOICE-CHANNEL-OVERLOAD
 sensor_type: audio_quality_monitor
 affected_services:
 - chat-service
-- game-server
-cascade_services:
-- analytics-pipeline
-description: CPU-throttled voice server pods causing voice chat audio quality degradation with packet loss, jitter, and codec failures
+error_services:
+- chat-service
+cascade_services: []
+description: A right-sizing change halved the voice-mixer CPU limit; CFS throttling makes the mixer miss its 20 ms frame deadline, so voice chat loses packets and downgrades bitrate
+onset_delay_seconds: 10
+ramp_seconds: 20
 investigation_notes: |-
-  Root cause: voice server CPU saturation at {mixer_cpu_pct}% (above 85% the single-core mixer cannot keep up) causes the audio mixing pipeline to miss its 10ms deadline, resulting in packet drops on the UDP voice channel. The server downgrades bitrate from 96kbps to 64kbps but this is insufficient under load.
-  1. Check server resources: `top -H -p $(pgrep -d, voice-mixer)` to verify CPU usage per thread; the mixing thread is single-core bound and needs CPU affinity pinning.
-  2. Review MOS scores: any stream below 2.0 MOS is unintelligible — those players should be migrated to a less-loaded voice server immediately.
-  3. Inspect FEC recovery rate: 12.3% recovery means FEC is working but insufficient for {voice_packet_loss_pct}% loss — consider enabling Opus FEC redundancy mode.
-  4. Remediate: issue `restart_voice_servers` to rebalance voice channel assignments across the server pool; then `reset_codec_pipeline` to force codec renegotiation at optimal bitrates for current network conditions.
-  5. Scale voice server pods horizontally and set max speakers per server to 50 to prevent CPU saturation; enable Opus DTX (discontinuous transmission) to reduce idle bandwidth.
-remediation_action: restart_voice_servers
+  Root cause: a right-sizing Helm upgrade of the voice-mixer deployment (CHG0071208, from a VPA recommendation) lowered its CPU limit from 2000m to {cpu_limit} about two minutes before the first VOICE-CHANNEL-OVERLOAD line. The recommendation followed average CPU, but the Opus mixer works in 20 ms bursts; with half the CFS quota the pods are throttled for {cpu_throttled_pct}% of periods, the mixer misses its 20 ms frame deadline (p99 {mix_latency_ms} ms), late frames are dropped ({voice_packet_loss_pct}% loss, {jitter_ms} ms jitter) and clients fall back from 96 to 64 kbps. Text chat on the same chat-service pods stays at 1-15 ms routing latency, and the nodes have spare CPU, so this is throttling at the container limit, not node saturation or network loss.
+  Confirm:
+    - chat-service logs the Helm upgrade of voice-mixer with resources.limits.cpu 2000m -> 1000m (attributes.change.request CHG0071208) before the first VOICE-CHANNEL-OVERLOAD line; its mixer_status lines carry attributes.deployment.cpu_limit 1000m (2000m before)
+    - metrics.chat.voice.cpu_throttled_pct is 45-75 (baseline 0-3) and the Kubernetes CPU throttling alert fires for chat-service in metrics-kubeletstatsreceiver.otel-*
+    - metrics.chat.voice.mix_latency_ms is 35-80 ms (baseline 4-9) and metrics.chat.voice.packet_loss_pct 6-15 (baseline 0-0.5), while the msg_routed lines keep latency at 1-15 ms
+  Remediation: opsctl patch deployment/voice-mixer --cpu-limit 2000m restores the limit. The rollout replaces the mixer pods over about 60 seconds, so throttling, mix latency and packet loss converge back to baseline over that minute while calls move to the new pods. Restarting the pods or scaling out replicas would not help: every new pod gets the same 1000m limit and each call is mixed on one pod.
+remediation_action: restore_voice_mixer_cpu_limit
+remediation_command: |-
+  opsctl patch deployment/voice-mixer --cpu-limit 2000m
 error_message: '[Voice] VOICE-CHANNEL-OVERLOAD: channel={voice_channel_id} loss={voice_packet_loss_pct}% jitter={jitter_ms}ms
-  speakers={active_speakers} codec={codec}'
+  speakers={active_speakers} codec={codec} mix_p99={mix_latency_ms}ms deadline=20ms'
 stack_trace: |-
-  === VOICE SERVER QUALITY METRICS ===
-  channel={voice_channel_id}  codec={codec}
+  === VOICE MIXER QUALITY REPORT ===
+  channel={voice_channel_id}  codec={codec}  deployment=voice-mixer
   ----------- per-stream stats --------
     stream_count     = {active_speakers}
     packet_loss_avg  = {voice_packet_loss_pct}%
     jitter_avg       = {jitter_ms}ms
-    jitter_max       = 287ms
-    bitrate          = 64kbps (target 96kbps — downgraded)
-    fec_recovery     = 12.3%
-  ----------- worst streams -----------
-    PLR-481020  loss=34.2%  jitter=198ms  MOS=1.8
-    PLR-229103  loss=28.7%  jitter=154ms  MOS=2.1
-    PLR-884712  loss=19.1%  jitter=112ms  MOS=2.6
-  ----------- server state ------------
-    cpu_pct     = {mixer_cpu_pct}%
-    mix_latency = {mix_latency_ms}ms (target 10ms)
-    udp_rx_drop = 4.2%
-  VOICE-CHANNEL-OVERLOAD: channel {voice_channel_id} quality degraded — {voice_packet_loss_pct}% loss
+    bitrate          = 64kbps (target 96kbps, downgraded)
+  ----------- mixer state -------------
+    frame_deadline   = 20ms
+    mix_latency_p99  = {mix_latency_ms}ms
+    cpu_limit        = {cpu_limit}
+    cfs_throttled    = {cpu_throttled_pct}% of periods
+  VOICE-CHANNEL-OVERLOAD: channel {voice_channel_id} quality degraded, {voice_packet_loss_pct}% loss
 correlation_attr:
-  key: infra.audio_codec_lib
-  value: opus-1.4.0-custom-build
+  key: deployment.cpu_limit
+  value: 1000m
 fault_params:
   voice_channel_id:
     format: "VC-{n}"
     n: {randint: [10000, 99999]}
-  voice_packet_loss_pct: {uniform: [5.0, 35.0], round: 1}
-  jitter_ms: {uniform: [20.0, 150.0], round: 1}
+  voice_packet_loss_pct: {uniform: [6.0, 15.0], round: 1}
+  jitter_ms: {uniform: [25.0, 60.0], round: 1}
   active_speakers: {randint: [2, 25]}
   codec: opus
-  mixer_cpu_pct: {uniform: [85.0, 99.0], round: 1}
-  mix_latency_ms: {randint: [15, 30]}
+  cpu_limit: 1000m
+  cpu_throttled_pct: {uniform: [45.0, 75.0], round: 1}
+  mix_latency_ms: {randint: [35, 80]}
 rca_clues:
   chat-service:
-    voice.mixer_cpu_pct: {uniform: [85.0, 99.0], round: 1}
-    voice.mix_latency_ms: {randint: [15, 30]}
-    voice.codec_downgrade: true
-  game-server:
-    game.voice_disconnect_count: {randint: [10, 100]}
-    game.team_comm_degraded: true
-  analytics-pipeline:
-    analytics.voice_quality_events: {randint: [200, 1000]}
+    voice.cpu_throttled_pct: {uniform: [45.0, 75.0], round: 1}
+    voice.mix_latency_ms: {randint: [35, 80]}
+    voice.cpu_limit: 1000m
+fault_scope:
+  cluster: gaming-gke-cluster
+  workloads: [chat-service]
+infrastructure_events:
+  - service: chat-service
+    severity: INFO
+    offset_seconds: -120
+    body: 'helm upgrade voice-mixer chat-charts/voice-mixer --namespace chat --reuse-values --set resources.limits.cpu=1000m: Release "voice-mixer" has been upgraded. REVISION: 23 (CHG0071208)'
+    attributes:
+      operation: config_change
+      change.request: CHG0071208
+      user.name: finops-rightsizing
+      change.summary: 'voice-mixer resources.limits.cpu 2000m -> 1000m (VPA recommendation)'
+      config.key: resources.limits.cpu
+      deployment.cpu_limit: 1000m
+  - service: chat-service
+    severity: INFO
+    offset_seconds: -60
+    body: 'deployment "voice-mixer" successfully rolled out (6/6 pods, limits.cpu=1000m)'
+    attributes:
+      operation: deployment_rollout
+      deployment.cpu_limit: 1000m
+remediation_effects:
+  transition_seconds: 60
+  log_taper_seconds: 45
+  log_events:
+    - service: chat-service
+      severity: INFO
+      offset_seconds: 1
+      body: 'level=info logger=changelog msg="change applied" cmd="opsctl patch deployment/voice-mixer --cpu-limit 2000m" actor={actor} result="resources.limits.cpu 1000m -> 2000m, rollout started"'
+      attributes:
+        operation: change_applied
+        change.target: deployment/voice-mixer
+        deployment.cpu_limit: 2000m
+    - service: chat-service
+      severity: INFO
+      offset_seconds: 60
+      body: 'deployment "voice-mixer" successfully rolled out (6/6 pods, limits.cpu=2000m)'
+      attributes:
+        operation: deployment_rollout
+        deployment.cpu_limit: 2000m
+  steady_attributes:
+    chat-service:
+      deployment.cpu_limit: 2000m
+  verification:
+    - signal: chat.voice.mix_latency_ms
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "chat-service"'
+      field: 'metrics.chat.voice.mix_latency_ms'
+      expect: 'back in 4-9 ms (was 35-80 ms), converging over about 60 seconds as the new pods take the calls'
+      within_seconds: 90
+    - signal: chat.voice.packet_loss_pct
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "chat-service"'
+      field: 'metrics.chat.voice.packet_loss_pct'
+      expect: 'back in 0-0.5% (was 6-15%) within about 60 seconds'
+      within_seconds: 90
+    - signal: VOICE-CHANNEL-OVERLOAD lines
+      from: 'logs.otel.gaming'
+      where: 'body.text LIKE "*VOICE-CHANNEL-OVERLOAD*"'
+      expect: '0 new lines'
+      within_seconds: 90
+    - signal: voice-mixer CPU limit
+      from: 'logs.otel.gaming'
+      where: 'resource.attributes.service.name == "chat-service"'
+      field: 'attributes.deployment.cpu_limit'
+      expect: '2000m on every line since the fix (was 1000m)'
+      within_seconds: 90
 business_impact:
   - kpi: business.sessions_per_min
     value: {uniform: [1088.0, 1252.0]}
@@ -73,3 +136,4 @@ business_impact:
 generator_impact:
   kubernetes_otel:
     container_cpu_throttling: 0.95
+generator_hold_seconds: {kubernetes_otel: 60}

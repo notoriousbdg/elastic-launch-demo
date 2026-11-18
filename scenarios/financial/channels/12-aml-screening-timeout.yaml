@@ -6,32 +6,40 @@ sensor_type: aml_screener
 affected_services:
 - compliance-monitor
 - fraud-detector
+error_services:
+- compliance-monitor
 cascade_services:
 - order-gateway
 - customer-portal
 description: Anti-money laundering screening service exceeds response time SLA
+onset_delay_seconds: 10
+service_lag_seconds: {fraud-detector: 30, order-gateway: 45, customer-portal: 60}
 investigation_notes: |-
-  1. Check compliance-monitor logs for COMPL-AML-SCREENING — note transaction_id, jurisdiction, screening_ms, and which watchlist check timed out.
-  2. Query FROM logs.otel.financial.* | WHERE body.text LIKE "*COMPL-AML-SCREENING*" | STATS avg(screening_ms) BY jurisdiction to determine if a specific jurisdiction's provider is slow.
-  3. Inspect the PEP_DATABASE check elapsed time — PEP hits with pep_hit_score > 0.7 require MLRO escalation regardless of timeout; do not auto-clear.
-  4. Check fraud-detector for correlated alerts on the same transaction_id — overlapping fraud and AML signals may indicate a sanctioned-entity order attempt (a sanction match score below 0.5 with no correlated flags rules it out).
-  5. Hold the transaction and escalate to MLRO; if ADVERSE_MEDIA check timed out, run it synchronously before releasing the hold.
-remediation_action: hold_transaction_and_escalate_mlro
-error_message: '[COMPL] COMPL-AML-SCREENING: transaction={transaction_id} screening_ms={screening_ms} sla_ms={aml_sla_ms}
-  jurisdiction={jurisdiction}'
+  Root cause: aml-screening-routing config revision 19 (CR-6043, compliance-platform) routes jurisdiction {jurisdiction} to the screening provider's {provider_endpoint} endpoint instead of eu-west; a templating error in the routing map. Every EU screening now crosses the Atlantic and, because the US endpoint enforces a per-tenant rate limit that this extra volume exceeds, gets HTTP 429 responses and retries with backoff ({http_429_retries} retries on one screening), so EU screenings take {screening_ms}ms against a {aml_sla_ms}ms SLA and transactions are held. Screenings for US, UK, SG and JP still complete in 0.1-1.5 seconds on their usual endpoints, and the watchlist data and the provider are healthy, which rules out a provider outage or a slow PEP database. Sending EU personal data to a US endpoint is also a data residency concern for the DPO.
+  Confirm:
+    - compliance-monitor "[COMPL] aml_screening_health jurisdiction=EU endpoint=us-east routing_rev=19 ... status=ANOMALY" lines (attributes.aml.provider_endpoint, attributes.aml.routing_revision); metrics.compliance.aml_screening_p95_ms for attributes.aml.jurisdiction EU at 12,700-30,000 against 800-1,600 normally, the other jurisdictions unchanged
+    - EU "[COMPL] aml_screening ... endpoint=us-east ... http_429=" lines with sla_met=false, while US, UK, SG and JP lines show sla_met=true
+    - the compliance-monitor line "[COMPL] config_change config=aml-screening-routing rev=19 ... EU: eu-west -> us-east" with attributes.operation config_change comes before the first COMPL-AML-SCREENING line
+    - metrics.compliance.aml_held_transactions and metrics.fraud_detector.decisions_pending_aml grow while EU screenings are slow; order-gateway logs order_held reason=AML_SCREENING_PENDING (held={held_txns}) and fraud-detector logs decision=PENDING_AML (pending_decisions={pending_decisions}) with low fraud scores
+  Remediation: opsctl rollback config/aml-screening-routing --to-revision previous. The router reloads revision 18 in about 10 seconds, EU screenings go back to eu-west, the held queue drains and the EU p95 is back under 2,000ms within about 90 seconds. A PEP hit with pep_hit_score {pep_hit_score} still goes to the MLRO for review: that is a compliance obligation, not the fix. Holding transactions and escalating is the consequence of the slow screenings, not a remedy.
+remediation_action: rollback_aml_screening_routing
+remediation_command: |-
+  opsctl rollback config/aml-screening-routing --to-revision previous
+error_message: '[COMPL] COMPL-AML-SCREENING: transaction={transaction_id} screening_ms={screening_ms} sla_ms={aml_sla_ms} jurisdiction={jurisdiction} endpoint={provider_endpoint} http_429_retries={http_429_retries} disposition=HELD'
 stack_trace: |-
   === AML SCREENING RESULTS ===
-  transaction={transaction_id}  jurisdiction={jurisdiction}
+  transaction={transaction_id}  jurisdiction={jurisdiction}  provider_endpoint={provider_endpoint}  routing_rev=19
   --- WATCHLIST CHECKS ---
-    OFAC_SDN         checked=true   hits=0   elapsed=1,240ms
-    EU_SANCTIONS     checked=true   hits=0   elapsed=2,100ms
-    UN_CONSOLIDATED  checked=true   hits=0   elapsed=890ms
-    PEP_DATABASE     checked=true   hits=1   elapsed=8,400ms  <<< SLOW
-    ADVERSE_MEDIA    checked=false  hits=--  elapsed=TIMEOUT
-  total_screening_ms={screening_ms}  sla_ms={aml_sla_ms}  breach=true
+    OFAC_SDN         checked=true   hits=0   elapsed=4,120ms  http_429=2
+    EU_SANCTIONS     checked=true   hits=0   elapsed=5,380ms  http_429=3
+    UN_CONSOLIDATED  checked=true   hits=0   elapsed=3,960ms  http_429=2
+    PEP_DATABASE     checked=true   hits=1   elapsed=6,700ms  http_429=4
+    ADVERSE_MEDIA    checked=false  hits=--  elapsed=TIMEOUT  http_429=retrying (Retry-After backoff)
+  total_screening_ms={screening_ms}  sla_ms={aml_sla_ms}  breach=true  rtt_to_endpoint_ms=92
   pep_hit_score={pep_hit_score}  pep_name_match='partial'  disposition=PENDING_REVIEW
-  ACTION: hold_transaction=true  escalate_mlro=true  alert=COMPL-AML-SCREENING
-correlation_attr: {}
+correlation_attr:
+  key: aml.provider_endpoint
+  value: us-east
 fault_params:
   transaction_id:
     format: "TXN-{n}"
@@ -39,21 +47,102 @@ fault_params:
   screening_ms: {randint: [12700, 30000]}
   aml_sla_ms: 3000
   jurisdiction: EU
+  provider_endpoint: us-east
+  http_429_retries: {randint: [3, 40]}
   pep_hit_score: {uniform: [0.71, 0.99], round: 2}
+  held_txns: {randint: [50, 400]}
+  pending_decisions: {randint: [20, 180]}
 rca_clues:
   compliance-monitor:
     compliance.aml_screening_timeout_ms: {randint: [12700, 30000]}
-    compliance.pep_hit_score: {uniform: [0.71, 0.99], round: 2}
-    compliance.timed_out_check: ADVERSE_MEDIA
+    aml.jurisdiction: EU
+    aml.provider_endpoint: us-east
+    aml.http_429_retries: {randint: [3, 40]}
   fraud-detector:
     fraud.correlated_aml_flags: 0
-    fraud.sanction_entity_match_score: {uniform: [0.0, 0.2], round: 2}
+    fraud.decisions_pending_aml: {randint: [20, 180]}
   order-gateway:
-    oms.aml_hold_queue_depth: {randint: [1, 50]}
-    oms.transactions_pending_aml: {randint: [1, 100]}
+    oms.aml_hold_queue_depth: {randint: [50, 400]}
+    oms.transactions_pending_aml: {randint: [50, 400]}
   customer-portal:
-    portal.aml_hold_notifications_pending: {randint: [1, 20]}
+    portal.aml_hold_notifications_pending: {randint: [5, 60]}
     portal.account_aml_restricted: true
+cascade_messages:
+  fraud-detector:
+    - severity: WARN
+      message: '[COMPL] fraud_decision transaction={transaction_id} fraud_score=0.04 decision=PENDING_AML jurisdiction={jurisdiction} pending_decisions={pending_decisions}'
+  order-gateway:
+    - severity: WARN
+      message: '[OMS] order_held reason=AML_SCREENING_PENDING jurisdiction={jurisdiction} transaction={transaction_id} held={held_txns} status=HELD'
+  customer-portal:
+    - severity: WARN
+      message: '[PORTAL] client_action action=transfer_status latency_ms=210 http_status=200 transfer_state=HELD_AML_SCREENING jurisdiction={jurisdiction}'
+fault_scope:
+  cluster: finserv-aks-cluster
+  workloads: [compliance-monitor, fraud-detector]
+infrastructure_events:
+  - service: compliance-monitor
+    severity: INFO
+    offset_seconds: -120
+    body: '[COMPL] config_change config=aml-screening-routing rev=19 (was 18) route EU: eu-west -> us-east (US, UK, SG, JP unchanged); applied by compliance-platform (CR-6043)'
+    attributes:
+      user.name: compliance-platform
+      change.request: CR-6043
+      operation: config_change
+      change.summary: 'aml-screening-routing EU endpoint: eu-west -> us-east'
+      config.revision: 19
+      aml.routing_revision: 19
+      aml.jurisdiction: EU
+      aml.provider_endpoint: us-east
+remediation_effects:
+  log_events:
+    - service: audit-logger
+      severity: INFO
+      offset_seconds: 1
+      body: '[AUDIT] event_logged stream=change-mgmt type=CHANGE_APPLIED cmd="opsctl rollback config/aml-screening-routing --to-revision previous" actor={actor}: aml-screening-routing rev 19 -> rev 18 (EU endpoint us-east -> eu-west)'
+      attributes:
+        operation: change_applied
+        audit.stream: change-mgmt
+        change.target: config/aml-screening-routing
+    - service: compliance-monitor
+      severity: INFO
+      offset_seconds: 10
+      body: '[COMPL] config_reload config=aml-screening-routing rev=18 route EU: us-east -> eu-west; held EU screenings re-queued'
+      attributes:
+        operation: config_reload
+        config.revision: 18
+        aml.routing_revision: 18
+        aml.jurisdiction: EU
+        aml.provider_endpoint: eu-west
+    - service: compliance-monitor
+      severity: INFO
+      offset_seconds: 80
+      body: '[COMPL] aml_hold_queue drained jurisdiction=EU endpoint=eu-west; held transactions screened and released, PEP matches routed to MLRO review'
+      attributes:
+        operation: aml_hold_release
+        aml.jurisdiction: EU
+        aml.provider_endpoint: eu-west
+  steady_attributes:
+    compliance-monitor:
+      aml.routing_revision: 18
+  verification:
+    - signal: compliance.aml_screening_p95_ms (EU)
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "compliance-monitor" AND attributes.aml.jurisdiction == "EU"'
+      field: 'metrics.compliance.aml_screening_p95_ms'
+      expect: 'back under 2,000ms within about 90s as the held queue drains (was 12,700-30,000ms)'
+      within_seconds: 150
+    - signal: COMPL-AML-SCREENING lines
+      from: 'logs.otel.finserv'
+      where: 'body.text LIKE "*COMPL-AML-SCREENING*"'
+      expect: '0 new lines'
+      within_seconds: 150
+    - signal: EU screening provider endpoint
+      from: 'logs.otel.finserv'
+      where: 'resource.attributes.service.name == "compliance-monitor" AND attributes.aml.jurisdiction == "EU"'
+      field: 'attributes.aml.provider_endpoint'
+      expect: 'eu-west on every EU screening line from the routing reload (about 10s after the fix); us-east stops appearing for EU'
+      within_seconds: 150
 business_impact:
   - kpi: business.order_flow_per_min
     value: {uniform: [316.2, 363.8]}

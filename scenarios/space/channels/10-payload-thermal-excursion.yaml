@@ -9,14 +9,17 @@ affected_services:
 cascade_services:
 - mission-control
 description: Payload bay temperature outside safe operating range
-investigation_notes: 'Root cause: coolant loop flow restriction or heater control circuit stuck-on condition. Coolant flow
-  below nominal 3.2L/min (for example 2.4L/min) points to a loop restriction — check pump outlet pressure and look for air bubbles in the coolant loop (cavitation
-  from improper ground fill). Verify MLI (multi-layer insulation) blanket integrity — a torn or displaced blanket on the sun-facing
-  side causes rapid thermal excursion. Cross-reference with payload bay zones B/C/D — if only one zone affected, suspect local
-  heater controller failure rather than loop-wide issue. Remediation: increase coolant pump speed (PLD_COOLANT_FLOW 4.0),
-  disable zone heater if stuck-on (PLD_HEATER zone OFF), and monitor temperature convergence over 5-minute window. If MLI
-  damage confirmed, notify payload integration team for a fairing access-door inspection.'
+investigation_notes: |-
+  Root cause: the zone {zone} heater relay HTR-A3 is stuck ON. The thermostat commanded it OFF at the 24.0C setpoint, but the relay contacts stayed closed, so the heater keeps driving zone {zone} up to {temp}C against a safe max of {safe_max}C (+{deviation}C). The coolant loop is healthy: flow holds at the nominal 3.2L/min (a restriction would show well below that, for example 2.4L/min, with low pump outlet pressure or air in the loop), the MLI blanket is intact, and zones B/C/D stay nominal, which points to a local heater controller fault rather than a loop-wide issue.
+  Confirm:
+    - payload-monitor logs [PLD] sensor=bay_temperature zone={zone} ... heater=HTR-A3:STUCK_ON coolant_flow=3.2L/min status=ANOMALY (attributes.payload.heater_state); metric payload.bay_temperature climbs from ~22C to ~{temp}C
+    - the payload-monitor warning "[PLD] HTR-A3 relay commanded OFF ... contact feedback=CLOSED" comes before the first PLD-THERMAL-EXCURSION
+    - sensor-validator reports validation.thermal_zone_affected={zone} and validation.mli_status=INTACT
+  Remediation: force the zone {zone} heater off and raise coolant flow to pull the heat out: opsctl patch heater/pld-zone-a --state=off, then opsctl patch coolant/pld-loop --flow=4.0. The payload has thermal mass, so the temperature does not snap back: it falls below the {safe_max}C safe max within about a minute and settles back near 22-24C over about 3 minutes. Leave HTR-A3 disabled and schedule the relay for replacement; if MLI damage is ever found, notify the payload integration team for a fairing access-door inspection.
 remediation_action: reset_payload_thermal
+remediation_command: |-
+  opsctl patch heater/pld-zone-a --state=off
+  opsctl patch coolant/pld-loop --flow=4.0
 error_message: '[PLD] PLD-THERMAL-EXCURSION: zone={zone} temp={temp}C safe_max={safe_max}C delta=+{deviation}C'
 stack_trace: |-
   == PAYLOAD CONTROLLER STATUS == THERMAL MANAGEMENT ==
@@ -28,12 +31,12 @@ stack_trace: |-
   C       19.8C    -10.0C     45.0C      NOMINAL
   D       24.3C    -10.0C     45.0C      NOMINAL
   ---------------------------------------------------------------
-  COOLANT_FLOW: 3.2L/min | HEATER_STATE: STUCK_ON | MLI_STATUS: INTACT
+  COOLANT_FLOW: 3.2L/min | HEATER_STATE: HTR-A3 STUCK_ON | MLI_STATUS: INTACT
   PLD-THERMAL-EXCURSION: Zone {zone} temperature {temp}C exceeds safe max {safe_max}C
-  ACTION: Increase coolant flow rate, verify MLI blanket integrity
+  ACTION: Disable the zone heater, increase coolant flow rate
 correlation_attr:
-  key: runtime.python_version
-  value: cpython-3.13.0-free-threaded
+  key: payload.heater_relay
+  value: HTR-A3
 fault_params:
   zone: A
   temp: 53.4
@@ -44,11 +47,74 @@ rca_clues:
   payload-monitor:
     payload.coolant_flow_lpm: {uniform: [3.1, 3.3], round: 1}
     payload.heater_state: STUCK_ON
+    payload.heater_relay: HTR-A3
   sensor-validator:
     validation.thermal_zone_affected: A
     validation.mli_status: INTACT
   mission-control:
     upstream.degraded_subsystem: payload
+cascade_messages:
+  mission-control:
+    - severity: WARN
+      message: '[MCC] ALERT subsystem=payload code=PLD-THERMAL-EXCURSION zone={zone} temp={temp}C safe_max={safe_max}C; payload customer notified, encapsulation hold'
+fault_scope:
+  workloads: [payload-monitor, sensor-validator]
+infrastructure_events:
+  - service: payload-monitor
+    severity: WARN
+    offset_seconds: -90
+    body: '[PLD] HTR-A3 relay commanded OFF at thermostat setpoint 24.0C zone=A; relay contact feedback=CLOSED (expected OPEN) heater_current=2.8A'
+    attributes:
+      operation: heater_control
+      payload.zone: A
+      payload.heater_relay: HTR-A3
+      payload.heater_state: STUCK_ON
+remediation_effects:
+  log_taper_seconds: 60
+  log_events:
+    - service: mission-control
+      severity: INFO
+      offset_seconds: 1
+      body: '[MCC] CMD ACCEPTED opsctl patch heater/pld-zone-a --state=off from {actor}: zone A heaters HTR-A1..A4 power removed at the bus'
+      attributes:
+        operation: command
+        command.target: heater/pld-zone-a
+    - service: mission-control
+      severity: INFO
+      offset_seconds: 4
+      body: '[MCC] CMD ACCEPTED opsctl patch coolant/pld-loop --flow=4.0 from {actor}: payload coolant pump 3.2L/min -> 4.0L/min'
+      attributes:
+        operation: command
+        command.target: coolant/pld-loop
+    - service: payload-monitor
+      severity: INFO
+      offset_seconds: 50
+      body: '[PLD] zone A heater bus OFF, coolant_flow=4.0L/min; bay_temperature 44.1C below safe max 45.0C and falling'
+      attributes:
+        operation: heater_control
+        payload.heater_state: 'OFF'
+        payload.coolant_flow_lpm: 4.0
+  steady_attributes:
+    payload-monitor:
+      payload.heater_state: 'OFF'
+  verification:
+    - signal: payload.bay_temperature
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "payload-monitor"'
+      field: 'metrics.payload.bay_temperature'
+      expect: 'below 45 C within about a minute, back near 22-24 C after about 3 minutes (was ~53 C)'
+      within_seconds: 300
+    - signal: PLD-THERMAL-EXCURSION lines
+      from: 'logs.otel.nova7'
+      where: 'body.text LIKE "*PLD-THERMAL-EXCURSION*"'
+      expect: '0 new lines once the taper ends (about a minute)'
+      within_seconds: 300
+    - signal: zone A heater state
+      from: 'logs.otel.nova7'
+      where: 'resource.attributes.service.name == "payload-monitor"'
+      field: 'attributes.payload.heater_state'
+      expect: 'OFF on every line logged since the fix; STUCK_ON stops appearing'
+      within_seconds: 300
 business_impact:
   - kpi: business.mission_success_probability_pct
     factor: {uniform: [0.60, 0.82]}

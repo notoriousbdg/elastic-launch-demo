@@ -142,6 +142,10 @@ _VERIFICATION_INDICES = {
     "logs-k8seventsreceiver.otel-default",
     "traces-generic.otel-default",
 }
+# AWS integration metric streams a verification may read (one per package, e.g.
+# metrics-aws.lambda.otel-*). Their fields are CloudWatch-style: filter on
+# Namespace / MetricName / stat and read `metrics.amazonaws.com/AWS/<ns>/<metric>`.
+_VERIFICATION_AWS_INDEX = re.compile(r"metrics-aws\.[a-z0-9_]+\.otel-\*")
 
 def _placeholders(text: str) -> set[str]:
     # Match {word} but not {{word}} (double-brace escapes are literal in log lines).
@@ -986,6 +990,11 @@ def check_scenario(scenario_id: str) -> tuple[list[str], list[str]]:
                 f"channel, so those alerts never fire: {missing}"
             )
 
+    # ── Check 45: ops.yaml (opsctl profile), whenever the scenario has one ──
+    e45, w45 = check_ops_profile(s)
+    errors.extend(e45)
+    warnings.extend(w45)
+
     # ── Checks 37-44: schema 1.3 realism contract (only for scenarios >= 1.3) ──
     if _schema_at_least(s, (1, 3)):
         e13, w13 = check_schema_13(s)
@@ -1010,7 +1019,10 @@ def check_schema_13(s: Any) -> tuple[list[str], list[str]]:
     """Checks 37-44 for schema 1.3 scenarios (realism + verifiable remediation).
 
     37. every channel has a ``remediation_command``; each line is ``opsctl <verb> ...``
-        with a known verb (``app.ops.VERBS``)
+        with a verb the scenario's ops profile defines, and parses
+    41. (also, as warnings) verification signals the scenario actually emits: a
+        ``metrics.<name>`` from metrics-generic that a service emits, a log
+        ``attributes.<key>`` a service, clue or fix line sets
     38. ``fault_state`` / ``remediation_effects.state`` only name enabled generators,
         their declared ``SPEC.state_keys``, and workloads / node pools that exist in
         ``k8s_topology``
@@ -1030,13 +1042,18 @@ def check_schema_13(s: Any) -> tuple[list[str], list[str]]:
         ``k8s_events``; node_not_ready needs a ``fault_scope`` with nodes or a pool
     44. ``error_type`` contains no quote characters (it is embedded in KQL/ES|QL)
     """
-    from app.ops import VERBS
+    from app import ops_profile
+    from app.ops import OpsError, parse_command
     from generator_engine.platform_topology import build_platform
     from generator_engine.registry import GENERATORS, enabled_specs
 
     errors: list[str] = []
     warnings: list[str] = []
     raw_channels = s._channels
+    profile = ops_profile.profile_for(s)
+    verbs = ops_profile.verbs(profile)
+    emitted_metrics = _emitted_metric_names(s)
+    emitted_attrs = _emitted_attribute_keys(s)
     topo = getattr(s, "k8s_topology", None)
     platform = build_platform(topo, s.namespace) if topo else None
     enabled = {spec.id for spec in enabled_specs(s)}
@@ -1061,9 +1078,14 @@ def check_schema_13(s: Any) -> tuple[list[str], list[str]]:
             errors.append(f"{label}: schema 1.3 needs remediation_command (one opsctl command per line)")
         for ln in lines:
             parts = ln.split()
-            if parts[0] != "opsctl" or len(parts) < 3 or parts[1] not in VERBS:
+            if parts[0] != "opsctl" or len(parts) < 3 or parts[1] not in verbs:
                 errors.append(f"{label}: remediation_command line {ln!r} must be 'opsctl <verb> <target> ...' "
-                              f"with a verb in {sorted(VERBS)}")
+                              f"with a verb this scenario's ops profile defines: {sorted(verbs)}")
+                continue
+            try:
+                parse_command(ln, profile)
+            except OpsError as exc:
+                errors.append(f"{label}: remediation_command line {ln!r} does not parse: {exc}")
 
         # 38
         added_nodes: set[str] = set()
@@ -1120,6 +1142,29 @@ def check_schema_13(s: Any) -> tuple[list[str], list[str]]:
         err_svcs = ch.get("error_services")
         if err_svcs and not set(err_svcs) <= affected:
             errors.append(f"{label}: error_services {err_svcs} must be a subset of affected_services")
+        hold = ch.get("generator_hold_seconds")
+        if hold is not None:
+            if not isinstance(hold, dict):
+                errors.append(f"{label}: generator_hold_seconds must be a mapping of generator id -> seconds")
+            else:
+                for gid, secs in hold.items():
+                    if gid not in (ch.get("generator_impact") or {}):
+                        errors.append(f"{label}: generator_hold_seconds names '{gid}', which this channel's "
+                                      f"generator_impact does not set")
+                    if isinstance(secs, bool) or not isinstance(secs, (int, float)) or secs < 0:
+                        errors.append(f"{label}: generator_hold_seconds['{gid}'] must be a number >= 0")
+        lag = ch.get("service_lag_seconds")
+        if lag is not None:
+            if not isinstance(lag, dict):
+                errors.append(f"{label}: service_lag_seconds must be a mapping of service -> seconds")
+            else:
+                known = affected | set(ch.get("cascade_services") or [])
+                for svc, secs in lag.items():
+                    if svc not in known:
+                        errors.append(f"{label}: service_lag_seconds names '{svc}', which is neither an "
+                                      f"affected nor a cascade service")
+                    if isinstance(secs, bool) or not isinstance(secs, (int, float)) or secs < 0:
+                        errors.append(f"{label}: service_lag_seconds['{svc}'] must be a number >= 0")
         allowed_cascade = set(ch.get("cascade_services") or []) | (affected - set(err_svcs or affected))
         params = set((ch.get("fault_params") or {}).keys())
         for svc, msgs in (ch.get("cascade_messages") or {}).items():
@@ -1143,9 +1188,11 @@ def check_schema_13(s: Any) -> tuple[list[str], list[str]]:
                 continue
             # the runbook renders each check as a runnable ES|QL query
             src = str(v.get("from") or "")
-            if not (src.startswith("logs.otel.") or src in _VERIFICATION_INDICES):
+            if not (src.startswith("logs.otel.") or src in _VERIFICATION_INDICES
+                    or _VERIFICATION_AWS_INDEX.fullmatch(src)):
                 errors.append(f"{label}: verification '{v['signal']}' needs 'from' set to the index "
-                              f"the signal lives in (logs.otel.<ns> or one of {sorted(_VERIFICATION_INDICES)})")
+                              f"the signal lives in (logs.otel.<ns>, metrics-aws.<package>.otel-* or one of "
+                              f"{sorted(_VERIFICATION_INDICES)})")
             for fld in [str(v.get("where") or ""), str(v.get("field") or "")]:
                 # ignore string literals and already-quoted identifiers
                 fld = re.sub(r'"[^"]*"|`[^`]*`', " ", fld)
@@ -1153,6 +1200,19 @@ def check_schema_13(s: Any) -> tuple[list[str], list[str]]:
                     errors.append(f"{label}: verification '{v['signal']}': field '{tok}' needs backticks in ES|QL")
                 for tok in re.findall(r"(?<![\w.`])k8s\.[a-z_.]+(?=\s*[<>=!]=?\s*\d)", fld):
                     errors.append(f"{label}: verification '{v['signal']}': metric '{tok}' needs the 'metrics.' prefix")
+            # (warning) the signal must exist: a service metric no service emits, or a log
+            # attribute nothing sets, is a query Nightshift runs and finds nothing for
+            text = re.sub(r'"[^"]*"', " ", f"{v.get('where') or ''} {v.get('field') or ''}")
+            if src == "metrics-generic.otel-default":
+                for name in re.findall(r"(?<![\w.`])metrics\.([A-Za-z0-9_.]+)", text):
+                    if name not in emitted_metrics:
+                        warnings.append(f"{label}: verification '{v['signal']}': no service emits metric "
+                                        f"'{name}' (metrics-generic.otel-default)")
+            if src.startswith("logs.otel."):
+                for key in re.findall(r"(?<![\w.`])attributes\.([A-Za-z0-9_.]+)", text):
+                    if key not in emitted_attrs and not key.startswith(("k8s.", "service.", "host.")):
+                        warnings.append(f"{label}: verification '{v['signal']}': no service, clue or fix "
+                                        f"line sets log attribute '{key}'")
 
         # 42
         onset = float(ch.get("onset_delay_seconds", 0) or 0)
@@ -1177,6 +1237,183 @@ def check_schema_13(s: Any) -> tuple[list[str], list[str]]:
             errors.append(f"{label}: error_type must not contain quotes (it is embedded in KQL): {et!r}")
 
     return errors, warnings
+
+def _walk_steps(node: Any):
+    """Every dict inside a service's DSL steps (nested when/per-channel blocks included)."""
+    if isinstance(node, dict):
+        yield node
+        for v in node.values():
+            yield from _walk_steps(v)
+    elif isinstance(node, list):
+        for v in node:
+            yield from _walk_steps(v)
+
+
+def _emitted_metric_names(s: Any) -> set[str]:
+    """Metric names the scenario's services emit (``metric: {name: ...}`` steps)."""
+    names: set[str] = set()
+    for spec in (getattr(s, "_service_specs", {}) or {}).values():
+        for d in _walk_steps(spec):
+            m = d.get("metric")
+            if isinstance(m, dict) and isinstance(m.get("name"), str):
+                names.add(m["name"])
+    for kpi in getattr(s, "_kpi_emissions", []) or []:
+        if isinstance(kpi, dict) and kpi.get("name"):
+            names.add(str(kpi["name"]))
+    return names
+
+
+def _emitted_attribute_keys(s: Any) -> set[str]:
+    """Log attribute keys the scenario sets: DSL log attrs, rca_clues, fix lines."""
+    keys: set[str] = set()
+    for spec in (getattr(s, "_service_specs", {}) or {}).values():
+        for d in _walk_steps(spec):
+            lg = d.get("log")
+            if isinstance(lg, dict) and isinstance(lg.get("attrs"), dict):
+                keys |= {str(k) for k in lg["attrs"]}
+    for ch in (getattr(s, "_channels", {}) or {}).values():
+        for clues in (ch.get("rca_clues") or {}).values():
+            if isinstance(clues, dict):
+                keys |= {str(k) for k in clues}
+        eff = ch.get("remediation_effects") or {}
+        for attrs in (eff.get("steady_attributes") or {}).values():
+            if isinstance(attrs, dict):
+                keys |= {str(k) for k in attrs}
+        for evt in eff.get("log_events") or []:
+            keys |= {str(k) for k in ((evt or {}).get("attributes") or {})}
+        for evt in ch.get("infrastructure_events") or []:
+            keys |= {str(k) for k in ((evt or {}).get("attributes") or {})}
+    keys |= {"change.id", "user.name", "event.action"}
+    return keys
+
+
+def check_ops_profile(s: Any) -> tuple[list[str], list[str]]:
+    """Check 45: the scenario's ``ops.yaml`` (opsctl profile) is well formed.
+
+    Known keys; ``extends`` names shipped presets; verbs the file adds have a summary
+    and an example; template placeholders are command-context keys or vars the
+    profile defines; ``audit.service`` names a service; ``auto_remediate_channels``
+    are channels; ``state_changes`` name enabled generators and their ``state_keys``.
+    """
+    import yaml
+
+    from app import ops_profile
+    from generator_engine.registry import GENERATORS, enabled_specs
+
+    errors: list[str] = []
+    warnings: list[str] = []
+    sdir = getattr(s, "_scenario_dir", None)
+    path = Path(sdir) / ops_profile.PROFILE_FILE if sdir else None
+    if not path or not path.is_file():
+        return errors, warnings
+    label = f"{path.parent.name}/ops.yaml"
+    try:
+        raw = yaml.safe_load(path.read_text()) or {}
+    except yaml.YAMLError as exc:
+        return [f"{label}: invalid YAML: {exc}"], warnings
+    if not isinstance(raw, dict):
+        return [f"{label}: must be a mapping"], warnings
+    for key in sorted(set(raw) - ops_profile.PROFILE_KEYS):
+        errors.append(f"{label}: unknown key '{key}' (allowed: {sorted(ops_profile.PROFILE_KEYS)})")
+    extends = raw.get("extends") or []
+    extends = [extends] if isinstance(extends, str) else extends
+    shipped = set(ops_profile.preset_names())
+    for name in extends:
+        if name not in shipped:
+            errors.append(f"{label}: extends unknown preset '{name}' (shipped: {sorted(shipped)})")
+    try:
+        prof = ops_profile.resolve(raw)
+    except Exception as exc:
+        return errors + [f"{label}: does not resolve: {exc}"], warnings
+
+    for verb, info in (raw.get("verbs") or {}).items():
+        if info is None:
+            continue
+        if not isinstance(info, dict):
+            errors.append(f"{label}: verbs.{verb} must be a mapping")
+            continue
+        for key in sorted(set(info) - ops_profile.VERB_KEYS):
+            errors.append(f"{label}: verbs.{verb}: unknown key '{key}'")
+        merged = ops_profile.verbs(prof).get(verb) or {}
+        for need in ("summary", "example"):
+            if not merged.get(need):
+                errors.append(f"{label}: verbs.{verb} needs '{need}' (shown by opsctl --help)")
+    for kind, info in (raw.get("kinds") or {}).items():
+        for key in sorted(set(info or {}) - ops_profile.KIND_KEYS):
+            errors.append(f"{label}: kinds.{kind}: unknown key '{key}'")
+    for key in sorted(set(raw.get("runbook") or {}) - ops_profile.RUNBOOK_KEYS):
+        errors.append(f"{label}: runbook: unknown key '{key}' (allowed: {sorted(ops_profile.RUNBOOK_KEYS)})")
+
+    # placeholders: command context + profile vars + format vars
+    known = set(ops_profile.CONTEXT_KEYS) | set(prof.get("vars") or {}) | {"changes_text"}
+    audit = prof.get("audit") or {}
+    formats = audit.get("formats") or {}
+    for fname, fmt in formats.items():
+        for key in sorted(set(fmt or {}) - ops_profile.FORMAT_KEYS):
+            errors.append(f"{label}: audit.formats.{fname}: unknown key '{key}'")
+        known |= set((fmt or {}).get("vars") or {})
+
+    def _check_templates(where: str, node: Any) -> None:
+        if isinstance(node, str):
+            bad = [p for p in ops_profile.placeholders(node) if p not in known]
+            if bad:
+                errors.append(f"{label}: {where}: unknown placeholder(s) {sorted(set(bad))}")
+        elif isinstance(node, dict):
+            for k, v in node.items():
+                if k in ("when", "vars"):
+                    continue
+                _check_templates(f"{where}.{k}", k if isinstance(k, str) and "{" in k else None)
+                _check_templates(f"{where}.{k}", v)
+        elif isinstance(node, list):
+            for i, v in enumerate(node):
+                _check_templates(f"{where}[{i}]", v)
+
+    for section in ("verbs", "audit", "side_effects", "state_changes", "kinds"):
+        if section in raw:
+            _check_templates(section, raw[section])
+
+    default_fmt = audit.get("default")
+    if default_fmt and default_fmt not in formats:
+        errors.append(f"{label}: audit.default '{default_fmt}' is not in audit.formats")
+    for kind, info in (prof.get("kinds") or {}).items():
+        f = (info or {}).get("audit")
+        if f and f not in formats:
+            errors.append(f"{label}: kinds.{kind}.audit '{f}' is not in audit.formats")
+
+    services = set((getattr(s, "_service_specs", {}) or {}).keys())
+    wanted = audit.get("service") or []
+    wanted = [wanted] if isinstance(wanted, str) else wanted
+    if "audit" in raw and (raw.get("audit") or {}).get("service") and not any(w in services for w in wanted):
+        errors.append(f"{label}: audit.service {wanted} names no service of this scenario")
+    for se in raw.get("side_effects") or []:
+        if isinstance(se, dict) and se.get("service") and se["service"] not in services:
+            errors.append(f"{label}: side_effects service '{se['service']}' is not a service of this scenario")
+
+    chans = set((getattr(s, "_channels", {}) or {}).keys())
+    for c in raw.get("auto_remediate_channels") or []:
+        if not isinstance(c, int) or c not in chans:
+            errors.append(f"{label}: auto_remediate_channels entry {c!r} is not a channel number")
+
+    enabled = {spec.id for spec in enabled_specs(s)}
+    for i, rule in enumerate(raw.get("state_changes") or []):
+        if not isinstance(rule, dict):
+            errors.append(f"{label}: state_changes[{i}] must be a mapping")
+            continue
+        for key in sorted(set(rule) - ops_profile.STATE_CHANGE_KEYS):
+            errors.append(f"{label}: state_changes[{i}]: unknown key '{key}'")
+        gid = rule.get("generator")
+        if gid not in enabled:
+            errors.append(f"{label}: state_changes[{i}] names generator '{gid}', which is not enabled")
+            continue
+        declared = set(getattr(GENERATORS.get(gid), "state_keys", {}) or {})
+        for path_key in (rule.get("state") or {}):
+            top = str(path_key).split(".")[0]
+            if top not in declared:
+                errors.append(f"{label}: state_changes[{i}]: '{top}' is not in {gid} SPEC.state_keys {sorted(declared)}")
+    if not ops_profile.guide_text(prof):
+        warnings.append(f"{label}: no guide — `opsctl guide` has nothing to tell Claude about this scenario's telemetry")
+    return errors, warnings
+
 
 def check_checked_in_host_identity() -> list[str]:
     """Fail when a scenario file's host ids disagree with ScenarioIdentity."""

@@ -6,34 +6,44 @@ sensor_type: margin_calculator
 affected_services:
 - risk-calculator
 - settlement-processor
+error_services:
+- risk-calculator
 cascade_services:
 - customer-portal
 - compliance-monitor
 description: Margin requirement calculation fails due to stale collateral valuations
+onset_delay_seconds: 0
+service_lag_seconds:
+  settlement-processor: 30
+  customer-portal: 45
+  compliance-monitor: 60
 investigation_notes: |-
-  1. Check risk-calculator logs for RISK-MARGIN-CALL — note account_id, margin_ratio, and valuation_age_s for stale collateral.
-  2. Query FROM logs.otel.financial.* | WHERE body.text LIKE "*RISK-MARGIN-CALL*" | STATS count() BY account_id to identify accounts with repeated margin calls.
-  3. Inspect settlement-processor for pending collateral transfers — a funding shortfall here often compounds the equity deficiency (zero pending transfers rules out a funding shortfall).
-  4. Check customer-portal for unsatisfied margin call notifications — the client may not have received the T+1 deadline alert.
-  5. If valuation_age_s > 3600 force a collateral revaluation; if shortfall persists initiate liquidation of lowest-haircut assets first.
-remediation_action: force_collateral_revaluation
+  Root cause: cronjob/collateral-reval, which revalues pledged collateral every 60 s, was patched to suspend: true for a maintenance window about five minutes before the first RISK-MARGIN-CALL and was never resumed. The margin policy applies a 100% haircut to collateral whose valuation is older than 300 s, so once the last run aged past that limit every account's treasuries and equities count for $0 and only cash remains eligible: accounts fall below the {maintenance_ratio} maintenance ratio (margin_ratio {margin_ratio}) and margin calls fire across the book with valuation_age_s={valuation_age_s}. Positions and prices are fine: market data is fresh, the requirement side of the calculation (initial and maintenance margin) is unchanged, and settlement-processor shows no pending collateral transfers (settlement.collateral_transfer_pending 0), which rules out a funding shortfall. Cash-only accounts are not called, because they hold no collateral that needs a valuation.
+  Confirm:
+    - metric risk_calculator.collateral_valuation_age_s climbs past 300 s (from its usual 30-120 s) and keeps growing by one second per second; risk_calculator.margin_calls_issued_per_min jumps from 0-3 to 40-150
+    - risk-calculator "[RISK] margin_sweep" lines show collateral_reval_suspended=true (attributes.collateral_reval.suspended) and attributes.collateral_reval.last_success_age_s growing with status=ANOMALY
+    - the risk-calculator line "cronjob/collateral-reval suspend=true" (attributes.operation cronjob_update) comes before the first margin call
+    - body.text LIKE "*RISK-MARGIN-CALL*" lines show valuation_age_s above 300 on every account
+  Remediation: opsctl patch cronjob/collateral-reval --suspend false, then opsctl run job/collateral-reval to revalue now rather than wait for the next schedule. The run takes about 40 s; when it completes the oldest valuation is back under 120 s within about 75 s of the fix, the margin sweep re-evaluates and withdraws the calls that no longer have a deficiency, and new calls drop back to 0-3 per minute. Issuing or cancelling margin calls by hand is not the fix: the valuations stay stale, so the next sweep raises the same calls again.
+remediation_action: resume_collateral_revaluation
+remediation_command: |-
+  opsctl patch cronjob/collateral-reval --suspend false
+  opsctl run job/collateral-reval
 error_message: '[RISK] RISK-MARGIN-CALL: account={account_id} margin_ratio={margin_ratio} maintenance_ratio={maintenance_ratio}
-  valuation_age_s={valuation_age_s}'
+  valuation_age_s={valuation_age_s} stale_collateral_haircut=100%'
 stack_trace: |-
   === MARGIN SUMMARY ===
   account={account_id}  margin_ratio={margin_ratio}  maintenance={maintenance_ratio}
-  --- COLLATERAL ---
-    cash          $2,340,000    valued=CURRENT
-    treasuries    $8,120,000    valued=STALE ({valuation_age_s}s)
-    equities      $4,560,000    valued=STALE ({valuation_age_s}s)
-    total_col     $15,020,000
+  --- COLLATERAL ---  market_value   valuation_age   haircut              eligible
+    cash              $2,340,000     -               0%                   $2,340,000
+    treasuries        $8,120,000     {valuation_age_s}s   100% (age>300s)  $0
+    equities          $4,560,000     {valuation_age_s}s   100% (age>300s)  $0
+    total_eligible    $2,340,000     (at standard haircuts: $13,717,600)
   --- REQUIREMENTS ---
-    initial_margin    $18,450,000
-    maintenance       $14,760,000
-    current_equity    $12,180,000  <<< BELOW MAINTENANCE
-    shortfall         $2,580,000
-  collateral_stale=true  valuation_age={valuation_age_s}s  max_staleness=300s
-  ACTION: issue_margin_call=true  liquidation_t+1=PENDING  alert=RISK-MARGIN-CALL
+    maintenance       $9,600,000
+    shortfall         $7,260,000  <<< BELOW MAINTENANCE
+  collateral_source=collateral-reval  last_valuation_age={valuation_age_s}s  max_valuation_age=300s
+  ACTION: issue_margin_call=true  alert=RISK-MARGIN-CALL
 correlation_attr: {}
 fault_params:
   account_id:
@@ -41,11 +51,12 @@ fault_params:
     n: {randint: [10000, 99999]}
   margin_ratio: {uniform: [0.05, 0.20], round: 3}
   maintenance_ratio: 0.25
-  valuation_age_s: {randint: [3700, 14400]}
+  valuation_age_s: {randint: [320, 1800]}
 rca_clues:
   risk-calculator:
-    risk.margin_breach_count: {randint: [1, 20]}
-    risk.collateral_staleness_s: {randint: [3700, 14400]}
+    risk.collateral_staleness_s: {randint: [320, 1800]}
+    risk.stale_collateral_haircut_pct: 100
+    collateral_reval.suspended: true
   settlement-processor:
     settlement.collateral_transfer_pending: 0
     settlement.equity_deficiency_usd: {randint: [500000, 5000000]}
@@ -54,7 +65,98 @@ rca_clues:
     portal.account_restricted: true
   compliance-monitor:
     compliance.margin_call_regulatory_flags: {randint: [1, 10]}
-    compliance.collateral_valuation_age_s: {randint: [3700, 14400]}
+    compliance.collateral_valuation_age_s: {randint: [320, 1800]}
+cascade_messages:
+  settlement-processor:
+    - severity: WARN
+      message: '[SETTLE] margin_call_received account={account_id} source=risk-calculator collateral_transfer_pending=0 status=AWAITING_CLIENT_FUNDING'
+  customer-portal:
+    - severity: WARN
+      message: '[PORTAL] margin_call_notice account={account_id} margin_ratio={margin_ratio} maintenance={maintenance_ratio} account_restricted=true'
+  compliance-monitor:
+    - severity: WARN
+      message: '[COMPL] margin_call_record account={account_id} collateral_valuation_age_s={valuation_age_s} rule=FINRA-4210 recorded=true'
+fault_scope:
+  cluster: finserv-eks-cluster
+  workloads: [risk-calculator, settlement-processor]
+infrastructure_events:
+  - service: risk-calculator
+    severity: INFO
+    offset_seconds: -300
+    body: '[RISK] collateral_reval scheduler: cronjob/collateral-reval suspend=true (was false) for maintenance window MW-1117-02 by r.okafor (CR-7215); scheduled runs skipped until resumed'
+    attributes:
+      user.name: r.okafor
+      change.request: CR-7215
+      operation: cronjob_update
+      collateral_reval.suspended: true
+      change.summary: 'cronjob/collateral-reval suspend: false -> true'
+remediation_effects:
+  log_taper_seconds: 40
+  log_events:
+    - service: audit-logger
+      severity: INFO
+      offset_seconds: 1
+      body: '[AUDIT] event_logged stream=change-mgmt type=CHANGE_APPLIED cmd="opsctl patch cronjob/collateral-reval --suspend false" actor={actor}: cronjob/collateral-reval suspend true -> false'
+      attributes:
+        operation: change_applied
+        audit.stream: change-mgmt
+        change.target: cronjob/collateral-reval
+    - service: audit-logger
+      severity: INFO
+      offset_seconds: 2
+      body: '[AUDIT] event_logged stream=change-mgmt type=CHANGE_APPLIED cmd="opsctl run job/collateral-reval" actor={actor}: manual collateral revaluation run started'
+      attributes:
+        operation: change_applied
+        audit.stream: change-mgmt
+        change.target: job/collateral-reval
+    - service: risk-calculator
+      severity: INFO
+      offset_seconds: 3
+      body: '[RISK] collateral_reval scheduler: cronjob/collateral-reval suspend=false; schedule */1 * * * * resumed'
+      attributes:
+        operation: cronjob_update
+        collateral_reval.suspended: false
+    - service: risk-calculator
+      severity: INFO
+      offset_seconds: 4
+      body: '[RISK] collateral_reval job started run=manual lots=18432 sources=pricing,refdata'
+      attributes:
+        operation: collateral_reval
+    - service: risk-calculator
+      severity: INFO
+      offset_seconds: 42
+      body: '[RISK] collateral_reval job completed in 38s: 18432 collateral lots revalued, max valuation age 41s; margin sweep re-run, open calls without a deficiency withdrawn'
+      attributes:
+        operation: collateral_reval
+        collateral_reval.suspended: false
+        collateral_reval.last_success_age_s: 0
+  steady_attributes:
+    risk-calculator:
+      collateral_reval.suspended: false
+  verification:
+    - signal: risk_calculator.collateral_valuation_age_s
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "risk-calculator"'
+      field: 'metrics.risk_calculator.collateral_valuation_age_s'
+      expect: 'back under 120 s once the revaluation run completes (was 320-1,800 s and growing)'
+      within_seconds: 120
+    - signal: risk_calculator.margin_calls_issued_per_min
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "risk-calculator"'
+      field: 'metrics.risk_calculator.margin_calls_issued_per_min'
+      expect: 'back to 0-3 per minute (was 40-150)'
+      within_seconds: 120
+    - signal: RISK-MARGIN-CALL lines
+      from: 'logs.otel.finserv'
+      where: 'body.text LIKE "*RISK-MARGIN-CALL*"'
+      expect: '0 new lines'
+      within_seconds: 120
+    - signal: collateral-reval cronjob suspended
+      from: 'logs.otel.finserv'
+      where: 'resource.attributes.service.name == "risk-calculator"'
+      field: 'attributes.collateral_reval.suspended'
+      expect: 'false on every line since the fix; true stops appearing'
+      within_seconds: 120
 business_impact:
   - kpi: business.margin_utilization_pct
     factor: {uniform: [1.8, 3.5]}

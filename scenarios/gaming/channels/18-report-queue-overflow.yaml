@@ -6,57 +6,141 @@ sensor_type: queue_monitor
 affected_services:
 - moderation-engine
 - chat-service
-cascade_services:
-- auth-gateway
-description: Player report queue exceeds processing capacity causing delays in abuse case resolution
+error_services:
+- moderation-engine
+cascade_services: []
+description: Report classifier workers crash after an inference batch size change, so the player report queue grows and abuse
+  reports go unreviewed
+onset_delay_seconds: 15
+ramp_seconds: 45
 investigation_notes: |-
-  Root cause: 8 of 12 report processing workers have crashed (likely OOM on GPU inference nodes), reducing processing capacity by 67%. Auto-resolve is disabled due to high false positive rates from the automod model, creating a dual failure mode.
-  1. Check worker pods: `kubectl get pods -l app=report-processor` on the AKS cluster — look for OOMKilled or CrashLoopBackOff status on GPU-attached pods.
-  2. Review SLA breaches: harassment reports at 12h (SLA: 4h) and hate_speech at 6h (SLA: 1h) are critical compliance violations — escalate to the T&S lead.
-  3. Inspect GPU memory: `nvidia-smi` on inference nodes for memory near 40GB and the worker logs for `CUDA out of memory` — if 2 nodes show OOM, the batch size for the classification model may need to be reduced.
-  4. Remediate: issue `restart_report_workers` to recover crashed processors and `prioritize_sla_breached` to reorder the queue by SLA violation severity.
-  5. Enable CPU-fallback inference for lower-priority categories (spam, exploits) to free GPU capacity for high-SLA categories (hate_speech, harassment).
-remediation_action: restart_report_workers
-error_message: '[T&S] MOD-REPORT-QUEUE-OVERFLOW: queue={report_queue_depth} rate={processing_rate}/min oldest={oldest_report_hours}h
-  category={report_category}'
+  Root cause: a Helm upgrade of report-classifier (CHG0061818) rendered ConfigMap report-classifier revision 23 with inference_batch_size {batch_size} instead of 32. At {batch_size} reports per batch the classifier needs more than the 40 GB of its A100 GPU: the new pods fail on their first batch with torch.OutOfMemoryError (CUDA out of memory), and some are OOMKilled as their pinned host buffers grow with the batch. The Deployment is in CrashLoopBackOff with {workers_ready}/12 workers ready, so reports arrive at {inflow_per_s}/s but only {processing_rate}/s are classified, and the queue grows by about 35 reports per second toward its 60000 limit. Report inflow is normal and chat scanning by automod-text is healthy, so this is not a surge of reports.
+  Confirm:
+    - the report-classifier lines carry attributes.config.inference_batch_size = 128 (was 32) and gpu_mem_used 39.4GiB/40GiB, with torch.OutOfMemoryError lines; the Helm upgrade line with change.request CHG0061818 comes before them
+    - metrics.moderation.classifier.workers_ready is 0-3 (baseline 12), and the Kubernetes metrics show CrashLoopBackOff restarts and OOMKilled containers
+    - metrics.moderation.report_queue_depth climbs by about 35 per second to 20000-60000 (baseline 50-300), and chat-service logs overdue report verdicts
+  Remediation: run `opsctl rollback configmap/report-classifier --to-revision previous`. The pods roll with batch size 32 and load the model, reaching 12/12 ready within about 90 s. The queue starts to fall about 30 s after the rollback and is back to 50-300 within about 300 s. Restarting the pods or adding GPU nodes would not help: every worker still runs batches of 128 and runs out of GPU memory on its first batch.
+remediation_action: rollback_report_classifier_config
+remediation_command: |-
+  opsctl rollback configmap/report-classifier --to-revision previous
+error_message: '[T&S] MOD-REPORT-QUEUE-OVERFLOW: queue_depth over {queue_alert_threshold} and growing inflow={inflow_per_s}/s
+  processed={processing_rate}/s classifier_workers_ready={workers_ready}/12 inference_batch_size={batch_size} oldest_category={report_category}'
 stack_trace: |-
-  === REPORT QUEUE STATUS ===
-  category={report_category}
-  ----------- queue metrics -----------
-    depth           = {report_queue_depth}
-    processing_rate = {processing_rate}/min
-    oldest_report   = {oldest_report_hours}h
-    drain_eta       = NEVER (inflow > capacity)
-  ----------- category breakdown ------
-    harassment   : 8,421 pending  (SLA: 4h, actual: 12h)
-    cheating     : 4,201 pending  (SLA: 2h, actual: 8h)
-    hate_speech  : 2,847 pending  (SLA: 1h, actual: 6h)
-    exploits     : 1,204 pending  (SLA: 4h, actual: 24h)
-    spam         : 891 pending    (SLA: 8h, actual: 48h)
-  ----------- processor state ---------
-    workers_active  = 4/12 (8 CRASHED)
-    gpu_inference   = DEGRADED (OOM on 2 nodes)
-    auto_resolve    = DISABLED (fp_rate too high)
-  ----------- action ------------------
-    RESTART crashed workers  PRIORITIZE by SLA breach
-  MOD-REPORT-QUEUE-OVERFLOW: queue {report_queue_depth} reports, oldest {oldest_report_hours}h
+  === REPORT QUEUE / CLASSIFIER STATUS ===
+  --- queue ---
+    inflow          = {inflow_per_s} reports/s
+    processed       = {processing_rate} reports/s
+    drain_eta       = never (inflow > capacity)
+    oldest category = {report_category}
+  --- report-classifier (deployment, 12 replicas, 1x A100 40GB each) ---
+    ready                = {workers_ready}/12
+    state                = CrashLoopBackOff (restarts {restart_count})
+    last exit            = 1 (torch.OutOfMemoryError: CUDA out of memory), some OOMKilled
+    inference_batch_size = {batch_size}
+    gpu_mem at crash     = 39.4/40 GiB
+  MOD-REPORT-QUEUE-OVERFLOW: {workers_ready}/12 classifier workers ready, queue growing
 correlation_attr:
-  key: infra.gpu_memory_config
-  value: a100-40gb-batch-oversized
+  key: config.inference_batch_size
+  value: 128
 fault_params:
-  report_queue_depth: {randint: [18000, 50000]}
-  processing_rate: {uniform: [5.0, 30.0], round: 1}
-  oldest_report_hours: {uniform: [4.0, 72.0], round: 1}
+  queue_alert_threshold: 5000
+  inflow_per_s: {randint: [30, 40]}
+  processing_rate: {uniform: [0.0, 9.0], round: 1}
+  workers_ready: {randint: [0, 3]}
+  batch_size: 128
+  restart_count: {randint: [4, 9]}
   report_category: {choice: [harassment, cheating, hate_speech, exploits, spam]}
 rca_clues:
   moderation-engine:
-    moderation.workers_crashed: 8
-    moderation.gpu_inference_status: OOM
+    moderation.classifier_restarts: {randint: [4, 9]}
+    moderation.classifier_last_exit: 'CUDA out of memory'
+    config.inference_batch_size: 128
   chat-service:
-    chat.unmoderated_messages_pct: {uniform: [10.0, 40.0], round: 1}
-    chat.report_button_clicks: {randint: [1000, 10000]}
-  auth-gateway:
-    auth.flagged_account_backlog: {randint: [100, 1000]}
+    chat.reports_pending_verdict: {randint: [5000, 40000]}
+cascade_messages:
+  chat-service:
+    - severity: WARN
+      message: '[Chat] report verdicts overdue: {inflow_per_s} reports/s submitted to moderation-engine, no verdict within SLA;
+        reported messages stay visible pending review'
+fault_scope:
+  cluster: gaming-aks-cluster
+  workloads: [moderation-engine]
+service_lag_seconds: {chat-service: 30}
+infrastructure_events:
+  - service: moderation-engine
+    severity: INFO
+    offset_seconds: -150
+    body: 'helm upgrade report-classifier charts/report-classifier --namespace trust-safety --reuse-values --set inference.batchSize=128:
+      Release "report-classifier" has been upgraded. REVISION: 23 (CHG0061818)'
+    attributes:
+      operation: config_change
+      change.request: CHG0061818
+      user.name: ts-ml-oncall
+      change.summary: 'report-classifier inference_batch_size: 32 -> 128'
+      config.inference_batch_size: 128
+  - service: moderation-engine
+    severity: INFO
+    offset_seconds: -120
+    body: 'deployment "report-classifier" rolling update started: new pods mount ConfigMap report-classifier revision 23 (inference_batch_size=128)'
+    attributes:
+      operation: deployment_rollout
+      change.request: CHG0061818
+      config.inference_batch_size: 128
+remediation_effects:
+  transition_seconds: 300
+  log_taper_seconds: 60
+  log_events:
+    - service: moderation-engine
+      severity: INFO
+      offset_seconds: 1
+      body: 'level=info logger=changelog msg="change applied" cmd="opsctl rollback configmap/report-classifier --to-revision previous"
+        actor={actor} result="configmap/report-classifier revision 23 -> 22, inference_batch_size 128 -> 32; deployment/report-classifier rolling"'
+      attributes:
+        operation: change_applied
+        event.action: rollback
+        change.target: configmap/report-classifier
+        user.name: '{actor}'
+        config.inference_batch_size: 32
+    - service: moderation-engine
+      severity: INFO
+      offset_seconds: 90
+      body: 'deployment "report-classifier" successfully rolled out: 12/12 workers ready (inference_batch_size=32)'
+      attributes:
+        operation: deployment_rollout
+        config.inference_batch_size: 32
+    - service: moderation-engine
+      severity: INFO
+      offset_seconds: 300
+      body: '[T&S] report queue drained: queue_depth below 300, oldest report under 3 min'
+      attributes:
+        operation: classifier_status
+  steady_attributes:
+    moderation-engine:
+      config.inference_batch_size: 32
+  verification:
+    - signal: report queue depth
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "moderation-engine"'
+      field: 'metrics.moderation.report_queue_depth'
+      expect: 'falling steadily from about 30 s after the rollback, back in 50-300 within about 300 s (was 20000-60000 and growing)'
+      within_seconds: 360
+    - signal: classifier workers ready
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "moderation-engine"'
+      field: 'metrics.moderation.classifier.workers_ready'
+      expect: '12 within about 90 s (was 0-3)'
+      within_seconds: 150
+    - signal: MOD-REPORT-QUEUE-OVERFLOW lines
+      from: 'logs.otel.gaming'
+      where: 'body.text LIKE "*MOD-REPORT-QUEUE-OVERFLOW*"'
+      expect: '0 new lines'
+      within_seconds: 120
+    - signal: classifier inference batch size
+      from: 'logs.otel.gaming'
+      where: 'resource.attributes.service.name == "moderation-engine" AND attributes.operation == "classifier_status"'
+      field: 'attributes.config.inference_batch_size'
+      expect: '32 on every report-classifier line since the rollback (was 128)'
+      within_seconds: 150
 business_impact:
   - kpi: business.content_moderation_queue_size
     factor: {uniform: [3.0, 6.0]}
@@ -70,3 +154,5 @@ generator_impact:
   kubernetes_otel:
     oomkilled_containers: 0.8
     pod_crashloopbackoff: 0.6
+# CrashLoopBackOff restarts stop once the rolled pods are ready
+generator_hold_seconds: {kubernetes_otel: 120}

@@ -110,6 +110,17 @@ class GeneratorSpec:
     ``impact_keys``, which end with the fault) so the changed value shows up in
     telemetry and can be verified. The verifier rejects undeclared keys."""
 
+    ops_bindings: Any = ()
+    """How applied ``opsctl`` commands change this generator's ``state_keys`` (optional).
+
+    Either a list of rules — ``{verbs: [...], kinds: [...], when: <expr>,
+    state: {"<state_key>.<path>": "<template>"}, transition_seconds: N}``, rendered
+    with the command context of ``app/ops_profile.py`` — or a callable
+    ``(scenario, cmd) -> (state, transition_seconds)`` for bindings that need the
+    scenario's topology. Without bindings a fix still lands through the channel's
+    ``remediation_effects.state``, but an opsctl change on its own (a wrong or partial
+    fix) leaves no trace in this generator's telemetry."""
+
     scope_aware: bool = False
     """True when the generator honours a channel's ``fault_scope`` (cluster, node
     pool, nodes, AZ, workloads), degrading only the entities inside it (1.1)."""

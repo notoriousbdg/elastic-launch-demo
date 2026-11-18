@@ -29,6 +29,12 @@ steps:
         choice: [user_prompt, user_prompt, user_prompt, retrieved_passage, model_output]
       policy_profile:
         choice: [customer-support-strict, customer-support-strict, general-assistant, internal-kb]
+      # ch8 (content filter threshold lowered) and ch9 (injection burst from 203.0.113.47) each own a
+      # degradation factor: 0 = healthy, 1 = fully degraded; ramp in over 45 s, converge after the fix.
+      deg8:
+        expr: "min(1.0, elapsed.get(8, 0) / 45.0) if 8 in all_active else (1.0 - min(1.0, since_fix.get(8, 0) / 60.0) if 8 in fixed_channels else 0.0)"
+      deg9:
+        expr: "min(1.0, elapsed.get(9, 0) / 45.0) if 9 in all_active else (1.0 - min(1.0, since_fix.get(9, 0) / 60.0) if 9 in fixed_channels else 0.0)"
       hate_score:
         uniform: [0.0, 0.08]
         round: 3
@@ -38,60 +44,113 @@ steps:
       self_harm_score:
         uniform: [0.0, 0.04]
         round: 3
+      # screened prompts: attack traffic from ch9 dominates the stream and scores high on prompt-shield
+      inj_base:
+        uniform: [0.01, 0.22]
+      inj_attack:
+        uniform: [0.62, 0.97]
       injection_score:
-        if_active:
-          uniform: [0.62, 0.97]
-          round: 3
-        else:
-          uniform: [0.01, 0.22]
-          round: 3
+        expr: "round(inj_base + (inj_attack - inj_base) * deg9, 3)"
+      verdict:
+        expr: "'BLOCK' if injection_score >= 0.6 else 'ALLOW'"
       filter_latency_ms:
-        if_active:
-          uniform: [450.0, 2800.0]
-          round: 1
-        else:
-          uniform: [12.0, 85.0]
-          round: 1
+        uniform: [12.0, 85.0]
+        round: 1
       batch_allowed:
         randint: [180, 260]
+      # content-safety blocks: baseline 0.5-2.5% of prompts, 18-45% once the threshold is lowered
+      base_block_pct:
+        uniform: [0.5, 2.5]
+      tp8:
+        uniform: [18.0, 45.0]
+      block_pct:
+        expr: "base_block_pct + (tp8 - base_block_pct) * deg8"
       batch_blocked:
-        if_active:
-          randint: [45, 140]
-        else:
-          randint: [1, 6]
+        expr: "int(batch_allowed * block_pct / (100.0 - block_pct))"
+      severity_threshold:
+        expr: "2 if 8 in all_active else 6"
+      win_status:
+        expr: "'ANOMALY' if 8 in all_active or block_pct > 10.0 else 'NOMINAL'"
+      # prompt-shield injection attempts per minute: under 3 normally, 900-1000 in the burst
+      inj_rate_base:
+        uniform: [0.2, 2.5]
+      inj_rate_peak:
+        randint: [900, 1000]
+      injection_attempts_per_min:
+        expr: "round(inj_rate_base + (inj_rate_peak - inj_rate_base) * deg9, 1)"
+      top_ip:
+        expr: "'203.0.113.47' if deg9 >= 0.5 else rand.choice(['198.51.100.23', '198.51.100.77', '192.0.2.114', '192.0.2.9'])"
+      distinct_ips:
+        expr: "rand.randint(3, 9) if deg9 >= 0.5 else rand.randint(1, 3)"
+      top_share:
+        expr: "round(rand.uniform(55.0, 90.0), 1) if deg9 >= 0.5 else round(rand.uniform(8.0, 20.0), 1)"
+      shield_rate:
+        uniform: [86.0, 98.9]
+        round: 1
+      waf_rule:
+        expr: "'block-203.0.113.47' if (9 in fixed_channels or '203.0.113.47' in applied.get('waf-policy/waf-policy-azureai-prod', {}).get('block-ips', '')) else 'none'"
+      blocked_ip:
+        expr: "'203.0.113.47' if waf_rule != 'none' else 'none'"
+      inj_status:
+        expr: "'ANOMALY' if 9 in all_active or injection_attempts_per_min > 50.0 else 'NOMINAL'"
+      summary_status:
+        expr: "'ANOMALY' if win_status == 'ANOMALY' or inj_status == 'ANOMALY' else 'NOMINAL'"
   - counter:
       state_key: _screened_count
       by: 1
   - log:
       level: INFO
-      message: '[PROMPT_GUARD] screen_complete stage={screen_stage} profile={policy_profile} verdict=ALLOW hate={hate_score} violence={violence_score} self_harm={self_harm_score} injection={injection_score} latency={filter_latency_ms}ms'
+      message: '[PROMPT_GUARD] screen_complete stage={screen_stage} profile={policy_profile} verdict={verdict} hate={hate_score} violence={violence_score} self_harm={self_harm_score} injection={injection_score} latency={filter_latency_ms}ms'
       attrs:
         operation: screen_complete
         guard.stage:
           var: screen_stage
         guard.policy_profile:
           var: policy_profile
-        guard.verdict: ALLOW
+        guard.verdict:
+          var: verdict
         guard.injection_score:
           var: injection_score
         guard.latency_ms:
           var: filter_latency_ms
   - log:
       level: INFO
-      message: '[PROMPT_GUARD] window_totals allowed={batch_allowed} blocked={batch_blocked} jailbreak_detector=prompt-shield content_safety=azure-ai-content-safety status=NORMAL'
+      message: '[PROMPT_GUARD] window_totals allowed={batch_allowed} blocked={batch_blocked} policy=customer-chat-default severity_threshold={severity_threshold} jailbreak_detector=prompt-shield content_safety=azure-ai-content-safety status={win_status}'
       attrs:
         operation: window_totals
         guard.allowed:
           var: batch_allowed
         guard.blocked:
           var: batch_blocked
+        contentfilter.policy: customer-chat-default
+        contentfilter.severity_threshold:
+          var: severity_threshold
+        guard.status:
+          var: win_status
+  - log:
+      level: INFO
+      message: '[PROMPT_GUARD] injection_shield attempts_per_min={injection_attempts_per_min} distinct_ips={distinct_ips} top_ip={top_ip} top_ip_share={top_share}% pattern=system_prompt_extraction shield_detection_rate={shield_rate}% waf_custom_rule={waf_rule} status={inj_status}'
+      attrs:
+        operation: injection_shield
+        guard.injection_attempts_per_min:
+          var: injection_attempts_per_min
+        security.top_client_ip:
+          var: top_ip
+        security.distinct_ips:
+          var: distinct_ips
+        waf.custom_rule:
+          var: waf_rule
+        security.blocked_ip:
+          var: blocked_ip
+        guard.status:
+          var: inj_status
   - every:
       seconds: 10
       state_key: _last_summary
       steps:
         - log:
             level: INFO
-            message: '[PROMPT_GUARD] guard_summary screened_total={_screened_count} policy_version=2026.10.2 block_rate_target<3% status=NORMAL'
+            message: '[PROMPT_GUARD] guard_summary screened_total={_screened_count} policy_version=2026.10.2 block_rate_target<3% status={summary_status}'
             attrs:
               operation: guard_summary
               guard.screened_total:
@@ -116,6 +175,11 @@ steps:
       value:
         expr: round(batch_blocked / (batch_allowed + batch_blocked) * 100, 2)
       unit: '%'
+  - metric:
+      name: prompt_guard.injection_attempts_per_min
+      value:
+        var: injection_attempts_per_min
+      unit: '{attempts}/min'
   - metric:
       name: prompt_guard.injection_score
       value:

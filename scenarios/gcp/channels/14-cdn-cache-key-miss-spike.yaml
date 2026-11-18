@@ -1,0 +1,113 @@
+name: CDN Cache Key Miss Spike
+subsystem: content_delivery
+vehicle_section: edge_cache
+error_type: CDN-CACHE-KEY-MISS-SPIKE
+sensor_type: cache_hit_ratio
+affected_services:
+- cloud-cdn-service
+- cloud-load-balancer
+cascade_services:
+- vpc-network-manager
+description: Cloud CDN cache hit ratio collapses after the backend service cache key policy starts including every query string, driving origin load, origin latency and egress
+correlation_attr:
+  key: deployment.cdn_cache_key
+  value: include-all-query-params
+fault_params:
+  cdn_backend: gcpnet-cdn-backend-01
+  cdn_hit_ratio: {uniform: [15.0, 45.0], round: 1}
+  cdn_hit_sla: 85
+  cdn_miss_rate: {randint: [500, 5000]}
+  cdn_origin_latency_ms: {randint: [200, 2000]}
+rca_clues:
+  cloud-cdn-service:
+    cdn.cache_key_query_strings: included
+    cdn.unique_cache_keys: {randint: [50000, 200000]}
+    cdn.recent_invalidation: false
+  cloud-load-balancer:
+    lb.origin_request_surge: {uniform: [300, 800], round: 0}
+    lb.backend_cpu_spike: true
+  vpc-network-manager:
+    vpc.egress_bandwidth_spike: true
+business_impact:
+  - kpi: business.cdn_cache_hit_rate_pct
+    factor: {uniform: [0.15, 0.40]}
+  - kpi: business.origin_offload_pct
+    factor: {uniform: [0.20, 0.45]}
+  - kpi: business.edge_latency_p50_ms
+    factor: {uniform: [3.0, 8.0]}
+  - kpi: business.cloud_spend_usd_per_min
+    factor: {uniform: [2.0, 4.5]}
+investigation_notes: |-
+  Root cause: the cache key policy of Cloud CDN backend service gcpnet-cdn-backend-01 was changed to include all query strings (deployment.cdn_cache_key=include-all-query-params, see the audit record on the backend service before the first CDN-CACHE-KEY-MISS-SPIKE). Every distinct query string (tracking and cache-busting parameters) is now its own cache entry, so unique cache keys exceed 50,000, the hit ratio falls to {cdn_hit_ratio}% (SLA {cdn_hit_sla}%) and the surplus misses go to the origin, which raises origin latency and egress. No cache invalidation was issued (cdn.recent_invalidation=false), so a mass invalidation is ruled out; the origin answers, only slowly, and no fetch errors appear, so an origin outage is ruled out; other CDN backends are unchanged.
+  Confirm:
+    - cloud-cdn-service logs "cloud-cdn: cache_key backend=gcpnet-cdn-backend-01 ... status=ANOMALY" with attributes.cdn.cache_key_policy = include-all-query-params and attributes.cdn.unique_keys above 50000
+    - metrics.cdn.backend_hit_ratio_pct drops from 88-95 to 15-45 and metrics.cdn.unique_cache_keys rises from about 8000-15000 to 50000-200000
+    - rca attributes cdn.recent_invalidation=false and cdn.cache_key_query_strings=included on cloud-cdn-service
+    - the vpc-network-manager audit record with methodName=v1.compute.backendServices.patch on gcpnet-cdn-backend-01 comes before the first CDN-CACHE-KEY-MISS-SPIKE
+  Remediation: roll the cache key policy back to the previous revision (exclude-query-params) with opsctl rollback cache-key-policy/gcpnet-cdn-backend-01 --to-revision previous. Entries cached under the old keys are still there, so the hit ratio climbs back to about 90% over about 90 seconds as requests map to them again.
+remediation_action: rollback_cache_key_policy
+remediation_command: |-
+  opsctl rollback cache-key-policy/gcpnet-cdn-backend-01 --to-revision previous
+error_message: '[CloudCDN] CDN-CACHE-KEY-MISS-SPIKE backend={cdn_backend} hit_ratio={cdn_hit_ratio}% (SLA {cdn_hit_sla}%) miss_rate={cdn_miss_rate}/s origin_latency={cdn_origin_latency_ms}ms'
+stack_trace: |-
+  Cloud CDN Cache Analysis
+  -----------------------------------
+  Backend:          {cdn_backend}
+  Hit Ratio:        {cdn_hit_ratio}% (SLA: {cdn_hit_sla}%)
+  Miss Rate:        {cdn_miss_rate}/s
+  Origin Latency:   {cdn_origin_latency_ms}ms
+  Cache Key Policy: include-all-query-params
+  Top Missed Paths: /api/v2/assets, /media/images
+  Action: Review the cache key policy and TTL configuration
+fault_scope:
+  cluster: gcpnet-gke-central1
+  workloads: [cloud-cdn-service, cloud-load-balancer]
+infrastructure_events:
+  - service: vpc-network-manager
+    severity: INFO
+    offset_seconds: -90
+    body: 'gcp-audit: logName=cloudaudit.googleapis.com/activity serviceName=compute.googleapis.com methodName=v1.compute.backendServices.patch resourceName=projects/gcpnet-prod-001/global/backendServices/gcpnet-cdn-backend-01 principalEmail=cdn-release-bot@gcpnet-project.iam.gserviceaccount.com status=OK change="cdnPolicy.cacheKeyPolicy.includeQueryString false -> true"'
+    attributes:
+      user.name: cdn-release-bot@gcpnet-project.iam.gserviceaccount.com
+      change.request: CHG-7712
+      operation: cache_key_policy_change
+      deployment.cdn_cache_key: include-all-query-params
+cascade_messages:
+  vpc-network-manager:
+    - severity: WARN
+      message: 'vpc-network-manager: egress to origin up sharply, edge cache {cdn_backend} hit_ratio={cdn_hit_ratio}%'
+remediation_effects:
+  log_events:
+    - service: vpc-network-manager
+      severity: INFO
+      offset_seconds: 2
+      body: 'gcp-audit: logName=cloudaudit.googleapis.com/activity serviceName=compute.googleapis.com methodName=v1.compute.backendServices.patch resourceName=projects/gcpnet-prod-001/global/backendServices/gcpnet-cdn-backend-01 principalEmail={actor} status=OK'
+    - service: cloud-cdn-service
+      severity: INFO
+      offset_seconds: 6
+      body: 'cloud-cdn: backend gcpnet-cdn-backend-01 cache key policy now excludes query strings (includeQueryString=false)'
+      attributes:
+        operation: cache_key_policy_change
+        cdn.cache_key_policy: exclude-query-params
+  steady_attributes:
+    cloud-cdn-service:
+      cdn.cache_key_policy: exclude-query-params
+  verification:
+    - signal: cdn.backend_hit_ratio_pct
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "cloud-cdn-service"'
+      field: 'metrics.cdn.backend_hit_ratio_pct'
+      expect: 'back in 88-95 (was 15-45)'
+      within_seconds: 120
+    - signal: cdn.unique_cache_keys
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "cloud-cdn-service"'
+      field: 'metrics.cdn.unique_cache_keys'
+      expect: 'back below 20000 (was 50000-200000)'
+      within_seconds: 120
+    - signal: cache key policy
+      from: 'logs.otel.gcpnet'
+      where: 'resource.attributes.service.name == "cloud-cdn-service" AND body.text LIKE "*cache_key backend=gcpnet-cdn-backend-01*"'
+      field: 'attributes.cdn.cache_key_policy'
+      expect: 'exclude-query-params on every line logged since the fix; include-all-query-params stops appearing'
+      within_seconds: 120

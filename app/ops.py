@@ -5,8 +5,8 @@ An invocation is parsed into a normalized command and compared with the
 fixed once all of its lines have been matched by invocations made while it was
 active; the channel is then resolved, which applies its ``remediation_effects``.
 
-Every applied invocation, right or wrong, leaves an audit record on the
-``kube-apiserver`` service (or the scenario's first service). The response never
+Every applied invocation, right or wrong, leaves an audit record on the service
+the scenario's ops profile names (app/ops_profile.py). The response never
 says whether the change fixed anything: the caller verifies in telemetry.
 """
 
@@ -21,6 +21,8 @@ import weakref
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
+
+from app import ops_profile
 
 logger = logging.getLogger("nova7.ops")
 
@@ -41,74 +43,12 @@ def _account_id(inst: Any) -> str:
     except Exception:
         return AWS_ACCOUNT_ID
 
-# verb -> one-line help (shown by `opsctl --help` / GET /api/ops/actions)
-VERBS: dict[str, str] = {
-    "rollback": "Roll a resource back to an earlier revision (--to-revision N|previous)",
-    "restore": "Restore a versioned resource to a known-good version (--version)",
-    "renew": "Trigger certificate renewal (--all, --not-ready to limit the selection)",
-    "rotate": "Rotate a credential or secret and roll out the new value",
-    "sync": "Force an immediate refresh of a synced secret or config source",
-    "drain": "Cordon a node and evict its pods (--ignore-daemonsets)",
-    "replace": "Cordon, drain and terminate a node; the node group launches a replacement",
-    "patch": "Change settings on a resource (e.g. --memory-limit, --instance-types, --cron)",
-    "apply": "Create or update a policy object (e.g. ratelimit --rps)",
-    "expand": "Grow a persistent volume claim (--size)",
-    "run": "Start a one-off job from its template",
-    "delete": "Delete a resource, or every resource matching --selector",
-    "restart": "Rolling restart of a workload",
-}
+# The neutral verbs (``opsctl --help`` for a scenario without an ops.yaml). The verbs a
+# scenario actually accepts come from its ops profile (app/ops_profile.py).
+VERBS: dict[str, str] = {v: i.get("summary", "") for v, i in ops_profile.verbs(ops_profile.neutral()).items()}
 PLAN_HELP = "Dry run any of the above: show what would change without applying it"
 
-GRAMMAR = (
-    "opsctl [plan] <verb> <kind>[/<name>] [-n <namespace>] [--flag value | --flag=value | --switch]..."
-)
-
-# Kinds that live in the cloud account rather than the cluster API.
-AWS_KINDS = {"iam-policy", "iam-role", "iam-role-trust", "nodegroup", "registry-credential"}
-
-_KIND_ALIASES = {
-    "cm": "configmap", "configmaps": "configmap",
-    "deploy": "deployment", "deployments": "deployment",
-    "sts": "statefulset", "statefulsets": "statefulset",
-    "ds": "daemonset", "daemonsets": "daemonset",
-    "no": "node", "nodes": "node",
-    "po": "pod", "pods": "pod",
-    "svc": "service", "services": "service",
-    "ing": "ingress", "ingresses": "ingress",
-    "cert": "certificate", "certificates": "certificate",
-    "persistentvolumeclaim": "pvc", "persistentvolumeclaims": "pvc", "pvcs": "pvc",
-    "jobs": "job", "secrets": "secret",
-    "externalsecrets": "externalsecret", "es": "externalsecret",
-    "ratelimits": "ratelimit", "nodegroups": "nodegroup", "ng": "nodegroup",
-    "iam-policies": "iam-policy",
-    "netpol": "networkpolicy", "networkpolicies": "networkpolicy",
-    "poddisruptionbudget": "pdb", "poddisruptionbudgets": "pdb", "pdbs": "pdb",
-    "horizontalpodautoscaler": "hpa", "horizontalpodautoscalers": "hpa", "hpas": "hpa",
-}
-
-_RESOURCE_PLURAL = {
-    "configmap": "configmaps", "deployment": "deployments", "statefulset": "statefulsets",
-    "daemonset": "daemonsets", "node": "nodes", "pod": "pods", "service": "services",
-    "ingress": "ingresses", "certificate": "certificates", "pvc": "persistentvolumeclaims",
-    "job": "jobs", "secret": "secrets", "externalsecret": "externalsecrets",
-    "ratelimit": "ratelimits", "harbor": "harborconfigurations",
-    "networkpolicy": "networkpolicies", "pdb": "poddisruptionbudgets",
-    "hpa": "horizontalpodautoscalers",
-}
-
-_RESOURCE_GROUP = {
-    "deployment": "apps", "statefulset": "apps", "daemonset": "apps", "job": "batch",
-    "ingress": "networking.k8s.io", "certificate": "cert-manager.io",
-    "externalsecret": "external-secrets.io", "ratelimit": "gateway.platform.io",
-    "harbor": "goharbor.io", "networkpolicy": "networking.k8s.io", "pdb": "policy",
-    "hpa": "autoscaling",
-}
-
-_FLAG_ALIASES = {"l": "selector", "selector": "selector", "revision": "to-revision"}
-
-# flags that take no value
-_SWITCHES = {"all", "not-ready", "ignore-daemonsets", "delete-emptydir-data", "force",
-             "wait", "all-namespaces", "a"}
+GRAMMAR = ops_profile.grammar(ops_profile.neutral())
 
 
 class OpsError(ValueError):
@@ -144,20 +84,36 @@ class OpsCommand:
 # ── Parsing ───────────────────────────────────────────────────────────────
 
 
-def _norm_flag(name: str) -> str:
+def _flag_aliases(profile: dict[str, Any]) -> dict[str, str]:
+    return {str(k).lower(): str(v).lower()
+            for k, v in ((profile.get("flags") or {}).get("aliases") or {}).items()}
+
+
+def _switches(profile: dict[str, Any]) -> set[str]:
+    return {str(s).lower() for s in (profile.get("flags") or {}).get("switches") or []}
+
+
+def _norm_flag(name: str, profile: dict[str, Any] | None = None) -> str:
     name = name.lstrip("-").strip().lower().replace("_", "-")
-    return _FLAG_ALIASES.get(name, name)
+    return _flag_aliases(profile or ops_profile.neutral()).get(name, name)
 
 
-def _norm_target(token: str) -> str:
+def _norm_target(token: str, profile: dict[str, Any] | None = None) -> str:
     token = token.strip().lower()
     kind, sep, name = token.partition("/")
-    kind = _KIND_ALIASES.get(kind, kind)
+    kind = ops_profile.kind_aliases(profile or ops_profile.neutral()).get(kind, kind)
     return f"{kind}/{name}" if sep and name else kind
 
 
-def parse_command(command: str | list[str]) -> OpsCommand:
-    """Parse ``"rollback configmap/coredns -n kube-system --to-revision 42"`` (or argv)."""
+def parse_command(command: str | list[str], profile: dict[str, Any] | None = None) -> OpsCommand:
+    """Parse ``"rollback configmap/coredns -n kube-system --to-revision 42"`` (or argv).
+
+    *profile* (the scenario's ops profile) supplies the verbs, kind aliases, flag
+    aliases and switches; the neutral profile when omitted.
+    """
+    profile = profile or ops_profile.neutral()
+    known_verbs = ops_profile.verbs(profile)
+    switches = _switches(profile)
     if isinstance(command, str):
         try:
             tokens = shlex.split(command)
@@ -175,7 +131,7 @@ def parse_command(command: str | list[str]) -> OpsCommand:
     if not tokens:
         raise OpsError("error: you must specify a command. See 'opsctl --help'.")
     verb = tokens[0].lower()
-    if verb not in VERBS:
+    if verb not in known_verbs:
         raise OpsError(f'error: unknown command "{tokens[0]}" for "opsctl". See \'opsctl --help\'.')
 
     target = ""
@@ -187,10 +143,10 @@ def parse_command(command: str | list[str]) -> OpsCommand:
         tok = tokens[i]
         if tok.startswith("-") and len(tok) > 1:
             name, eq, value = tok.partition("=")
-            fname = _norm_flag(name)
+            fname = _norm_flag(name, profile)
             if not eq:
                 nxt = tokens[i + 1] if i + 1 < len(tokens) else None
-                if fname not in _SWITCHES and nxt is not None and not nxt.startswith("-"):
+                if fname not in switches and nxt is not None and not nxt.startswith("-"):
                     value = nxt
                     i += 1
                 else:
@@ -203,7 +159,7 @@ def parse_command(command: str | list[str]) -> OpsCommand:
                 flags[fname] = value
                 last_flag = fname
         elif not target:
-            target = _norm_target(tok)
+            target = _norm_target(tok, profile)
         elif last_flag and isinstance(flags.get(last_flag), str) and flags[last_flag].endswith(","):
             flags[last_flag] += tok  # "--instance-types a, b" (space after the comma)
         else:
@@ -218,7 +174,7 @@ def parse_command(command: str | list[str]) -> OpsCommand:
                       dry_run=dry_run, raw=raw)
 
 
-def expected_commands(remediation_command: Any) -> list[OpsCommand]:
+def expected_commands(remediation_command: Any, profile: dict[str, Any] | None = None) -> list[OpsCommand]:
     """The parsed lines of a channel's ``remediation_command`` (str or list)."""
     if not remediation_command:
         return []
@@ -240,7 +196,7 @@ def expected_commands(remediation_command: Any) -> list[OpsCommand]:
     out = []
     for line in lines:
         try:
-            out.append(parse_command(line))
+            out.append(parse_command(line, profile))
         except OpsError:
             logger.warning("ops: unparseable remediation_command line %r", line)
     return out
@@ -313,15 +269,17 @@ def _record_and_complete(inst: Any, cmd: OpsCommand) -> list[int]:
     """Record *cmd* against every active channel; return the channels now complete."""
     controller = inst.chaos_controller
     registry = getattr(controller, "_channel_registry", {}) or {}
+    profile = ops_profile.profile_for(inst)
     progress = _progress_for(controller)
     completed: list[int] = []
-    active = controller.get_active_channels()
+    # Faults that auto-expired before anyone fixed them still need their fix recorded.
+    active = controller.get_unfixed_channels()
     with progress.lock:
         for ch in list(progress.channels):
             if ch not in active:
                 progress.channels.pop(ch, None)
         for ch in active:
-            expected = expected_commands((registry.get(ch) or {}).get("remediation_command"))
+            expected = expected_commands((registry.get(ch) or {}).get("remediation_command"), profile)
             if not expected:
                 continue
             triggered_at = controller.get_channel_status(ch).get("triggered_at")
@@ -338,335 +296,268 @@ def _record_and_complete(inst: Any, cmd: OpsCommand) -> list[int]:
     return completed
 
 
-# ── Messages and audit records ────────────────────────────────────────────
+# ── Messages and audit records (all from the scenario's ops profile) ─────
 
 
-def _flag(cmd: OpsCommand, name: str) -> str:
-    v = cmd.flags.get(name)
-    return "" if v is None or v is True else str(v)
+def _ctx(profile: dict[str, Any], cmd: OpsCommand, **extra: Any) -> dict[str, Any]:
+    return ops_profile.command_context(profile, cmd, **extra)
 
 
-def _settings(cmd: OpsCommand, skip: tuple[str, ...] = ()) -> str:
-    items = [f"{k}={v}" for k, v in cmd.flags.items() if v is not True and k not in skip]
-    return ", ".join(items)
+def describe(cmd: OpsCommand, change_id: str = "", profile: dict[str, Any] | None = None,
+             ctx: dict[str, Any] | None = None) -> str:
+    """The result line for an applied command (the verb's ``describe`` template)."""
+    profile = profile or ops_profile.neutral()
+    ctx = ctx if ctx is not None else _ctx(profile, cmd, change_id=change_id)
+    tmpl = ops_profile.choose((ops_profile.verbs(profile).get(cmd.verb) or {}).get("describe"), ctx)
+    if not tmpl:
+        tmpl = "{ref} " + cmd.verb + " applied"
+    return str(ops_profile.render(tmpl, ctx))
 
 
-# kubectl's singular resource names where opsctl's kind is a short name
-_KIND_DISPLAY = {"pdb": "poddisruptionbudget", "hpa": "horizontalpodautoscaler",
-                 "pvc": "persistentvolumeclaim"}
+def describe_plan(cmd: OpsCommand, profile: dict[str, Any] | None = None) -> list[str]:
+    """What a dry run of *cmd* would change (the verb's ``plan`` lines)."""
+    profile = profile or ops_profile.neutral()
+    ctx = _ctx(profile, cmd)
+    changes = [f"{k} -> {v}" for k, v in cmd.flags.items() if v is not True]
+    ctx["changes_text"] = (": " + ", ".join(changes)) if changes else ""
+    lines = ops_profile.choose((ops_profile.verbs(profile).get(cmd.verb) or {}).get("plan"), ctx,
+                               key="lines")
+    if not lines:
+        lines = ["~ {ref}{where}{changes_text}"]
+    if isinstance(lines, str):
+        lines = [lines]
+    return [str(ops_profile.render(line, ctx)) for line in lines]
 
 
-def _ref(cmd: OpsCommand) -> str:
-    group = _RESOURCE_GROUP.get(cmd.kind)
-    name = _KIND_DISPLAY.get(cmd.kind, cmd.kind)
-    kind = f"{name}.{group}" if group else name
-    return f"{kind}/{cmd.name}" if cmd.name else kind
+def _format_for(profile: dict[str, Any], cmd: OpsCommand) -> tuple[str, dict[str, Any]]:
+    audit = profile.get("audit") or {}
+    formats = audit.get("formats") or {}
+    kind_info = (profile.get("kinds") or {}).get(cmd.kind) or {}
+    name = kind_info.get("audit") or audit.get("default") or "command_log"
+    fmt = formats.get(name)
+    if fmt is None:
+        logger.warning("ops: audit format %r not in the profile; using command_log", name)
+        name, fmt = "command_log", formats.get("command_log") or ops_profile.neutral()["audit"]["formats"]["command_log"]
+    return name, fmt
 
 
-def describe(cmd: OpsCommand, change_id: str = "") -> str:
-    """kubectl-style result line for an applied command."""
-    ref, v = _ref(cmd), cmd.verb
-    ns = f" in namespace {cmd.namespace}" if cmd.namespace else ""
-    if v == "rollback":
-        rev = _flag(cmd, "to-revision")
-        if rev and rev.lower() != "previous":
-            return f"{ref} rolled back to revision {rev}"
-        return f"{ref} rolled back to previous revision"
-    if v == "restore":
-        ver = _flag(cmd, "version")
-        return f"{ref} restored to version {ver}" if ver else f"{ref} restored to last known-good version"
-    if v == "renew":
-        if cmd.name:
-            return f"{ref} renewal triggered"
-        scope = "not-ready certificates" if "not-ready" in cmd.flags else "certificates"
-        return f"renewal triggered for all {scope}{ns}"
-    if v == "rotate":
-        return f"{ref} rotated; new version staged and rolled out"
-    if v == "sync":
-        return f"{ref} force-sync requested; secret refreshed from provider"
-    if v == "drain":
-        return f"{ref} cordoned\n{ref} drained"
-    if v == "replace":
-        return (f"{ref} cordoned\n{ref} drained\n{ref} terminated; "
-                f"replacement instance requested from node group")
-    if v == "patch":
-        s = _settings(cmd)
-        return f"{ref} patched" + (f" ({s})" if s else "")
-    if v == "apply":
-        s = _settings(cmd)
-        return f"{ref} configured" + (f" ({s})" if s else "")
-    if v == "expand":
-        size = _flag(cmd, "size")
-        return f"{ref} resize requested" + (f" to {size}" if size else "") + "; filesystem expansion pending"
-    if v == "run":
-        suffix = change_id.split("-")[-1][:5] if change_id else uuid.uuid4().hex[:5]
-        return f"job.batch/{cmd.name or cmd.kind}-manual-{suffix} created"
-    if v == "delete":
-        sel = _flag(cmd, "selector")
-        if sel:
-            return f"{_RESOURCE_PLURAL.get(cmd.kind, cmd.kind + 's')} matching {sel} deleted{ns}"
-        return f"{ref} deleted"
-    if v == "restart":
-        return f"{ref} restarted"
-    return f"{ref} {v} applied"
-
-
-def describe_plan(cmd: OpsCommand) -> list[str]:
-    """What a dry run of *cmd* would change."""
-    ref = _ref(cmd)
-    where = f" (namespace {cmd.namespace})" if cmd.namespace else ""
-    v = cmd.verb
-    lines: list[str]
-    if v == "rollback":
-        rev = _flag(cmd, "to-revision") or "previous"
-        lines = [f"~ {ref}{where}: restore data from revision {rev}"]
-    elif v == "restore":
-        lines = [f"~ {ref}: set default version -> {_flag(cmd, 'version') or 'last known-good'}"]
-    elif v == "renew":
-        lines = [f"~ {ref}{where}: issue renewal request" +
-                 (" for every matching certificate" if "all" in cmd.flags else "")]
-    elif v == "rotate":
-        lines = [f"~ {ref}{where}: generate new credential, stage it, roll dependent workloads"]
-    elif v == "sync":
-        lines = [f"~ {ref}{where}: annotate force-sync, refresh target secret"]
-    elif v == "drain":
-        lines = [f"~ {ref}: cordon (spec.unschedulable=true)", f"- {ref}: evict pods"]
-    elif v == "replace":
-        lines = [f"~ {ref}: cordon and drain", f"- {ref}: terminate instance",
-                 "+ node group: launch replacement instance"]
-    elif v == "delete":
-        sel = _flag(cmd, "selector")
-        lines = [f"- {ref}{where}" + (f": every object matching {sel}" if sel else "")]
-    elif v == "run":
-        lines = [f"+ job.batch/{cmd.name or cmd.kind}-manual-<id>{where}"]
-    elif v == "restart":
-        lines = [f"~ {ref}{where}: spec.template.metadata.annotations"
-                 f"[kubectl.kubernetes.io/restartedAt] -> <now>"]
-    else:
-        changes = [f"{k} -> {val}" for k, val in cmd.flags.items() if val is not True]
-        lines = [f"~ {ref}{where}" + (f": {', '.join(changes)}" if changes else "")]
-    return lines
-
-
-_K8S_AUDIT_VERB = {
-    "rollback": "update", "restore": "update", "renew": "patch", "rotate": "update",
-    "sync": "patch", "drain": "create", "replace": "delete", "patch": "patch",
-    "apply": "patch", "expand": "patch", "run": "create", "delete": "delete",
-    "restart": "patch",
-}
-
-
-def _cloudtrail(cmd: OpsCommand, account_id: str = AWS_ACCOUNT_ID) -> tuple[str, str, dict[str, str]]:
-    """(eventSource, eventName, requestParameters) for a cloud-account target."""
-    name = cmd.name or cmd.kind
-    if cmd.kind == "iam-policy":
-        params = {"policyArn": f"arn:aws:iam::{account_id}:policy/{name}"}
-        if _flag(cmd, "version"):
-            params["versionId"] = _flag(cmd, "version")
-        event = "SetDefaultPolicyVersion" if cmd.verb in ("restore", "rollback") else "CreatePolicyVersion"
-        return "iam.amazonaws.com", event, params
-    if cmd.kind in ("iam-role-trust", "iam-role"):
-        event = "UpdateAssumeRolePolicy" if cmd.kind == "iam-role-trust" else "UpdateRole"
-        return "iam.amazonaws.com", event, {"roleName": name}
-    if cmd.kind == "nodegroup":
-        params = {"nodegroupName": name}
-        if _flag(cmd, "instance-types"):
-            # CloudTrail renders the list the way the scenarios' change events do: [a,b]
-            params["instanceTypes"] = "[" + ",".join(
-                s.strip() for s in str(_flag(cmd, "instance-types")).split(",") if s.strip()) + "]"
-        event = {"patch": "UpdateNodegroupConfig", "apply": "UpdateNodegroupConfig",
-                 "rollback": "UpdateNodegroupVersion", "restore": "UpdateNodegroupVersion",
-                 "delete": "DeleteNodegroup"}.get(cmd.verb, "UpdateNodegroupConfig")
-        return "eks.amazonaws.com", event, params
-    if cmd.kind == "registry-credential":
-        event = {"rotate": "RotateSecret", "restore": "RestoreSecret",
-                 "delete": "DeleteSecret"}.get(cmd.verb, "PutSecretValue")
-        return "secretsmanager.amazonaws.com", event, {"secretId": f"{cmd.namespace + '/' if cmd.namespace else ''}{name}"}
-    return "eks.amazonaws.com", cmd.verb.capitalize() + cmd.kind.title().replace("-", ""), {"name": name}
+def _audit_ctx(profile: dict[str, Any], cmd: OpsCommand, change_id: str, account_id: str,
+               user: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    """(format, context with the format's vars and params evaluated) for *cmd*."""
+    ctx = _ctx(profile, cmd, change_id=change_id, account_id=account_id, actor=user)
+    ctx["describe"] = describe(cmd, change_id, profile, ctx=dict(ctx))
+    _, fmt = _format_for(profile, cmd)
+    ops_profile.eval_vars(fmt.get("vars"), ctx)
+    params_spec = fmt.get("params") or ctx["kind_info"].get("params") or {}
+    params = ops_profile.render_mapping(params_spec, ctx)
+    prefix = str(fmt.get("params_prefix") or "")
+    ctx["params"] = params
+    ctx["params_text"] = " ".join(f"{prefix}{k}={v}" for k, v in params.items())
+    return fmt, ctx
 
 
 def audit_record(cmd: OpsCommand, change_id: str, account_id: str = AWS_ACCOUNT_ID,
-                 user: str = OPS_USER) -> tuple[str, dict[str, Any]]:
+                 user: str = OPS_USER, profile: dict[str, Any] | None = None) -> tuple[str, dict[str, Any]]:
     """(body, attributes) of the audit line an applied command leaves behind."""
-    if cmd.kind in AWS_KINDS:
-        source, event, params = _cloudtrail(cmd, account_id)
-        rp = " ".join(f"requestParameters.{k}={v}" for k, v in params.items())
-        body = (f"cloudtrail: eventSource={source} eventName={event} "
-                f"userIdentity={user} {rp} errorCode=none change_id={change_id}")
-        attrs = {
-            "cloud.provider": "aws",
-            "cloud.account.id": account_id,
-            "aws.cloudtrail.event_source": source,
-            "aws.cloudtrail.event_name": event,
-            "user.name": user,
-            "change.id": change_id,
-            "event.action": event,
-        }
-        return body, attrs
-    verb = _K8S_AUDIT_VERB.get(cmd.verb, "patch")
-    resource = _RESOURCE_PLURAL.get(cmd.kind, cmd.kind + "s")
-    if cmd.verb == "drain":
-        resource = "pods/eviction"
-    if cmd.verb == "delete" and not cmd.name:
-        verb = "deletecollection"
-    status = 201 if verb == "create" else 200
-    # Same shape as the audit lines the scenarios' change events use.
-    parts = ["audit: level=Metadata stage=ResponseComplete", f"verb={verb}", f"resource={resource}"]
-    if cmd.namespace:
-        parts.append(f"namespace={cmd.namespace}")
-    if cmd.name:
-        parts.append(f"name={cmd.name}")
-    parts.append(f"user={user}")
-    sel = _flag(cmd, "selector")
-    if sel:
-        parts.append(f'labelSelector="{sel}"')
-    detail = describe(cmd).replace('"', "'")
-    parts += [f"code={status}", f'change="{detail}"', f"change_id={change_id}"]
-    attrs: dict[str, Any] = {
-        "k8s.audit.verb": verb,
-        "k8s.audit.resource": resource,
-        "k8s.audit.response_code": status,
-        "user.name": user,
-        "change.id": change_id,
-        "event.action": cmd.verb,
-    }
-    if cmd.name:
-        attrs["k8s.audit.object_name"] = cmd.name
-    if cmd.namespace:
-        attrs["k8s.namespace.name"] = cmd.namespace
-    return " ".join(parts), attrs
+    profile = profile or ops_profile.neutral()
+    fmt, ctx = _audit_ctx(profile, cmd, change_id, account_id, user)
+    body = str(ops_profile.render(fmt.get("body") or "", ctx)).strip()
+    attrs = ops_profile.render_mapping(fmt.get("attributes"), ctx)
+    return body, attrs
 
 
-_AUDIT_KV = re.compile(r"\b(resource|namespace|name)=(\S+)")
+def _token_present(token: str, body: str) -> bool:
+    return re.search(r"(?<![\w/.\-])" + re.escape(token) + r"(?![\w/.\-])", body, re.IGNORECASE) is not None
 
 
-def _fix_line_key(cmd: OpsCommand) -> tuple[str, ...]:
-    """What identifies *cmd*'s audit line: (eventName,) for AWS, else (resource, ns, name)."""
-    if cmd.kind in AWS_KINDS:
-        return (_cloudtrail(cmd)[1],)
-    resource = "pods/eviction" if cmd.verb == "drain" else _RESOURCE_PLURAL.get(cmd.kind, cmd.kind + "s")
-    return (resource, cmd.namespace or "", cmd.name or "")
+def _is_fix_line_for(body: str, fmt: dict[str, Any], ctx: dict[str, Any]) -> bool:
+    """Whether a channel's raw log line is *cmd*'s audit record, per the format's ``match``."""
+    if "{actor}" not in body:
+        return False
+    match = fmt.get("match") or {}
+    prefix = match.get("prefix")
+    if prefix and not body.startswith(str(prefix)):
+        return False
+    tokens = match.get("tokens") or []
+    if not tokens:
+        return bool(prefix)
+    for tmpl in tokens:
+        # A token whose placeholders are empty (no namespace, no name) is not checked.
+        if any(ops_profile.render("{" + ph + "}", ctx) in ("", None)
+               for ph in ops_profile.placeholders(tmpl)):
+            continue
+        if not _token_present(str(ops_profile.render(tmpl, ctx)), body):
+            return False
+    return True
 
 
 def _channel_fix_line(inst: Any, cmd: OpsCommand) -> tuple[int, int, dict[str, Any]] | None:
     """The active channel's own audit line for *cmd*, when *cmd* is one of its fix steps.
 
     Scenarios describe the right fix's audit record in ``remediation_effects.log_events``
-    with more detail (e.g. ``rollback to revision 11 (job-operator:v0.8.4)``). opsctl
-    emits that line as the command's audit record instead of its generic one, so each
-    action leaves exactly one record.
+    (a line naming ``{actor}``) with more detail than the generic record. opsctl emits
+    that line as the command's audit record instead of its generic one, so each action
+    leaves exactly one record. Which line belongs to which command is decided by the
+    audit format's ``match`` (prefix and tokens) in the scenario's ops profile.
     """
     controller = inst.chaos_controller
     registry = getattr(controller, "_channel_registry", {}) or {}
-    key = _fix_line_key(cmd)
-    for ch in controller.get_active_channels():
+    profile = ops_profile.profile_for(inst)
+    fmt, ctx = _audit_ctx(profile, cmd, "", _account_id(inst), OPS_USER)
+    for ch in controller.get_unfixed_channels():
         ch_def = registry.get(ch) or {}
-        if not any(matches(cmd, exp) for exp in expected_commands(ch_def.get("remediation_command"))):
+        if not any(matches(cmd, exp)
+                   for exp in expected_commands(ch_def.get("remediation_command"), profile)):
             continue
         events = (ch_def.get("remediation_effects") or {}).get("log_events") or []
         for idx, evt in enumerate(events):
             body = str((evt or {}).get("body") or "")
-            if cmd.kind in AWS_KINDS:
-                if body.startswith("cloudtrail:") and f"eventName={key[0]} " in body + " ":
-                    return ch, idx, evt
-                continue
-            if not body.startswith("audit:"):
-                continue
-            kv = dict(_AUDIT_KV.findall(body))
-            if (kv.get("resource"), kv.get("namespace", ""), kv.get("name", "")) == key:
+            if _is_fix_line_for(body, fmt, ctx):
                 return ch, idx, evt
     return None
 
 
-def _audit_service(inst: Any) -> str | None:
+def _services(inst: Any) -> dict[str, Any]:
     services = getattr(getattr(inst, "ctx", None), "services", None) or {}
     if not services:
-        scenario = getattr(inst, "scenario", None)
-        services = getattr(scenario, "services", None) or {}
-    if "kube-apiserver" in services:
-        return "kube-apiserver"
+        services = getattr(ops_profile.scenario_of(inst), "services", None) or {}
+    return services
+
+
+def _audit_service(inst: Any) -> str | None:
+    """The profile's first ``audit.service`` candidate the scenario has, else its first service."""
+    services = _services(inst)
+    wanted = (ops_profile.profile_for(inst).get("audit") or {}).get("service") or []
+    if isinstance(wanted, str):
+        wanted = [wanted]
+    for name in wanted:
+        if name in services:
+            return name
     return next(iter(services), None)
 
 
-def _side_effects(cmd: OpsCommand, change_id: str,
-                  user: str = OPS_USER) -> list[tuple[str, str, dict[str, Any]]]:
-    """(severity, body, attrs) for the obvious follow-on records of a command."""
-    if cmd.verb == "restart":
-        ref = _ref(cmd)
-        attrs = {"k8s.namespace.name": cmd.namespace, "change.id": change_id,
-                 "user.name": user, "event.action": "rollout-restart"}
-        if cmd.name:
-            attrs[f"k8s.{cmd.kind}.name"] = cmd.name
-        return [("INFO", f"{ref} restarted (kubectl.kubernetes.io/restartedAt annotation set); "
-                         f"rolling update started", attrs)]
-    return []
+def _side_effects(cmd: OpsCommand, change_id: str, user: str = OPS_USER,
+                  profile: dict[str, Any] | None = None) -> list[tuple[str, str, dict[str, Any], str | None]]:
+    """(severity, body, attrs, service) for the follow-on records of a command."""
+    profile = profile or ops_profile.neutral()
+    ctx = _ctx(profile, cmd, change_id=change_id, actor=user)
+    out = []
+    for se in profile.get("side_effects") or []:
+        if not isinstance(se, dict):
+            continue
+        if se.get("verbs") and cmd.verb not in se["verbs"]:
+            continue
+        if se.get("kinds") and cmd.kind not in se["kinds"]:
+            continue
+        if not ops_profile.truthy(se.get("when"), ctx):
+            continue
+        out.append((str(se.get("severity") or "INFO"),
+                    str(ops_profile.render(se.get("body") or "", ctx)),
+                    ops_profile.render_mapping(se.get("attributes"), ctx),
+                    se.get("service")))
+    return out
 
 
-# ── Entry points ──────────────────────────────────────────────────────────
+# ── Platform state an applied command changes ─────────────────────────────
 
 
-# opsctl flag -> workload field it changes in the pinned platform (schema 1.3 k8s_topology).
-_WORKLOAD_FLAGS = {
-    "memory-limit": "memory_limit", "memory-request": "memory_request",
-    "cpu-limit": "cpu_limit", "cpu-request": "cpu_request",
-    "image": "image", "replicas": "replicas",
-}
-_WORKLOAD_KINDS = {"deployment", "daemonset", "statefulset"}
-ROLLOUT_SECONDS = 90.0   # a rolling update of a few pods (maxSurge 25%)
-PVC_RESIZE_SECONDS = 45.0
+def _nest(path: str, value: Any) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    cur = out
+    parts = [p for p in path.split(".") if p]
+    for p in parts[:-1]:
+        cur = cur.setdefault(p, {})
+    cur[parts[-1]] = value
+    return out
+
+
+def _rule_state(rule: dict[str, Any], cmd: OpsCommand, ctx: dict[str, Any]) -> tuple[dict[str, Any], float] | None:
+    if rule.get("verbs") and cmd.verb not in rule["verbs"]:
+        return None
+    if rule.get("kinds") and cmd.kind not in rule["kinds"]:
+        return None
+    if not ops_profile.truthy(rule.get("when"), ctx):
+        return None
+    gid = rule.get("generator")
+    if not gid:
+        return None
+    state: dict[str, Any] = {}
+    for path, tmpl in (rule.get("state") or {}).items():
+        val = ops_profile.render(tmpl, ctx)
+        if val in ("", None):
+            continue
+        state = ops_profile.merge(state, _nest(str(ops_profile.render(str(path), ctx)), val))
+    if not state:
+        return None
+    return {gid: state}, float(rule.get("transition_seconds", 0) or 0)
 
 
 def change_state(inst: Any, cmd: OpsCommand) -> tuple[dict[str, Any], float]:
-    """The platform change an applied command makes, as ``kubernetes_otel`` state.
+    """The platform change an applied command makes, as generator state.
 
     Every applied change takes effect in telemetry on its own, whether or not it
     completes a fix: patching a memory limit rolls the pods to the new limit even while
-    the fault continues. Returns ({}, 0) when the command changes nothing the platform
-    model reports, or the scenario has no pinned topology.
-    """
-    scenario = getattr(getattr(inst, "ctx", None), "scenario", None) or getattr(inst, "scenario", None)
-    topo = getattr(scenario, "k8s_topology", None)
-    if not topo:
-        return {}, 0.0
-    default = topo.get("default_cluster") or (topo.get("clusters") or [{}])[0].get("name")
-    cluster = next((c for c in topo.get("clusters") or [] if c.get("name") == default), {})
-    workloads = {w.get("name"): w for w in cluster.get("workloads") or []}
-    pools = {p.get("name") for p in cluster.get("node_pools") or []}
+    the fault continues. Two sources, first hit wins:
 
-    if cmd.kind in _WORKLOAD_KINDS and cmd.name in workloads and cmd.verb in ("patch", "apply", "scale"):
-        changes = {}
-        for flag, fld in _WORKLOAD_FLAGS.items():
-            val = cmd.flags.get(flag)
-            if val is None or val is True:
+    1. the scenario's ``ops.yaml`` ``state_changes`` rules;
+    2. each enabled generator's ``SPEC.ops_bindings`` (rules like the above, or a
+       callable ``(scenario, cmd) -> (state, transition_seconds)``).
+
+    Returns ({}, 0) when the command changes nothing a generator reports.
+    """
+    scenario = ops_profile.scenario_of(inst)
+    profile = ops_profile.profile_for(inst)
+    ctx = _ctx(profile, cmd)
+    for rule in profile.get("state_changes") or []:
+        hit = _rule_state(rule, cmd, ctx) if isinstance(rule, dict) else None
+        if hit:
+            return hit
+    if scenario is None:
+        return {}, 0.0
+    try:
+        from generator_engine.registry import enabled_specs
+        specs = enabled_specs(scenario)
+    except Exception:
+        specs = []
+    for spec in specs:
+        bindings = getattr(spec, "ops_bindings", None)
+        if callable(bindings):
+            try:
+                state, transition = bindings(scenario, cmd)
+            except Exception:
+                logger.exception("ops: %s ops_bindings failed for %s", spec.id, cmd.display())
                 continue
-            changes[fld] = int(val) if fld == "replicas" else val
-        if changes:
-            return {"kubernetes_otel": {"workloads": {cmd.name: changes}}}, ROLLOUT_SECONDS
-    if cmd.kind == "pvc" and cmd.verb == "expand" and isinstance(cmd.flags.get("size"), str):
-        owner = next((n for n, w in workloads.items() if (w.get("pvc") or {}).get("name") == cmd.name), None)
-        if owner:
-            return ({"kubernetes_otel": {"workloads": {owner: {"pvc_capacity": cmd.flags["size"]}}}},
-                    PVC_RESIZE_SECONDS)
-    if cmd.kind == "nodegroup" and cmd.name in pools and isinstance(cmd.flags.get("instance-types"), str):
-        types = [t.strip() for t in cmd.flags["instance-types"].split(",") if t.strip()]
-        return {"kubernetes_otel": {"node_pools": {cmd.name: {"instance_types": types}}}}, 0.0
+            if state:
+                return state, float(transition or 0)
+            continue
+        for rule in bindings or []:
+            if isinstance(rule, dict):
+                hit = _rule_state({"generator": spec.id, **rule}, cmd, ctx)
+                if hit:
+                    return hit
     return {}, 0.0
+
+
+# ── Entry points ──────────────────────────────────────────────────────────
 
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
-def list_actions() -> dict[str, Any]:
+def list_actions(profile: dict[str, Any] | None = None) -> dict[str, Any]:
+    profile = profile or ops_profile.neutral()
+    flags = {}
+    if profile.get("namespaces"):
+        flags["-n, --namespace"] = "Namespace of the target object (omit for cluster or account scoped objects)"
+    flags["--flag value | --flag=value"] = "Setting to change; lists are comma-separated"
+    switches = sorted(_switches(profile))
+    flags["--switch"] = "Boolean option" + (f", e.g. {', '.join('--' + s for s in switches[:3])}" if switches else "")
     return {
-        "usage": GRAMMAR,
-        "verbs": [{"verb": v, "help": h} for v, h in VERBS.items()]
+        "usage": ops_profile.grammar(profile),
+        "verbs": [{"verb": v, "help": i.get("summary", "")} for v, i in ops_profile.verbs(profile).items()]
         + [{"verb": "plan", "help": PLAN_HELP}],
-        "flags": {
-            "-n, --namespace": "Namespace of the target object (omit for cluster or account scoped objects)",
-            "--flag value | --flag=value": "Setting to change; lists are comma-separated",
-            "--switch": "Boolean option, e.g. --all, --ignore-daemonsets",
-        },
+        "flags": flags,
     }
 
 
@@ -678,7 +569,8 @@ def execute(inst: Any, command: str | list[str], dry_run: bool = False,
     automation that applies a runbook fix on its own passes its own identity.
     """
     user = (user or OPS_USER).strip()[:128] or OPS_USER
-    cmd = parse_command(command)
+    profile = ops_profile.profile_for(inst)
+    cmd = parse_command(command, profile)
     dry_run = dry_run or cmd.dry_run
     base = {
         "action": cmd.verb,
@@ -687,9 +579,10 @@ def execute(inst: Any, command: str | list[str], dry_run: bool = False,
         "timestamp": _now_iso(),
     }
     if dry_run:
+        ref = _ctx(profile, cmd).get("ref") or cmd.target
         return {"status": "planned", **base,
-                "message": f"{_ref(cmd)} would be changed (dry run, nothing applied)",
-                "changes": describe_plan(cmd)}
+                "message": f"{ref} would be changed (dry run, nothing applied)",
+                "changes": describe_plan(cmd, profile)}
 
     change_id = "chg-" + uuid.uuid4().hex[:8]
     controller = inst.chaos_controller
@@ -707,12 +600,15 @@ def execute(inst: Any, command: str | list[str], dry_run: bool = False,
             if hasattr(controller, "mark_fix_event_emitted"):
                 controller.mark_fix_event_emitted(ch, idx)
         else:
-            body, attrs = audit_record(cmd, change_id, _account_id(inst), user)
+            body, attrs = audit_record(cmd, change_id, _account_id(inst), user, profile)
             controller.queue_event(service, body, attributes=attrs)
-        for i, (sev, sbody, sattrs) in enumerate(_side_effects(cmd, change_id, user), start=1):
-            controller.queue_event(service, sbody, severity=sev, attributes=sattrs,
+        for i, (sev, sbody, sattrs, sservice) in enumerate(
+                _side_effects(cmd, change_id, user, profile), start=1):
+            controller.queue_event(sservice or service, sbody, severity=sev, attributes=sattrs,
                                    delay_seconds=i)
 
+    if hasattr(controller, "record_applied"):
+        controller.record_applied(cmd.target, cmd.verb, cmd.flags)
     state, transition = change_state(inst, cmd)
     if state and hasattr(controller, "apply_change_state"):
         controller.apply_change_state(state, transition)
@@ -721,7 +617,7 @@ def execute(inst: Any, command: str | list[str], dry_run: bool = False,
         logger.info("ops: change %s completes the fix for channel %d", change_id, ch)
         inst.resolve_channel(ch, force=True, actor=user)
 
-    return {"status": "applied", **base, "message": describe(cmd, change_id),
+    return {"status": "applied", **base, "message": describe(cmd, change_id, profile),
             "change_id": change_id}
 
 

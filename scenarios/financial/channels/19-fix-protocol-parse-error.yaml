@@ -6,60 +6,153 @@ sensor_type: protocol_parser
 affected_services:
 - order-gateway
 - audit-logger
+error_services:
+- order-gateway
 cascade_services:
 - matching-engine
 - compliance-monitor
-description: FIX 4.4 message parsing failure due to malformed tags or checksum errors
+description: Nasdaq rejects the new orders sent on FIX session FIX-NSDQ-07 with session-level Rejects because their prices are formatted with a decimal comma
+onset_delay_seconds: 5
+service_lag_seconds: {audit-logger: 30, matching-engine: 30, compliance-monitor: 45}
 investigation_notes: |-
-  1. Check order-gateway logs for FIX-PARSE-REJECT — note fix_session, msg_type, bad_tag, and the checksum mismatch between expected and actual values.
-  2. Query FROM logs.otel.financial.* | WHERE body.text LIKE "*FIX-PARSE-REJECT*" | STATS count() BY fix_session, bad_tag to find the session and field combination causing most rejections.
-  3. Inspect the raw FIX message dump for body_length vs computed_length mismatch — a length discrepancy indicates tag 9 is being set incorrectly by the counterparty's OMS; here it comes from the same malformed tag {bad_tag}, which the OMS rewrites after computing tag 9.
-  4. Check audit-logger for the parse_errors count trend on this session — if error rate is rising, the counterparty may have deployed a new OMS version with a protocol deviation.
-  5. The message fails BodyLength/CheckSum validation, so the engine discards it as garbled (no 35=3) and will issue a ResendRequest (35=2); notify the counterparty with the tag 44 detail; coordinate with the counterparty's FIX connectivity team to fix the malformed tag before resuming the session.
-remediation_action: send_fix_reject_and_notify_counterparty
-error_message: '[FIX] FIX-PARSE-REJECT: session={fix_session} msg_type={msg_type} tag={bad_tag} checksum_expected={expected_checksum}
-  checksum_actual={actual_checksum}'
+  Root cause: a canary of order-gateway 3.5.0 was rolled out to deployment order-gateway-fix-nsdq, the instance that hosts FIX session {fix_session} (CR-6032). 3.5.0 ships a new base image that sets LANG=de_DE.UTF-8, and the FIX price formatter uses the JVM default locale, so tag 44 is written with a decimal comma (44={bad_value}). Nasdaq answers each of our outbound NewOrderSingle messages (35={msg_type}) with a session-level Reject: 35=3, 371={bad_tag}, 373=6 (Incorrect data format for value), 58={venue_text}. The messages are otherwise well formed: BodyLength and CheckSum are valid in both directions, the session stays logged on with normal heartbeats and no sequence gaps. The other sessions (FIX-NYSE-01, FIX-NSDQ-01, FIX-CBOE-01, FIX-CME-01, FIX-BATS-01) run 3.4.1 with locale C.UTF-8 on the main order-gateway deployment and their orders, including those to the same venue on FIX-NSDQ-01, are accepted.
+  Confirm:
+    - order-gateway "[OMS] fix_session_status session=FIX-NSDQ-07" lines show version=3.5.0 locale=de_DE.UTF-8 price_format_check=244,52 status=ANOMALY (attributes.deployment.version, attributes.process.locale, attributes.session.status); the other sessions show 3.4.1, C.UTF-8 and 244.52
+    - metrics.order_gateway.fix_session_rejects_per_min for fix.session FIX-NSDQ-07 rises from 0-1 to 300-900 while the other sessions stay at 0-1; metrics.order_gateway.reject_rate rises with it and metrics.matching_engine.venue_reroutes_per_min climbs as the router re-routes the rejected orders
+    - body.text "*FIX-PARSE-REJECT*" lines carry 35=3, 373=6 and the comma price in 44=; the stack trace shows our outbound 35={msg_type} and the venue reply with valid checksums
+    - the order-gateway line "[OMS] canary rollout deployment/order-gateway-fix-nsdq 3.4.1 -> 3.5.0" (attributes.change.request CR-6032) comes before the first reject
+  Remediation: opsctl rollback deployment/order-gateway-fix-nsdq --to-revision previous replaces the canary pod with 3.4.1 (locale C.UTF-8) in about 30 s; the session logs on again from the new pod and the per-minute reject rate falls to 0 within about 60 s. Asking the counterparty to fix their OMS is wrong: the malformed field is in the orders we send, the venue is applying the FIX rule that prices use a decimal point, and the same venue accepts our orders from the 3.4.1 sessions. Resetting the session or resending does not help either, because every new order is formatted the same way.
+remediation_action: rollback_fix_gateway_canary
+remediation_command: |-
+  opsctl rollback deployment/order-gateway-fix-nsdq --to-revision previous
+error_message: '[OMS] FIX-PARSE-REJECT session={fix_session} venue rejected our 35={msg_type} clordid={cl_ord_id}: 35=3 45={ref_seq} 371={bad_tag}
+  373=6 (Incorrect data format for value) {bad_tag}={bad_value} 58={venue_text}'
 stack_trace: |-
-  === RAW FIX MESSAGE DUMP ===
-  8=FIX.4.4|9=176|35={msg_type}|49=SENDER|56=TARGET|34=12847|
-  52=20260217-14:32:07.882|11=ORD-847291|55=AAPL|54=1|38=2500|
-  40=2|59=0|{bad_tag}=244,52<<<MALFORMED>>>|
-  10={actual_checksum}|
-  --- PARSE ANALYSIS ---
-    session={fix_session}  msg_type={msg_type}  direction=INBOUND
-    tag_{bad_tag}  status=INVALID  reason=unexpected_value_format
-    checksum  expected={expected_checksum}  actual={actual_checksum}  match=false
-    body_length=176  computed_length=174  length_match=false
-  --- SESSION STATS ---
-    msgs_today=124,832  parse_errors=47  reject_rate=0.038%
-    last_good_seq=12846  gap_detected=false
-  ACTION: discard_garbled=true  resend_request(35=2)=queued  increment_error_count=true  alert=FIX-PARSE-REJECT
+  === FIX SESSION {fix_session}  deployment=order-gateway-fix-nsdq  version=3.5.0  LANG=de_DE.UTF-8 ===
+  --- LAST EXCHANGE (decoded, UTCTimestamp shown as ISO-8601) ---
+  OUT 8=FIX.4.4 9=162 35={msg_type} 34={ref_seq} 49=FINSERV07 56=NSDQ 52={iso_now} 11={cl_ord_id} 55=AAPL 54=1 38=2500 40=2 44={bad_value} 59=0 60={iso_now} 10=087
+  IN  8=FIX.4.4 9=118 35=3 34=88214 49=NSDQ 56=FINSERV07 52={iso_now} 45={ref_seq} 371={bad_tag} 372={msg_type} 373=6 58={venue_text} 10=203
+  --- SESSION CHECK ---
+    outbound BodyLength=valid CheckSum=valid   inbound BodyLength=valid CheckSum=valid
+    tag {bad_tag} value={bad_value}  formatter=java.text.DecimalFormat(default locale de_DE)  expected decimal point
+    session state=LOGGED_ON  heartbeats=ok  sequence gap=none
+  ACTION: order rejected by venue, returned to router  alert=FIX-PARSE-REJECT
 correlation_attr: {}
 fault_params:
   fix_session: FIX-NSDQ-07
   msg_type: D
   bad_tag: 44
-  expected_checksum:
-    format: "{n:03d}"
-    n: {randint: [0, 127]}
-  actual_checksum:
-    format: "{n:03d}"
-    n: {randint: [128, 255]}
+  bad_value:
+    format: "{a},{b:02d}"
+    a: {randint: [20, 480]}
+    b: {randint: [1, 99]}
+  venue_text: Incorrect data format for value, tag 44
+  cl_ord_id:
+    format: "N7-{n}"
+    n: {randint: [1000000, 9999999]}
+  ref_seq: {randint: [10000, 99999]}
 rca_clues:
   order-gateway:
-    oms.fix_parse_error_rate_pct: {uniform: [0.01, 5.0], round: 3}
-    oms.fix_reject_msg_count: {randint: [1, 200]}
+    oms.fix_session_rejects_per_min: {randint: [300, 900]}
     oms.fix_rejected_tag: 44
+    oms.fix_checksum_valid: true
+    deployment.version: 3.5.0
+    process.locale: de_DE.UTF-8
   audit-logger:
-    audit.fix_session_error_events: {randint: [1, 100]}
-    audit.bad_tag_frequency: {randint: [1, 50]}
-    audit.counterparty_oms_version_changed: true
+    audit.order_rejected_events_per_min: {randint: [300, 900]}
+    audit.reject_session: FIX-NSDQ-07
   matching-engine:
-    engine.orders_dropped_parse_error: {randint: [0, 100]}
-    engine.fix_session_resets: {randint: [0, 10]}
+    engine.venue_reroutes_per_min: {randint: [270, 810]}
   compliance-monitor:
-    compliance.fix_protocol_violation_flags: {randint: [0, 20]}
-    compliance.session_audit_gaps_from_rejects: {randint: [0, 10]}
+    compliance.best_ex_exceptions: {randint: [10, 200]}
+cascade_messages:
+  audit-logger:
+    - severity: WARN
+      message: '[AUDIT] event_logged stream=order-events type=ORDER_REJECTED session={fix_session} clordid={cl_ord_id} reason=venue session reject 373=6 tag={bad_tag}'
+  matching-engine:
+    - severity: WARN
+      message: '[SOR] child order {cl_ord_id} rejected by NSDQ on {fix_session} (35=3 373=6); re-routing to next lit venue'
+  compliance-monitor:
+    - severity: WARN
+      message: '[COMPL] best-execution exception: {cl_ord_id} rejected at NSDQ and re-routed; routing report entry flagged for review'
+fault_scope:
+  cluster: finserv-eks-cluster
+  workloads: [order-gateway, audit-logger]
+infrastructure_events:
+  - service: order-gateway
+    severity: INFO
+    offset_seconds: -120
+    body: '[OMS] canary rollout deployment/order-gateway-fix-nsdq 3.4.1 -> 3.5.0 started: new base image finserv-jre21:2026.11 (env LANG=de_DE.UTF-8, was C.UTF-8), 1/1 pod updated, hosts session FIX-NSDQ-07; deployed by oms-release (CR-6032)'
+    attributes:
+      user.name: oms-release
+      change.request: CR-6032
+      operation: deployment_rollout
+      change.summary: 'order-gateway-fix-nsdq: 3.4.1 -> 3.5.0 (LANG C.UTF-8 -> de_DE.UTF-8)'
+      deployment.version: 3.5.0
+      process.locale: de_DE.UTF-8
+      fix.session: FIX-NSDQ-07
+remediation_effects:
+  log_taper_seconds: 30
+  log_events:
+    - service: audit-logger
+      severity: INFO
+      offset_seconds: 1
+      body: '[AUDIT] event_logged stream=change-mgmt type=CHANGE_APPLIED cmd="opsctl rollback deployment/order-gateway-fix-nsdq --to-revision previous" actor={actor}: order-gateway-fix-nsdq 3.5.0 -> 3.4.1 (LANG de_DE.UTF-8 -> C.UTF-8)'
+      attributes:
+        operation: change_applied
+        audit.stream: change-mgmt
+        change.target: deployment/order-gateway-fix-nsdq
+    - service: order-gateway
+      severity: INFO
+      offset_seconds: 5
+      body: '[OMS] deployment order-gateway-fix-nsdq rolling back to 3.4.1: new pod starting (LANG=C.UTF-8); FIX-NSDQ-07 logout scheduled on the 3.5.0 pod'
+      attributes:
+        operation: deployment_rollout
+        fix.session: FIX-NSDQ-07
+    - service: order-gateway
+      severity: INFO
+      offset_seconds: 30
+      body: '[OMS] FIX-NSDQ-07 logged on from order-gateway-fix-nsdq 3.4.1 (locale C.UTF-8): 35=A accepted, sequence numbers continued, price format check 44=244.52'
+      attributes:
+        operation: fix_logon
+        fix.session: FIX-NSDQ-07
+        deployment.version: 3.4.1
+        process.locale: C.UTF-8
+    - service: order-gateway
+      severity: INFO
+      offset_seconds: 60
+      body: '[OMS] FIX-NSDQ-07 no session rejects in the last 30 s; orders to NSDQ accepted'
+      attributes:
+        operation: fix_session_status
+        fix.session: FIX-NSDQ-07
+  steady_attributes:
+    order-gateway:
+      deployment.version: 3.4.1
+      process.locale: C.UTF-8
+  verification:
+    - signal: order_gateway.fix_session_rejects_per_min
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "order-gateway"'
+      field: 'metrics.order_gateway.fix_session_rejects_per_min'
+      expect: 'back to 0-1 per minute on FIX-NSDQ-07 (was 300-900)'
+      within_seconds: 120
+    - signal: FIX-PARSE-REJECT lines
+      from: 'logs.otel.finserv'
+      where: 'body.text LIKE "*FIX-PARSE-REJECT*"'
+      expect: '0 new lines once the canary pod is replaced (about 30 s)'
+      within_seconds: 120
+    - signal: FIX-NSDQ-07 process locale
+      from: 'logs.otel.finserv'
+      where: 'resource.attributes.service.name == "order-gateway"'
+      field: 'attributes.process.locale'
+      expect: 'C.UTF-8 on every line since the rollback; de_DE.UTF-8 stops appearing'
+      within_seconds: 120
+    - signal: order-gateway-fix-nsdq version
+      from: 'logs.otel.finserv'
+      where: 'resource.attributes.service.name == "order-gateway"'
+      field: 'attributes.deployment.version'
+      expect: '3.4.1 on every line since the rollback; 3.5.0 stops appearing'
+      within_seconds: 120
 business_impact:
   - kpi: business.order_flow_per_min
     value: {uniform: [316.2, 363.8]}

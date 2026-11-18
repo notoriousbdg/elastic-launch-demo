@@ -35,6 +35,11 @@ state:
     init: 0
   _last_gse_summary:
     init: now
+  # Hydraulics and power bus status lines every few seconds (0: the first cycle reports).
+  _last_hyd_status:
+    init: 0
+  _last_pwr_status:
+    init: 0
 steps:
 - counter:
     state_key: _weather_cycle
@@ -126,10 +131,34 @@ steps:
     value:
       var: _weather_cycle
     unit: cycles
+# WX-NORTH data age (seconds since its last 1 Hz record). Its firmware
+# davis-v3.2.1-patched drops the RS-422 link: data arrives in bursts, age 30-180 s.
+# After the rollback to davis-v3.1.8 the backlog clears within ~30 s.
+- sample:
+    wx_fault:
+      expr: 20 in all_active
+    wx_fixed:
+      expr: 20 in fixed_channels and 20 not in all_active
+    wx_e:
+      expr: elapsed.get(20, 0)
+    wx_age:
+      expr: "round(min(2.0 + wx_e, 30.0 + (wx_e % 150.0)), 1) if wx_fault else (round(max(rand.uniform(1.0, 4.0),
+        60.0 * (1.0 - min(1.0, since_fix.get(20, 0) / 30.0))), 1) if wx_fixed else round(rand.uniform(1.0, 4.0), 1))"
+    wx_fw:
+      expr: "'davis-v3.2.1-patched' if wx_fault else 'davis-v3.1.8'"
+    wx_status:
+      expr: "'ANOMALY' if wx_fault or wx_age > 15 else 'NOMINAL'"
+    wx_lcc:
+      expr: "'NO-GO' if wx_age > 15 else 'GO'"
+- metric:
+    name: ground.weather.data_age_s
+    value:
+      var: wx_age
+    unit: s
 - log:
     level: INFO
-    message: '[GND] weather_check cycle={_weather_cycle} wind={wind}kts visibility={vis}km ceiling=12000ft constraint=WITHIN
-      status=GO'
+    message: '[GND] weather_check cycle={_weather_cycle} wind={wind}kts visibility={vis}km ceiling=12000ft station=WX-NORTH
+      data_age={wx_age}s max_gap=15s fw={wx_fw} lcc={wx_lcc} status={wx_status}'
     attrs:
       operation: weather_check
       weather.cycle:
@@ -138,7 +167,15 @@ steps:
         var: wind
       weather.visibility_km:
         var: vis
-      weather.status: GO
+      weather.status:
+        var: wx_lcc
+      weather.station_id: WX-NORTH
+      weather.data_age_s:
+        var: wx_age
+      deployment.wx_station_fw:
+        var: wx_fw
+      sensor.status:
+        var: wx_status
 - sample:
     system:
       choice: PAD_SYSTEMS
@@ -154,6 +191,90 @@ steps:
     name: ground.pad_system_checks
     value: 1.0
     unit: checks
+# Pad hydraulics: HYD-A is the active system. A worn HYD-A pump loses pressure
+# (2400-2750 PSI, min 2800) over ~45 s; after the switch to HYD-B the pressure
+# rebuilds to HYD-B's ~2920 PSI over ~60 s.
+- sample:
+    hyd_fault:
+      expr: 12 in all_active
+    hyd_fixed:
+      expr: 12 in fixed_channels and 12 not in all_active
+    hyd_ramp:
+      expr: min(1.0, elapsed.get(12, 0) / 45.0)
+    hyd_conv:
+      expr: min(1.0, since_fix.get(12, 0) / 60.0)
+    hyd_psi:
+      expr: "round(3000.0 - (3000.0 - rand.uniform(2450.0, 2700.0)) * hyd_ramp) if hyd_fault else (round(2600.0
+        + (rand.uniform(2900.0, 2950.0) - 2600.0) * hyd_conv) if hyd_fixed else round(rand.uniform(2960.0, 3040.0)))"
+    hyd_active:
+      expr: "'HYD-B' if hyd_fixed else 'HYD-A'"
+    hyd_reservoir:
+      expr: "round(rand.uniform(76.0, 80.0)) if hyd_fault else round(rand.uniform(91.0, 95.0))"
+    hyd_status:
+      expr: "'ANOMALY' if hyd_fault or hyd_psi < 2800 else 'NOMINAL'"
+- metric:
+    name: ground.hydraulics.pressure_psi
+    value:
+      var: hyd_psi
+    unit: PSI
+- every:
+    seconds: 5
+    state_key: _last_hyd_status
+    steps:
+    - log:
+        level: INFO
+        message: '[GND] hydraulics_status active={hyd_active} pressure={hyd_psi}PSI min_required=2800PSI reservoir={hyd_reservoir}%
+          status={hyd_status}'
+        attrs:
+          operation: hydraulics_status
+          ground.hydraulics.active_system:
+            var: hyd_active
+          ground.hydraulics.pressure_psi:
+            var: hyd_psi
+          ground.hyd_reservoir_pct:
+            var: hyd_reservoir
+          sensor.status:
+            var: hyd_status
+# Pad power bus PWR-A: a utility feed sag with UPS-A on bypass pulls the bus to
+# ~109.8 V (8.5% low) within ~30 s; the transformer tap +2 brings it back to
+# ~120 V over ~45 s.
+- sample:
+    pwr_fault:
+      expr: 14 in all_active
+    pwr_fixed:
+      expr: 14 in fixed_channels and 14 not in all_active
+    pwr_ramp:
+      expr: min(1.0, elapsed.get(14, 0) / 30.0)
+    pwr_conv:
+      expr: min(1.0, since_fix.get(14, 0) / 45.0)
+    bus_v:
+      expr: "round(120.0 - (120.0 - rand.uniform(109.5, 110.1)) * pwr_ramp, 1) if pwr_fault else (round(109.8
+        + (rand.uniform(119.5, 120.5) - 109.8) * pwr_conv, 1) if pwr_fixed else round(rand.uniform(119.4, 120.6), 1))"
+    bus_tap:
+      expr: "'+2' if pwr_fixed else '0'"
+    bus_status:
+      expr: "'ANOMALY' if pwr_fault or abs(bus_v - 120.0) > 6.0 else 'NOMINAL'"
+- metric:
+    name: ground.power.bus_voltage
+    value:
+      var: bus_v
+    unit: V
+- every:
+    seconds: 5
+    state_key: _last_pwr_status
+    steps:
+    - log:
+        level: INFO
+        message: '[GND] power_bus_status bus=PWR-A voltage={bus_v}V nominal=120.0V transformer_tap={bus_tap} status={bus_status}'
+        attrs:
+          operation: power_bus_status
+          ground.power.bus_id: PWR-A
+          ground.power.bus_voltage:
+            var: bus_v
+          ground.power.transformer_tap:
+            var: bus_tap
+          sensor.status:
+            var: bus_status
 - sample:
     item:
       choice: GSE_ITEMS

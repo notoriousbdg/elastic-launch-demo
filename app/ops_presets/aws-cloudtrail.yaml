@@ -1,0 +1,60 @@
+# AWS account-level kinds and CloudTrail-style audit records. Scenario-neutral:
+# any scenario with an AWS account can extend it. Per-kind `cloudtrail` blocks map a
+# verb to the API event (`_` is the default) and name its request parameters.
+kinds:
+  iam-policy:
+    aliases: [iam-policies]
+    audit: cloudtrail
+    cloudtrail:
+      source: iam.amazonaws.com
+      event: {restore: SetDefaultPolicyVersion, rollback: SetDefaultPolicyVersion, _: CreatePolicyVersion}
+    params:
+      policyArn: "arn:aws:iam::{account_id}:policy/{=name or kind}"
+      versionId: "{flags.version}"
+  iam-role:
+    audit: cloudtrail
+    cloudtrail: {source: iam.amazonaws.com, event: {_: UpdateRole}}
+    params: {roleName: "{=name or kind}"}
+  iam-role-trust:
+    audit: cloudtrail
+    cloudtrail: {source: iam.amazonaws.com, event: {_: UpdateAssumeRolePolicy}}
+    params: {roleName: "{=name or kind}"}
+  nodegroup:
+    aliases: [nodegroups, ng]
+    audit: cloudtrail
+    cloudtrail:
+      source: eks.amazonaws.com
+      event: {patch: UpdateNodegroupConfig, apply: UpdateNodegroupConfig, rollback: UpdateNodegroupVersion,
+              restore: UpdateNodegroupVersion, delete: DeleteNodegroup, _: UpdateNodegroupConfig}
+    params:
+      nodegroupName: "{=name or kind}"
+      instanceTypes: "{=('[' + ','.join(flag_list('instance-types')) + ']') if flag('instance-types') else ''}"
+  registry-credential:
+    audit: cloudtrail
+    cloudtrail:
+      source: secretsmanager.amazonaws.com
+      event: {rotate: RotateSecret, restore: RestoreSecret, delete: DeleteSecret, _: PutSecretValue}
+    params:
+      secretId: "{=(namespace + '/' if namespace else '') + (name or kind)}"
+
+audit:
+  formats:
+    cloudtrail:
+      vars:
+        ct: "kind_info.get('cloudtrail') or {}"
+        ct_events: "ct.get('event') or {}"
+        event_source: "ct.get('source') or 'eks.amazonaws.com'"
+        event_name: "ct_events.get(verb) or ct_events.get('_') or (verb.capitalize() + kind.title().replace('-', ''))"
+      params_prefix: "requestParameters."
+      body: "cloudtrail: eventSource={event_source} eventName={event_name} userIdentity={actor} {params_text} errorCode=none change_id={change_id}"
+      attributes:
+        cloud.provider: aws
+        cloud.account.id: "{account_id}"
+        aws.cloudtrail.event_source: "{event_source}"
+        aws.cloudtrail.event_name: "{event_name}"
+        user.name: "{actor}"
+        change.id: "{change_id}"
+        event.action: "{event_name}"
+      match:
+        prefix: "cloudtrail:"
+        tokens: ["eventName={event_name}"]

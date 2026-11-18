@@ -1,0 +1,211 @@
+# opsctl profile for the AWS Orders Platform (see app/ops_profile.py for the contract).
+# Changes go to the AWS account through the control plane (ECS, Lambda, ELB, WAF, EC2,
+# Route 53, ACM ...); CloudTrail records every accepted change with its change id.
+# Verbs come from the neutral preset; the CloudTrail audit format and the IAM policy kind
+# come from the aws-cloudtrail preset. This file names the AWS resource kinds the
+# channels operate on and the wording of the help.
+extends: [aws-cloudtrail]
+
+banner: "opsctl applies changes to the awsorders AWS account through the AWS control plane. Every applied change is recorded by CloudTrail with a change id."
+
+actors:
+  default: assumed-role/awsorders-oncall/sre-oncall            # a person resolving from the Chaos UI
+  auto: assumed-role/awsorders-auto-remediation/ssm-automation  # the remediation workflow
+
+auto_remediate_channels: [16, 17, 18, 19, 20]
+
+verbs:
+  rollback:
+    summary: "Roll an ECS service, Lambda function or WAF rule group back to its previous revision (--to-revision previous)"
+    example: "opsctl rollback ecs-service/<name> --to-revision previous\n  opsctl rollback lambda-function/<name> --to-revision previous"
+    describe: "{ref} rolled back to {rev_text}"
+  restore:
+    summary: "Put a changed setting, rule, record or policy version back (--version, --health-check-path, --port ...)"
+    example: "opsctl restore target-group/<name> --health-check-path /health\n  opsctl restore iam-policy/<name> --version v6"
+    describe:
+      - {when: "flag('version')", text: "{ref} default version set to {flags.version}"}
+      - {text: "{ref} restored{settings_text}"}
+  patch:
+    summary: "Change settings on a resource (--desired-count, --min-capacity, --provisioned-concurrency, --cpu-credits ...)"
+    example: "opsctl patch ecs-service/<name> --desired-count 12\n  opsctl patch lambda-alias/<function>:live --provisioned-concurrency 60"
+    describe: "{ref} updated{settings_text}"
+  sync:
+    summary: "Point a consumer at the current secret or configuration version (--secret-stage AWSCURRENT)"
+    example: "opsctl sync gateway-target/<name> --secret-stage AWSCURRENT"
+    describe: "{ref} synchronised{settings_text}"
+  renew:
+    summary: "Renew or replace a certificate"
+    example: "opsctl renew acm-certificate/<domain>"
+    describe: "{ref} renewal requested; validation in progress"
+  restart:
+    summary: "Force a new deployment of an ECS service so tasks restart on the current configuration"
+    example: "opsctl restart ecs-service/<name>"
+    describe: "{ref} new deployment started"
+  run:
+    summary: "Run an automation document (Systems Manager Automation)"
+    example: "opsctl run automation/<name>"
+    describe: "{ref} execution started{=(' (' + change_id + ')') if change_id else ''}"
+  # not used on this platform
+  rotate: null
+  drain: null
+  replace: null
+  apply: null
+  expand: null
+  delete: null
+
+kinds:
+  ecs-service:
+    aliases: [ecs-services, ecs]
+    audit: cloudtrail
+    cloudtrail: {source: ecs.amazonaws.com, event: {_: UpdateService}}
+    params:
+      cluster: "awsorders"
+      service: "{=name or kind}"
+      desiredCount: "{flags.desired-count}"
+      taskDefinition: "{flags.to-revision}"
+      forceNewDeployment: "{=('true' if verb == 'restart' else '')}"
+  scalable-target:
+    aliases: [scalable-targets, autoscaling]
+    audit: cloudtrail
+    cloudtrail: {source: application-autoscaling.amazonaws.com, event: {_: RegisterScalableTarget}}
+    params:
+      serviceNamespace: ecs
+      resourceId: "service/awsorders/{=name or kind}"
+      scalableDimension: "ecs:service:DesiredCount"
+      minCapacity: "{flags.min-capacity}"
+      maxCapacity: "{flags.max-capacity}"
+  lambda-function:
+    aliases: [lambda, lambda-functions]
+    audit: cloudtrail
+    cloudtrail: {source: lambda.amazonaws.com, event: {_: UpdateFunctionConfiguration20150331v2}}
+    params:
+      functionName: "{=name or kind}"
+      revision: "{flags.to-revision}"
+      environment: "{=(flag('env') or '')}"
+  lambda-alias:
+    aliases: [lambda-aliases]
+    audit: cloudtrail
+    cloudtrail: {source: lambda.amazonaws.com, event: {_: PutProvisionedConcurrencyConfig}}
+    params:
+      functionName: "{=(name or kind).split(':')[0]}"
+      qualifier: "{=((name or kind).split(':') + ['live'])[1]}"
+      provisionedConcurrentExecutions: "{flags.provisioned-concurrency}"
+  target-group:
+    aliases: [target-groups, tg]
+    audit: cloudtrail
+    cloudtrail: {source: elasticloadbalancing.amazonaws.com, event: {_: ModifyTargetGroup}}
+    params:
+      targetGroup: "{=name or kind}"
+      healthCheckPath: "{flags.health-check-path}"
+  web-acl:
+    aliases: [web-acls, waf]
+    audit: cloudtrail
+    cloudtrail: {source: wafv2.amazonaws.com, event: {_: UpdateWebACL}}
+    params:
+      name: "{=name or kind}"
+      ruleGroup: "{flags.rule-group}"
+      revision: "{flags.to-revision}"
+  security-group:
+    aliases: [security-groups, sg]
+    audit: cloudtrail
+    cloudtrail: {source: ec2.amazonaws.com, event: {_: AuthorizeSecurityGroupIngress}}
+    params:
+      groupName: "{=name or kind}"
+      ipProtocol: "{=('tcp' if flag('port') else '')}"
+      port: "{flags.port}"
+      sourceGroup: "{flags.source}"
+  instance-credit-spec:
+    aliases: [cpu-credits]
+    audit: cloudtrail
+    cloudtrail: {source: ec2.amazonaws.com, event: {_: ModifyInstanceCreditSpecification}}
+    params:
+      autoScalingGroup: "{=name or kind}"
+      cpuCredits: "{flags.cpu-credits}"
+  gateway-target:
+    aliases: [gateway-targets]
+    audit: cloudtrail
+    cloudtrail: {source: bedrock-agentcore.amazonaws.com, event: {_: UpdateGatewayTarget}}
+    params:
+      targetName: "{=name or kind}"
+      secretStage: "{flags.secret-stage}"
+  dynamodb-table:
+    aliases: [dynamodb, ddb]
+    audit: cloudtrail
+    cloudtrail: {source: dynamodb.amazonaws.com, event: {_: UpdateTable}}
+    params:
+      tableName: "{=name or kind}"
+      billingMode: "{flags.billing-mode}"
+  hosted-zone:
+    aliases: [hosted-zones, zone]
+    audit: cloudtrail
+    cloudtrail: {source: route53.amazonaws.com, event: {_: AssociateVPCWithHostedZone}}
+    params:
+      hostedZone: "{=name or kind}"
+      vpc: "{flags.vpc}"
+  route53-record:
+    aliases: [route53-records, dns-record]
+    audit: cloudtrail
+    cloudtrail: {source: route53.amazonaws.com, event: {_: ChangeResourceRecordSets}}
+    params:
+      recordName: "{=name or kind}"
+  acm-certificate:
+    aliases: [acm-certificates, cert]
+    audit: cloudtrail
+    cloudtrail: {source: acm.amazonaws.com, event: {renew: RenewCertificate, _: RequestCertificate}}
+    params:
+      domainName: "{=name or kind}"
+      validationMethod: DNS
+  automation:
+    aliases: [automations, ssm]
+    audit: cloudtrail
+    cloudtrail: {source: ssm.amazonaws.com, event: {_: StartAutomationExecution}}
+    params:
+      documentName: "{=name or kind}"
+
+audit:
+  service: [orders-gateway, orders-service]
+
+runbook:
+  scope_note: "Resources and regions outside the Scope were not changed and can legitimately still show the old values."
+  recovery_note: "Each query names the changed resource, so its result is the value to compare."
+  audit_label: "CloudTrail"
+
+guide:
+  scenario: |
+    ## Where this platform's telemetry is
+    The data is OpenTelemetry, not ECS: there are no top-level `log.level` or `service.*`
+    fields.
+    - **Logs:** `FROM logs.otel.awsorders`. Message in `body.text` (never `body` alone),
+      level in `severity_text`, emitter in `resource.attributes.service.name`. Root-cause
+      and change details (CloudTrail events, versions, settings) are in `attributes.*`,
+      for example `attributes.change.id` and `attributes.aws.lambda.provisioned_concurrency`.
+    - **Service metrics** (database connections, Lambda init duration and errors, queue age,
+      ALB healthy targets, 5xx rates, Bedrock throttles ...): `FROM metrics-generic.otel-default`,
+      keyed by `resource.attributes.service.name`, for example
+      `metrics.aws.lambda.init_duration_ms` for `payment-processor`. Before you conclude a
+      metric does not exist, look here.
+    - **CloudTrail records** for every applied change are in the logs, with
+      `attributes.aws.cloudtrail.event_name` and `attributes.change.id`.
+    - The AWS integration data streams (`metrics-aws.*`, `logs-aws.*`) carry the same
+      incidents at CloudWatch granularity (one datapoint per minute) and are useful context,
+      but judge recovery on the service metrics and logs above.
+
+    Always filter to the region and resource in the runbook's Scope.
+
+    Example: the Lambda init duration the payment function reports now:
+
+    ```
+    FROM metrics-generic.otel-default
+    | WHERE @timestamp > NOW() - 5 minutes
+      AND resource.attributes.service.name == "payment-processor"
+      AND metrics.aws.lambda.init_duration_ms IS NOT NULL
+    | STATS avg_ms = AVG(metrics.aws.lambda.init_duration_ms),
+            max_ms = MAX(metrics.aws.lambda.init_duration_ms)
+        BY minute = BUCKET(@timestamp, 1 minute)
+    | SORT minute DESC
+    ```
+
+    A fix takes effect over a short transition (a new ECS deployment, a new Lambda
+    environment, a DNS or certificate change settling). Compare the window after the
+    change's `change.id` with the window before it, and give it the transition time
+    before concluding it did not work.

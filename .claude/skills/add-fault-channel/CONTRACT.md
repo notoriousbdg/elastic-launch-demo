@@ -26,13 +26,15 @@ Hold every field to the Realism checklist in [../add-scenario/BRIEF.md](../add-s
 | `remediation_action` | ✅ | `str` | `snake_case` action identifier. E.g. `"restart_payment_gateway"` |
 | `error_message` | ✅ | `str` | Log line template in the component's real log format. All `{placeholder}` names must be keys in `fault_params` or runtime placeholders (`{self_node}`, `{self_pod_ip}`, `{node_count}`, `{klog_time}`, `{nginx_time}`, ...; see §Schema 1.3 fields). |
 | `stack_trace` | ✅ | `str` | Multi-line dump template, or `''` when the component logs no stack trace (the engine then adds no `exception.*` attributes). Same placeholder rule. |
-| `correlation_attr` | optional | `dict` | `{key: "attr.name", value: "value"}` — injected on error spans at 90% rate, 5% on normal spans. |
+| `correlation_attr` | optional | `dict` | `{key: "attr.name", value: "value"}` — injected on the `affected_services`' spans only (90% of error or affected-service spans, 5% of others); cascade and unrelated services never carry it. |
 | `fault_params` | ✅ | `dict` | YAML DSL expressions for every `{placeholder}` in `error_message` + `stack_trace`. |
 | `rca_clues` | ✅ | `dict` | Per-service partial clues. Keys = service names from `affected_services` + `cascade_services`. |
 | `infrastructure_events` | optional (1.3: one is the cause) | `list` | One-shot log events per trigger: `{service, severity, body, attributes, offset_seconds}`. At 1.3 one entry is the change or provider event that caused the fault, with a negative `offset_seconds` so it is logged before the errors (Check 42). |
 | `remediation_command` | ✅ at 1.3 | `str` | One `opsctl <verb> <kind>[/<name>] [-n ns] [--flags]` per line (Check 37). See §Schema 1.3 fields. |
 | `fault_scope` | ✅ at 1.3 (warning) | `dict` | `{cluster, node_pool, nodes, az, workloads, namespaces}` (Check 39). |
 | `onset_delay_seconds` / `ramp_seconds` | optional | `number` | Symptoms start after the delay; Kubernetes impacts ramp in. |
+| `service_lag_seconds` | optional | `{service: number}` | Extra delay for one service on top of `onset_delay_seconds`, so a dependent degrades after the component at fault. Keys must be affected or cascade services. In a service's DSL, `lag.get(N, 0)` is that total delay for channel N. |
+| `generator_hold_seconds` | optional | `{generator_id: number}` | Keep that generator's `generator_impact` applied this many seconds after the fix, so a package stream (Azure OpenAI, Application Gateway...) recovers together with the scenario's own metrics instead of snapping to baseline. Keys must be in the channel's `generator_impact`. Leave out event-style generators (audit and security events): their records stop when the fix lands. |
 | `cascade_messages` | optional | `dict` | `{service: [str or {severity, message}]}` in each dependent's real log format (Check 40). |
 | `error_services` | optional | `list` | Subset of `affected_services` that emits `error_message`; the others emit their `cascade_messages` (Check 40). |
 | `k8s_events` | optional | `list` | Kubernetes events while the fault is active (pinned-topology scenarios). |
@@ -96,6 +98,24 @@ remediation_effects:
 ```
 
 `remediation_effects` apply when the channel is resolved by `opsctl`, by the remediation workflow or from the Chaos page (not on auto-expiry). `verification` becomes "Recovery is confirmed when" in the Wiki runbook.
+
+### Remediation and signal at 1.3
+
+- **Verbs come from the ops profile.** Each `remediation_command` verb must exist in the scenario's profile: the presets named in `scenarios/<id>/ops.yaml` `extends` plus the file's own `verbs` (Check 37). If none reads naturally, add the verb to `ops.yaml` with `summary` and `example` (Check 45 requires both). Contract: AGENTS.MD "Ops profile", `app/ops_profile.py`.
+- **One `{actor}` line per command line.** `remediation_effects.log_events` carries, for each command line, one line naming `{actor}` that satisfies the profile's audit format `match` (body starts with `prefix`, contains every rendered `tokens` entry: the target for the neutral and space formats, `resource=` / `namespace=` / `name=` for kube audit, `eventName=` for CloudTrail). That line stands in for the command's audit record, so the fix leaves exactly one record per command. Example (space, audit on mission-control, `match: {tokens: ["{target}"]}`):
+
+  ```yaml
+  remediation_command: |-
+    opsctl rollback firmware/pms-reg-a --to-revision previous
+  remediation_effects:
+    log_events:
+      - service: mission-control
+        severity: INFO
+        offset_seconds: 1
+        body: '[MCC] CMD ACCEPTED opsctl rollback firmware/pms-reg-a --to-revision previous from {actor}: REG-A controller fw-4.2.0-rc1 -> fw-4.1.7'
+  ```
+- **Verification signals must be emitted.** A `verification` entry on `metrics-generic` names a `metrics.<name>` some service's `metric` step emits; a log `attributes.<key>` is set by a service step, `steady_attributes`, `rca_clues` or a `log_events` line. Check 41 warns when nothing emits it.
+- **The signal service has a during-fault and an after-fix branch.** The service emitting the signal metric reads it out of band while `N in all_active` (ramped with `elapsed`), converging back while `N in fixed_channels` (with `since_fix`), baseline otherwise, and puts the fix's configuration on its status log keyed on `fixed_channels` or `applied`. See §Before / during / after in [../add-scenario/contract/services.md](../add-scenario/contract/services.md). When replacing channel N, the service's existing branches for N belong to the old channel: rewrite them.
 
 Fault logs carry `error.type`, the channel's `rca_clues` as log attributes and, with a stack trace, `exception.*`. They no longer carry `chaos.*`, `ops.*`, `system.*` or `cascade.*` fields or an `event_name` blob; never add such attributes.
 
@@ -190,6 +210,7 @@ If the new channel adds a first fault in a new subsystem, add a new grouping lin
 - [ ] Channel number 16–20 → `remediation_action` is a plausible auto-runbook action
 - [ ] `business_impact` has dict entries targeting names in `executive_kpi_emissions` that turn enough KPI tiles yellow/red for the channel's scope tier, impacted KPIs declare `better:`, and `affected_services` includes a trace entry service (copy the old channel's block if it had one; re-check the values; don't silently drop it)
 - [ ] Schema 1.3 scenario: `remediation_command`, `fault_scope`, a cause event with negative `offset_seconds`, and `remediation_effects.verification` present; `state` keys are in the generator's `SPEC.state_keys`; Checks 37-44 clean
+- [ ] Schema 1.3 scenario: every `remediation_command` verb is in the ops profile (or added to `ops.yaml` with `summary` + `example`); one `{actor}` `log_events` line per command line satisfying the audit `match`; verification signals emitted by a service (no Check 41 warnings); the signal service has during-fault and after-fix branches for N; Check 45 clean
 - [ ] Realism checklist (`../add-scenario/BRIEF.md`) passes: real log format, `error_type` is a unique quote-free substring of `error_message`, no demo wording, no `chaos.*` attributes
 - [ ] `python3 scripts/verify_yaml_scenarios.py <id>` passes
 - [ ] `git diff --name-only` shows only files under `scenarios/<id>/`

@@ -319,6 +319,33 @@ def business_load(now: datetime.datetime | None = None) -> float:
 
 # ── Chaos resolver ────────────────────────────────────────────────────────────
 
+def _held_after_fix(chaos_controller: Any, channel_registry: dict, generator_id: str,
+                    active: list[int]) -> list[int]:
+    """Fixed channels whose ``generator_hold_seconds`` for *generator_id* has not yet elapsed.
+
+    A package stream (Azure OpenAI metrics, Application Gateway logs...) would otherwise snap
+    to baseline the moment a fix lands, while the scenario's own metrics converge over the
+    recovery time. A channel that sets ``generator_hold_seconds: {generator_id: seconds}``
+    keeps that generator's ``generator_impact`` applied for that long after the fix.
+    """
+    since_fix = getattr(chaos_controller, "get_since_fix", None)
+    if since_fix is None:
+        return []
+    held: list[int] = []
+    for ch_id, secs in since_fix().items():
+        if ch_id in active:
+            continue
+        ch = channel_registry.get(ch_id) or {}
+        hold = (ch.get("generator_hold_seconds") or {}).get(generator_id)
+        try:
+            hold = float(hold or 0)
+        except (TypeError, ValueError):
+            continue
+        if hold > 0 and secs < hold and generator_id in (ch.get("generator_impact") or {}):
+            held.append(ch_id)
+    return held
+
+
 def resolve_active_chaos(
     chaos_controller: ChaosSource | None,
     channel_registry: dict,
@@ -358,7 +385,8 @@ def resolve_active_chaos(
     # First-match-only incorrectly zeroed sibling impact_keys when multiple
     # GT / multi-fault channels were active together.
     matched: list[tuple[int, dict, dict]] = []
-    for ch_id in chaos_controller.get_active_channels():
+    active = list(chaos_controller.get_active_channels())
+    for ch_id in active + _held_after_fix(chaos_controller, channel_registry, generator_id, active):
         ch = channel_registry.get(ch_id)
         if not ch:
             continue

@@ -10,14 +10,16 @@ cascade_services:
 - mission-control
 - range-safety
 description: Payload vibration levels exceed structural safety margins
-investigation_notes: 'Root cause: resonance coupling between the launch vehicle structure and payload isolation mounts at
-  the observed frequency. Spectrum peaks at the primary frequency with secondary peaks at 88.4Hz and 142.7Hz suggest a structural
-  mode, not random vibration. Check isolation mount damper pressure (nominal 48.2PSI) — low pressure indicates a damper gas
-  leak allowing resonance transmission. Verify no loose payload adapter bolts (torque spec 45 ft-lb). Remediation: activate
-  vibration suppression mode (PLD_VIBRATION_DAMP ACTIVE), increase damper pressure via PLD_DAMPER_PRESS +10PSI. If structural
-  resonance confirmed, assess whether launch loads will excite this mode — may require launch hold for structural review.
-  Log the vibration spectrum for post-flight coupled loads analysis.'
+investigation_notes: |-
+  Root cause: a slow gas leak in the {axis}-axis payload isolator damper (ISO-X). Damper pressure has fallen from the nominal 52.0PSI to {damper_psi}PSI, so the isolation mount no longer decouples the payload from the launch vehicle structure and a structural mode couples through at {frequency}Hz: {amplitude}g on the {axis} axis against a {limit}g limit. Spectrum peaks at the primary frequency with secondary peaks at 88.4Hz and 142.7Hz indicate a structural mode, not random vibration. Y and Z stay nominal, which isolates the fault to the X-axis mount. Verify no loose payload adapter bolts (torque spec 45 ft-lb).
+  Confirm:
+    - payload-monitor logs [PLD] sensor=vibration_x ... damper=ISO-X:{damper_psi}PSI isolator_mode=PASSIVE status=ANOMALY (attributes.payload.damper_pressure_psi); metric payload.vibration_x rises from under 1g to 2-8g
+    - the payload-monitor warning "[PLD] ISO-X damper pressure ... falling" comes before the first PLD-VIBRATION-LIMIT
+    - sensor-validator reports validation.isolation_mount_status=DEGRADED
+  Remediation: re-pressurize the X-axis damper to 52PSI and switch it to active suppression with opsctl patch damper/pld-iso-x --pressure=52 --mode=active. The mount stiffens as the pressure comes back, so vibration_x decays below the {limit}g limit within about a minute and settles under 0.8g. Keep the damper in ACTIVE mode until the leak is repaired, assess whether launch loads will excite this mode (a launch hold for structural review may be needed), and log the vibration spectrum for post-flight coupled loads analysis.
 remediation_action: reset_payload_thermal
+remediation_command: |-
+  opsctl patch damper/pld-iso-x --pressure=52 --mode=active
 error_message: '[PLD] PLD-VIBRATION-LIMIT: axis={axis} amplitude={amplitude}g frequency={frequency}Hz limit={limit}g'
 stack_trace: |-
   == VIBRATION SPECTRUM DATA == PAYLOAD ACCELEROMETER ==
@@ -29,21 +31,21 @@ stack_trace: |-
   Z       31.8Hz     0.67g        1.5g     NOMINAL
   ---------------------------------------------------------------
   SPECTRUM_PEAKS: {frequency}Hz({amplitude}g), 88.4Hz(0.31g), 142.7Hz(0.18g)
-  ISOLATION_MOUNT: DEGRADED | DAMPER_PRESSURE: {damper_psi}PSI (nominal 48.2PSI)
+  ISOLATION_MOUNT: DEGRADED | DAMPER_PRESSURE: {damper_psi}PSI (nominal 52.0PSI)
   PLD-VIBRATION-LIMIT: {axis}-axis {amplitude}g at {frequency}Hz exceeds {limit}g structural limit
   ACTION: Verify isolation mount dampers, check for resonance coupling
 correlation_attr:
-  key: infra.mount_revision
-  value: iso-bracket-rev-C
+  key: payload.isolator_id
+  value: PLD-ISO-X
 fault_params:
   axis: X
-  damper_psi: {uniform: [38.0, 44.0], round: 1}
+  damper_psi: {uniform: [40.5, 41.5], round: 1}
   amplitude: {uniform: [2.0, 8.0], round: 2}
   frequency: {uniform: [20.0, 80.0], round: 1}
   limit: 1.5
 rca_clues:
   payload-monitor:
-    payload.damper_pressure_psi: {uniform: [38.0, 44.0], round: 1}
+    payload.damper_pressure_psi: {uniform: [40.5, 41.5], round: 1}
     payload.resonance_freq_hz: {uniform: [20, 80], round: 1}
   sensor-validator:
     validation.vibration_exceeded: true
@@ -52,6 +54,63 @@ rca_clues:
     upstream.degraded_subsystem: payload
   range-safety:
     safety.structural_status: monitor
+cascade_messages:
+  mission-control:
+    - severity: WARN
+      message: '[MCC] ALERT subsystem=payload code=PLD-VIBRATION-LIMIT axis={axis} amplitude={amplitude}g limit={limit}g; structures team paged for coupled loads review'
+  range-safety:
+    - severity: WARN
+      message: '[RSO] structural_status=MONITOR source=PLD axis={axis} amplitude={amplitude}g at {frequency}Hz; launch commit criteria under review'
+fault_scope:
+  workloads: [payload-monitor, sensor-validator]
+infrastructure_events:
+  - service: payload-monitor
+    severity: WARN
+    offset_seconds: -120
+    body: '[PLD] ISO-X damper pressure 46.3PSI falling (52.0PSI at last check) rate=-0.8PSI/min leak_suspected=true axis=X'
+    attributes:
+      operation: damper_check
+      payload.isolator_id: PLD-ISO-X
+      payload.damper_pressure_psi: 46.3
+remediation_effects:
+  log_taper_seconds: 45
+  log_events:
+    - service: mission-control
+      severity: INFO
+      offset_seconds: 1
+      body: '[MCC] CMD ACCEPTED opsctl patch damper/pld-iso-x --pressure=52 --mode=active from {actor}: ISO-X damper 41PSI -> 52PSI, mode PASSIVE -> ACTIVE'
+      attributes:
+        operation: command
+        command.target: damper/pld-iso-x
+    - service: payload-monitor
+      severity: INFO
+      offset_seconds: 45
+      body: '[PLD] ISO-X damper 52.0PSI isolator_mode=ACTIVE; vibration_x 0.9g below 1.5g limit and decaying'
+      attributes:
+        operation: damper_check
+        payload.isolator_mode: ACTIVE
+        payload.damper_pressure_psi: 52.0
+  steady_attributes:
+    payload-monitor:
+      payload.isolator_mode: ACTIVE
+  verification:
+    - signal: payload.vibration_x
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "payload-monitor"'
+      field: 'metrics.payload.vibration_x'
+      expect: 'below the 1.5 g limit within about a minute, then under 0.8 g (was 2-8 g)'
+      within_seconds: 150
+    - signal: PLD-VIBRATION-LIMIT lines
+      from: 'logs.otel.nova7'
+      where: 'body.text LIKE "*PLD-VIBRATION-LIMIT*"'
+      expect: '0 new lines once the taper ends (under a minute)'
+      within_seconds: 150
+    - signal: ISO-X isolator mode
+      from: 'logs.otel.nova7'
+      where: 'resource.attributes.service.name == "payload-monitor"'
+      field: 'attributes.payload.isolator_mode'
+      expect: 'ACTIVE on every line logged since the fix; PASSIVE stops appearing'
+      within_seconds: 150
 business_impact:
   - kpi: business.mission_success_probability_pct
     factor: {uniform: [0.55, 0.78]}

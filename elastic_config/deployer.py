@@ -19,6 +19,7 @@ from elastic_config.deployer_base import (
     ProgressCallback,
     StepIdx,
     WORKFLOW_INDEX_SUFFIXES,
+    LEGACY_WORKFLOW_INDEX_SUFFIXES,
     _kibana_headers,
     _es_headers,
 )
@@ -308,8 +309,8 @@ class ScenarioDeployer(
             results["wiki_runbooks_deleted"] = self._cleanup_wiki_runbooks(client)
             results["nightshift_context_removed"] = self._set_nightshift_context(client, None)
 
-        # Delete audit indices and remediation queue
-        for suffix in WORKFLOW_INDEX_SUFFIXES:
+        # Delete audit indices and remediation queue (and indices earlier releases made)
+        for suffix in WORKFLOW_INDEX_SUFFIXES + LEGACY_WORKFLOW_INDEX_SUFFIXES:
             client.delete(
                 f"{self.elastic_url}/{self.ns}-{suffix}",
                 headers=_es_headers(self.api_key),
@@ -492,6 +493,11 @@ class ScenarioDeployer(
                         )
                         if r.status_code < 300:
                             deleted += 1
+                    for suffix in LEGACY_WORKFLOW_INDEX_SUFFIXES:
+                        client.delete(
+                            f"{self.elastic_url}/{self.ns}-{suffix}",
+                            headers=_es_headers(self.api_key),
+                        )
                     step.status = "ok"
                     step.detail = f"Deleted {deleted} audit indices"
                 except Exception as exc:

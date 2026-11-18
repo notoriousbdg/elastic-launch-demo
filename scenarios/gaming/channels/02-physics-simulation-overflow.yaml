@@ -5,60 +5,131 @@ error_type: PHYS-OVERFLOW
 sensor_type: physics_validator
 affected_services:
 - game-server
-- analytics-pipeline
+error_services: [game-server]
 cascade_services:
 - matchmaking-engine
-description: Physics simulation accumulates floating-point errors causing object positions to overflow into NaN territory
+description: Interpenetrating bodies are pushed apart at unbounded speed after a physics tuning change, so velocities overflow and entity positions go NaN
+onset_delay_seconds: 10
+ramp_seconds: 20
 investigation_notes: |-
-  Root cause: the physics integrator uses single-precision floats for velocity accumulation, and repeated substep iterations without epsilon clamping allow energy injection from collision response to compound exponentially, pushing velocities past simulation limits.
-  1. Check the entity trace: look at `accel` values in the dump — acceleration >10000 indicates a collision solver feedback loop (two overlapping colliders pumping energy). This is the cause.
-  2. Inspect `penetration_max` — values >0.5m would mean the broadphase AABB tree is stale (here it stays below 0.4m, so the BVH is fine); run `/debug physics rebuild_bvh` on the affected zone to force spatial index rebuild.
-  3. Review substep count: 4 substeps at high entity density can overrun the frame budget (substep time above 16ms); here substep time stays under 12ms, so it is not the cause, but reduce to 2 substeps and enable CCD (continuous collision detection) for fast movers.
-  4. Remediate: issue `reset_physics_engine` to zero all velocities, rebuild the collision world, and re-derive positions from the last valid snapshot.
-  5. Long-term: migrate velocity accumulator to double-precision and add per-substep energy conservation checks to detect and break feedback loops before overflow.
-remediation_action: reset_physics_engine
-error_message: '[Physics] PHYS-OVERFLOW: entity={entity_id} velocity={velocity} max={max_velocity} zone={zone_id} tick={tick_number}'
+  Root cause: Argo CD synced the game-server-physics-tuning ConfigMap from revision physics-tuning-r18 to physics-tuning-r19 (CHG0071402) about two minutes before the first PHYS-OVERFLOW. r19 sets max_depenetration_velocity from 10 m/s to 0, which the solver reads as unlimited. When two colliders overlap (spawn points, doors, vehicles) the depenetration impulse now pushes them apart at any speed: entity {entity_id} reached {velocity} m/s against the {max_velocity} m/s sanity limit after an overlap of only {penetration_max} m, and the next integration step writes NaN positions, so the server resets the entity. Every match that loaded r19 is affected; the overlap depth is normal and the broadphase is fine, so nothing in the collision data itself changed. Matchmaking only sees players quitting: match {match_id} lost {early_leavers} players early.
+  Confirm:
+    - game-server `[Physics] sim-status` lines carry attributes.config.physics_revision physics-tuning-r19 and physics.max_depenetration_velocity_mps 0, and they start after the Argo CD sync line with change.request CHG0071402 (before it: physics-tuning-r18 and 10)
+    - metric game_server.physics.overflow_events_per_min reads 80-250 (baseline 0-1) and game_server.physics.max_body_velocity_mps reads 1e4-1e6 m/s (baseline 20-60)
+    - the PHYS-OVERFLOW lines show physics.penetration_max_m of only 0.08-0.35 m and physics.substep_frame_ms under 12 ms, so neither deep overlaps nor an overrun frame budget explain the velocities
+  Remediation: roll the tuning back with opsctl rollback configmap/game-server-physics-tuning --to-revision previous. Matches pick up the restored revision at their next tuning reload, so overflow_events_per_min falls back to 0-1 and max_body_velocity_mps to 20-60 within about 30 seconds, and the PHYS-OVERFLOW lines stop. Restarting game servers would end every live match and come back on the same r19 tuning; rebuilding the BVH does not help because the broadphase is correct.
+remediation_action: rollback_physics_tuning
+remediation_command: |-
+  opsctl rollback configmap/game-server-physics-tuning --to-revision previous
+error_message: '[Physics] PHYS-OVERFLOW: entity={entity_id} velocity={velocity}m/s limit={max_velocity}m/s cause=depenetration_impulse penetration={penetration_max}m
+  max_depenetration_velocity=0 zone={zone_id} tick={tick_number} -> position NaN, entity reset'
 stack_trace: |-
   === PHYSICS ENGINE STATE DUMP ===
-  tick={tick_number}  zone={zone_id}  substep=4/4
+  tick={tick_number}  zone={zone_id}  substep=4/4  tuning=physics-tuning-r19
   ----------- entity {entity_id} -----------
-    pos       = (8421.7, 102.3, -3304.9)
+    pos       = (NaN, NaN, NaN)  (previous (8421.7, 102.3, -3304.9))
     vel       = ({velocity}, 0.0, 0.0)  |v|={velocity}
-    max_vel   = {max_velocity}
-    accel     = ({accel_x}, 0.0, -4201.3)
+    limit     = {max_velocity}
     mass      = 85.0 kg
     collider  = CAPSULE r=0.4 h=1.8
-  ----------- collision candidates --------
-    broadphase_pairs = 47
-    narrowphase_hits = 3
-    penetration_max  = {penetration_max}m (ENT-29481 <-> ENT-30012)
+  ----------- contact solver --------------
+    narrowphase_hits         = 3
+    penetration_max          = {penetration_max}m
+    depenetration_impulse    = unclamped (max_depenetration_velocity=0)
   ----------- action ----------------------
-    CLAMP velocity to {max_velocity}  REWIND substep 3
+    RESET entity to last valid snapshot
   PHYS-OVERFLOW: entity {entity_id} velocity {velocity} exceeds simulation limit {max_velocity}
 correlation_attr:
-  key: deployment.physics_solver_build
-  value: physics-solver-v5.4.0-substep4-f32
+  key: config.physics_revision
+  value: physics-tuning-r19
 fault_params:
   entity_id:
     format: "ENT-{n}"
     n: {randint: [10000, 99999]}
-  velocity: {uniform: [1000.0, 999999.0], round: 1}
+  velocity: {uniform: [10000.0, 999999.0], round: 1}
   max_velocity: 500.0
-  accel_x: {uniform: [10500.0, 15000.0], round: 1}
   penetration_max: {uniform: [0.08, 0.35], round: 2}
   zone_id: {choice: [ZONE-A1, ZONE-B2, ZONE-C3, ZONE-D4]}
   tick_number: {randint: [100000, 9999999]}
+  match_id:
+    format: "MATCH-{n}"
+    n: {randint: [100000, 999999]}
+  early_leavers: {randint: [6, 18]}
 rca_clues:
   game-server:
-    physics.substep_count: 4
+    config.physics_revision: physics-tuning-r19
+    physics.max_depenetration_velocity_mps: 0
     physics.penetration_max_m: {uniform: [0.08, 0.35], round: 2}
-    physics.accel_magnitude: {uniform: [10500.0, 15000.0], round: 1}
     physics.substep_frame_ms: {uniform: [6.0, 12.0], round: 1}
-  analytics-pipeline:
-    analytics.physics_error_events: {randint: [100, 500]}
-    analytics.entity_density: normal
   matchmaking-engine:
-    matchmaking.affected_matches: {randint: [5, 30]}
+    matchmaking.early_leave_rate_pct: {uniform: [18.0, 35.0], round: 1}
+cascade_messages:
+  matchmaking-engine:
+    - severity: WARN
+      message: 'level=warn component=session-tracker msg="early leave spike" match={match_id} leavers={early_leavers} reason=player_quit requeue=true'
+fault_scope:
+  cluster: gaming-eks-cluster
+  workloads: [game-server]
+service_lag_seconds: {matchmaking-engine: 30}
+infrastructure_events:
+  - service: game-server
+    severity: INFO
+    offset_seconds: -120
+    body: 'level=info msg="Sync operation to 3be07a1 succeeded" application=game-server-config dest-namespace=game-servers dest-server=gaming-eks-cluster resource=ConfigMap/game-server-physics-tuning revision=3be07a1 initiator=m.kowalski'
+    attributes:
+      operation: config_change
+      change.request: CHG0071402
+      user.name: m.kowalski
+      change.summary: 'game-server-physics-tuning max_depenetration_velocity: 10 -> 0'
+      config.physics_revision: physics-tuning-r19
+      physics.max_depenetration_velocity_mps: 0
+remediation_effects:
+  transition_seconds: 30
+  log_taper_seconds: 20
+  log_events:
+    - service: game-server
+      severity: INFO
+      offset_seconds: 1
+      body: 'level=info logger=changelog msg="change applied" cmd="opsctl rollback configmap/game-server-physics-tuning --to-revision previous" actor={actor} result="configmap/game-server-physics-tuning restored to physics-tuning-r18 (max_depenetration_velocity=10)"'
+      attributes:
+        operation: change_applied
+        change.target: configmap/game-server-physics-tuning
+        config.physics_revision: physics-tuning-r18
+    - service: game-server
+      severity: INFO
+      offset_seconds: 12
+      body: '[Physics] tuning reloaded revision=physics-tuning-r18 max_depenetration_velocity=10m/s matches_reloaded=all'
+      attributes:
+        operation: physics_tuning_reload
+        config.physics_revision: physics-tuning-r18
+        physics.max_depenetration_velocity_mps: 10
+  steady_attributes:
+    game-server:
+      config.physics_revision: physics-tuning-r18
+  verification:
+    - signal: physics overflow events
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "game-server"'
+      field: 'metrics.game_server.physics.overflow_events_per_min'
+      expect: 'back to 0-1 per minute (was 80-250) within about 30 seconds'
+      within_seconds: 90
+    - signal: max body velocity
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "game-server"'
+      field: 'metrics.game_server.physics.max_body_velocity_mps'
+      expect: 'back in 20-60 m/s (was 1e4-1e6 m/s)'
+      within_seconds: 90
+    - signal: PHYS-OVERFLOW lines
+      from: 'logs.otel.gaming'
+      where: 'body.text LIKE "*PHYS-OVERFLOW*"'
+      expect: '0 new lines'
+      within_seconds: 90
+    - signal: physics tuning revision
+      from: 'logs.otel.gaming'
+      where: 'resource.attributes.service.name == "game-server" AND attributes.operation == "physics_status"'
+      field: 'attributes.config.physics_revision'
+      expect: 'physics-tuning-r18 on every sim-status line since the rollback (was physics-tuning-r19)'
+      within_seconds: 90
 business_impact:
   - kpi: business.matches_played_per_min
     factor: {uniform: [0.15, 0.40]}

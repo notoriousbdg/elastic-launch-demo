@@ -31,7 +31,7 @@ What the new channel should represent — the observable failure, what causes it
 
 **Too vague:** "something with payments" — ask for the observable failure and remediation action.
 
-For a schema 1.3 scenario also get, or propose, the **cause** (the change or provider event that came first: a GitOps sync, a Terraform apply, an expired token, an AWS Health event) and the **fix** as it would be typed (`opsctl rollback configmap/<name> -n <ns>`). The fix must address the cause, not the symptom.
+For a schema 1.3 scenario also get, or propose, the **signal** (the metric that moves out of band during the fault and converges back after the fix, and the configuration the fix leaves visible) and the **cause** (the change or provider event that came first: a GitOps sync, a Terraform apply, an expired token, an AWS Health event) and the **fix** as it would be typed (`opsctl rollback configmap/<name> -n <ns>`). The fix must address the cause, not the symptom, and use a verb the scenario's ops profile defines (`scenarios/<id>/ops.yaml` and its `extends` presets); propose a new verb only when none reads naturally.
 
 ---
 

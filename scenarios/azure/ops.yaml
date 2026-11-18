@@ -1,0 +1,171 @@
+# opsctl profile for the Azure GenAI Assistant (see app/ops_profile.py for the contract).
+# Azure Resource Manager changes leave Activity Log records (azure-activity preset);
+# Entra app credential changes leave an Entra audit record; application configuration
+# (agents, routes, budgets, search configs, worker pools, caches) goes through the
+# platform's own config service and leaves a deploy-log record.
+extends: [neutral, azure-activity]
+
+banner: "opsctl applies changes to the Azure GenAI Assistant: Azure resources through Resource Manager, application configuration through the config service. Every applied change is logged with a change id."
+
+actors:
+  default: sre-oncall@contoso-demo.onmicrosoft.com
+  auto: mi-genai-auto-remediator
+
+auto_remediate_channels: [16, 17, 18, 19, 20]
+
+verbs:
+  rollback:
+    summary: "Roll a deployment, policy, agent or configuration back to an earlier revision (--to-revision N|previous)"
+    example: "opsctl rollback foundry-deployment/<name> --to-revision previous\n  opsctl rollback waf-policy/<name> --to-revision previous"
+  patch:
+    summary: "Change settings on a resource or application component (--<setting> <value>)"
+    example: "opsctl patch openai-deployment/<name> --capacity 600\n  opsctl patch ratelimit/<tenant> --rpm 600"
+  apply:
+    summary: "Add or update a rule or policy setting on a resource (--<setting> <value>)"
+    example: "opsctl apply waf-policy/<name> --block-ips <ip>"
+  rotate:
+    summary: "Rotate a secret, key or credential and roll out the new version"
+    example: "opsctl rotate keyvault-secret/<name> --vault <vault>\n  opsctl rotate client-secret/<app>"
+  run:
+    summary: "Run an indexer, reconciliation or other one-off job"
+    example: "opsctl run indexer/<name>\n  opsctl run job/<name>"
+  delete:
+    summary: "Delete a role assignment, cached entries or another object (--all for every entry)"
+    example: "opsctl delete role-assignment/<id>\n  opsctl delete cache/<name> --all"
+  # not used in this environment
+  restore: null
+  renew: null
+  sync: null
+  drain: null
+  replace: null
+  expand: null
+  restart: null
+
+kinds:
+  # Azure Resource Manager resources: Activity Log records
+  foundry-deployment:
+    aliases: [foundry]
+    audit: azure_activity
+    azure: {provider: Microsoft.CognitiveServices/accounts/deployments, operation: {_: write}}
+  openai-deployment:
+    aliases: [aoai-deployment]
+    audit: azure_activity
+    azure: {provider: Microsoft.CognitiveServices/accounts/deployments, operation: {_: write}}
+  content-filter:
+    audit: azure_activity
+    azure: {provider: Microsoft.CognitiveServices/accounts/raiPolicies, operation: {_: write}}
+  role-assignment:
+    aliases: [roleassignment]
+    audit: azure_activity
+    azure: {provider: Microsoft.Authorization/roleAssignments, operation: {delete: delete, _: write}}
+  keyvault-secret:
+    aliases: [kv-secret]
+    audit: azure_activity
+    azure: {provider: Microsoft.KeyVault/vaults/secrets, operation: {_: write}}
+  waf-policy:
+    audit: azure_activity
+    azure: {provider: Microsoft.Network/ApplicationGatewayWebApplicationFirewallPolicies, operation: {_: write}}
+  nsg:
+    aliases: [network-security-group]
+    audit: azure_activity
+    azure: {provider: Microsoft.Network/networkSecurityGroups, operation: {_: write}}
+  cosmos-account:
+    audit: azure_activity
+    azure: {provider: Microsoft.DocumentDB/databaseAccounts, operation: {_: write}}
+  cosmos-container:
+    audit: azure_activity
+    azure: {provider: Microsoft.DocumentDB/databaseAccounts/sqlDatabases/containers, operation: {_: throughputSettings/write}}
+  # Entra ID application credentials: Entra audit record
+  client-secret:
+    audit: entra_audit
+  # Application configuration (config service, deploy log): the default format
+  agent: {}
+  agent-config: {}
+  route: {}
+  ratelimit: {aliases: [ratelimits]}
+  budget: {}
+  search-config: {}
+  datasource-credential: {}
+  indexer: {}
+  embedding-config: {}
+  worker-pool: {}
+  cache: {}
+  job: {}
+
+audit:
+  service: [identity-broker, cost-guard]
+  default: deploy_log
+  formats:
+    azure_activity:
+      body: "azure-activity: operationName={operation_name} resourceId=/subscriptions/38514ecc-371c-5d0a-9c14-ab99a396027d/resourceGroups/azureai-rg/providers/{az_provider}/{=name or kind} caller={actor} status=Succeeded category=Administrative change_id={change_id}"
+    entra_audit:
+      body: 'entra-audit: activityDisplayName="Update application - Certificates and secrets management" category=ApplicationManagement target={target} initiatedBy={actor} result=success change_id={change_id}'
+      attributes:
+        cloud.provider: azure
+        event.action: "Update application - Certificates and secrets management"
+        azure.entra.category: ApplicationManagement
+        azure.entra.target: "{target}"
+        user.name: "{actor}"
+        change.id: "{change_id}"
+      match:
+        prefix: "entra-audit:"
+        tokens: ["{target}"]
+    deploy_log:
+      body: 'config-service: change applied {target} cmd="opsctl {command}" by={actor} change_id={change_id}'
+      attributes:
+        event.action: "{verb}"
+        config.target: "{target}"
+        config.command: "opsctl {command}"
+        user.name: "{actor}"
+        change.id: "{change_id}"
+      match:
+        prefix: "config-service:"
+        tokens: ["{target}"]
+
+runbook:
+  scope_note: "Other deployments, regions and services were not changed and make a useful comparison."
+  recovery_note: "Each query names the changed resource or its own service, so its result is the value to compare."
+  audit_label: "Azure Activity Log and config-service deploy log"
+
+guide:
+  scenario: |
+    ## Where the Azure GenAI Assistant's telemetry is
+    The application data is OpenTelemetry. Each component is a service
+    (`resource.attributes.service.name`): assistant-web (Application Gateway front door and
+    web tier), chat-orchestrator (agent loop and Azure OpenAI calls), model-router
+    (Foundry and Azure OpenAI deployments), prompt-guard (content filters and injection
+    checks), retrieval-service (AI Search and result cache), embedding-service,
+    conversation-store (Cosmos DB), cost-guard (budgets and token spend) and identity-broker
+    (Entra ID tokens and Key Vault).
+
+    - **Logs:** `FROM logs.otel.azureai`. Message in `body.text` (never `body` alone), level in
+      `severity_text`. Fault codes (for example `OPENAI-QUOTA-EXHAUSTED`) appear in `body.text`
+      and in `attributes.error.type`. Component state and configuration are in `attributes.*`
+      (for example `attributes.deployment.foundry_model_version`, `attributes.waf.policy_version`).
+    - **Service metrics:** `FROM metrics-generic.otel-default`, filtered by
+      `resource.attributes.service.name`, fields under `metrics.<component>.*`, for example
+      `metrics.model_router.canary_traffic_share_pct`, `metrics.conversation_store.normalized_ru_consumption_pct`,
+      `metrics.retrieval.search_latency_ms`, `metrics.cost_guard.burn_rate_usd_per_hour`.
+    - **Azure integration data:** the Azure OpenAI, Foundry, billing, Application Gateway,
+      Activity Log and VNet flow packages write their own streams (for example
+      `metrics-azure.open_ai-*`, `metrics-azure.ai_foundry-*`, `metrics-azure.billing-*`).
+      They follow the same incident: they recover once the fix lands.
+    - **Changes:** every Azure Resource Manager change is an Activity Log line,
+      `body.text LIKE "azure-activity:*"`, with `attributes.azure.activity.operation_name`;
+      Entra credential changes are `entra-audit:` lines; application configuration changes are
+      `config-service:` lines. All carry `attributes.change.id` and `attributes.user.name`.
+    - **Business KPIs:** `metrics.business.*` from chat-orchestrator.
+
+    Compare a short window after the command with the window before it: readings converge
+    over the recovery time the runbook states, they do not jump back instantly.
+
+    Example: tokens-per-minute headroom of the chat deployment, per minute over the last 15 minutes:
+
+    ```
+    FROM metrics-generic.otel-default
+    | WHERE @timestamp > NOW() - 15 minutes AND resource.attributes.service.name == "chat-orchestrator"
+      AND metrics.chat.openai_quota_headroom_pct IS NOT NULL
+    | STATS min = MIN(metrics.chat.openai_quota_headroom_pct), max = MAX(metrics.chat.openai_quota_headroom_pct)
+        BY minute = BUCKET(@timestamp, 1 minute)
+    | SORT minute DESC
+    ```

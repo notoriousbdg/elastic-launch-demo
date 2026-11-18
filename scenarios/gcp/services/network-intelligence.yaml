@@ -58,30 +58,16 @@ steps:
     protocol:
       choice: PROTOCOLS
     result:
-      if_active:
-        choice: FAULT_RESULTS
-      else: REACHABLE
+      expr: "rand.choice(FAULT_RESULTS) if active and 20 not in all_active else 'REACHABLE'"
     hops_total:
       randint:
       - 5
       - 10
 - sample:
     hops_completed:
-      if_active:
-        expr: rand.randint(2, max(2, hops_total - 1))
-      else:
-        var: hops_total
+      expr: "rand.randint(2, max(2, hops_total - 1)) if active and 20 not in all_active else hops_total"
     latency_ms:
-      if_active:
-        uniform:
-        - 100.0
-        - 2000.0
-        round: 2
-      else:
-        uniform:
-        - 1.0
-        - 15.0
-        round: 2
+      expr: "round(rand.uniform(100.0, 2000.0), 2) if active and 20 not in all_active else round(rand.uniform(1.0, 15.0), 2)"
 - metric:
     name: ni.test_latency_ms
     value:
@@ -221,3 +207,43 @@ steps:
         var: shadowed_rules
       ni.overly_permissive:
         var: overly_permissive
+- sample:
+    vertex_endpoint: gcpnet-ni-assist-central1
+    throttle_pct:
+      expr: "round(1.0 + (max(35.0, min(45.0, rand.gauss(40.0, 2.5))) - 1.0) * min(1.0, elapsed.get(20, 0) / 60.0), 1) if 20 in all_active else (round(1.0 + (40.0 - 1.0) * (1.0 - min(1.0, since_fix.get(20, 0) / 60.0)), 1) if 20 in fixed_channels else round(min(2.0, abs(rand.gauss(0.4, 0.4))), 1))"
+    pending_analyses:
+      expr: "int(3 + (max(20.0, min(300.0, rand.gauss(160.0, 12.0))) - 3) * min(1.0, elapsed.get(20, 0) / 120.0)) if 20 in all_active else (int(3 + (160.0 - 3) * (1.0 - min(1.0, since_fix.get(20, 0) / 90.0))) if 20 in fixed_channels else rand.randint(0, 6))"
+    model_deployment:
+      expr: "'gemini-2.5-pro-ni-summarizer-v2' if 20 in all_active else 'gemini-2.5-flash-ni-summarizer-v1'"
+    vertex_status:
+      expr: "'ANOMALY' if 20 in all_active or throttle_pct > 2.0 else 'NOMINAL'"
+- metric:
+    name: ni.ai_summary_throttle_pct
+    value:
+      var: throttle_pct
+    unit: '%'
+- metric:
+    name: ni.pending_analyses
+    value:
+      var: pending_analyses
+    unit: analyses
+- when: "vertex_status == 'NOMINAL'"
+  log: &ai_summary_log
+    level: INFO
+    message: 'nic: ai_summary endpoint={vertex_endpoint} model_deployment={model_deployment} throttled={throttle_pct}% pending_analyses={pending_analyses} status={vertex_status}'
+    attrs:
+      operation: ai_summary
+      ni.vertex_endpoint:
+        var: vertex_endpoint
+      ni.model_deployment:
+        var: model_deployment
+      ni.ai_summary_throttle_pct:
+        var: throttle_pct
+      ni.pending_analyses:
+        var: pending_analyses
+      ni.status:
+        var: vertex_status
+- when: "vertex_status != 'NOMINAL'"
+  log:
+    <<: *ai_summary_log
+    level: WARN

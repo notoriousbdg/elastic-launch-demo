@@ -6,20 +6,23 @@ sensor_type: queue_depth
 affected_services: [embedding-service, retrieval-service]
 cascade_services: []
 
-description: Embedding batch jobs back up so newly ingested documents stay unsearchable in Azure AI Search for hours.
+description: A reindex job queues a large backlog of embedding batches that the capped batch worker pool cannot keep up with, so newly ingested documents stay unsearchable in Azure AI Search for hours.
 
 investigation_notes: |
-  1. Search body.text LIKE *EMB-BATCH-BACKLOG* and read queue_depth={queue_depth} and oldest_job_age_min={oldest_job_age_min} to size the backlog.
-  2. Compare ingest rate docs_ingested_per_min={ingest_rate} against embedding throughput docs_embedded_per_min={embed_rate}; a persistent gap means the backlog is growing.
-  3. Check worker capacity on the embedding deployment: active_workers={active_workers} of max {max_workers} means every worker is busy and the pool cap is the bottleneck. Azure OpenAI throttling is negligible (throttled_calls={throttled_calls}) and the deployment keeps more than 40% of its TPM quota, so quota is not what limits throughput.
-  4. Confirm the downstream effect: retrieval-service shows freshness_lag_min={oldest_job_age_min} and new documents missing from the index.
-  5. Rule out a poison batch by checking failed_batches={failed_batches} (under 5) and the dead-letter queue for repeated retries.
-  6. Get approval, then scale the embedding batch workers and watch queue_depth drain toward zero.
+  Root cause: reindex job reindex-kb-passages queued a large backlog on {queue_name} while worker pool embedding-batch is capped at max_workers={max_workers}. All {active_workers} workers are busy: ingest is {ingest_rate} docs/min against {embed_rate} docs/min embedded, so queue_depth is {queue_depth} and the oldest job is {oldest_job_age_min} minutes old. The Azure OpenAI deployment is not the limit.
+  Confirm:
+    - embedding-service logs [EMBEDDING] queue_health queue={queue_name} workers={active_workers}/{max_workers} status=ANOMALY (attributes.batch.max_workers=4); metric embedding_service.queue_depth climbs from 0-60 to 4000-60000 batches
+    - the embedding-service line "config-service: change applied job/reindex-kb-passages" (enqueued 48210 batches) comes before the first EMB-BATCH-BACKLOG
+    - rca attributes embedding.workers_at_max=true with embedding.tpm_quota_remaining_pct above 40 and throttled_calls={throttled_calls} rule out Azure OpenAI throttling; failed_batches={failed_batches} and embedding.dead_letter_batches under 5 rule out a poison batch; embedding_service.vector_dimension stays 1536 and embedding_service.latency_ms stays at baseline
+    - retrieval-service shows search.index_freshness_lag_min and search.new_docs_missing_count only as a downstream effect
+  Remediation: raise the pool cap with opsctl patch worker-pool/embedding-batch --max-workers 16. The extra workers drain queue_depth toward 0 over about 150 seconds. Requesting more Azure OpenAI quota is not needed and cancelling the reindex job would discard the work already done.
 
 remediation_action: scale_embedding_batch_workers
+remediation_command: |-
+  opsctl patch worker-pool/embedding-batch --max-workers 16
 
 error_message: |
-  [EmbeddingService] EMB-BATCH-BACKLOG: queue={queue_name} queue_depth={queue_depth} oldest_job_age_min={oldest_job_age_min} workers={active_workers}/{max_workers}
+  [EMBEDDING] EMB-BATCH-BACKLOG: queue={queue_name} queue_depth={queue_depth} oldest_job_age_min={oldest_job_age_min} workers={active_workers}/{max_workers}
 
 stack_trace: |
   BatchBacklogException: EMB-BATCH-BACKLOG
@@ -38,7 +41,7 @@ correlation_attr:
   value: batch-workers-max4-batch256-2026-10-18
 
 fault_params:
-  queue_name: {choice: [ingest-embed-batch, reindex-embed-batch]}
+  queue_name: reindex-embed-batch
   queue_depth: {randint: [4000, 60000]}
   oldest_job_age_min: {randint: [90, 480]}
   ingest_rate: {randint: [900, 3000]}
@@ -60,6 +63,55 @@ rca_clues:
     search.index_freshness_lag_min: {randint: [90, 480]}
     search.new_docs_missing_count: {randint: [500, 12000]}
 
+service_lag_seconds: {retrieval-service: 45}
+fault_scope:
+  workloads: [embedding-service, retrieval-service]
+
+infrastructure_events:
+  - service: embedding-service
+    severity: INFO
+    offset_seconds: -120
+    body: 'config-service: change applied job/reindex-kb-passages cmd="release-pipeline submit job/reindex-kb-passages --queue=reindex-embed-batch" by=release-pipeline@contoso-demo.onmicrosoft.com : enqueued 48210 batches; worker-pool/embedding-batch max_workers=4'
+    attributes:
+      user.name: release-pipeline@contoso-demo.onmicrosoft.com
+      operation: reindex_job_submit
+      config.target: job/reindex-kb-passages
+      batch.max_workers: 4
+      change.summary: 'reindex job queued 48210 batches on reindex-embed-batch'
+
+remediation_effects:
+  log_events:
+    - service: embedding-service
+      severity: INFO
+      offset_seconds: 1
+      body: 'config-service: change applied worker-pool/embedding-batch cmd="opsctl patch worker-pool/embedding-batch --max-workers 16" by={actor} : max_workers 4 -> 16'
+      attributes:
+        operation: worker_pool_patch
+        batch.max_workers: 16
+        change.summary: 'max_workers: 4 -> 16'
+  steady_attributes:
+    embedding-service:
+      batch.max_workers: 16
+  verification:
+    - signal: embedding_service.queue_depth
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "embedding-service"'
+      field: 'metrics.embedding_service.queue_depth'
+      expect: 'draining toward 0, back under 100 (was 4000-60000)'
+      within_seconds: 180
+    - signal: batch worker cap
+      from: 'logs.otel.azureai'
+      where: 'resource.attributes.service.name == "embedding-service"'
+      field: 'attributes.batch.max_workers'
+      expect: '16 on every line logged since the fix'
+      within_seconds: 60
+    - signal: retrieval.index_freshness_minutes
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "retrieval-service"'
+      field: 'metrics.retrieval.index_freshness_minutes'
+      expect: 'back under 20 minutes (was 90-480 while the backlog was queued)'
+      within_seconds: 180
+
 business_impact:
   - kpi: business.resolution_rate_pct
     value: {uniform: [46.5, 53.5], round: 1}
@@ -67,4 +119,3 @@ business_impact:
     value: {uniform: [120.9, 139.1], round: 0}
   - kpi: business.retrieval_latency_p95_ms
     value: {uniform: [350.61, 403.39]}
-

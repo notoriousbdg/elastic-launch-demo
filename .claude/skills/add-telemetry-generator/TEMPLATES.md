@@ -141,6 +141,17 @@ SPEC = GeneratorSpec(
         "workloads": {"type": "dict", "doc": "Per-workload overrides: memory_limit, replicas, image, ..."},
         "pvc_capacity": {"type": "str", "doc": "Volume size after an expand, e.g. 2Ti."},
     },
+    # Optional: how applied opsctl commands change state_keys (generator schema 1.1 step 6).
+    # Rules, rendered with the app/ops_profile.py command context; the generator id is implied.
+    # Or a callable (scenario, cmd) -> (state, transition_seconds); see
+    # generators/kubernetes_otel/ops_bindings.py.
+    ops_bindings=[
+        {"verbs": ["patch"], "kinds": ["deployment"], "when": "flag('memory-limit')",
+         "state": {"workloads.{name}.memory_limit": "{flags.memory-limit}"},
+         "transition_seconds": 90},
+        {"verbs": ["expand"], "kinds": ["pvc"],
+         "state": {"pvc_capacity": "{flags.size}"}, "transition_seconds": 45},
+    ],
     # Couplings the generator enforces, so a channel need not set both sides.
     coherence=(
         "oomkilled_containers => memory ramps to the limit before each kill; restarts increment",
@@ -149,4 +160,22 @@ SPEC = GeneratorSpec(
 )
 ```
 
-Leave `state_keys` empty and `scope_aware=False` only when the generator reports no config-like value and has no entity a scope could select (one global stream).
+Leave `state_keys` empty and `scope_aware=False` only when the generator reports no config-like value and has no entity a scope could select (one global stream). Omit `ops_bindings` when `state_keys` is empty.
+
+Test pattern for `ops_bindings` (`app.ops.change_state` reads enabled generators from `ctx.scenario.generators`):
+
+```python
+from types import SimpleNamespace
+from app import ops, ops_profile
+
+def test_ops_bindings_change_state():
+    prof = ops_profile.neutral()
+    scenario = SimpleNamespace(generators={"<id>": {}}, ops_profile=prof)
+    inst = SimpleNamespace(ctx=SimpleNamespace(scenario=scenario))
+    cmd = ops.parse_command("patch deployment/api --memory-limit 2Gi", prof)
+    assert ops.change_state(inst, cmd) == ({"<id>": {"workloads": {"api": {"memory_limit": "2Gi"}}}}, 90.0)
+    ignored = ops.parse_command("restart deployment/api", prof)
+    assert ops.change_state(inst, ignored) == ({}, 0.0)
+```
+
+A callable binding that reads topology needs the scenario attributes it uses (e.g. `k8s_topology`); `tests/test_space.py::test_kubernetes_generator_bindings_keep_platform_changes` loads a real scenario instead.

@@ -10,41 +10,48 @@ cascade_services:
 - mission-control
 - range-safety
 description: GPS receiver detecting multipath signal interference
-investigation_notes: 'Root cause: ground-bounce multipath from launch structure or nearby buildings corrupting pseudorange
-  measurements on low-elevation satellites. PDOP >6.0 indicates poor satellite geometry — check which SVs are flagged for
-  multipath (SNR anomalies on G04, G07, G15). Verify antenna choke ring integrity and ground plane clearance. If >3 SVs affected,
-  the GPS solution degrades below navigation-grade accuracy. Remediation: switch to IMU-primary navigation mode (GNC_NAV_MODE
-  IMU_PRIMARY), mask multipath-affected SVs via SVMASK command, and schedule GPS reacquisition after clearing the launch structure
-  multipath zone during ascent.'
+investigation_notes: |-
+  Root cause: the pad swing arm SA-2 was retracted to position 2 shortly before the first multipath flag, which put its reflector panel in the GPS antenna's field of view (azimuth 120-250 deg, elevation under 25 deg). Ground-bounce reflections off the panel corrupt the pseudoranges of the low-elevation satellites on that side: G04, G07 and G15 show SNR anomalies and multipath, and RAIM also excludes G21 and G24 because it cannot isolate the bad ranges, so only {num_satellites} SVs remain in the solution. PDOP above 6.0 confirms the poor geometry, and the position uncertainty climbs to {uncertainty}m, below navigation grade.
+  Confirm:
+    - ground-systems logs the swing arm move to POS-2 before the first GNC-GPS-MULTIPATH line
+    - navigation gps_fix lines: sv_count drops from 9-12 to {num_satellites}, solution=ANOMALY, attributes.nav.mode GPS_PRIMARY
+    - metrics.navigation.position_uncertainty_m far above 5 m; metrics.navigation.gps.confidence drops below 0.6
+    - IMU and star tracker readings stay NOMINAL, so the fault is in the GPS measurements, not the navigation computer
+    - antenna choke ring and ground plane clearance are unchanged; the reflector is the new object in view
+  Remediation: switch navigation to IMU-primary mode (opsctl patch navigation/gnc-nav --mode=imu-primary) and load an SV mask for the multipath satellites (opsctl apply svmask/gps --prns=G04,G07,G15). RAIM readmits G21 and G24, the GPS solution aids the IMU again, and the position uncertainty converges back under 5 m within about a minute; gps_fix lines then show mode=IMU_PRIMARY. Schedule GPS reacquisition with the full constellation after the vehicle clears the launch structure during ascent.
 remediation_action: recalibrate_navigation
-error_message: '[GNC] GNC-GPS-MULTIPATH: sv_count={num_satellites} pdop=8.7 threshold=6.0 uncertainty={uncertainty}m'
+remediation_command: |-
+  opsctl patch navigation/gnc-nav --mode=imu-primary
+  opsctl apply svmask/gps --prns=G04,G07,G15
+error_message: '[GNC] GNC-GPS-MULTIPATH: sv_used={num_satellites} multipath_svs=G04,G07,G15 pdop=8.7 threshold=6.0 uncertainty={uncertainty}m'
 stack_trace: |-
   == GN&C SYSTEM STATUS == GPS RECEIVER UNIT ==
   TIMESTAMP: MET+00:04:14.005 | FRAME: 0x4A32 | SEQ: 18445
   ---------------------------------------------------------------
-  SV_ID   EL    AZ     SNR    MULTIPATH   USED
-  G04     12    127    42.1   YES         NO
-  G07     18    203    38.7   YES         NO
-  G09     28    315    44.2   NO          YES
-  G12     71    089    46.0   NO          YES
-  G15     9     241    31.4   YES         NO
-  G18     52    158    45.3   NO          YES
-  G21     39    022    43.8   NO          YES
-  G24     24    276    41.9   NO          YES
+  SV_ID   EL    AZ     SNR    MULTIPATH   RAIM    USED
+  G04     12    127    42.1   YES         EXCL    NO
+  G07     18    203    38.7   YES         EXCL    NO
+  G09     28    315    44.2   NO          OK      YES
+  G12     71    089    46.0   NO          OK      YES
+  G15     9     241    31.4   YES         EXCL    NO
+  G18     52    158    45.3   NO          OK      YES
+  G21     39    022    43.8   NO          EXCL    NO
+  G24     24    276    41.9   NO          EXCL    NO
   ---------------------------------------------------------------
-  AFFECTED SVs: {num_satellites} | PDOP: 8.7 (threshold 6.0)
-  POSITION UNCERTAINTY: {uncertainty}m | SOLUTION: DEGRADED
+  SV_USED: {num_satellites} | MULTIPATH: G04,G07,G15 | PDOP: 8.7 (threshold 6.0)
+  POSITION UNCERTAINTY: {uncertainty}m | SOLUTION: DEGRADED | NAV_MODE: GPS_PRIMARY
   GNC-GPS-MULTIPATH: Multipath interference degrading navigation solution
-  ACTION: Switch to IMU-primary navigation mode
+  ACTION: Switch to IMU-primary navigation mode, mask multipath SVs
 correlation_attr:
-  key: network.dns_resolver
-  value: coredns-v1.11.4-patch2
+  key: gse.swing_arm_position
+  value: POS-2
 fault_params:
   num_satellites: 3
-  uncertainty: {uniform: [5.0, 50.0], round: 1}
+  uncertainty: {uniform: [12.0, 50.0], round: 1}
 rca_clues:
   navigation:
-    gnc.sv_masked_count: 3
+    gnc.multipath_sv_count: 3
+    gnc.raim_excluded_svs: "G04,G07,G15,G21,G24"
     gnc.pdop: {uniform: [6.5, 12.0], round: 1}
   sensor-validator:
     validation.gps_solution_quality: degraded
@@ -54,6 +61,59 @@ rca_clues:
     telemetry.nav_accuracy: reduced
   range-safety:
     safety.nav_solution_status: degraded
+cascade_messages:
+  mission-control:
+    - severity: WARN
+      message: '[MCC] GNC nav solution DEGRADED: GPS sv_used={num_satellites} uncertainty={uncertainty}m; flight dynamics holding trajectory updates'
+  range-safety:
+    - severity: WARN
+      message: '[RSO] vehicle GPS position uncertainty {uncertainty}m exceeds 5.0m; instantaneous impact point computed from radar track only'
+fault_scope:
+  workloads: [navigation, sensor-validator]
+infrastructure_events:
+  - service: ground-systems
+    severity: INFO
+    offset_seconds: -120
+    body: '[GND] swing arm SA-2 retracted to position 2 (POS-2); reflector panel now in GPS antenna field of view az 120-250deg el<25deg'
+    attributes:
+      gse.swing_arm: SA-2
+      gse.swing_arm_position: POS-2
+      operation: gse_config
+remediation_effects:
+  log_events:
+    - service: mission-control
+      severity: INFO
+      offset_seconds: 2
+      body: '[MCC] CMD ACCEPTED opsctl patch navigation/gnc-nav --mode=imu-primary from {actor}: GNC_NAV_MODE GPS_PRIMARY -> IMU_PRIMARY'
+    - service: mission-control
+      severity: INFO
+      offset_seconds: 5
+      body: '[MCC] CMD ACCEPTED opsctl apply svmask/gps --prns=G04,G07,G15 from {actor}: SVMASK loaded, 3 SVs masked'
+    - service: navigation
+      severity: INFO
+      offset_seconds: 45
+      body: '[GNC] nav mode IMU_PRIMARY; SVMASK G04,G07,G15 active; RAIM readmitted G21,G24; position uncertainty 3.1m NOMINAL'
+  steady_attributes:
+    navigation:
+      gnc.sv_mask: "G04,G07,G15"
+  verification:
+    - signal: navigation.position_uncertainty_m
+      from: 'metrics-generic.otel-default'
+      field: 'metrics.navigation.position_uncertainty_m'
+      where: 'resource.attributes.service.name == "navigation"'
+      expect: 'back under 5 m (was 12-50 m), converging over about a minute'
+      within_seconds: 120
+    - signal: GNC-GPS-MULTIPATH errors
+      from: 'logs.otel.nova7'
+      where: 'body.text LIKE "*GNC-GPS-MULTIPATH*"'
+      expect: '0 new lines'
+      within_seconds: 120
+    - signal: navigation mode
+      from: 'logs.otel.nova7'
+      where: 'resource.attributes.service.name == "navigation"'
+      field: 'attributes.nav.mode'
+      expect: 'IMU_PRIMARY on the latest gps_fix lines (was GPS_PRIMARY)'
+      within_seconds: 120
 business_impact:
   - kpi: business.maneuver_accuracy_pct
     factor: {uniform: [0.55, 0.80]}

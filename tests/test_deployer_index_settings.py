@@ -77,7 +77,9 @@ class TestWorkflowIndices:
         puts: list = []
         _Workflows(serverless=True)._ensure_workflow_indices(_client(puts))
         by_suffix = {p.lstrip("/").split("-", 1)[1]: b for p, b in puts}
-        assert by_suffix["chaos-context"]["mappings"]["properties"]["@timestamp"] == {"type": "date"}
+        props = by_suffix["notify-context"]["mappings"]["properties"]
+        assert props["@timestamp"] == {"type": "date"}
+        assert props["error_type"] == {"type": "keyword"}
 
     def test_serverless_sends_no_settings(self):
         puts: list = []

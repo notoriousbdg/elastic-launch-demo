@@ -9,6 +9,8 @@ from typing import Any
 
 import httpx
 
+from app import ops_profile
+from app.ops_profile import auto_remediate_channels
 from scenario_engine.base import _substitute_fault_params
 from elastic_config.deployer_base import (
     ConcurrentBulkIndexer,
@@ -39,7 +41,16 @@ class _AlwaysRng(random.Random):
 _CUSTOM_CONTEXT_PATH = "/internal/nightshift/custom_context"
 
 
-def _scope_fact(scope: Any) -> str:
+def _runbook(profile: dict[str, Any] | None, key: str) -> str:
+    """A runbook phrase from the scenario's ops profile (``runbook:`` in ops.yaml)."""
+    from app import ops_profile
+
+    prof = profile if isinstance(profile, dict) else ops_profile.neutral()
+    return str((prof.get("runbook") or {}).get(key)
+               or (ops_profile.neutral().get("runbook") or {}).get(key) or "").strip()
+
+
+def _scope_fact(scope: Any, profile: dict[str, Any] | None = None) -> str:
     """Established-fact line for a channel's ``fault_scope`` ("" when absent)."""
     if not isinstance(scope, dict) or not scope:
         return ""
@@ -60,10 +71,8 @@ def _scope_fact(scope: Any) -> str:
         parts.append(f"{one if len(values) == 1 else many} {', '.join(values)}")
     if not parts:
         return ""
-    return (
-        f"- Scope: {', '.join(parts)}. Other clusters, pools and zones are unaffected and "
-        "make a useful comparison.\n"
-    )
+    note = _runbook(profile, "scope_note")
+    return f"- Scope: {', '.join(parts)}. {note}\n"
 
 
 def _remediation_fact(ch_data: dict[str, Any]) -> str:
@@ -96,14 +105,16 @@ def recovery_query(check: dict[str, Any]) -> str:
     field = check.get("field")
     # log lines and metric trends over the recent past; object state (versions, image
     # tags, node lists) as it is now, i.e. over the last couple of scrapes
-    window = "2 minutes" if field and not field.startswith("metrics.") else "15 minutes"
+    # a metric field may be backtick-quoted (CloudWatch names contain "/")
+    is_metric = bool(field) and field.strip("`").startswith("metrics.")
+    window = "2 minutes" if field and not is_metric else "15 minutes"
     where = f"@timestamp > NOW() - {window}"
     if check.get("where"):
         where += f" AND {check['where']}"
     node, pod = "resource.attributes.k8s.node.name", "resource.attributes.k8s.pod.name"
     if not field:
         tail = "STATS lines = COUNT(*) BY minute = BUCKET(@timestamp, 1 minute) | SORT minute DESC"
-    elif field.startswith("metrics."):
+    elif is_metric:
         tail = (f"STATS min = MIN({field}), max = MAX({field}) BY minute = BUCKET(@timestamp, 1 minute) "
                 "| SORT minute DESC")
     elif field in (node, pod):
@@ -117,7 +128,7 @@ def recovery_query(check: dict[str, Any]) -> str:
     return f"FROM {src} | WHERE {where} | {tail}"
 
 
-def _recovery_fact(ch_data: dict[str, Any]) -> str:
+def _recovery_fact(ch_data: dict[str, Any], profile: dict[str, Any] | None = None) -> str:
     """Recovery fact: the channel's verification signals, then the generic error-count check."""
     error_type = ch_data["error_type"]
     generic = (
@@ -146,15 +157,15 @@ def _recovery_fact(ch_data: dict[str, Any]) -> str:
             line += f". Query: `` {query} ``" if "`" in query else f". Query: `{query}`"
         bullets.append(f"  - {line}")
     if ch_data.get("remediation_command"):
-        bullets.insert(0, "  - `the change itself`: every applied fix leaves one audit record (a CloudTrail "
-                          "record for cloud changes) carrying its `change_id`. Query: "
+        bullets.insert(0, f"  - `the change itself`: every applied fix leaves one record in the "
+                          f"{_runbook(profile, 'audit_label')} carrying its `change_id`. Query: "
                           f"`{FIX_AUDIT_QUERY}`")
     bullets.append(f"  - {generic[0].upper()}{generic[1:]}")
     header = "- Recovery is confirmed when:"
     if any("Query: `" in b for b in bullets):
-        header += (" (run each query as written: it already names the right index and fields, "
-                   "including the node group label, image tag and kubelet version, and returns "
-                   "the current value to compare with the expected one)")
+        header += (" (run each query as written: it already names the right index and fields "
+                   "and returns the current value to compare with the expected one. "
+                   f"{_runbook(profile, 'recovery_note')})")
     return header + "\n" + "\n".join(bullets)
 
 
@@ -429,9 +440,10 @@ class KbMixin:
         investigation_notes = _substitute_fault_params(
             ch_data.get("investigation_notes", ""), self.scenario.fault_param_ranges(int(ch_num))
         ).strip()
-        scope_fact = _scope_fact(ch_data.get("fault_scope"))
+        profile = ops_profile.profile_for(self.scenario)
+        scope_fact = _scope_fact(ch_data.get("fault_scope"), profile)
         remediation_fact = _remediation_fact(ch_data)
-        recovery_fact = _recovery_fact(ch_data)
+        recovery_fact = _recovery_fact(ch_data, profile)
         investigation_section = ""
         if investigation_notes:
             investigation_section = f"""
@@ -579,7 +591,7 @@ class KbMixin:
 
         remediation_action = ch_data.get("remediation_action", "remediate")
         ch_int = int(ch_num)
-        approval_mode = "required" if ch_int <= 15 else "skip"
+        approval_mode = "skip" if ch_int in auto_remediate_channels(self.scenario) else "required"
         investigation_notes = _substitute_fault_params(
             ch_data.get("investigation_notes", ""), self.scenario.fault_param_ranges(int(ch_num))
         )
@@ -614,7 +626,7 @@ class KbMixin:
 - Verify if errors correlate with infrastructure events
 
 ## Remediation
-Consult the remediation guide skill (`{self.scenario.namespace}-remediation-guide`) for full decision guidance, then use `{self.scenario.prefixed_tool_id("remediation_action")}` with action_type: {remediation_action}, channel: {ch_num}, approval_mode: {approval_mode}, dry_run: false, and a justification. Channels 1–15 must use approval_mode: required (the workflow includes a human-in-the-loop step that requests operator approval through waitForInput; relay that request and resume with the reply you receive). Only pass approval_mode: skip when the Auto-Remediate notification workflow explicitly requests it. Once the tool returns successfully, remediation has been executed, but do not declare the incident resolved yet.
+Consult the remediation guide skill (`{self.scenario.namespace}-remediation-guide`) for full decision guidance, then use `{self.scenario.prefixed_tool_id("remediation_action")}` with action_type: {remediation_action}, channel: {ch_num}, approval_mode: {approval_mode}, dry_run: false, and a justification. Channels {ops_profile.hitl_and_auto_ranges(self.scenario)[0]} must use approval_mode: required (the workflow includes a human-in-the-loop step that requests operator approval through waitForInput; relay that request and resume with the reply you receive). Only pass approval_mode: skip when the Auto-Remediate notification workflow explicitly requests it. Once the tool returns successfully, remediation has been executed, but do not declare the incident resolved yet.
 
 ## Confirming Recovery
 Consult the remediation guide skill (`{self.scenario.namespace}-remediation-guide`), then wait briefly and use `{self.scenario.prefixed_tool_id("verify_recovery")}` to confirm the fix propagated. Zero (or near-zero) error/warn counts means the incident is resolved. Do NOT rely on the 15-minute tools in the triage and investigation skills to judge current status immediately after remediation — they will keep showing the pre-fix errors as residual history for several minutes, which does not mean the fault is still active.

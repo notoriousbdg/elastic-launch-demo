@@ -7,12 +7,12 @@ namespace: awsorders
 scenario_icon: 📦
 sort_order: 10
 nominal_label: ONLINE
-schema_version: '1.2'
+schema_version: "1.3"
 apm_ml_bucket_span: 1m
 generators:
   aws_rds_otel:
     instance_id: orders-db
-    connections_baseline: [0, 2]
+    connections_baseline: [30, 80]
   aws_cloudwatch_logs:
     gateway_service: orders-gateway
   aws_elb_metrics_otel: true
@@ -633,7 +633,7 @@ trace_attributes:
           - staging
       dynamodb.table:
         choice:
-          - awsorders-stock
+          - awsorders-inventory
       warehouse:
         choice:
           - use1-a

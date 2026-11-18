@@ -9,47 +9,120 @@ cascade_services:
 - mes-controller
 - ot-historian
 - shopfloor-portal
-description: OPC-UA application instance certificate between the gateway and aggregation server expired; secure channel rejected
+description: The gateway's OPC UA application instance certificate expired after automatic renewal had been failing; the PLC servers reject every new secure channel
 investigation_notes: |-
-  Root Cause: OPC-UA app instance certificates have a hard expiry; once the `notAfter` date passes, the secure channel handshake is rejected by the server with status 0x80120000 (BadCertificateInvalid) or 0x80140000 (BadCertificateTimeInvalid). Auto-renewal jobs that depend on the cert still being valid for handshake will not renew themselves.
-  Remediation: 1) Check expiry: `openssl x509 -in /etc/scada/certs/app-instance.crt -noout -dates`. 2) Issue a fresh certificate via the OT PKI: `pki-cli issue --profile opcua-app-instance --cn scada-gateway-prod`. 3) Push the new cert to the gateway and trust list: `scada-admin install-cert --cert /tmp/new.crt`. 4) Also push to PLC trust list (out-of-band, via the engineering workstation). 5) Renegotiate channels: `scada-admin reconnect --all`. 6) Add an expiry alert at 7 days remaining (these certs only live 30 days) via Elastic Watcher.
+  Root cause: the scada-gateway OPC UA application instance certificate ({cert_subject}, serial {cert_serial}) reached its notAfter time. These certificates are issued for 30 days by the OT PKI and renewed over EST; the renewal has been failing with HTTP 401 because the EST bootstrap credential expired, which scada-gateway logged as a certificate_renewal WARN before the first OPC-UA-CERT-EXPIRY. When a secure channel is renewed or re-opened, the four OPC UA PLCs reject the expired certificate: the gateway sees BadSecurityChecksFailed (0x80130000) and the PLC server audit log reports BadCertificateTimeInvalid. PLC-PACK-01 is Modbus TCP and does not use the certificate, so it stays connected. The network, the PLCs and the trust lists are fine.
+  Confirm:
+    - scada-gateway certificate lines show serial={cert_serial} and valid=false (attributes.scada.cert_serial, attributes.scada.cert_valid); metric scada.cert_valid goes from 1 to 0
+    - the scada-gateway certificate_renewal WARN (EST 401) comes before the first OPC-UA-CERT-EXPIRY
+    - metric scada.connected_plcs drops from 5 to 1 (only PLC-PACK-01) and scada.tag_update_rate_per_s drops from about 1,200 to about 140 per second
+    - mes-controller, ot-historian and shopfloor-portal see the OPC UA lines go stale after the gateway's errors start
+  Remediation: issue a new certificate with opsctl renew certificate/scada-gateway-opcua. The renewal uses the OT PKI directly, so it does not depend on the expired EST credential; the PLC trust lists already trust the issuing CA, so no change is needed on the PLCs. The gateway reloads the certificate, the four OPC UA PLCs reconnect within about 15 s and tag data flows again. Re-enrolling the EST bootstrap credential is a follow-up task.
 remediation_action: renew_opcua_cert
-error_message: '[SCADA] OPC-UA-CERT-EXPIRY: subject={cert_subject} expired_days_ago={cert_expired_days} thumbprint={cert_thumbprint}
-  affected_plcs={affected_plcs}'
+remediation_command: |-
+  opsctl renew certificate/scada-gateway-opcua
+error_message: '[SCADA] OPC-UA-CERT-EXPIRY: endpoint=opc.tcp://{plc_endpoint}:4840 status=BadSecurityChecksFailed (0x80130000) subject="{cert_subject}" serial={cert_serial} notAfter passed; secure channel rejected, plcs_disconnected={affected_plcs}'
 stack_trace: |-
-  === OPC-UA CERTIFICATE STATUS ===
-  Subject:      {cert_subject}
-  Issuer:       CN=Manufacturing OT Root CA
-  NotBefore:    2026-03-13 00:00:00 UTC
-  NotAfter:     {cert_expiry_date} (expired {cert_expired_days} days ago)
-  Thumbprint:   {cert_thumbprint}
+  === OPC-UA SECURE CHANNEL DIAGNOSTIC ===
+  Client certificate: {cert_subject}
+  Issuer:             CN=OT Issuing CA 01, O=Manufacturing OT
+  Serial:             {cert_serial}
+  Validity:           EXPIRED (notAfter passed; EST renewal failing with 401 since bootstrap credential expired)
+  Security policy:    Basic256Sha256 / SignAndEncrypt
   ------------------------------------------------------------------------
-  Handshake:    REJECTED — status 0x80140000 (BadCertificateTimeInvalid)
-  Affected:     {affected_plcs}
-  OPC-UA-CERT-EXPIRY: secure channel cannot be established
+  OpenSecureChannel -> {plc_endpoint}:4840
+    Server response:  BadSecurityChecksFailed (0x80130000)
+    Server audit:     BadCertificateTimeInvalid (application instance certificate)
+  ------------------------------------------------------------------------
+  OPC-UA-CERT-EXPIRY: {affected_plcs} of 4 OPC UA PLCs disconnected; PLC-PACK-01 (Modbus TCP) unaffected
 correlation_attr:
-  key: infra.opcua_cert_profile
-  value: ot-pki-shortlived-30d
+  key: scada.cert_serial
+  value: 4F2A91C3E07B
+onset_delay_seconds: 45
 fault_params:
-  cert_subject: "CN=scada-gateway-prod, O=Manufacturing OT"
-  cert_expired_days: 9
-  cert_thumbprint:
-    format: "{a:016x}{b:016x}{c:08x}"
-    a: {randint: [0, 9223372036854775807]}
-    b: {randint: [0, 9223372036854775807]}
-    c: {randint: [0, 4294967295]}
-  cert_expiry_date: "2026-04-12 00:00:00 UTC"
-  affected_plcs: {randint: [1, 4]}
+  cert_subject: "CN=scada-gateway, O=Manufacturing OT, OU=Plant P002"
+  cert_serial: 4F2A91C3E07B
+  plc_endpoint: 10.40.3.21
+  affected_plcs: 4
 rca_clues:
   scada-gateway:
-    opcua.cert_status: expired
-    opcua.cert_expired_days: 9
+    scada.cert_valid: false
+    opcua.security_policy: Basic256Sha256
   mes-controller:
-    mes.scada_link_status: down
+    mes.scada_link_status: degraded
   ot-historian:
-    historian.scada_link_status: down
+    historian.scada_link_status: degraded
   shopfloor-portal:
-    portal.scada_link_status: down
+    portal.scada_link_status: degraded
+cascade_messages:
+  mes-controller:
+    - severity: WARN
+      message: '[MES] equipment_state feed from scada-gateway stale for 4 of 5 PLCs; LINE-01..LINE-03 states held at last known value'
+  ot-historian:
+    - severity: WARN
+      message: '[HIST] tag_ingest from scada-gateway down to ~140 points/s (expected ~1,200); OPC UA sources marked Uncertain_LastUsableValue'
+  shopfloor-portal:
+    - severity: WARN
+      message: '[PORTAL] line dashboard LINE-01..LINE-03 showing stale data (no OPC UA updates); banner "Live data unavailable" displayed'
+fault_scope:
+  cluster: mfg-eks-cluster
+  workloads: [scada-gateway]
+infrastructure_events:
+  - service: scada-gateway
+    severity: WARN
+    offset_seconds: -120
+    body: '[SCADA] certificate_renewal subject="CN=scada-gateway, O=Manufacturing OT, OU=Plant P002" serial=4F2A91C3E07B EST simplereenroll https://est.ot-pki.plant.local/.well-known/est/simplereenroll -> 401 Unauthorized (bootstrap credential expired); certificate expires in 3 min, next retry in 30 min'
+    attributes:
+      operation: certificate_renewal
+      scada.cert_serial: 4F2A91C3E07B
+      http.response.status_code: 401
+service_lag_seconds:
+  mes-controller: 15
+  ot-historian: 15
+  shopfloor-portal: 30
+remediation_effects:
+  log_events:
+    - service: scada-gateway
+      severity: INFO
+      offset_seconds: 1
+      body: '[CHG] CHANGE APPLIED opsctl renew certificate/scada-gateway-opcua by {actor}: new application instance certificate issued by OT Issuing CA 01, serial 7B10E5D2A946, valid 30 days'
+      attributes:
+        operation: change_applied
+        change.target: certificate/scada-gateway-opcua
+    - service: scada-gateway
+      severity: INFO
+      offset_seconds: 15
+      body: '[SCADA] secure channels re-opened with serial 7B10E5D2A946: PLC-LINE01-A, PLC-LINE02-A, PLC-LINE03-A, PLC-LINE03-B connected'
+      attributes:
+        operation: plc_reconnect
+  steady_attributes:
+    scada-gateway:
+      scada.cert_serial: 7B10E5D2A946
+  log_taper_seconds: 15
+  verification:
+    - signal: scada.cert_valid
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "scada-gateway"'
+      field: 'metrics.scada.cert_valid'
+      expect: '1 (was 0)'
+      within_seconds: 30
+    - signal: scada.connected_plcs
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "scada-gateway"'
+      field: 'metrics.scada.connected_plcs'
+      expect: '5 (was 1)'
+      within_seconds: 60
+    - signal: OPC-UA-CERT-EXPIRY lines
+      from: 'logs.otel.mfg'
+      where: 'body.text LIKE "*OPC-UA-CERT-EXPIRY*"'
+      expect: '0 new lines'
+      within_seconds: 60
+    - signal: gateway certificate serial
+      from: 'logs.otel.mfg'
+      where: 'resource.attributes.service.name == "scada-gateway" AND body.text LIKE "*certificate subject=*"'
+      field: 'attributes.scada.cert_serial'
+      expect: '7B10E5D2A946 on every line logged since the fix; 4F2A91C3E07B stops appearing'
+      within_seconds: 60
 business_impact:
   - kpi: business.oee_overall_pct
     factor: {uniform: [0.20, 0.50]}

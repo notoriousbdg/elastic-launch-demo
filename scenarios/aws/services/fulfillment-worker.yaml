@@ -41,45 +41,32 @@ constants:
 
 state:
   _processed: {init: 0}
+  _last_summary: {init: now}
 
 steps:
 - sample:
+    aws_ecs_desired_count:
+      expr: "12 if 16 in fixed_channels else 4"
+    aws_ecs_running_tasks:
+      expr: "(12 if since_fix.get(16, 0) >= 60 else 4) if 16 in fixed_channels else 4"
     messages_received:
-      if_active:
-        randint:
-        - 20
-        - 90
-      else:
-        randint:
-        - 60
-        - 240
+      expr: "int(round(max(0, 150 + (510 - 150) * min(1.0, elapsed.get(16, 0) / 90.0) + rand.gauss(0, 17)))) if 16 in all_active
+          else (int(round(max(0, 510 + (rand.randint(60, 240) - 510) * min(1.0, since_fix.get(16, 0) / 60.0) + rand.gauss(0, 17 * (1.0 - min(1.0, since_fix.get(16, 0) / 60.0)))))) if 16 in fixed_channels
+          else rand.randint(60, 240))"
     messages_deleted:
-      if_active:
-        randint:
-        - 2
-        - 25
-      else:
-        randint:
-        - 58
-        - 238
+      expr: "int(round(max(0, 150 + (240 - 150) * min(1.0, elapsed.get(16, 0) / 90.0) + rand.gauss(0, 6)))) if 16 in all_active
+          else ((int(round(max(0, 240 + rand.gauss(0, 6)))) if since_fix.get(16, 0) < 60 else (int(round(max(0, 720 + rand.gauss(0, 15)))) if since_fix.get(16, 0) < 285 else rand.randint(58, 238))) if 16 in fixed_channels
+          else rand.randint(58, 238))"
     visible_messages:
-      if_active:
-        randint:
-        - 4000
-        - 26000
-      else:
-        randint:
-        - 0
-        - 120
+      expr: "int(round(max(0, 60 + (2400 - 60) * min(1.0, elapsed.get(16, 0) / 90.0) + rand.gauss(0, 100)))) if 16 in all_active
+          else (int(round(max(0, 2400 + (rand.randint(0, 120) - 2400) * min(1.0, max(0.0, (since_fix.get(16, 0) - 30) / 270.0)) + rand.gauss(0, 100 * (1.0 - min(1.0, since_fix.get(16, 0) / 300.0)))))) if 16 in fixed_channels
+          else rand.randint(0, 120))"
     oldest_message_age_s:
-      if_active:
-        randint:
-        - 420
-        - 3600
-      else:
-        randint:
-        - 1
-        - 25
+      expr: "int(round(max(0, 13 + (600 - 13) * min(1.0, elapsed.get(16, 0) / 90.0) + rand.gauss(0, 25)))) if 16 in all_active
+          else (int(round(max(0, 600 + (rand.randint(1, 25) - 600) * min(1.0, max(0.0, (since_fix.get(16, 0) - 30) / 270.0)) + rand.gauss(0, 25 * (1.0 - min(1.0, since_fix.get(16, 0) / 300.0)))))) if 16 in fixed_channels
+          else rand.randint(1, 25))"
+    queue_status:
+      expr: "'ANOMALY' if 16 in all_active or (16 in fixed_channels and since_fix.get(16, 0) < 300) else 'NOMINAL'"
 - counter:
     state_key: _processed
     by: 1
@@ -105,7 +92,7 @@ steps:
     unit: s
 - log:
     level: INFO
-    message: 'sqs[awsorders-fulfillment]: poll received={messages_received} deleted={messages_deleted} visible={visible_messages} oldest_age_s={oldest_message_age_s}'
+    message: 'sqs[awsorders-fulfillment]: poll received={messages_received} deleted={messages_deleted} visible={visible_messages} oldest_age_s={oldest_message_age_s} status={queue_status}'
     attrs:
       operation: queue_poll
       messaging.system: aws_sqs
@@ -118,22 +105,17 @@ steps:
         var: visible_messages
       messaging.oldest_age_s:
         var: oldest_message_age_s
+      aws.ecs.desired_count:
+        var: aws_ecs_desired_count
 - sample:
     warehouse:
       choice: WAREHOUSES
     carrier:
       choice: CARRIERS
     processing_ms:
-      if_active:
-        uniform:
-        - 4500.0
-        - 28000.0
-        round: 1
-      else:
-        uniform:
-        - 120.0
-        - 650.0
-        round: 1
+      expr: "round(max(0.0, 385 + (1100 - 385) * min(1.0, elapsed.get(16, 0) / 90.0) + rand.gauss(0, 80)), 1) if 16 in all_active
+          else (round(max(0.0, 1100 + (rand.uniform(120.0, 650.0) - 1100) * min(1.0, since_fix.get(16, 0) / 300.0) + rand.gauss(0, 80 * (1.0 - min(1.0, since_fix.get(16, 0) / 300.0)))), 1) if 16 in fixed_channels
+          else round(rand.uniform(120.0, 650.0), 1))"
     batch_size:
       randint:
       - 1
@@ -162,31 +144,18 @@ steps:
         var: carrier
       fulfillment.processing_ms:
         var: processing_ms
+      aws.ecs.desired_count:
+        var: aws_ecs_desired_count
 - sample:
     dlq_moves:
-      if_active:
-        randint:
-        - 8
-        - 70
-      else:
-        randint:
-        - 0
-        - 1
-    receive_count_max:
-      if_active:
-        randint:
-        - 4
-        - 5
-      else: 1
+      randint:
+      - 0
+      - 1
+    receive_count_max: 1
     in_flight_messages:
-      if_active:
-        randint:
-        - 90
-        - 120
-      else:
-        randint:
-        - 5
-        - 40
+      expr: "int(round(max(0, 22 + (35 - 22) * min(1.0, elapsed.get(16, 0) / 90.0) + rand.gauss(0, 1.5)))) if 16 in all_active
+          else ((int(round(max(0, 35 + rand.gauss(0, 1.5)))) if since_fix.get(16, 0) < 60 else (int(round(max(0, 100 + rand.gauss(0, 5)))) if since_fix.get(16, 0) < 285 else rand.randint(5, 40))) if 16 in fixed_channels
+          else rand.randint(5, 40))"
     visibility_timeout_s: 60
 - metric:
     name: fulfillment.dlq_moves
@@ -209,3 +178,20 @@ steps:
         var: receive_count_max
       messaging.in_flight:
         var: in_flight_messages
+      aws.ecs.desired_count:
+        var: aws_ecs_desired_count
+- every:
+    seconds: 30
+    state_key: _last_summary
+    steps:
+    - log:
+        level: INFO
+        message: 'worker.summary processed={_processed} desired_tasks={aws_ecs_desired_count} queue_visible={visible_messages} oldest_age_s={oldest_message_age_s} status={queue_status}'
+        attrs:
+          operation: worker_summary
+          fulfillment.total_processed:
+            var: _processed
+          aws.ecs.desired_count:
+            var: aws_ecs_desired_count
+          aws.ecs.running_tasks:
+            var: aws_ecs_running_tasks

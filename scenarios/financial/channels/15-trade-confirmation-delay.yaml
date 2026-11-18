@@ -6,59 +6,145 @@ sensor_type: confirmation_timer
 affected_services:
 - customer-portal
 - settlement-processor
+error_services:
+- customer-portal
 cascade_services:
 - audit-logger
 - compliance-monitor
-description: Trade confirmation messages delayed beyond regulatory reporting window
+description: Trade confirmation messages delayed beyond the client confirmation window because the confirmation dispatchers were scaled down
+onset_delay_seconds: 10
+service_lag_seconds: {settlement-processor: 45, audit-logger: 30, compliance-monitor: 60}
 investigation_notes: |-
-  1. Check customer-portal logs for PORTAL-CONFIRM-DELAY — note trade_id, delay_s vs reg_max_s, and delivery_queue depth and consumer count on the trade-confirmations Kafka topic.
-  2. Query FROM logs.otel.financial.* | WHERE body.text LIKE "*PORTAL-CONFIRM-DELAY*" | STATS count(), max(delay_s) BY instrument to identify if a specific asset class is most affected.
-  3. Inspect settlement-processor for enrichment failures on the affected trade_ids — missing SSI data causes confirmation messages to stall in the formatting stage.
-  4. Check audit-logger for confirmation dispatch records — if compliance_check stage took > 30s the downstream consumer_lag will cascade.
-  5. Scale the delivery queue consumers from 2 to at least 6 (confirm the trade-confirmations topic has at least 6 partitions, or extra consumers sit idle); file a regulatory exception report for any trades where delay_s > reg_max_s and notify the client of the delay.
-remediation_action: scale_confirmation_queue_consumers
-error_message: '[PORTAL] PORTAL-CONFIRM-DELAY: trade={trade_id} delay_s={delay_s} reg_max_s={reg_max_s} instrument={instrument}
-  qty={quantity}'
+  Root cause: a GitOps change (CR-4519, PR "right-size idle dispatchers") scaled deployment customer-portal-confirmations from 6 to 2 replicas to save cost. The trade-confirmations topic has 12 partitions and at the trading peak receives about 220 confirmations per second; each dispatcher pod consumes about 75 per second, so 2 pods (6 partitions each) handle 150 per second and the consumer group lag grows by about 70 messages every second. Confirmation {trade_id} waited {delay_s}s against a {reg_max_s}s window and the group lag stands at {queue_depth} messages. The rest of the pipeline is fast: trade capture, enrichment (SSI lookups succeed, 0 failures) and compliance_check ({compliance_check_s}s, well under the 30 s that would point at the compliance stage) all complete; only delivery_queue waits.
+  Confirm:
+    - customer-portal confirmation_status lines (body.text LIKE "*confirmation_status*") show attributes.deployment.replicas=2, attributes.kafka.consumer.count=2 and attributes.confirmation.queue_lag growing
+    - metrics.customer_portal.confirmation_queue_lag growing linearly from its normal 0-200 by about 70 messages per second, metrics.customer_portal.confirmations_consumed_per_s flat at about 150 and metrics.customer_portal.confirmation_delay_s rising past 120 s; the Kafka consumer group lag alert fires for trade-confirmations
+    - settlement-processor reports affirmations pending on undelivered confirmations with no SSI or enrichment errors
+    - the customer-portal line "[PORTAL] gitops sync app=customer-portal-confirmations ... replicas 6 -> 2" (attributes.operation=deployment_rollout, attributes.change.request=CR-4519) comes before the first PORTAL-CONFIRM-DELAY line
+  Remediation: opsctl patch deployment/customer-portal-confirmations --replicas 6 restores six dispatchers. The four new pods are ready and the group rebalances in about 30 s (2 partitions per consumer), then six consumers take about 450 per second and the backlog drains at a net 230 per second: lag is under 500 within about 4 minutes. Revert the PR in Git as well, or the next sync scales the deployment back to 2. More than 12 replicas would sit idle (one consumer per partition), and filing exception reports for late confirmations does not reduce the backlog.
+remediation_action: scale_confirmation_dispatchers
+remediation_command: |-
+  opsctl patch deployment/customer-portal-confirmations --replicas 6
+error_message: '[PORTAL] PORTAL-CONFIRM-DELAY: trade={trade_id} delay_s={delay_s} reg_max_s={reg_max_s} instrument={instrument} qty={quantity} topic=trade-confirmations group_lag={queue_depth} consumers=2'
 stack_trace: |-
   === CONFIRMATION PIPELINE STATUS ===
   trade={trade_id}  instrument={instrument}  qty={quantity}
   STAGE                STATUS      ELAPSED
   trade_capture        COMPLETE    0.2s
-  enrichment           COMPLETE    1.4s
+  enrichment           COMPLETE    1.4s   (ssi_lookup=OK)
   template_render      COMPLETE    0.8s
   compliance_check     COMPLETE    {compliance_check_s}s
-  delivery_queue       STUCK       {delay_s}s  <<< BACKLOG
+  delivery_queue       WAITING     {delay_s}s  <<< BACKLOG
   client_ack           PENDING     ---
   --- DELIVERY STATS ---
-    queue_depth=16,217  consumers=2  consumer_lag=15,890
+    topic=trade-confirmations  partitions=12  group=portal-confirmations
+    queue_depth={queue_depth}  consumers=2 (6 partitions each)  consumed_per_s=150  inflow_per_s=220
     format=FIX-Confirmation(35=AK)  alt_channel=SWIFT-MT515
     reg_window={reg_max_s}s  elapsed={delay_s}s  breach=true
-  ACTION: scale_consumers=true  reg_exception_report=true  alert=PORTAL-CONFIRM-DELAY
+  ACTION: reg_exception_report=true  alert=PORTAL-CONFIRM-DELAY
 correlation_attr: {}
 fault_params:
   trade_id:
     format: "TRD-{n}"
     n: {randint: [100000, 999999]}
-  delay_s: {uniform: [600, 7200], round: 1}
-  compliance_check_s: {uniform: [2.0, 4.0], round: 1}
-  reg_max_s: 300
+  delay_s: {uniform: [150, 600], round: 1}
+  queue_depth: {randint: [33000, 132000]}
+  compliance_check_s: {uniform: [0.3, 0.9], round: 1}
+  reg_max_s: 120
   instrument: {choice: [US.AAPL, US.GOOGL, US.MSFT, US.AMZN, US.TSLA, FX.EURUSD, FX.GBPUSD, FUT.ES, FUT.NQ, OPT.SPX]}
   quantity: {randint: [100, 50000]}
 rca_clues:
   customer-portal:
-    portal.confirmation_delay_s: {uniform: [600, 7200], round: 1}
+    portal.confirmation_delay_s: {uniform: [150, 600], round: 1}
     portal.delivery_queue_consumers: 2
-    portal.undelivered_confirmations: {randint: [100, 5000]}
+    portal.confirmation_queue_lag: {randint: [33000, 132000]}
   settlement-processor:
     settlement.ssi_lookup_failures: 0
     settlement.enrichment_timeout_count: 0
+    settlement.affirmations_pending: {randint: [50, 2000]}
   audit-logger:
     audit.confirm_dispatch_missing: {randint: [10, 1000]}
     audit.reg_exception_reports_filed: {randint: [1, 20]}
-    audit.compliance_check_s: {uniform: [2.0, 4.0], round: 1}
+    audit.compliance_check_s: {uniform: [0.3, 0.9], round: 1}
   compliance-monitor:
     compliance.confirmation_reg_breach_count: {randint: [1, 100]}
-    compliance.mifid_disclosure_delay_s: {uniform: [600, 7200], round: 1}
+    compliance.mifid_disclosure_delay_s: {uniform: [150, 600], round: 1}
+cascade_messages:
+  settlement-processor:
+    - severity: WARN
+      message: '[SETTLE] affirmation pending trade={trade_id}: client confirmation not delivered after {delay_s}s; ssi_lookup=OK enrichment=OK'
+  audit-logger:
+    - severity: WARN
+      message: '[AUDIT] event_logged stream=trades type=CONFIRM_DISPATCH_LATE trade={trade_id} delay_s={delay_s} sla_s={reg_max_s}'
+  compliance-monitor:
+    - severity: WARN
+      message: '[COMPL] confirmation_timeliness trade={trade_id} delay_s={delay_s} window_s={reg_max_s} breach=true exception report queued'
+fault_scope:
+  cluster: finserv-aks-cluster
+  workloads: [customer-portal, settlement-processor]
+infrastructure_events:
+  - service: customer-portal
+    severity: INFO
+    offset_seconds: -150
+    body: '[PORTAL] gitops sync app=customer-portal-confirmations revision=9f3c2e1: deployment customer-portal-confirmations replicas 6 -> 2 (PR "right-size idle dispatchers", cost optimisation) by m.ilves (CR-4519)'
+    attributes:
+      user.name: m.ilves
+      change.request: CR-4519
+      operation: deployment_rollout
+      change.summary: 'customer-portal-confirmations replicas: 6 -> 2'
+      deployment.name: customer-portal-confirmations
+      deployment.replicas: 2
+remediation_effects:
+  log_taper_seconds: 200
+  log_events:
+    - service: audit-logger
+      severity: INFO
+      offset_seconds: 1
+      body: '[AUDIT] event_logged stream=change-mgmt type=CHANGE_APPLIED cmd="opsctl patch deployment/customer-portal-confirmations --replicas 6" actor={actor}: deployment/customer-portal-confirmations replicas 2 -> 6'
+      attributes:
+        operation: change_applied
+        audit.stream: change-mgmt
+        change.target: deployment/customer-portal-confirmations
+    - service: customer-portal
+      severity: INFO
+      offset_seconds: 3
+      body: 'deployment customer-portal-confirmations scaled 2 -> 6 replicas: 4 new pods starting'
+      attributes:
+        operation: deployment_rollout
+        deployment.name: customer-portal-confirmations
+        deployment.replicas: 6
+    - service: customer-portal
+      severity: INFO
+      offset_seconds: 30
+      body: '[PORTAL] consumer group portal-confirmations rebalanced: 6 members, 12 partitions (2 per member), consuming about 450 msg/s'
+      attributes:
+        operation: consumer_rebalance
+        kafka.consumer.count: 6
+        deployment.replicas: 6
+  verification:
+    - signal: customer_portal.confirmation_queue_lag
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "customer-portal"'
+      field: 'metrics.customer_portal.confirmation_queue_lag'
+      expect: 'falls at about 230 messages per second once the new pods join and is back under 500 within about 4 minutes (was over 40,000 and growing by about 70 per second)'
+      within_seconds: 240
+    - signal: PORTAL-CONFIRM-DELAY lines
+      from: 'logs.otel.finserv'
+      where: 'body.text LIKE "*PORTAL-CONFIRM-DELAY*"'
+      expect: 'taper off as the backlog drains; 0 new lines after about 200 s'
+      within_seconds: 240
+    - signal: dispatcher replicas
+      from: 'logs.otel.finserv'
+      where: 'resource.attributes.service.name == "customer-portal" AND body.text LIKE "*confirmation_status*"'
+      field: 'attributes.deployment.replicas'
+      expect: '6 on every line since the fix; 2 stops appearing'
+      within_seconds: 60
+    - signal: confirmation consumers
+      from: 'logs.otel.finserv'
+      where: 'resource.attributes.service.name == "customer-portal" AND body.text LIKE "*confirmation_status*"'
+      field: 'attributes.kafka.consumer.count'
+      expect: '6 once the new pods have joined the group (about 30 s); 2 stops appearing'
+      within_seconds: 60
 business_impact:
   - kpi: business.reporting_latency_sec
     factor: {uniform: [5.0, 12.0]}
@@ -71,4 +157,5 @@ business_impact:
 
 generator_impact:
   kafka_otel:
-    high_consumer_lag_per_partition: 15000.0
+    high_consumer_lag_by_topic: 55000.0
+generator_hold_seconds: {kafka_otel: 220}

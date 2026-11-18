@@ -8,59 +8,136 @@ affected_services:
 cascade_services:
 - mes-controller
 - shopfloor-portal
-description: OEE analytics k8s pod OOM-killed when caching unprocessed events during an upstream slowdown
+description: A rightsizing change halved the OEE analytics memory limit below its working set; the container is OOM-killed every few minutes and loses its in-memory OEE windows
 investigation_notes: |-
-  Root Cause: When the SCADA / MES upstream slows or backlogs, the OEE analytics service buffers incoming events. If the per-pod memory limit is below the buffer high-watermark, the kernel cgroup OOM killer kills the container and Kubernetes reports OOMKilled (exit 137). Because the cached state is lost, the next pod recomputes from scratch — producing a saw-tooth OEE pattern that's misleading to operators.
-  Remediation: 1) Inspect the kill: `kubectl describe pods -n mfg oee-analytics | grep -A 5 'Last State'`. 2) Right-size the memory request/limit: `kubectl set resources deploy/oee-analytics -n mfg --limits=memory=1Gi`. 3) Reduce buffer high-watermark in the service config and redeploy. 4) Add a memory pressure HPA. 5) Add a Watcher rule for repeated OOMKills on this deployment.
+  Root cause: the oee-analytics Deployment was synced by Argo CD with resources.limits.memory reduced from 1Gi to 512Mi shortly before the first ANALYTICS-CONTAINER-OOM (rightsizing PR by platform-finops, CHG-7385). The rightsizing used the container's memory request history, but oee-analytics keeps the open shift windows and the event buffer for all five lines in memory, so its steady working set is about 680-760 MiB. With a 512Mi limit, the working set climbs to the limit within a few minutes of each start and the kernel OOM-kills the container (OOMKilled, exit code 137). Every restart drops the in-memory windows, so OEE recomputes from the last checkpoint and the portal shows a saw-tooth. Node memory is fine, there is no traffic spike, and the image ({image_tag}) has not changed.
+  Confirm:
+    - oee-analytics pod_resources lines show memory_limit=512Mi (attributes.k8s.container.memory_limit); metric oee.container_memory_limit_mib goes from 1024 to 512 and oee.container_memory_working_set_mib rises to about 510 before each kill
+    - the oee-analytics Argo CD sync line (CHG-7385) comes before the first ANALYTICS-CONTAINER-OOM
+    - metric oee.container_restarts climbs every few minutes; oee.calc_latency_ms rises from 40-90 ms to 800-2500 ms while the windows are rebuilt
+  Remediation: restore the limit with opsctl patch deployment/oee-analytics --memory-limit 1Gi. The Deployment rolls a new pod with the 1Gi limit; the working set settles around 700 MiB, restarts stop and calculation latency returns to normal within about two minutes. The rightsizing PR should be reverted in Git as a follow-up so the next sync does not re-apply 512Mi.
 remediation_action: resize_pod_memory
-error_message: '[OEE-K8S] ANALYTICS-CONTAINER-OOM: pod={pod_name} container={container_name} restarts={restart_count} mem_limit={mem_limit_mb}MB
-  last_exit_code=137'
+remediation_command: |-
+  opsctl patch deployment/oee-analytics --memory-limit 1Gi
+error_message: '[OEE-K8S] ANALYTICS-CONTAINER-OOM: pod={pod_name} container={container_name} reason=OOMKilled exit_code=137 restarts={restart_count} memory_limit={mem_limit_mb}Mi working_set_before_kill={mem_peak_mb}Mi'
 stack_trace: |-
   === KUBERNETES POD STATE — {pod_name} ===
-  Namespace: mfg | Container: {container_name}
+  Namespace: mfg | Container: {container_name} | Image: {image_tag}
   ------------------------------------------------------------------------
+  State:             Running (started 40s ago)
   Last State:        Terminated
     Reason:          OOMKilled
     Exit Code:       137
-    Started:         2026-05-06T14:22:11Z
-    Finished:        2026-05-06T14:38:42Z
-  Memory Limit:      {mem_limit_mb}Mi
-  Memory Peak:       {mem_peak_mb}Mi (last sample before kill)
+    Ran for:         3m12s
+  Limits:            memory: {mem_limit_mb}Mi (was 1Gi before Argo CD sync CHG-7385)
+  Working set:       {mem_peak_mb}Mi (last sample before kill)
   Restart Count:     {restart_count}
   ------------------------------------------------------------------------
-  ANALYTICS-CONTAINER-OOM: pod {pod_name} OOMKilled — saw-tooth OEE pattern likely
+  ANALYTICS-CONTAINER-OOM: container working set exceeds memory limit
 correlation_attr:
-  key: deployment.oee_analytics_image
-  value: oee-analytics:5.1.0-rc2
+  key: k8s.container.memory_limit
+  value: 512Mi
 fault_params:
   pod_name:
-    format: "oee-analytics-{suffix}-{rand:04x}xq"
-    suffix: {choice: [7c8d9f4b6, 6b9c8e3d2]}
-    rand: {randint: [0, 65535]}
+    format: "oee-analytics-{suffix}-{rand:05x}"
+    suffix: 7c8d9f4b6
+    rand: {randint: [0, 1048575]}
   container_name: oee-analytics
-  restart_count: {randint: [2, 12]}
+  image_tag: oee-analytics:5.0.4
+  restart_count: {randint: [3, 12]}
   mem_limit_mb: 512
   mem_peak_mb: {randint: [506, 512]}
 rca_clues:
   oee-analytics:
-    k8s.last_oom_kill: true
-    k8s.restart_count: {randint: [2, 12]}
-    k8s.mem_limit_mi: 512
-    oee.event_buffer_high_watermark_mb: {randint: [700, 900]}
+    k8s.last_termination_reason: OOMKilled
+    oee.open_windows: 5
+    oee.event_buffer_mb: {randint: [180, 240]}
   mes-controller:
     mes.oee_feedback_lag_s: {randint: [15, 90]}
   shopfloor-portal:
     portal.oee_tile_stale: true
+cascade_messages:
+  mes-controller:
+    - severity: WARN
+      message: '[MES] oee_feedback POST http://oee-analytics:8080/api/v1/events -> connection refused (pod restarting); events queued for retry'
+  shopfloor-portal:
+    - severity: WARN
+      message: '[PORTAL] GET /api/v1/oee/lines -> 503 from oee-analytics; OEE tiles showing last cached values'
+fault_scope:
+  cluster: mfg-gke-cluster
+  workloads: [oee-analytics]
+infrastructure_events:
+  - service: oee-analytics
+    severity: INFO
+    offset_seconds: -120
+    body: '[OEE-K8S] argocd sync app=oee-analytics revision=9f3c2e1 Deployment/oee-analytics resources.limits.memory 1Gi -> 512Mi, resources.requests.memory 768Mi -> 384Mi; PR "rightsize mfg workloads" by platform-finops (CHG-7385)'
+    attributes:
+      operation: config_change
+      user.name: platform-finops
+      change.request: CHG-7385
+      k8s.container.memory_limit: 512Mi
+      change.summary: 'oee-analytics memory limit: 1Gi -> 512Mi'
+service_lag_seconds:
+  mes-controller: 20
+  shopfloor-portal: 30
+remediation_effects:
+  log_events:
+    - service: oee-analytics
+      severity: INFO
+      offset_seconds: 1
+      body: '[CHG] CHANGE APPLIED opsctl patch deployment/oee-analytics --memory-limit 1Gi by {actor}: resources.limits.memory 512Mi -> 1Gi, rollout started'
+      attributes:
+        operation: change_applied
+        change.target: deployment/oee-analytics
+    - service: oee-analytics
+      severity: INFO
+      offset_seconds: 45
+      body: '[OEE-K8S] deployment oee-analytics rollout complete: 1/1 ready, memory_limit=1Gi working_set=702Mi'
+      attributes:
+        operation: rollout_status
+  steady_attributes:
+    oee-analytics:
+      k8s.container.memory_limit: 1Gi
+  log_taper_seconds: 30
+  verification:
+    - signal: oee.container_memory_limit_mib
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "oee-analytics"'
+      field: 'metrics.oee.container_memory_limit_mib'
+      expect: '1024 (was 512)'
+      within_seconds: 60
+    - signal: oee.container_restarts
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "oee-analytics"'
+      field: 'metrics.oee.container_restarts'
+      expect: 'stops increasing'
+      within_seconds: 120
+    - signal: oee.calc_latency_ms
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "oee-analytics"'
+      field: 'metrics.oee.calc_latency_ms'
+      expect: 'back under 120 ms (was 800-2500 ms)'
+      within_seconds: 150
+    - signal: ANALYTICS-CONTAINER-OOM lines
+      from: 'logs.otel.mfg'
+      where: 'body.text LIKE "*ANALYTICS-CONTAINER-OOM*"'
+      expect: '0 new lines'
+      within_seconds: 90
+    - signal: container memory limit
+      from: 'logs.otel.mfg'
+      where: 'resource.attributes.service.name == "oee-analytics" AND body.text LIKE "*pod_resources*"'
+      field: 'attributes.k8s.container.memory_limit'
+      expect: '1Gi on every line logged since the fix; 512Mi stops appearing'
+      within_seconds: 60
 business_impact:
   - kpi: business.oee_overall_pct
-    factor: {uniform: [0.35, 0.65]}
+    factor: {uniform: [0.60, 0.85]}
   - kpi: business.oee_availability_pct
-    factor: {uniform: [0.40, 0.70]}
-  - kpi: business.throughput_units_per_hour
-    factor: {uniform: [0.40, 0.70]}
-  - kpi: business.unplanned_downtime_min_per_shift
-    factor: {uniform: [1.5, 3.0]}
+    factor: {uniform: [0.70, 0.85]}
+  - kpi: business.oee_performance_pct
+    factor: {uniform: [0.85, 0.92]}
 generator_impact:
   kubernetes_otel:
     oomkilled_containers: 0.8
     container_memory_near_limit: 0.98
+generator_hold_seconds: {kubernetes_otel: 90}

@@ -10,8 +10,12 @@ cascade_services:
 - ehr-system
 description: Excessive simultaneous vital sign alerts overwhelming the alerting pipeline from bedside monitors
 investigation_notes: |-
-  Root Cause: Alert storms occur when bedside monitor thresholds are misconfigured or a genuine multi-patient event (e.g., unit-wide SpO2 probe disconnects during rounds) floods the clinical alerting pipeline. The GE/Philips central station queues alerts faster than the CDS engine can evaluate them. Alarms firing on readings that breach the configured limits but sit inside the MedSurg acuity defaults (HR 40-150 bpm, SpO2 above 90%), with no probe disconnects, point to ICU-tight limits loaded on a MedSurg unit rather than a genuine multi-patient event.
-  Remediation: 1) Check the alert threshold configuration on the central monitoring station for the affected nursing unit — verify HR, SpO2, RR, and BP limits match unit acuity (ICU vs MedSurg). 2) Load the MedSurg alarm-limit profile, then recalibrate: `monitor-admin apply-profile --unit {nursing_unit} --profile medsurg-default && monitor-admin recalibrate --unit {nursing_unit} --params HR,SpO2,RR`. 3) Reset the vitals feed aggregator: `systemctl restart vitals-feed-aggregator`. 4) Enable alert suppression windowing (10s dedup) on the central station to prevent duplicate firings. 5) Review biomedical engineering ticket queue for known sensor hardware faults on the unit.
+  Root cause: the adult-icu-v7 alarm-limit profile was loaded on the {nursing_unit} central station shortly before the alarm storm. Its ICU limits (HR 50-110 bpm, SpO2 low 94%) fire on ordinary MedSurg readings: patient {patient_id} at HR {heart_rate} bpm and SpO2 {spo2}% is inside the MedSurg defaults (HR 40-150 bpm, SpO2 low 90%). The unit logged {alert_count} alarms in {window_seconds}s with no probe disconnects, and MedSurg-4S on medsurg-default stays quiet. This is a configuration problem, not a patient event or a sensor fault.
+  Confirm:
+    - patient-monitor logs [MONITOR] central_station unit=MedSurg-4N profile=adult-icu-v7 hr_limits=50-110bpm ... status=ALARM_FLOOD (attributes.vitals.alarm_profile); MedSurg-4S shows profile=medsurg-default status=OK
+    - metric patient_monitor.alerts_per_minute rises from 3-13 to 60-120 after the profile load, all of the increase from MedSurg-4N
+    - the patient-monitor line "alarm profile adult-icu-v7 loaded" comes before the first VITAL-ALERT-STORM; probe_off_1m stays 0
+  Remediation: load the MedSurg profile back onto the unit with opsctl apply alarm-profile/medsurg-4n --profile medsurg-default. New alarms stop at once and the per-minute count falls back to baseline within about 90 seconds as the active alarms are acknowledged. Recalibrating the monitors or restarting the vitals aggregator does nothing (the sensors are fine), and adding dedup windows only hides alarms behind the wrong limits.
 remediation_action: recalibrate_monitors
 error_message: '[MONITOR] VITAL-ALERT-STORM: unit={nursing_unit} alerts={alert_count} window={window_seconds}s patient={patient_id}
   hr={heart_rate} spo2={spo2}%'
@@ -30,12 +34,12 @@ stack_trace: |-
   VITAL-ALERT-STORM: {alert_count} alerts in {window_seconds}s exceeds storm threshold on {nursing_unit}
   ACTION: Alert pipeline saturated — downstream CDS rule evaluation delayed
 correlation_attr:
-  key: infra.monitor_firmware
-  value: ge-carescape-v4.1.2-rc
+  key: vitals.alarm_profile
+  value: adult-icu-v7
 fault_params:
-  nursing_unit: {choice: [MedSurg-4N, MedSurg-4S]}
-  alert_count: {randint: [25, 120]}
-  window_seconds: {choice: [30, 60, 120]}
+  nursing_unit: MedSurg-4N
+  alert_count: {randint: [60, 110]}
+  window_seconds: 60
   patient_id:
     format: "PT-{n}"
     n: {randint: [100000, 999999]}
@@ -45,13 +49,78 @@ rca_clues:
   patient-monitor:
     vitals.threshold_config: mismatched_acuity
     vitals.probe_disconnect_count: 0
-    vitals.monitor_firmware: ge-carescape-v4.1.2-rc
+    vitals.alarm_profile: adult-icu-v7
   clinical-alerts:
     alerts.storm_window_s: {randint: [30, 120]}
     alerts.dedup_disabled: true
   ehr-system:
     upstream.vitals_feed_status: flooded
     ehr.cds_queue_depth: {randint: [100, 500]}
+remediation_command: |-
+  opsctl apply alarm-profile/medsurg-4n --profile medsurg-default
+error_services: [patient-monitor]
+service_lag_seconds:
+  clinical-alerts: 15
+  ehr-system: 30
+cascade_messages:
+  clinical-alerts:
+    - severity: WARN
+      message: '[CDS] alert_queue_backlog source=central_station unit={nursing_unit} alarms={alert_count}/{window_seconds}s; vital sign rule evaluation delayed'
+  ehr-system:
+    - severity: WARN
+      message: '[EHR] vitals_flowsheet_backlog unit={nursing_unit} patient={patient_id} alarms={alert_count}; alarm documentation queue delayed'
+fault_scope:
+  workloads: [patient-monitor]
+infrastructure_events:
+  - service: patient-monitor
+    severity: INFO
+    offset_seconds: -120
+    body: '[MONITOR] central_station unit=MedSurg-4N alarm profile adult-icu-v7 loaded (was medsurg-default) from template push ICU-ALARM-2026Q4 by biomed-clinical-eng (CHG0031876)'
+    attributes:
+      user.name: biomed-clinical-eng
+      change.request: CHG0031876
+      operation: alarm_profile_load
+      vitals.unit: MedSurg-4N
+      vitals.alarm_profile: adult-icu-v7
+      change.summary: 'MedSurg-4N alarm profile: medsurg-default -> adult-icu-v7'
+remediation_effects:
+  log_events:
+    - service: patient-monitor
+      severity: INFO
+      offset_seconds: 1
+      body: '[CHG] CHANGE IMPLEMENTED opsctl apply alarm-profile/medsurg-4n --profile medsurg-default by {actor}: MedSurg-4N adult-icu-v7 -> medsurg-default'
+      attributes:
+        operation: change_implemented
+        change.target: alarm-profile/medsurg-4n
+    - service: patient-monitor
+      severity: INFO
+      offset_seconds: 5
+      body: '[MONITOR] central_station unit=MedSurg-4N alarm profile medsurg-default loaded: HR 40-150 bpm, SpO2 low 90%'
+      attributes:
+        operation: alarm_profile_load
+        vitals.unit: MedSurg-4N
+        vitals.alarm_profile: medsurg-default
+  steady_attributes:
+    patient-monitor:
+      vitals.alarm_profile: medsurg-default
+  verification:
+    - signal: patient_monitor.alerts_per_minute
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "patient-monitor"'
+      field: 'metrics.patient_monitor.alerts_per_minute'
+      expect: 'back to 3-13 alarms per minute across units (was 60-120) within about 90 seconds'
+      within_seconds: 150
+    - signal: VITAL-ALERT-STORM lines
+      from: 'logs.otel.healthcare'
+      where: 'body.text LIKE "*VITAL-ALERT-STORM*"'
+      expect: '0 new lines'
+      within_seconds: 150
+    - signal: vitals.alarm_profile
+      from: 'logs.otel.healthcare'
+      where: 'resource.attributes.service.name == "patient-monitor"'
+      field: 'attributes.vitals.alarm_profile'
+      expect: 'medsurg-default on the MedSurg-4N central_station lines; adult-icu-v7 stops appearing'
+      within_seconds: 150
 business_impact:
   - kpi: business.patient_safety_events_per_min
     factor: {uniform: [2.0, 5.0]}

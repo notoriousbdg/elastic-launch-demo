@@ -127,6 +127,18 @@ For each pending migration (oldest → newest):
 
 **The `1.2 → 1.3` migration** (realism and verifiable remediation) is per-channel work and has `needs_input: true`. Apply its guidance from `schema.yaml` to each of the 20 channel files. Values that cannot be derived from the files — the exact `opsctl` remediation commands, realistic after-state values for `remediation_effects.state` (a new memory limit, instance types, a PVC size), the cause event when the notes do not name one — must come from the user: draft a proposal per channel from the investigation notes and confirm it with `AskUserQuestion` (batch several channels per question) before writing. Use `scenarios/k8splatform/channels/02-edge-conntrack-exhaustion.yaml` (rollback) and `13-ingress-oom-reload-storm.yaml` (new value) as the reference, and the Realism checklist in `.claude/skills/add-scenario/BRIEF.md`. A scenario without `k8s_topology` uses only `cluster` and `workloads` in `fault_scope`, and needs no `state` unless a generator it enables declares matching `SPEC.state_keys`.
 
+Two parts of the 1.3 migration are not per-field edits:
+
+- **Ops profile (`scenarios/<id>/ops.yaml`).** It lives in the scenario folder, so it is inside Mode B's scope. Contract: `app/ops_profile.py` docstring and AGENTS.MD "Ops profile"; references `scenarios/k8splatform/ops.yaml` (Kubernetes + AWS) and `scenarios/space/ops.yaml` (no Kubernetes, own verbs and audit format). Write it before the channels' `remediation_command` lines, because Check 37 accepts only verbs this profile defines.
+  1. `extends`: the presets that match the platform (`neutral` is always applied first; add `kubernetes`, `aws-cloudtrail`, `gcp-audit` or `azure-activity` only when the scenario runs there).
+  2. `actors`: `default` (a person resolving from the Chaos UI) and `auto` (the auto-remediation workflow), named the way this platform's audit log would name them.
+  3. `auto_remediate_channels`: the channels the workflow fixes without approval (default `[16, 17, 18, 19, 20]`; set it explicitly).
+  4. `audit.service` (candidate services, in order) and an audit format (`audit.default` + `audit.formats`) whose body reads like this platform's own command log. Its `match` (`prefix`, `tokens`) must hold for each fix's `{actor}` line in `remediation_effects.log_events`, so that line stands in for the command's audit record; the neutral and space formats match on `{target}`.
+  5. `verbs`: reuse the preset verbs, overriding `summary` / `example` / `describe` so they read in the scenario's terms; add a verb only when no existing verb reads naturally, and remove unused preset verbs with `null`. Add `kinds` the commands target when they need aliases or audit names.
+  6. `runbook` phrases and a `guide`: where the scenario's logs, metrics and command records are, with one runnable ES|QL example (Check 45 warns when `guide` is missing).
+  Then give each fix's `remediation_effects.log_events` one `{actor}` line per command line.
+- **Before / during / after telemetry (step 5b).** In `services/*.yaml`, make each channel's signal metric read three ways, fault first: out of band while `N in all_active` (ramp in with `min(1, elapsed.get(N, 0) / <s>)`), converging back while `N in fixed_channels` (`min(1, since_fix.get(N, 0) / <s>)`), baseline otherwise. Put the configuration the fix changes (active unit, firmware revision, mode) on the subsystem's status log as an attribute keyed on `fixed_channels` or `applied` (`applied.get("link/x-band", {}).get("active")`). Point `verification` at that metric (`from: metrics-generic.otel-default`) and attribute (`from: logs.otel.<ns>`). See `scenarios/space/services/fuel-system.yaml` (`lox_pressure_val`) and `.claude/skills/add-scenario/contract/services.md`.
+
 After each migration is applied, confirm the target version is correct.
 
 ### Step 3: Verify
@@ -137,7 +149,7 @@ After all migrations are applied, run the verifier:
 python3 scripts/verify_yaml_scenarios.py <id>
 ```
 
-A scenario is only up to date when it has no Check 35 errors (unknown `{placeholder}` in `investigation_notes`) and no Check 36 warnings (healthy-looking `choice` clues, faulty units the `stack_trace` lists as healthy). Fix those per the evidence contract in `.claude/skills/add-fault-channel/CONTRACT.md`. At 1.3, Checks 37-44 also run: Checks 37, 38, 39 (names), 40, 41 and 44 are errors; Checks 39 (missing `fault_scope`), 42 (no cause event before the symptoms) and 43 (coherence) are warnings to fix before calling the upgrade done.
+A scenario is only up to date when it has no Check 35 errors (unknown `{placeholder}` in `investigation_notes`) and no Check 36 warnings (healthy-looking `choice` clues, faulty units the `stack_trace` lists as healthy). Fix those per the evidence contract in `.claude/skills/add-fault-channel/CONTRACT.md`. At 1.3, Checks 37-44 also run: Checks 37, 38, 39 (names), 40, 41 and 44 are errors; Checks 39 (missing `fault_scope`), 41 (a verification `metrics.<name>` no service emits, or a log `attributes.<key>` nothing sets), 42 (no cause event before the symptoms) and 43 (coherence) are warnings to fix before calling the upgrade done. Check 45 validates `ops.yaml` at any schema version (known keys, shipped presets, verbs with `summary` and `example`, defined audit formats, existing `audit.service`, `auto_remediate_channels` that are channels, `state_changes` against generator `state_keys`); its errors block, and its missing-`guide` warning should be fixed too.
 
 Also run the auto-discovery check:
 
@@ -224,7 +236,7 @@ If the migration has `breaking: true`, make sure the user understands that any e
 
 If the user confirms, **first collect any `needs_input` values** from the pending migration chain using `AskUserQuestion` — subagents cannot prompt the user mid-run, so gather all required values now and pass them into each subagent prompt. For a per-channel migration such as 1.3, that means the remediation commands and after-state values for every channel of every scenario: draft them from each scenario's investigation notes, confirm them with the user scenario by scenario, and pass the confirmed list to that scenario's subagent.
 
-Then **dispatch one subagent per scenario in a single message** (they run concurrently; each scenario's files are disjoint). The 13 bundled scenarios are: `aws`, `azure`, `banking`, `ecommerce`, `fanatics`, `financial`, `gaming`, `gcp`, `healthcare`, `k8splatform`, `manufacturing`, `space`, `telecom` (confirm with `ls scenarios`; skip any already at the new version — `k8splatform` ships at 1.3).
+Then **dispatch one subagent per scenario in a single message** (they run concurrently; each scenario's files are disjoint). The 13 bundled scenarios are: `aws`, `azure`, `banking`, `ecommerce`, `fanatics`, `financial`, `gaming`, `gcp`, `healthcare`, `k8splatform`, `manufacturing`, `space`, `telecom` (confirm with `ls scenarios`; skip any already at the new version — `azure`, `gcp`, `k8splatform` and `space` ship at 1.3).
 
 **Subagent prompt template** (fill in `<ID>`, `<CURRENT>`, `<NEW>`, `<GUIDANCE>`, and any resolved `needs_input` values):
 

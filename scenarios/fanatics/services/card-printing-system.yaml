@@ -28,71 +28,222 @@ db_operations:
   - UPDATE print_jobs SET status = ?, completed_at = NOW() WHERE job_id = ?
 emit_fault_logs: true
 kpi_emitter: false
-constants:
-  PRODUCTION_METRICS:
-    print_throughput:
-      name: Print Throughput
-      unit: cards/min
-      nominal_min: 120.0
-      nominal_max: 180.0
-      metric: card_printing.throughput
-    print_queue_depth:
-      name: Print Queue Depth
-      unit: jobs
-      nominal_min: 0.0
-      nominal_max: 50.0
-      metric: card_printing.queue_depth
-    ink_coverage:
-      name: Ink Coverage Accuracy
-      unit: '%'
-      nominal_min: 97.0
-      nominal_max: 100.0
-      metric: card_printing.ink_coverage
-    substrate_temp:
-      name: Substrate Temperature
-      unit: C
-      nominal_min: 22.0
-      nominal_max: 28.0
-      metric: card_printing.substrate_temp
+state:
+  q_jobs:
+    init: 0
+  cp_t:
+    init: now
+  qc_in_total:
+    init: 0
+  qc_rej_total:
+    init: 0
 steps:
-- for_each:
-    in: PRODUCTION_METRICS
-    as:
-    - sensor_key
-    - sensor
-    steps:
-    - sample:
-        raw_value:
-          expr: rand.uniform(sensor['nominal_min'], sensor['nominal_max'])
-        noise:
-          expr: rand.gauss(0, (sensor['nominal_max'] - sensor['nominal_min']) * 0.02)
-        value:
-          if_active:
-            expr: round(raw_value + noise, 2)
-          else:
-            expr: round(max(sensor['nominal_min'], min(sensor['nominal_max'], raw_value + noise)), 2)
-    - metric:
-        name:
-          expr: sensor['metric']
-        value:
-          var: value
-        unit:
-          expr: sensor['unit']
-    - log:
-        level: INFO
-        message: '[PrintController] INFO - {sensor_key}: {value} {sensor[unit]} status=NOMINAL'
-        attrs:
-          operation: production_reading
-          sensor.name:
-            var: sensor_key
-          sensor.value:
-            var: value
-          sensor.unit:
-            expr: sensor['unit']
-          sensor.status: NOMINAL
+- sample:
+    dt:
+      expr: "min(10.0, max(0.0, time.time() - cp_t))"
+- counter:
+    state_key: cp_t
+    by:
+      expr: "dt"
+# Ch 16: the retrained model's reject rate steps up at deploy and steps back once the previous
+# model is loaded (30s after the command) as the 1-minute reject window rolls over.
+- sample:
+    qc_bad:
+      expr: "1.0 if 16 in all_active else (min(1.0, max(0.0, 1.0 - (since_fix.get(16, 0) - 30.0) / 30.0)) if 16 in fixed_channels else 0.0)"
+    qc_reject_val:
+      expr: "round(max(0.1, 0.9 + rand.gauss(0, 0.1)) + 13.1 * qc_bad * (1.0 + rand.gauss(0, 0.03)), 2)"
+    qc_model:
+      expr: "'defect-detect-v2.1.0-retrained' if (16 in all_active or (16 in fixed_channels and since_fix.get(16, 0) < 30)) else 'defect-detect-v2.0.3'"
+    qc_status:
+      expr: "'ANOMALY' if qc_reject_val > 2.0 else 'NOMINAL'"
+# Ch 15: RIP render time sets the service rate. Arrivals are ~50 jobs/min (3 cards each, plus
+# reprints of QC rejects); the press can take 100 jobs/min when the RIP keeps up. Queue depth
+# integrates arrivals minus service, so it builds steadily during the fault and drains at
+# (capacity - arrivals) after the fix while throughput recovers as soon as the cache is back.
+- sample:
+    rip_ramp:
+      expr: "min(1.0, elapsed.get(15, 0) / 20.0) if 15 in all_active else (min(1.0, max(0.0, 1.0 - (since_fix.get(15, 0) - 20.0) / 30.0)) if 15 in fixed_channels else 0.0)"
+    rip_render_val:
+      expr: "round((7.0 + 173.0 * rip_ramp) * (1.0 + rand.gauss(0, 0.03)), 1)"
+    rip_cpu_val:
+      expr: "round(min(100.0, (38.0 + 56.0 * rip_ramp) * (1.0 + rand.gauss(0, 0.03))), 1)"
+    lam:
+      expr: "50.0 * (1.0 + qc_reject_val / 100.0) * (1.0 + rand.gauss(0, 0.03))"
+    mu:
+      expr: "min(100.0, 1050.0 / rip_render_val)"
+    q_delta:
+      expr: "max(-q_jobs, (lam - mu) * dt / 60.0)"
+- counter:
+    state_key: q_jobs
+    by:
+      expr: "q_delta"
+- sample:
+    served:
+      expr: "mu if q_jobs > 1.0 else min(mu, lam)"
+    throughput_val:
+      expr: "round(served * 3.0 * (1.0 + rand.gauss(0, 0.02)), 2)"
+    queue_depth_val:
+      expr: "min(500, round(q_jobs + max(0.0, 8.0 + rand.gauss(0, 1.5))))"
+    qc_in_inc:
+      expr: "served * 3.0 * dt / 60.0"
+    qc_rej_inc:
+      expr: "served * 3.0 * dt / 60.0 * qc_reject_val / 100.0"
+    rip_cfg:
+      expr: "'smartstream-prodpro-v7.1-preview' if (15 in all_active or (15 in fixed_channels and since_fix.get(15, 0) < 20)) else 'smartstream-prodpro-v7.0.4'"
+    rip_cache:
+      expr: "'off' if (15 in all_active or (15 in fixed_channels and since_fix.get(15, 0) < 20)) else 'on'"
+    printer_state:
+      expr: "'WAITING_FOR_RIP' if rip_render_val > 20.0 else ('DRAINING_BACKLOG' if q_jobs > 50.0 else 'PRINTING')"
+    queue_status:
+      expr: "'ANOMALY' if queue_depth_val > 100 else 'NOMINAL'"
+    line_status:
+      expr: "'NOMINAL' if queue_depth_val <= 100 and qc_reject_val <= 2.0 else 'DEGRADED'"
+    thr_status:
+      expr: "'NOMINAL' if throughput_val >= 120.0 else 'LOW'"
+    ink_val:
+      expr: "round(max(97.0, min(100.0, 98.6 + rand.gauss(0, 0.12))), 2)"
+    substrate_val:
+      expr: "round(max(22.0, min(28.0, 25.0 + rand.gauss(0, 0.2))), 2)"
+    cat_schema:
+      expr: "'schema-v5.3.0' if (14 in all_active or 14 in fixed_channels) else 'schema-v5.2.4'"
+- counter:
+    state_key: qc_in_total
+    by:
+      expr: "qc_in_inc"
+- counter:
+    state_key: qc_rej_total
+    by:
+      expr: "qc_rej_inc"
+- metric:
+    name: card_printing.throughput
+    value:
+      var: throughput_val
+    unit: cards/min
 - log:
     level: INFO
-    message: '[PrintController] INFO - production_line_check: all systems nominal throughput=156cards/min'
+    message: '[PrintController] INFO - print_throughput: {throughput_val} cards/min status={thr_status}'
+    attrs:
+      operation: production_reading
+      sensor.name: print_throughput
+      sensor.value:
+        var: throughput_val
+      sensor.unit: cards/min
+      sensor.status:
+        var: thr_status
+- metric:
+    name: card_printing.queue_depth
+    value:
+      var: queue_depth_val
+    unit: jobs
+- log:
+    level: INFO
+    message: '[PrintScheduler] INFO - queue_depth={queue_depth_val} jobs (max 500) printer=HP-Indigo-7K-01 state={printer_state}
+      rip_config={rip_cfg} status={queue_status}'
+    attrs:
+      operation: production_reading
+      sensor.name: print_queue_depth
+      sensor.value:
+        var: queue_depth_val
+      sensor.unit: jobs
+      sensor.expected_max: 100
+      sensor.status:
+        var: queue_status
+      print.printer_status:
+        var: printer_state
+      infra.rip_server_config:
+        var: rip_cfg
+- metric:
+    name: card_printing.rip_avg_render_s
+    value:
+      var: rip_render_val
+    unit: s
+- metric:
+    name: card_printing.rip_server_cpu_pct
+    value:
+      var: rip_cpu_val
+    unit: '%'
+- log:
+    level: INFO
+    message: '[RIP] smartstream render_avg={rip_render_val}s cpu={rip_cpu_val}% render_cache={rip_cache} config={rip_cfg}'
+    attrs:
+      operation: rip_status
+      rip.render_avg_s:
+        var: rip_render_val
+      rip.cpu_pct:
+        var: rip_cpu_val
+      print.rip_render_cache:
+        var: rip_cache
+      infra.rip_server_config:
+        var: rip_cfg
+- metric:
+    name: card_printing.qc_reject_pct
+    value:
+      var: qc_reject_val
+    unit: '%'
+- metric:
+    name: card_printing.qc_inspected_total
+    value:
+      var: qc_in_total
+    unit: cards
+- metric:
+    name: card_printing.qc_rejected_total
+    value:
+      var: qc_rej_total
+    unit: cards
+- log:
+    level: INFO
+    message: '[QCInspector] lines=LINE-A,LINE-B,LINE-C model={qc_model} window=60s reject_pct={qc_reject_val}% threshold=2.0% status={qc_status}'
+    attrs:
+      operation: qc_inspection
+      qc.reject_pct:
+        var: qc_reject_val
+      qc.threshold_pct: 2.0
+      qc.status:
+        var: qc_status
+      deployment.qc_vision_model:
+        var: qc_model
+- metric:
+    name: card_printing.ink_coverage
+    value:
+      var: ink_val
+    unit: '%'
+- log:
+    level: INFO
+    message: '[PrintController] INFO - ink_coverage: {ink_val} % status=NOMINAL'
+    attrs:
+      operation: production_reading
+      sensor.name: ink_coverage
+      sensor.value:
+        var: ink_val
+      sensor.unit: '%'
+      sensor.status: NOMINAL
+- metric:
+    name: card_printing.substrate_temp
+    value:
+      var: substrate_val
+    unit: C
+- log:
+    level: INFO
+    message: '[PrintController] INFO - substrate_temp: {substrate_val} C status=NOMINAL'
+    attrs:
+      operation: production_reading
+      sensor.name: substrate_temp
+      sensor.value:
+        var: substrate_val
+      sensor.unit: C
+      sensor.status: NOMINAL
+- log:
+    level: INFO
+    message: '[CatalogReplicator] source=products_master schema={cat_schema}'
+    attrs:
+      operation: catalog_source
+      print.catalog_schema_ver:
+        var: cat_schema
+- log:
+    level: INFO
+    message: '[PrintController] INFO - production_line_check: status={line_status} throughput={throughput_val}cards/min queue={queue_depth_val}
+      qc_reject={qc_reject_val}%'
     attrs:
       operation: system_check
-      check.result: PASS
+      check.result:
+        expr: "'PASS' if line_status == 'NOMINAL' else 'FAIL'"

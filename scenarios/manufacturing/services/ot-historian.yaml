@@ -23,10 +23,6 @@ db_operations:
 emit_fault_logs: true
 kpi_emitter: false
 constants:
-  ARCHIVES_WRITE:
-  - AR-CURRENT
-  - AR-DAILY-01
-  - AR-DAILY-02
   ARCHIVES_COMPACT:
   - AR-DAILY-01
   - AR-DAILY-02
@@ -34,93 +30,128 @@ constants:
 state:
   _writes_total:
     init: 0
-  _last_archive_report:
-    init: now
 steps:
 - sample:
-    archive:
-      choice: ARCHIVES_WRITE
-    batch_size:
-      randint:
-      - 500
-      - 5000
-- log:
-    level: INFO
-    message: '[HIST] archive_write archive={archive} batch_size={batch_size} compression=LZ4 status=OK'
-    attrs:
-      operation: archive_write
-      historian.archive:
-        var: archive
-      historian.batch_size:
-        var: batch_size
-      historian.compression: LZ4
+    # Per-channel fault intensity: ramps 0->1 once the fault reaches this service, drains 1->0 after its fix.
+    f1:
+      expr: "min(1.0, max(0.0, elapsed.get(1, 0) - lag.get(1, 0)) / 20.0) if 1 in all_active else (max(0.0, 1.0 - since_fix.get(1, 0) / 40.0) if 1 in fixed_channels else 0.0)"
+    f4:
+      expr: "min(1.0, max(0.0, elapsed.get(4, 0) - lag.get(4, 0)) / 20.0) if 4 in all_active else (max(0.0, 1.0 - since_fix.get(4, 0) / 60.0) if 4 in fixed_channels else 0.0)"
+    f5:
+      expr: "min(1.0, max(0.0, elapsed.get(5, 0) - lag.get(5, 0)) / 30.0) if 5 in all_active else (max(0.0, 1.0 - since_fix.get(5, 0) / 90.0) if 5 in fixed_channels else 0.0)"
+    f6:
+      expr: "min(1.0, max(0.0, elapsed.get(6, 0) - lag.get(6, 0)) / 10.0) if 6 in all_active else (max(0.0, 1.0 - since_fix.get(6, 0) / 15.0) if 6 in fixed_channels else 0.0)"
+    f7:
+      expr: "min(1.0, max(0.0, elapsed.get(7, 0) - lag.get(7, 0)) / 10.0) if 7 in all_active else (max(0.0, 1.0 - since_fix.get(7, 0) / 20.0) if 7 in fixed_channels else 0.0)"
 - sample:
-    depth:
-      randint:
-      - 120
-      - 8500
-- log:
-    level: DEBUG
-    message: '[HIST] buffer_status depth={depth} watermark_high=50000 watermark_low=10000'
-    attrs:
-      operation: buffer_status
-      historian.buffer_depth:
-        var: depth
-- every:
-    seconds: 10
-    state_key: _last_archive_report
-    steps:
-    - sample:
-        compact_archive:
-          choice: ARCHIVES_COMPACT
-        ratio:
-          uniform:
-          - 3.5
-          - 9.8
-          round: 2
-        duration_s:
-          randint:
-          - 8
-          - 65
-    - log:
-        level: INFO
-        message: '[HIST] archive_compaction archive={compact_archive} compression_ratio={ratio}x duration_s={duration_s}'
-        attrs:
-          operation: archive_compaction
-          historian.archive:
-            var: compact_archive
-          historian.compression_ratio:
-            var: ratio
+    offered_pts_s:
+      expr: "rand.gauss(1200.0, 35.0) * (1.0 - 0.24 * f1) * (1.0 - 0.88 * f7) + f4 * rand.uniform(29000.0, 39000.0)"
+    ingest_pts_s:
+      expr: "int(min(9000.0, offered_pts_s))"
+    write_lag_s:
+      expr: "round(rand.uniform(0.1, 0.8) + f5 * rand.uniform(12.0, 45.0) + f4 * rand.uniform(8.0, 30.0), 2)"
+    buffer_pct:
+      expr: "round(min(99.0, rand.uniform(10.0, 25.0) + f5 * rand.uniform(60.0, 80.0) + f4 * rand.uniform(55.0, 75.0)), 1)"
+    disk_await_ms:
+      expr: "round(rand.uniform(2.0, 6.0) + f5 * rand.uniform(55.0, 135.0) + f4 * rand.uniform(4.0, 12.0), 1)"
+    disk_throughput_mibs:
+      expr: "round(rand.uniform(123.0, 125.0), 1) if f5 > 0.5 and 5 in all_active else (round(rand.uniform(220.0, 320.0), 1) if 5 in fixed_channels and since_fix.get(5, 0) < 90 else round(rand.uniform(40.0, 90.0), 1))"
+    compactions_queued:
+      expr: "int(rand.randint(0, 2) + f5 * rand.randint(12, 30))"
+    out_of_range_per_min:
+      expr: "int(f6 * rand.randint(20, 80))"
+    tag_drops_per_min:
+      expr: "int(max(0.0, offered_pts_s - 9000.0) * 60)"
+    vol_throughput_mibs:
+      expr: "125 if 5 in all_active else 500"
+    vol_iops:
+      expr: "3000 if 5 in all_active else 6000"
+    disk_util_pct:
+      expr: "round(min(100.0, disk_throughput_mibs / vol_throughput_mibs * 100.0), 1)"
 - counter:
     state_key: _writes_total
     by:
-      randint:
-      - 800
-      - 3500
+      var: ingest_pts_s
 - metric:
     name: historian.writes_total
     value:
       var: _writes_total
-    unit: writes
+    unit: points
+- metric:
+    name: historian.ingest_rate_pts_s
+    value:
+      var: ingest_pts_s
+    unit: points/s
 - metric:
     name: historian.write_lag_seconds
     value:
-      if_active:
-        uniform:
-        - 8.0
-        - 45.0
-        round: 2
-      else:
-        uniform:
-        - 0.05
-        - 0.8
-        round: 2
+      var: write_lag_s
     unit: s
 - metric:
     name: historian.buffer_utilization_pct
     value:
-      uniform:
-      - 8.0
-      - 65.0
-      round: 1
+      var: buffer_pct
     unit: '%'
+- metric:
+    name: historian.disk_await_ms
+    value:
+      var: disk_await_ms
+    unit: ms
+- metric:
+    name: historian.disk_throughput_mibs
+    value:
+      var: disk_throughput_mibs
+    unit: MiB/s
+- metric:
+    name: historian.compactions_queued
+    value:
+      var: compactions_queued
+    unit: compactions
+- metric:
+    name: historian.out_of_range_points_per_min
+    value:
+      var: out_of_range_per_min
+    unit: points/min
+- metric:
+    name: historian.dropped_points_per_min
+    value:
+      var: tag_drops_per_min
+    unit: points/min
+- log:
+    level: INFO
+    message: '[HIST] storage volume=historian-data pvc=historian-data-ot-historian-0 type=gp3 throughput_mibs={vol_throughput_mibs} iops={vol_iops} read_write_mibs={disk_throughput_mibs} util_pct={disk_util_pct} await_ms={disk_await_ms}'
+    attrs:
+      operation: storage_status
+      historian.volume_throughput_mibs:
+        var: vol_throughput_mibs
+      historian.volume_iops:
+        var: vol_iops
+      historian.disk_await_ms:
+        var: disk_await_ms
+- log:
+    level: INFO
+    message: '[HIST] buffer_status archive=AR-CURRENT ingest_pts_s={ingest_pts_s} buffer_pct={buffer_pct} write_lag_s={write_lag_s} compactions_queued={compactions_queued}'
+    attrs:
+      operation: buffer_status
+      historian.buffer_utilization_pct:
+        var: buffer_pct
+      historian.write_lag_seconds:
+        var: write_lag_s
+- sample:
+    compact_archive:
+      choice: ARCHIVES_COMPACT
+    shard_mb:
+      randint:
+      - 180
+      - 420
+    compact_s:
+      expr: "round(shard_mb / max(1.0, disk_throughput_mibs) * 2.0, 1)"
+- log:
+    level: INFO
+    message: '[HIST] compaction archive={compact_archive} level=2 shard_mb={shard_mb} duration_s={compact_s} queued={compactions_queued}'
+    attrs:
+      operation: compaction
+      historian.archive_id:
+        var: compact_archive
+      historian.compaction_duration_s:
+        var: compact_s

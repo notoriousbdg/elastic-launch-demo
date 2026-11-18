@@ -9,57 +9,129 @@ affected_services:
 cascade_services:
 - member-portal
 - mobile-gateway
-description: AI-powered photo damage estimation model exceeding response time threshold
+description: AI photo damage estimates time out because the document vault started handing the estimator full-resolution originals instead of its reduced rendition.
 investigation_notes: |-
-  1. Check GPU utilization on the DamageNet inference cluster — 98% GPU util with 847 queued batches indicates the model fleet is saturated. Scale GPU instances: aws autoscaling set-desired-capacity.
-  2. The repair_vs_replace stage is the bottleneck — this is the most compute-intensive step requiring part-level damage classification and repair cost lookup against the CCC ONE/Mitchell databases.
-  3. Review model version DamageNet-v4.2 performance — if inference P99 exceeds SLA after a recent model update, consider rolling back: kubectl rollout undo deployment/damage-estimator.
-  4. Enable MANUAL_ADJUSTER fallback routing — estimated 2-4hr delay is acceptable for non-drivable vehicles. For drivable vehicles, provide preliminary estimate and supplement later.
-  5. Monitor image preprocessing — low quality images (blur, poor lighting) cause the damage_detection stage to run multiple passes. Add client-side image quality validation before upload.
-  6. Check if CAT event volume is causing the surge — photo estimates spike 10-20x after hailstorms. Pre-scale GPU fleet when CAT alerts are issued.
-remediation_action: scale_estimation_fleet
-error_message: '[CLAIMS] CLAIMS-PHOTO-EST-TIMEOUT: claim={claim_id} model_latency_ms={model_latency_ms} sla_ms={model_sla_ms}
-  vehicle={vehicle_desc} images={image_count}'
+  1. Search logs.otel.banking for body.text containing CLAIMS-PHOTO-EST-TIMEOUT on claims-processor: claim={claim_id} ({vehicle_desc}, {image_count} images) took {model_latency_ms} ms against an SLA of {model_sla_ms} ms. metrics.claims_processor.photo_estimate_p95_ms normally reads 1,800-3,200 ms and is now 11,000-26,000 ms, with metrics.claims_processor.estimator_gpu_util_pct pinned at 96-99%.
+  2. The model did not change: the estimator still serves DamageNet-v4.2 and photo volume per minute is at its usual level, so neither a model regression nor a CAT surge explains the GPU load.
+  3. Look at what the estimator receives: metrics.document_vault.estimator_image_mb (average image handed to the estimator) normally reads 0.35-0.7 MB and is now 6.5-9 MB. The rendition_status line on document-vault carries attributes.document.rendition_profile, which reads original instead of estimator-1600px. Preprocessing 12 MP originals multiplies GPU work per image.
+  4. Find the change: ConfigMap vault-rendition-profiles (namespace documents) was reloaded as rev-9 just before the first timeout; the refactor dropped the estimator rendition, so requests for it fall back to the original. Scaling the GPU node pool treats the symptom and costs about four times the normal fleet.
+  5. Fix: opsctl rollback configmap/vault-rendition-profiles -n documents --to-revision previous. document-vault serves the 1600 px rendition again within seconds; the queued estimate batches drain over about two minutes, so latency converges rather than dropping at once.
+  6. Recovery: document.rendition_profile reads estimator-1600px, estimator_image_mb back under 1 MB, photo_estimate_p95_ms back under 3,200 ms, GPU utilisation back to 45-70%, and no new CLAIMS-PHOTO-EST-TIMEOUT lines. Claims that fell back to a manual adjuster can be re-queued for an AI estimate.
+remediation_action: rollback_vault_renditions
+remediation_command: |-
+  opsctl rollback configmap/vault-rendition-profiles -n documents --to-revision previous
+error_message: '[CLAIMS] CLAIMS-PHOTO-EST-TIMEOUT: claim={claim_id} model_latency_ms={model_latency_ms} sla_ms={model_sla_ms} vehicle={vehicle_desc} images={image_count} image_mb={image_mb}'
 stack_trace: |-
-  === PHOTO ESTIMATION PIPELINE ===
-  claim={claim_id}  vehicle={vehicle_desc}
-  --- IMAGE ANALYSIS ---
-    images_submitted={image_count}  quality_pass={image_count}
-    STEP                    STATUS      ELAPSED_MS
-    image_preprocessing     COMPLETE    420
-    damage_detection        COMPLETE    1,240
-    part_identification     COMPLETE    890
-    repair_vs_replace       TIMEOUT     {model_latency_ms}  <<< STUCK
-    cost_estimation         SKIPPED     ---
-    supplement_prediction   SKIPPED     ---
-  --- MODEL HEALTH ---
-    model_version=DamageNet-v4.2  gpu_util=98%  batch_queue=847
-    inference_p99={model_latency_ms}ms  sla={model_sla_ms}ms
-    fallback=MANUAL_ADJUSTER  estimated_delay=2-4hrs
-  ACTION: route_manual=true  scale_gpu_fleet=true  alert=CLAIMS-PHOTO-EST-TIMEOUT
+  === PHOTO ESTIMATE TIMEOUT ===
+  claim={claim_id}  vehicle={vehicle_desc}  images={image_count}
+  --- PIPELINE ---
+    STAGE               ELAPSED_MS   DETAIL
+    image_fetch         {fetch_ms}         rendition=original avg_image_mb={image_mb}
+    preprocess          {preprocess_ms}        resize 4032x3024 -> 1600x1200 on GPU
+    damage_detection    {model_latency_ms}       model=DamageNet-v4.2  <<< SLA {model_sla_ms}
+    repair_vs_replace   ---          SKIPPED
+  --- ESTIMATOR FLEET ---
+    gpu_util={gpu_util}%  queued_batches={queued_batches}
+  ACTION: fallback=MANUAL_ADJUSTER  alert=CLAIMS-PHOTO-EST-TIMEOUT
 correlation_attr:
-  key: runtime.damage_model_weights
-  value: DamageNet-v4.2.1-retrain
+  key: document.rendition_profile
+  value: original
 fault_params:
   claim_id: {format: "CLM-{n}", n: {randint: [100000, 999999]}}
-  model_latency_ms: {randint: [10000, 60000]}
+  model_latency_ms: {randint: [11000, 26000]}
   model_sla_ms: 5000
   vehicle_desc: {choice: [2024 Toyota Camry SE, 2023 Ford F-150 XLT, 2024 Honda CR-V EX, 2023 Chevrolet Silverado 1500, 2024 Hyundai Tucson SEL, 2023 Jeep Wrangler Rubicon]}
   image_count: {randint: [4, 12]}
+  image_mb: {uniform: [6.5, 9.0], round: 1}
+  fetch_ms: {randint: [900, 2400]}
+  preprocess_ms: {randint: [3000, 7000]}
+  gpu_util: {uniform: [96, 99], round: 1}
+  queued_batches: {randint: [500, 1200]}
 rca_clues:
   claims-processor:
-    claims.gpu_utilization_pct: {uniform: [93, 99], round: 1}
+    claims.estimator_gpu_util_pct: {uniform: [96, 99], round: 1}
     claims.model_inference_queue: {randint: [500, 1200]}
-    claims.photo_estimate_volume_x: {uniform: [10, 20], round: 1}
+    claims.damage_model_version: DamageNet-v4.2
   document-vault:
-    document.damage_photo_resolution: 4K
-    document.image_preprocessing_ms: {randint: [300, 800]}
+    document.rendition_profile: original
+    document.estimator_image_mb: {uniform: [6.5, 9.0], round: 1}
   member-portal:
     portal.estimate_eta_display: DELAYED
-    portal.manual_adjuster_fallback: true
   mobile-gateway:
-    gateway.photo_upload_success_rate: {uniform: [0.85, 0.95], round: 2}
     gateway.damage_estimate_timeout: true
+error_services:
+- claims-processor
+service_lag_seconds:
+  claims-processor: 20
+  member-portal: 60
+  mobile-gateway: 60
+cascade_messages:
+  document-vault:
+  - severity: WARN
+    message: '[DOC] rendition_miss profile=estimator-1600px not defined in vault-rendition-profiles rev-9, serving original size=7.8MB container=claims-photos status=FALLBACK'
+  member-portal:
+  - severity: WARN
+    message: '[PORTAL] page_view page=/claims/status claim={claim_id} estimate=DELAYED fallback=manual_adjuster status=200'
+  mobile-gateway:
+  - severity: WARN
+    message: '[MOBILE] api_request endpoint=/api/v1/mobile/claims claim={claim_id} estimate_status=TIMEOUT latency_ms={model_latency_ms} status=202'
+fault_scope:
+  cluster: banking-aks-cluster
+  workloads: [document-vault, claims-processor]
+infrastructure_events:
+- service: document-vault
+  severity: INFO
+  offset_seconds: -90
+  body: '[DOC] config_reload configmap=documents/vault-rendition-profiles rev-8 -> rev-9 profiles=thumbnail-320px,portal-1024px (estimator-1600px removed) applied_by=argocd/documents status=RELOADED'
+  attributes:
+    operation: config_reload
+    document.rendition_config_rev: rev-9
+    user.name: argocd/documents
+remediation_effects:
+  transition_seconds: 120
+  log_events:
+  - service: document-vault
+    severity: INFO
+    offset_seconds: 1
+    body: '[change-audit] change applied action=rollback target=configmap/vault-rendition-profiles namespace=documents cmd="opsctl rollback configmap/vault-rendition-profiles -n documents --to-revision previous" actor={actor} result="rev-9 -> rev-8 (estimator-1600px restored)"'
+    attributes:
+      operation: change_applied
+      change.target: configmap/vault-rendition-profiles
+      document.rendition_config_rev: rev-8
+  - service: document-vault
+    severity: INFO
+    offset_seconds: 6
+    body: '[DOC] config_reload configmap=documents/vault-rendition-profiles rev-9 -> rev-8 profiles=thumbnail-320px,portal-1024px,estimator-1600px status=RELOADED'
+    attributes:
+      operation: config_reload
+      document.rendition_config_rev: rev-8
+  steady_attributes:
+    document-vault:
+      document.rendition_config_rev: rev-8
+  verification:
+  - signal: claims_processor.photo_estimate_p95_ms
+    from: metrics-generic.otel-default
+    where: resource.attributes.service.name == "claims-processor"
+    field: metrics.claims_processor.photo_estimate_p95_ms
+    expect: back under 3,200 ms (was 11,000-26,000 ms)
+    within_seconds: 180
+  - signal: document_vault.estimator_image_mb
+    from: metrics-generic.otel-default
+    where: resource.attributes.service.name == "document-vault"
+    field: metrics.document_vault.estimator_image_mb
+    expect: back in 0.35-0.7 MB (was 6.5-9 MB)
+    within_seconds: 60
+  - signal: estimator rendition profile
+    from: logs.otel.banking
+    where: resource.attributes.service.name == "document-vault" AND attributes.operation == "rendition_status"
+    field: attributes.document.rendition_profile
+    expect: estimator-1600px on every line logged since the fix; original stops appearing
+    within_seconds: 60
+  - signal: CLAIMS-PHOTO-EST-TIMEOUT lines
+    from: logs.otel.banking
+    where: body.text LIKE "*CLAIMS-PHOTO-EST-TIMEOUT*"
+    expect: 0 new lines
+    within_seconds: 180
 business_impact:
   - kpi: business.net_satisfaction_proxy_nps
     value: {uniform: [14.28, 16.42], round: 1}

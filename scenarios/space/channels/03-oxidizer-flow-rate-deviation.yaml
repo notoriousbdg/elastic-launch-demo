@@ -9,13 +9,16 @@ affected_services:
 cascade_services:
 - mission-control
 description: Oxidizer flow rate deviates from commanded value
-investigation_notes: 'Root cause: turbopump cavitation due to LOX inlet temperature rise or inlet pressure drop causing the
-  pump to operate off its design curve. Verify LOX inlet temp (-183C nominal) and inlet pressure (290PSI nominal). Check turbopump
-  RPM vs commanded — a 0.5% shortfall indicates bearing degradation. Inspect main oxidizer valve (MOV) position feedback for
-  actuator slop. Cross-check mixture ratio — flow deviation >3% risks engine-rich shutdown. Remediation: adjust MOV trim position
-  via PMS_FLOW_TRIM command, verify flow converges within 3% tolerance band. If turbopump RPM is low, safe the engine for
-  inspection.'
+investigation_notes: |-
+  Root cause: after the last MOV-OX valve cycle the main oxidizer valve position feedback (LVDT) settled with an offset. The controller believes the valve is at the commanded position, but it is under-open, so LOX flow runs {delta}% below commanded ({measured}kg/s measured vs {commanded}kg/s commanded, tolerance 3%). The turbopump is not the cause: RPM ({turbopump_rpm} vs 31500 commanded) is slightly low only because it follows the reduced flow, and LOX inlet temperature (-183C nominal) and inlet pressure (290PSI nominal) are in range, which rules out cavitation. A deviation above 3% risks an engine-rich shutdown through the mixture ratio.
+  Confirm:
+    - fuel-system logs [PMS] sensor=oxidizer_flow ... delta=-6.5% valve=MOV-OX trim=0.0% status=ANOMALY; metrics fuel_system.oxidizer_flow_rate vs fuel_system.oxidizer_flow_commanded diverge by about 6.5%
+    - the fuel-system warning "[PMS] MOV-OX cycle complete ... position feedback offset" comes before the first PMS-OXIDIZER-FLOW
+    - rca attributes propulsion.lox_inlet_temp_c nominal and propulsion.mov_trim_pct near 0
+  Remediation: trim the main oxidizer valve open by 6.5% to cancel the feedback offset with opsctl patch valve/mov-ox --trim-pct=6.5. The flow converges to within 3% of commanded over about 45 seconds as the valve moves and the feed line settles. If the turbopump RPM stays low after the trim, safe the engine for inspection.
 remediation_action: recalibrate_engine
+remediation_command: |-
+  opsctl patch valve/mov-ox --trim-pct=6.5
 error_message: '[PMS] PMS-OXIDIZER-FLOW: measured={measured}kg/s commanded={commanded}kg/s delta={delta}% tolerance=3.0%'
 stack_trace: |-
   == TELEMETRY FRAME DUMP == PMS OXIDIZER FLOW CONTROLLER ==
@@ -26,16 +29,17 @@ stack_trace: |-
   LOX_INLET_TEMP     -182.4C    -183.0C     +0.3%
   LOX_INLET_PRESS    287.3PSI   290.0PSI    -0.9%
   TURBOPUMP_RPM      {turbopump_rpm}      31500       BELOW_CMD
+  MOV_OX_POSITION    FEEDBACK=CMD   ACTUAL=UNDER   OFFSET_SUSPECT
   ---------------------------------------------------------------
   FLOW TOLERANCE: 3.0% | MEASURED DELTA: {delta}%
   PMS-OXIDIZER-FLOW: Flow deviation exceeds tolerance band
-  ACTION: Check turbopump inlet conditions and valve position feedback
+  ACTION: Check valve position feedback and turbopump inlet conditions
 correlation_attr:
-  key: runtime.gc_policy
-  value: gogc-25-memlimit-1gib
+  key: propulsion.mov_ox_cycle_id
+  value: MOV-OX-CYC-0412
 fault_params:
-  measured: 4.86
-  commanded: 5.20
+  measured: 11.59
+  commanded: 12.40
   delta: "-6.5"
   turbopump_rpm: {randint: [30800, 31200]}
 rca_clues:
@@ -44,10 +48,64 @@ rca_clues:
     propulsion.mov_trim_pct: {uniform: [-0.4, 0.4], round: 1}
     propulsion.lox_inlet_temp_c: {uniform: [-183.3, -182.7], round: 1}
   sensor-validator:
-    validation.flow_delta_pct: {uniform: [3.5, 8.0], round: 1}
+    validation.flow_delta_pct: {uniform: [5.8, 7.2], round: 1}
     validation.sensor_type: flow_rate
   mission-control:
     upstream.degraded_subsystem: propulsion
+cascade_messages:
+  mission-control:
+    - severity: WARN
+      message: '[MCC] ALERT subsystem=propulsion code=PMS-OXIDIZER-FLOW delta={delta}% measured={measured}kg/s commanded={commanded}kg/s; mixture ratio watch opened'
+fault_scope:
+  workloads: [fuel-system, sensor-validator]
+infrastructure_events:
+  - service: fuel-system
+    severity: WARN
+    offset_seconds: -75
+    body: '[PMS] MOV-OX cycle complete cycle_id=MOV-OX-CYC-0412 open/close=PASS; position feedback offset after cycle LVDT=-6.4% vs commanded (limit 2.0%)'
+    attributes:
+      operation: valve_cycle
+      propulsion.valve: MOV-OX
+      propulsion.mov_ox_cycle_id: MOV-OX-CYC-0412
+      propulsion.position_feedback_offset_pct: -6.4
+remediation_effects:
+  log_taper_seconds: 45
+  log_events:
+    - service: mission-control
+      severity: INFO
+      offset_seconds: 1
+      body: '[MCC] CMD ACCEPTED opsctl patch valve/mov-ox --trim-pct=6.5 from {actor}: MOV-OX trim 0.0% -> +6.5%'
+      attributes:
+        operation: command
+        command.target: valve/mov-ox
+    - service: fuel-system
+      severity: INFO
+      offset_seconds: 30
+      body: '[PMS] MOV-OX trim +6.5% applied; LOX flow 12.31kg/s commanded 12.40kg/s delta=-0.7% status=NOMINAL'
+      attributes:
+        operation: valve_trim
+        propulsion.mov_trim_pct: 6.5
+  steady_attributes:
+    fuel-system:
+      propulsion.mov_trim_pct: 6.5
+  verification:
+    - signal: fuel_system.oxidizer_flow_rate
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "fuel-system"'
+      field: 'metrics.fuel_system.oxidizer_flow_rate'
+      expect: 'within 3% of fuel_system.oxidizer_flow_commanded (12.4 kg/s), i.e. 12.03-12.77 kg/s; was ~11.6 kg/s (-6.5%)'
+      within_seconds: 90
+    - signal: PMS-OXIDIZER-FLOW lines
+      from: 'logs.otel.nova7'
+      where: 'body.text LIKE "*PMS-OXIDIZER-FLOW*"'
+      expect: '0 new lines'
+      within_seconds: 90
+    - signal: MOV-OX trim
+      from: 'logs.otel.nova7'
+      where: 'resource.attributes.service.name == "fuel-system"'
+      field: 'attributes.propulsion.mov_trim_pct'
+      expect: '6.5 on every line logged since the fix'
+      within_seconds: 90
 business_impact:
   - kpi: business.mission_success_probability_pct
     factor: {uniform: [0.60, 0.82]}

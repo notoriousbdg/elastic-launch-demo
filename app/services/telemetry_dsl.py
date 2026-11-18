@@ -191,6 +191,12 @@ class YamlService(BaseService):
             "fixed_channels": list(getattr(self.chaos_controller, "get_fixed_channels", lambda: [])()),
             # Every active channel, not only those naming this service.
             "all_active": list(self.chaos_controller.get_active_channels()),
+            # Seconds since each fixed channel's fix landed, so a value converges back to
+            # nominal after the fix instead of snapping: min(1, since_fix.get(2, 0) / 60).
+            "since_fix": dict(getattr(self.chaos_controller, "get_since_fix", lambda: {})()),
+            # Latest applied opsctl flags per target ("kind/name" -> {flag: value, "_verb"}),
+            # for any command, not only a completed fix: a partial or wrong change shows too.
+            "applied": dict(getattr(self.chaos_controller, "get_applied", lambda: {})()),
         }
         # Seconds since each active channel was triggered, so a service can ramp a
         # value (e.g. Ingress count climbing as objects are created) instead of stepping.
@@ -198,6 +204,15 @@ class YamlService(BaseService):
         env["elapsed"] = {
             ch: e for ch in env["all_active"]
             if _elapsed is not None and (e := _elapsed(ch)) is not None
+        }
+        # Seconds of onset delay that apply to THIS service per active channel (the
+        # channel's onset_delay_seconds plus its service_lag_seconds entry), so a
+        # dependent's metric can start later than the component at fault:
+        # min(1, max(0, elapsed.get(5, 0) - lag.get(5, 0)) / 20).
+        env["lag"] = {
+            ch: float((self._channel_registry.get(ch) or {}).get("onset_delay_seconds", 0) or 0)
+            + self._service_lag(self._channel_registry.get(ch) or {})
+            for ch in env["all_active"]
         }
         # Real timestamps for message bodies that carry their own (klog, logfmt, JSON).
         import datetime as _dt
@@ -297,7 +312,7 @@ class YamlService(BaseService):
 
         # ``with_remediation_meta`` is accepted for older specs but no longer stamps
         # chaos.* fields or an event_name JSON blob on the record: who triggered a
-        # fault now lives in the {ns}-chaos-context index (see Instance.trigger_channel).
+        # fault now lives in the {ns}-notify-context index (see Instance.trigger_channel).
         if with_remed and channel is not None:
             self.emit_log(level, message, attrs or None, channel=channel, identity=identity)
         else:

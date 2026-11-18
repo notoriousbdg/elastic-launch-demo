@@ -36,15 +36,28 @@ constants:
   - Lipase
   - UA
   - Blood Culture
+  HEMATOLOGY_TESTS:
+  - CBC
+  - PT/INR
+  - UA
+  - Blood Culture
 state:
   _results_processed:
     init: 0
   _last_queue_report:
     init: now
+# Before / during / after (schema 1.3):
+#   ch 3  LIS2-A2 bridge v2.8.1-beta on the chemistry connection (COBAS-8000) stops ACKing ASTM frames:
+#         chemistry results fall to ~0/min in ~30s; hematology (SYSMEX-XN, bridge v2.8.0) keeps
+#         delivering. After the rollback the analyzer uploads its buffered results (70-90/min for
+#         ~90s), then settles at 20-40/min by ~180s; chemistry TAT follows over ~180s.
+#   ch 15 ISBT 128 scanner driver v1.7.3-patched at BB-DISP-01: scanner offline, units dispensed
+#         without a scan; the Cryoprecipitate group A discrepancy grows to 7 in ~120s. After the
+#         driver rollback and the reconciliation job the book count matches the RFID count in ~20s.
 steps:
 - sample:
     test:
-      choice: TEST_TYPES
+      expr: "rand.choice(HEMATOLOGY_TESTS) if 3 in all_active else rand.choice(TEST_TYPES)"
     order_id:
       expr: f'LAB-{rand.randint(100000, 999999)}'
     tat_min:
@@ -97,6 +110,112 @@ steps:
       lab.patient_id:
         var: order_patient_id
       lab.status: SPECIMEN_RECEIVED
+# ── ch 3: analyzer ASTM connections ────────────────────────────────────────
+- sample:
+    chem_results_1m:
+      expr: "round(30.0 + (rand.uniform(0.0, 1.5) - 30.0) * min(1.0, elapsed.get(3, 0) / 30.0), 1) if 3 in all_active
+        else ((round(rand.uniform(70.0, 90.0), 1) if since_fix.get(3, 0) < 90
+               else round(80.0 + (max(20.0, min(40.0, rand.gauss(30.0, 3.0))) - 80.0) * min(1.0, (since_fix.get(3, 0) - 90.0) / 90.0), 1)) if 3 in fixed_channels
+        else round(max(20.0, min(40.0, rand.gauss(30.0, 3.0))), 1))"
+    heme_results_1m:
+      expr: "round(max(35.0, min(55.0, rand.gauss(45.0, 4.0))), 1)"
+    chem_bridge:
+      expr: "'lis2a2-bridge-v2.8.1-beta' if 3 in all_active else 'lis2a2-bridge-v2.8.0'"
+    chem_enq_timeouts_1m:
+      expr: "rand.randint(10, 20) if 3 in all_active else 0"
+    chem_status:
+      expr: "'STALLED' if 3 in all_active or chem_results_1m < 10.0 else 'OK'"
+    tat_minutes:
+      expr: "round(28.0 + (rand.uniform(60.0, 85.0) - 28.0) * min(1.0, elapsed.get(3, 0) / 120.0), 1) if 3 in all_active
+        else (round(72.0 + (rand.uniform(18.0, 40.0) - 72.0) * min(1.0, since_fix.get(3, 0) / 180.0), 1) if 3 in fixed_channels
+        else round(rand.uniform(18.0, 40.0), 1))"
+- metric:
+    name: lab.astm_results_per_min
+    value:
+      var: chem_results_1m
+    unit: results/min
+- metric:
+    name: lab.avg_turnaround_minutes
+    value:
+      var: tat_minutes
+    unit: min
+- log:
+    level: INFO
+    message: '[LIS] astm_link instrument=COBAS-8000 line=chemistry port=5562 bridge={chem_bridge} results_1m={chem_results_1m} enq_timeouts_1m={chem_enq_timeouts_1m} status={chem_status}'
+    attrs: &chem_attrs
+      operation: instrument_link_status
+      lab.instrument_id: COBAS-8000
+      lab.instrument_line: chemistry
+      deployment.lis_interface_version:
+        var: chem_bridge
+      lis.astm_results_received_per_min:
+        var: chem_results_1m
+      lis.enq_timeouts_per_min:
+        var: chem_enq_timeouts_1m
+      lis.instrument_link_status:
+        var: chem_status
+  when: "chem_status == 'OK'"
+- log:
+    level: WARN
+    message: '[LIS] astm_link instrument=COBAS-8000 line=chemistry port=5562 bridge={chem_bridge} results_1m={chem_results_1m} enq_timeouts_1m={chem_enq_timeouts_1m} status={chem_status}'
+    attrs: *chem_attrs
+  when: "chem_status != 'OK'"
+- log:
+    level: INFO
+    message: '[LIS] astm_link instrument=SYSMEX-XN line=hematology port=5563 bridge=lis2a2-bridge-v2.8.0 results_1m={heme_results_1m} enq_timeouts_1m=0 status=OK'
+    attrs:
+      operation: instrument_link_status
+      lab.instrument_id: SYSMEX-XN
+      lab.instrument_line: hematology
+      deployment.lis_interface_version: lis2a2-bridge-v2.8.0
+      lis.astm_results_received_per_min:
+        var: heme_results_1m
+      lis.instrument_link_status: OK
+# ── ch 15: blood bank inventory ────────────────────────────────────────────
+- sample:
+    bb_discrepancy:
+      expr: "int(round(7 * min(1.0, elapsed.get(15, 0) / 120.0))) if 15 in all_active
+        else ((7 if since_fix.get(15, 0) < 20 else 0) if 15 in fixed_channels else 0)"
+    bb_rfid_count:
+      expr: "11 - bb_discrepancy if 15 in all_active else (4 if 15 in fixed_channels else 11)"
+    bb_system_count:
+      expr: "bb_rfid_count + bb_discrepancy"
+    bb_scanner_state:
+      expr: "'OFFLINE' if 15 in all_active else 'ONLINE'"
+    bb_driver:
+      expr: "'isbt128-scanner-v1.7.3-patched' if 15 in all_active else 'isbt128-scanner-v1.7.2'"
+    bb_status:
+      expr: "'MISMATCH' if bb_discrepancy > 0 else 'OK'"
+- metric:
+    name: lab.bb_inventory_discrepancy_units
+    value:
+      var: bb_discrepancy
+    unit: units
+- log:
+    level: INFO
+    message: '[LIS] bb_inventory product=Cryoprecipitate abo=A book_count={bb_system_count} rfid_count={bb_rfid_count} discrepancy={bb_discrepancy} scanner=BB-DISP-01 scanner_state={bb_scanner_state} driver={bb_driver} status={bb_status}'
+    attrs: &bb_attrs
+      operation: blood_bank_inventory
+      bb.product: Cryoprecipitate
+      bb.abo_group: A
+      bb.system_count:
+        var: bb_system_count
+      bb.rfid_count:
+        var: bb_rfid_count
+      bb.discrepancy_units:
+        var: bb_discrepancy
+      bb.isbt_scanner_status:
+        var: bb_scanner_state
+      deployment.bb_isbt_driver:
+        var: bb_driver
+      bb.inventory_status:
+        var: bb_status
+  when: "bb_status == 'OK'"
+- log:
+    level: WARN
+    message: '[LIS] bb_inventory product=Cryoprecipitate abo=A book_count={bb_system_count} rfid_count={bb_rfid_count} discrepancy={bb_discrepancy} scanner=BB-DISP-01 scanner_state={bb_scanner_state} driver={bb_driver} status={bb_status}'
+    attrs: *bb_attrs
+  when: "bb_status != 'OK'"
 - every:
     seconds: 10
     state_key: _last_queue_report
@@ -129,21 +248,6 @@ steps:
     value:
       var: _results_processed
     unit: results
-- sample:
-    tat_minutes:
-      if_active:
-        randint:
-        - 90
-        - 300
-      else:
-        randint:
-        - 10
-        - 45
-- metric:
-    name: lab.avg_turnaround_minutes
-    value:
-      var: tat_minutes
-    unit: min
 - metric:
     name: lab.pending_orders
     value:

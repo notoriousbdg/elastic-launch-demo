@@ -15,109 +15,145 @@ topology:
   - POST
 emit_fault_logs: true
 kpi_emitter: false
-state:
-  _bearer_count:
-    init: 0
-  _last_summary:
-    init: now
 steps:
+# 5G/EPC packet core and RAN performance counters for the Frankfurt market.
+#   ch 4  gNB-FRA-417 FRA417-n78-1 locked: PRB on the remaining carrier climbs within ~30s; after the
+#         rollback the cell is back after ~40s and load balancing takes ~60s more.
+#   ch 5  T3412 12 min from the trigger: TAU climbs to ~3x over 150s (compressed; UEs adopt the timer
+#         at their next TAU), CPU passes 85% ~120s in (onset); after the rollback UEs get
+#         T3412=54 at their next TAU, so TAU and MME CPU decay over ~4 min.
+#   ch 6  UE pool /20 from the trigger: new sessions fill its 4,094 addresses over 90s (onset), then
+#         every Create Session is rejected; restored on commit, tunnels recover over ~2 min.
 - sample:
-    bearer_type:
-      choice:
-      - 5G_NR
-      - LTE
-      - NR-DC
-      - LTE-A
-    qos_class:
-      choice:
-      - QCI-1
-      - QCI-5
-      - QCI-9
-      - 5QI-1
-      - 5QI-9
-    cell_id:
-      format: "CELL-EU-{n}"
-      n:
-        randint:
-        - 10000
-        - 99999
-- counter:
-    state_key: _bearer_count
-    by: 1
-- log:
-    level: INFO
-    message: '[NET] bearer_allocation type={bearer_type} qos={qos_class} cell={cell_id} status=ALLOCATED'
-    attrs:
-      operation: bearer_allocation
-      network.bearer_type:
-        var: bearer_type
-      network.qos_class:
-        var: qos_class
-- sample:
-    sctp_load:
-      randint:
-      - 30
-      - 70
-    attach_rate:
-      randint:
-      - 200
-      - 500
-- log:
-    level: INFO
-    message: '[NET] signaling_health sctp_load={sctp_load}% attach_rate={attach_rate}/min status=NORMAL'
-    attrs:
-      operation: signaling_health
-      network.sctp_load_pct:
-        var: sctp_load
-      network.attach_rate:
-        var: attach_rate
-- every:
-    seconds: 10
-    state_key: _last_summary
-    steps:
-    - log:
-        level: INFO
-        message: '[NET] network_summary bearers_allocated={_bearer_count} gtp_tunnels=42000 mme_pool=HEALTHY status=NORMAL'
-        attrs:
-          operation: network_summary
-          network.bearers_allocated:
-            var: _bearer_count
-          network.gtp_tunnels: 42000
-- sample:
-    prb_util:
-      if_active:
-        uniform:
-        - 90.0
-        - 99.0
-        round: 1
-      else:
-        uniform:
-        - 40.0
-        - 75.0
-        round: 1
-    active_bearers:
-      if_active:
-        randint:
-        - 240
-        - 256
-      else:
-        randint:
-        - 100
-        - 200
+    r4:
+      expr: "min(1.0, elapsed.get(4, 0) / 30.0) if 4 in all_active else ((1.0 if since_fix.get(4, 0) < 40 else max(0.0, 1.0 - (since_fix.get(4, 0) - 40.0) / 60.0)) if 4 in fixed_channels else 0.0)"
+    cells_locked:
+      expr: "1 if (4 in all_active or (4 in fixed_channels and since_fix.get(4, 0) < 40)) else 0"
+    cells_enabled:
+      expr: "2 - cells_locked"
+    prb_center:
+      expr: "55.0 + 42.0 * r4"
+    prb_pct:
+      expr: "round(min(99.8, prb_center + rand.gauss(0, 1.2)), 1)"
+    pdu_fail:
+      expr: "max(0, int(3 + 250.0 * r4 + rand.gauss(0, 1 + 15.0 * r4)))"
+    amf_cpu_pct:
+      expr: "round(35.0 + rand.gauss(0, 1.5), 1)"
+    cm_revision:
+      expr: "'cm-fra417-r212' if 4 in all_active else 'cm-fra417-r211'"
+    ran_status:
+      expr: "'ANOMALY' if 4 in all_active or prb_pct > 85.0 else 'NORMAL'"
 - metric:
     name: network_core.prb_utilization_pct
-    value:
-      var: prb_util
+    value: {var: prb_pct}
     unit: '%'
 - metric:
-    name: network_core.active_bearers
-    value:
-      var: active_bearers
-    unit: bearers
+    name: network_core.cells_locked
+    value: {var: cells_locked}
+    unit: cells
+- metric:
+    name: network_core.pdu_setup_failures_per_min
+    value: {var: pdu_fail}
+    unit: failures/min
+- metric:
+    name: network_core.amf_cpu_pct
+    value: {var: amf_cpu_pct}
+    unit: '%'
+- log:
+    level: INFO
+    message: 'ran-pm gnb=gNB-FRA-417 cells_enabled={cells_enabled}/2 dl_prb_util={prb_pct}% pdu_setup_fail_last_min={pdu_fail} cm_revision={cm_revision} amf_cpu={amf_cpu_pct}% status={ran_status}'
+    attrs:
+      operation: ran_pm
+      ran.gnb_id: gNB-FRA-417
+      ran.prb_utilization_pct: {var: prb_pct}
+      ran.cells_locked: {var: cells_locked}
+      ran.pdu_setup_failures_per_min: {var: pdu_fail}
+      ran.cm_revision: {var: cm_revision}
+      ran.status: {var: ran_status}
+- sample:
+    r5:
+      expr: "min(1.0, elapsed.get(5, 0) / 150.0) if 5 in all_active else (max(0.0, 1.0 - since_fix.get(5, 0) / 240.0) if 5 in fixed_channels else 0.0)"
+    tau_per_min:
+      expr: "int((11000 + 22500 * r5) * (1.0 + rand.gauss(0, 0.015)))"
+    mme_cpu_pct:
+      expr: "round(min(99.0, 42.0 + 53.0 * r5 + rand.gauss(0, 1.0)), 1)"
+    attach_per_min:
+      expr: "int(900 * (1.0 + rand.gauss(0, 0.03)))"
+    nas_queue:
+      expr: "max(0, int(60 + 4700 * max(0.0, (mme_cpu_pct - 80.0) / 17.0) + rand.gauss(0, 10)))"
+    t3412_min:
+      expr: "12 if 5 in all_active else 54"
+    mme_status:
+      expr: "'ANOMALY' if 5 in all_active or mme_cpu_pct > 85.0 else 'NORMAL'"
+- metric:
+    name: network_core.tau_per_min
+    value: {var: tau_per_min}
+    unit: procedures/min
+- metric:
+    name: network_core.mme_cpu_pct
+    value: {var: mme_cpu_pct}
+    unit: '%'
+- metric:
+    name: network_core.attach_per_min
+    value: {var: attach_per_min}
+    unit: procedures/min
+- metric:
+    name: network_core.nas_queue_depth
+    value: {var: nas_queue}
+    unit: messages
+- log:
+    level: INFO
+    message: 'mme-fra-01 pm: pool=mme-pool-eu-central cpu={mme_cpu_pct}% tau_per_min={tau_per_min} attach_per_min={attach_per_min} nas_queue={nas_queue} t3412={t3412_min}min status={mme_status}'
+    attrs:
+      operation: mme_pm
+      mme.pool: mme-pool-eu-central
+      mme.cpu_pct: {var: mme_cpu_pct}
+      mme.tau_per_min: {var: tau_per_min}
+      mme.t3412_min: {var: t3412_min}
+      mme.status: {var: mme_status}
+- sample:
+    fill6:
+      expr: "min(1.0, elapsed.get(6, 0) / 90.0) if 6 in all_active else 0.0"
+    r6:
+      expr: "min(1.0, max(0.0, elapsed.get(6, 0) - 90.0) / 10.0) if 6 in all_active else 0.0"
+    pool_util_pct:
+      expr: "round(100.0 * fill6, 1) if 6 in all_active else round(61.0 + (1.5 * max(0.0, 1.0 - since_fix.get(6, 0) / 120.0) if 6 in fixed_channels else 0.0) + rand.gauss(0, 0.3), 1)"
+    rejects_per_min:
+      expr: "max(0, int(1200.0 * r6 + rand.gauss(0, 60.0 * r6)))"
+    tunnels_active:
+      expr: "int((160000 - 20000 * min(1.0, elapsed.get(6, 0) / 600.0) if 6 in all_active else (160000 - 12000 * max(0.0, 1.0 - since_fix.get(6, 0) / 120.0) if 6 in fixed_channels else 160000)) * (1.0 + rand.gauss(0, 0.004)))"
+    active_bearers:
+      expr: "int(tunnels_active * 1.18)"
+    ue_pool_cidr:
+      expr: "'100.64.0.0/20' if 6 in all_active else '100.64.0.0/14'"
+    pool_free:
+      expr: "int(4094 * (1.0 - fill6)) if 6 in all_active else int(262142 * (1.0 - pool_util_pct / 100.0))"
+    pgw_status:
+      expr: "'ANOMALY' if 6 in all_active else 'NORMAL'"
+- metric:
+    name: network_core.ue_ip_pool_utilization_pct
+    value: {var: pool_util_pct}
+    unit: '%'
+- metric:
+    name: network_core.create_session_rejects_per_min
+    value: {var: rejects_per_min}
+    unit: rejects/min
 - metric:
     name: network_core.gtp_tunnels_active
-    value:
-      randint:
-      - 30000
-      - 45000
+    value: {var: tunnels_active}
     unit: tunnels
+- metric:
+    name: network_core.active_bearers
+    value: {var: active_bearers}
+    unit: bearers
+- log:
+    level: INFO
+    message: 'pgw-fra-02 pm: apn=internet.meridian.eu pool=meridian-internet-v4 range={ue_pool_cidr} utilization={pool_util_pct}% free={pool_free} create_session_rejects_last_min={rejects_per_min} gtp_tunnels={tunnels_active} status={pgw_status}'
+    attrs:
+      operation: pgw_pm
+      pgw.ue_pool: meridian-internet-v4
+      pgw.ue_pool_cidr: {var: ue_pool_cidr}
+      pgw.ue_pool_utilization_pct: {var: pool_util_pct}
+      pgw.create_session_rejects_per_min: {var: rejects_per_min}
+      pgw.gtp_tunnels_active: {var: tunnels_active}
+      pgw.status: {var: pgw_status}

@@ -21,20 +21,39 @@ kpi_emitter: false
 constants:
   MODALITIES:
   - CT
-  - MRI
-  - XR
+  - MR
+  - CR
+  - DX
   - US
   - MG
   - NM
+  STORAGE_SOP_CLASSES:
+  - {modality: CT, sop: CT Image Storage}
+  - {modality: MR, sop: MR Image Storage}
+  - {modality: CR, sop: Computed Radiography Image Storage}
+  - {modality: DX, sop: Digital X-Ray Image Storage - For Presentation}
+  - {modality: US, sop: Ultrasound Image Storage}
+  - {modality: MG, sop: Digital Mammography X-Ray Image Storage - For Presentation}
+  - {modality: NM, sop: Nuclear Medicine Image Storage}
 state:
   _studies_processed:
     init: 0
   _last_pacs_report:
     init: now
+  _last_assoc_report:
+    init: 0
+# Before / during / after (schema 1.3):
+#   ch 16 the pacs-vna-migration schedule was left suspended after the ONTAP 9.14.1P3 upgrade:
+#         PACS-VOL-01 (5 TB) climbs to ~94% with the last successful migration ~72h ago. After the
+#         schedule is resumed and a run is started, the oldest 90 days of studies move to VNA-TIER2
+#         and usage falls below 85% in ~160s, ~79% when the batch completes (~240s).
+#   ch 19 gateway dcm4chee-5.31.1-patch3 negotiates CT Image Storage for every modality: CT stores,
+#         every other modality fails with 0xA900 (64-76% of C-STOREs) within ~20s. After the rollback
+#         the modalities resend their queued studies and the failure rate is back under 0.5% in ~45s.
 steps:
 - sample:
     modality:
-      choice: MODALITIES
+      expr: "'CT' if 19 in all_active else rand.choice(MODALITIES)"
     study_uid_mid:
       randint:
       - 10000
@@ -96,6 +115,112 @@ steps:
         var: pending
       imaging.next_patient:
         var: next_patient
+# ── ch 19: DICOM gateway ───────────────────────────────────────────────────
+- sample:
+    cstore_fail_pct:
+      expr: "round(0.2 + (rand.uniform(64.0, 76.0) - 0.2) * min(1.0, elapsed.get(19, 0) / 20.0), 1) if 19 in all_active
+        else (round(70.0 + (rand.uniform(0.0, 0.4) - 70.0) * min(1.0, since_fix.get(19, 0) / 45.0), 1) if 19 in fixed_channels
+        else round(rand.uniform(0.0, 0.4), 1))"
+    non_ct_fail_frac:
+      expr: "min(1.0, elapsed.get(19, 0) / 20.0) if 19 in all_active
+        else (max(0.0, 1.0 - since_fix.get(19, 0) / 45.0) if 19 in fixed_channels else 0.0)"
+    gw_build:
+      expr: "'dcm4chee-5.31.1-patch3' if 19 in all_active else 'dcm4chee-5.31.1-patch2'"
+    gw_status:
+      expr: "'DEGRADED' if 19 in all_active or cstore_fail_pct > 2.0 else 'OK'"
+- metric:
+    name: imaging.cstore_failure_pct
+    value:
+      var: cstore_fail_pct
+    unit: '%'
+- log:
+    level: INFO
+    message: '[PACS] gateway_status called_ae=PACS-SCP-01 build={gw_build} cstore_failure_pct={cstore_fail_pct}% status={gw_status}'
+    attrs: &gw_attrs
+      operation: gateway_status
+      infra.pacs_gateway_build:
+        var: gw_build
+      dicom.cstore_failure_pct:
+        var: cstore_fail_pct
+      dicom.gateway_status:
+        var: gw_status
+  when: "gw_status == 'OK'"
+- log:
+    level: WARN
+    message: '[PACS] gateway_status called_ae=PACS-SCP-01 build={gw_build} cstore_failure_pct={cstore_fail_pct}% status={gw_status}'
+    attrs: *gw_attrs
+  when: "gw_status != 'OK'"
+- every:
+    seconds: 15
+    state_key: _last_assoc_report
+    steps:
+    - for_each:
+        in: STORAGE_SOP_CLASSES
+        as: sc
+        steps:
+        - sample:
+            assoc_sent:
+              expr: "rand.randint(8, 40)"
+            assoc_failed:
+              expr: "0 if sc['modality'] == 'CT' else int(round(assoc_sent * non_ct_fail_frac))"
+            assoc_sop:
+              expr: "'CT Image Storage' if 19 in all_active else sc['sop']"
+            assoc_modality:
+              expr: "sc['modality']"
+        - log:
+            level: INFO
+            message: '[PACS] cstore_assoc calling_ae={assoc_modality}-SCU called_ae=PACS-SCP-01 abstract_syntax="{assoc_sop}" transfer_syntax=1.2.840.10008.1.2.1 sent={assoc_sent} failed={assoc_failed}'
+            attrs:
+              operation: dicom_association
+              dicom.calling_ae:
+                expr: "sc['modality'] + '-SCU'"
+              dicom.negotiated_sop_class:
+                var: assoc_sop
+              dicom.cstore_sent:
+                var: assoc_sent
+              dicom.cstore_failed:
+                var: assoc_failed
+              infra.pacs_gateway_build:
+                var: gw_build
+# ── ch 16: PACS volume and VNA migration ───────────────────────────────────
+- sample:
+    vol01_used_pct:
+      expr: "round(84.0 + (93.8 - 84.0) * min(1.0, elapsed.get(16, 0) / 60.0) + rand.gauss(0, 0.1), 1) if 16 in all_active
+        else (round(93.8 - (93.8 - 79.0) * min(1.0, since_fix.get(16, 0) / 240.0) + rand.gauss(0, 0.1), 1) if 16 in fixed_channels
+        else round(rand.uniform(76.0, 80.0), 1))"
+    vol01_free_gb:
+      expr: "int(5000 * (100.0 - vol01_used_pct) / 100.0)"
+    vna_job_state:
+      expr: "'SUSPENDED' if 16 in all_active else ('RUNNING' if 16 in fixed_channels and since_fix.get(16, 0) < 240 else 'SCHEDULED')"
+    vna_last_success_h:
+      expr: "rand.randint(71, 73) if 16 in all_active else (0 if 16 in fixed_channels else rand.randint(2, 20))"
+    vol01_status:
+      expr: "'CRITICAL' if vol01_used_pct >= 85.0 else 'OK'"
+- metric:
+    name: imaging.pacs_storage_used_pct
+    value:
+      var: vol01_used_pct
+    unit: '%'
+- log:
+    level: INFO
+    message: '[PACS] archive_migration job=pacs-vna-migration state={vna_job_state} last_success_h={vna_last_success_h} volume=PACS-VOL-01 used={vol01_used_pct}% free={vol01_free_gb}GB target=VNA-TIER2 status={vol01_status}'
+    attrs: &vna_attrs
+      operation: archive_migration_status
+      pacs.volume_id: PACS-VOL-01
+      pacs.volume_used_pct:
+        var: vol01_used_pct
+      pacs.archive_job_state:
+        var: vna_job_state
+      pacs.archive_migration_last_success_h:
+        var: vna_last_success_h
+      pacs.volume_status:
+        var: vol01_status
+  when: "vol01_status == 'OK'"
+- log:
+    level: WARN
+    message: '[PACS] archive_migration job=pacs-vna-migration state={vna_job_state} last_success_h={vna_last_success_h} volume=PACS-VOL-01 used={vol01_used_pct}% free={vol01_free_gb}GB target=VNA-TIER2 status={vol01_status}'
+    attrs: *vna_attrs
+  when: "vol01_status != 'OK'"
 - every:
     seconds: 10
     state_key: _last_pacs_report
@@ -129,26 +254,10 @@ steps:
     value:
       var: _studies_processed
     unit: studies
-- sample:
-    transfer_latency_ms:
-      if_active:
-        randint:
-        - 8000
-        - 30000
-      else:
-        randint:
-        - 200
-        - 2000
 - metric:
     name: imaging.transfer_latency_ms
     value:
-      var: transfer_latency_ms
+      randint:
+      - 200
+      - 2000
     unit: ms
-- metric:
-    name: imaging.pacs_storage_used_pct
-    value:
-      uniform:
-      - 60.0
-      - 82.0
-      round: 1
-    unit: '%'

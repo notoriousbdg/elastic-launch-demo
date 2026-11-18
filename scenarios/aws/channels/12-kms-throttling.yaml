@@ -7,17 +7,20 @@ affected_services: [payment-processor]
 cascade_services: [orders-service]
 
 description: >
-  The payment-processor Lambda calls KMS Decrypt for every card token and exceeds the regional KMS request-rate quota, so calls fail with ThrottlingException and charges are delayed or rejected.
+  The payment-processor Lambda calls KMS Decrypt on the RSA card-token key for every token and exceeds the regional RSA request-rate quota, so calls fail with ThrottlingException and charges are delayed or rejected.
 
 investigation_notes: |
-  1. Search body.text for *PAY-KMS-THROTTLED* and confirm the {kms_requests_per_sec} requests/sec rate against the account-wide us-west-2 quota for symmetric cryptographic operations ({kms_quota_per_sec}/sec, shared by every caller in the account); key {kms_key_alias} carries most of the calls.
+  1. Search body.text for *PAY-KMS-THROTTLED* and confirm the {kms_requests_per_sec} requests/sec rate against the us-west-2 quota for RSA_2048 cryptographic operations ({kms_quota_per_sec}/sec, shared by every caller in the account and counting SDK retries); key {kms_key_alias} (RSA_2048) carries most of the calls.
   2. In CloudTrail, filter eventName=Decrypt and errorCode=ThrottlingException for the payment-processor execution role; the count should match {throttled_calls} in this window.
-  3. Check CloudWatch Lambda metrics for payment-processor: average Duration climbs to about 4500ms (alert above 3000ms, baseline under 800ms) because each throttled Decrypt retries up to 4 times with about {sdk_backoff_ms}ms of SDK backoff, and concurrent executions rise as invocations wait.
+  3. Check CloudWatch Lambda metrics for payment-processor: average Duration climbs to about 4500ms (alert above 3000ms, baseline under 800ms) because each throttled Decrypt is retried up to 4 times by the SDK with about {sdk_backoff_ms}ms of backoff per attempt, and concurrent executions rise as invocations wait.
   4. Confirm there is no data key caching: each invocation issues one Decrypt per token (cache_hit_ratio is {cache_hit_pct}%).
-  5. Check whether a traffic spike or a new Lambda concurrency limit raised the call rate (infra.kms_decrypt_mode shows direct per-call decrypt).
-  6. After approval, enable data key caching (AWS Encryption SDK cache or envelope encryption with a cached data key), then verify ThrottlingException count drops to 0 and request a quota increase only if still needed.
+  5. Check CloudTrail for UpdateFunctionConfiguration on the function shortly before the first throttle: a deploy set KMS_DATA_KEY_CACHE_TTL=0, which turned data key caching off (it was 300) and made every token a direct Decrypt (attributes.kms.data_key_cache_ttl_s is 0 on the payment-processor lines).
+  6. Confirm payments.kms_throttled_requests is far above its ~0 baseline and aws.lambda.duration_ms moves with it, while Errors on the import path and idempotency checks stay flat.
+  7. Remediation: `opsctl patch lambda-function/awsorders-payment-processor --env KMS_DATA_KEY_CACHE_TTL=300` re-enables data key caching on a new function version that alias live picks up; new execution environments replace the old ones and throttled calls fall to 0 and Duration returns to baseline in about 120s as their caches fill. Request an RSA quota increase only if throttling persists with caching on.
 
 remediation_action: enable_kms_data_key_caching
+remediation_command: |-
+  opsctl patch lambda-function/awsorders-payment-processor --env KMS_DATA_KEY_CACHE_TTL=300
 
 error_message: |
   PAY-KMS-THROTTLED: key={kms_key_alias} error=ThrottlingException requests_per_sec={kms_requests_per_sec} quota_per_sec={kms_quota_per_sec} throttled_calls={throttled_calls} cache_hit_pct={cache_hit_pct}
@@ -27,7 +30,7 @@ stack_trace: |
     File "payment_processor/handler.py", line 88, in charge
       card = token_vault.decrypt_token(token)
     File "payment_processor/token_vault.py", line 41, in decrypt_token
-      return kms.decrypt(CiphertextBlob=blob, KeyId="{kms_key_alias}")
+      return kms.decrypt(CiphertextBlob=blob, KeyId="{kms_key_alias}", EncryptionAlgorithm="RSAES_OAEP_SHA_256")
     kms_key_alias={kms_key_alias}  requests_per_sec={kms_requests_per_sec}  quota_per_sec={kms_quota_per_sec}
     sdk_backoff_ms={sdk_backoff_ms}  throttled_calls={throttled_calls}  data_key_cache=disabled
 
@@ -37,8 +40,8 @@ correlation_attr:
 
 fault_params:
   kms_key_alias: alias/payment-card-tokens
-  kms_requests_per_sec: {randint: [50500, 58000]}
-  kms_quota_per_sec: 50000
+  kms_requests_per_sec: {randint: [560, 900]}
+  kms_quota_per_sec: 500
   throttled_calls: {randint: [400, 6000]}
   cache_hit_pct: {randint: [0, 3]}
   sdk_backoff_ms: {randint: [900, 1100]}
@@ -64,4 +67,83 @@ business_impact:
 generator_impact:
   aws_lambda_otel:
     high_average_duration: 4500.0
-    high_concurrent_executions: 1000.0
+    high_concurrent_executions: 220.0
+# the package streams keep the fault while the scenario's own metrics converge
+generator_hold_seconds: {aws_lambda_otel: 120}
+
+infrastructure_events:
+  - service: payment-processor
+    severity: WARN
+    offset_seconds: -120
+    event_name: aws.cloudtrail.UpdateFunctionConfiguration
+    body: '[CloudTrail] UpdateFunctionConfiguration20150331v2: function=awsorders-payment-processor environment=KMS_DATA_KEY_CACHE_TTL=0 (was 300) initiated_by=deploy-pipeline region=us-west-2 event_source=lambda.amazonaws.com'
+    attributes:
+      cloud.provider: aws
+      cloud.service: lambda
+      aws.cloudtrail.event_name: UpdateFunctionConfiguration20150331v2
+      aws.lambda.function: awsorders-payment-processor
+      kms.data_key_cache_ttl_s: 0
+      infrastructure.source: CloudTrail
+  - service: payment-processor
+    severity: WARN
+    offset_seconds: 20
+    event_name: aws.cloudwatch.AlarmStateChange
+    body: '[CloudWatch] Alarm in ALARM: awsorders-payment-processor KMS ThrottlingException count > 100 for 2 datapoints region=us-west-2'
+    attributes:
+      cloud.provider: aws
+      cloud.service: kms
+      aws.cloudwatch.alarm_name: awsorders-kms-decrypt-throttled
+      infrastructure.source: CloudWatch
+
+cascade_messages:
+  orders-service:
+    - severity: WARN
+      message: 'charge call to payment-processor timed out after retry: dependency=kms ThrottlingException; order queued for retry retry_queue_depth={throttled_calls}'
+
+fault_scope:
+  cluster: awsorders-eks-usw2
+  workloads: [payment-processor]
+
+service_lag_seconds: {orders-service: 30}
+onset_delay_seconds: 20
+ramp_seconds: 45
+
+remediation_effects:
+  transition_seconds: 120
+  log_events:
+    - service: payment-processor
+      severity: INFO
+      offset_seconds: 1
+      body: 'cloudtrail: eventSource=lambda.amazonaws.com eventName=UpdateFunctionConfiguration20150331v2 userIdentity={actor} requestParameters.functionName=awsorders-payment-processor requestParameters.environment=KMS_DATA_KEY_CACHE_TTL=300 errorCode=none'
+      attributes:
+        operation: lambda_config_update
+        command.target: lambda-function/awsorders-payment-processor
+        aws.cloudtrail.event_name: UpdateFunctionConfiguration20150331v2
+    - service: payment-processor
+      severity: INFO
+      offset_seconds: 40
+      body: 'lambda[awsorders-payment-processor]: data key cache enabled ttl_s=300 on new version, alias live updated; Decrypt calls per invocation down, no ThrottlingException in the last window'
+      attributes:
+        operation: lambda_config_update
+        kms.data_key_cache_ttl_s: 300
+  steady_attributes:
+    payment-processor:
+      kms.data_key_cache_ttl_s: 300
+  verification:
+    - signal: payments.kms_throttled_requests
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "payment-processor"'
+      field: 'metrics.payments.kms_throttled_requests'
+      expect: 'back in 0-2 (was 400-6000); aws.lambda.duration_ms back under 320 ms (was 3600-4400 ms higher)'
+      within_seconds: 180
+    - signal: PAY-KMS-THROTTLED lines
+      from: 'logs.otel.awsorders'
+      where: 'body.text LIKE "*PAY-KMS-THROTTLED*"'
+      expect: '0 new lines'
+      within_seconds: 180
+    - signal: data key cache TTL
+      from: 'logs.otel.awsorders'
+      where: 'resource.attributes.service.name == "payment-processor"'
+      field: 'attributes.kms.data_key_cache_ttl_s'
+      expect: '300 on every line since the fix; 0 stops appearing'
+      within_seconds: 180

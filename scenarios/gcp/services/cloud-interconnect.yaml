@@ -50,41 +50,92 @@ constants:
   - DOWN
   - FLAPPING
 state:
-  _last_bgp_check:
-    init: now
+  _bgp_ticks:
+    init: 0
 steps:
+# Channel 12 recovery after the optic swap (since_fix): light is back at once, the link
+# retrains and comes up at ~75 s, the LACP member attaches at ~90 s, the BGP session is
+# established and routes re-advertised at ~165 s, then traffic fails back to the primary.
+- sample:
+    rx_light_dbm:
+      expr: "round(-2.5 + (max(-22.0, min(-16.0, rand.gauss(-19.0, 1.3))) + 2.5) * min(1.0, elapsed.get(12, 0) / 60.0), 1) if 12 in all_active
+        else round(max(-3.2, min(-1.8, rand.gauss(-2.5, 0.25))), 1)"
+    link_up:
+      expr: "0 if (12 in all_active and rx_light_dbm < -14.0) or (12 in fixed_channels and since_fix.get(12, 0) < 75) else 1"
+    lacp_state:
+      expr: "'ATTACHED' if link_up == 1 and not (12 in fixed_channels and since_fix.get(12, 0) < 90) else 'DETACHED'"
+    bgp_up12:
+      expr: "0 if (12 in all_active and link_up == 0) or (12 in fixed_channels and since_fix.get(12, 0) < 165) else 1"
+    failover_state:
+      expr: "'NONE' if bgp_up12 == 1 else 'FAILOVER_IN_PROGRESS'"
+    optic_batch:
+      expr: "'lr4-100g-batch-2026q4' if 12 in fixed_channels else 'lr4-100g-batch-2026q2'"
+    optic_status:
+      expr: "'ANOMALY' if 12 in all_active or rx_light_dbm < -14.0 or link_up == 0 or lacp_state == 'DETACHED' or bgp_up12 == 0 else 'NOMINAL'"
+- metric:
+    name: interconnect.rx_light_dbm
+    value:
+      var: rx_light_dbm
+    unit: dBm
+- metric:
+    name: interconnect.link_up
+    value:
+      var: link_up
+    unit: '1'
+- when: "optic_status == 'NOMINAL'"
+  log: &optic_diagnostics_log
+    level: INFO
+    message: 'cloud-interconnect: attachment=gcpnet-interconnect-primary link=1 rx_light={rx_light_dbm}dBm lacp={lacp_state} optic={optic_batch} failover={failover_state} location=iad-zone1-1 status={optic_status}'
+    attrs:
+      operation: optic_diagnostics
+      interconnect.attachment: gcpnet-interconnect-primary
+      interconnect.rx_light_dbm:
+        var: rx_light_dbm
+      interconnect.link_up:
+        var: link_up
+      interconnect.lacp_state:
+        var: lacp_state
+      interconnect.optic_batch:
+        var: optic_batch
+      interconnect.status:
+        var: optic_status
+- when: "optic_status != 'NOMINAL' and link_up == 1"
+  log:
+    <<: *optic_diagnostics_log
+    level: WARN
+- when: "link_up == 0"
+  log:
+    <<: *optic_diagnostics_log
+    level: ERROR
 - sample:
     attachment:
       choice: ATTACHMENTS
     link_status:
-      if_active:
-        choice: LINK_FAULT_STATES
-      else: UP
+      expr: "'DOWN' if attachment == 'gcpnet-interconnect-primary' and link_up == 0 else 'UP'"
     bandwidth_gbps:
-      choice: BANDWIDTH_OPTIONS
+      expr: "100 if attachment == 'gcpnet-interconnect-primary' else 10"
+    primary_share:
+      expr: "min(1.0, max(0.0, (since_fix.get(12, 0) - 165) / 30.0)) if 12 in fixed_channels else (0.0 if 12 in all_active and link_up == 0 else 1.0)"
     utilization_pct:
-      if_active:
-        uniform:
-        - 85.0
-        - 99.0
-        round: 1
-      else:
-        uniform:
-        - 20.0
-        - 70.0
-        round: 1
+      expr: "round(max(0.0, rand.gauss(45.0, 3.0)) * primary_share, 1) if attachment == 'gcpnet-interconnect-primary' else round(max(0.0, rand.gauss(30.0, 2.5) + 42.0 * (1.0 - primary_share)), 1)"
     location:
-      choice: LOCATIONS
+      expr: "'iad-zone1-1' if attachment == 'gcpnet-interconnect-primary' else 'dfw-zone1-1'"
 - metric:
     name: interconnect.bandwidth_gbps
     value:
       var: bandwidth_gbps
     unit: Gbps
+    attrs:
+      interconnect.attachment:
+        var: attachment
 - metric:
     name: interconnect.utilization_pct
     value:
       var: utilization_pct
     unit: '%'
+    attrs:
+      interconnect.attachment:
+        var: attachment
 - log:
     level: INFO
     message: 'cloud-interconnect: attachment={attachment} link={link_status} bandwidth={bandwidth_gbps}Gbps utilization={utilization_pct}%
@@ -99,45 +150,64 @@ steps:
         var: bandwidth_gbps
       interconnect.utilization:
         var: utilization_pct
-- every:
-    seconds: 10
-    state_key: _last_bgp_check
-    steps:
-    - sample:
-        peer_ip:
-          expr: f'169.254.{rand.randint(0,255)}.{rand.randint(1,254)}'
-        peer_asn:
-          choice: PEER_ASNS
-        bgp_state:
-          if_active:
-            choice: BGP_STATES
-          else: ESTABLISHED
-        advertised_routes:
-          if_active:
-            randint:
-            - 0
-            - 5
-          else:
-            randint:
-            - 20
-            - 100
-    - metric:
-        name: interconnect.bgp_advertised_routes
-        value:
-          var: advertised_routes
-        unit: routes
-    - log:
-        level: INFO
-        message: 'cloud-router: peer={peer_ip} asn={peer_asn} state={bgp_state} advertised={advertised_routes} bfd=ENABLED
-          attachment={attachment}'
-        attrs:
-          operation: bgp_check
-          interconnect.bgp_peer:
-            var: peer_ip
-          interconnect.bgp_state:
-            var: bgp_state
-          interconnect.advertised_routes:
-            var: advertised_routes
+- counter:
+    state_key: _bgp_ticks
+    by: 1
+- sample:
+    bgp_flaps:
+      expr: "round(max(5.0, min(30.0, rand.gauss(17.0, 3.0))) * min(1.0, elapsed.get(13, 0) / 60.0)) if 13 in all_active
+        else (round(18.0 * (1.0 - min(1.0, since_fix.get(13, 0) / 90.0))) if 13 in fixed_channels else 0)"
+    bgp_uptime_s:
+      expr: "int(max(4.0, min(88.0, rand.gauss(40.0, 22.0)))) if 13 in all_active else (int(30 + since_fix.get(13, 0)) if 13 in fixed_channels else (0 if bgp_up12 == 0 else (int(since_fix.get(12, 0) - 165) + 1 if 12 in fixed_channels else 259200 + _bgp_ticks * 5)))"
+    bgp_state:
+      expr: "'ACTIVE' if 13 in all_active else (('IDLE' if link_up == 0 else 'ACTIVE') if bgp_up12 == 0 else ('ESTABLISHED' if bgp_uptime_s > 20 or 13 not in fixed_channels else 'OPEN_SENT'))"
+    peer_bfd_multiplier:
+      expr: "2 if (13 in all_active or 13 in fixed_channels) else 5"
+    bfd_rx_ms:
+      expr: "5000 if 13 in fixed_channels else 1000"
+    advertised_routes:
+      expr: "(0 if rand.randint(0, 9) < 4 else 48) if 13 in all_active else (0 if bgp_up12 == 0 else 48)"
+    bgp_status:
+      expr: "'ANOMALY' if 13 in all_active or bgp_flaps > 0 or bgp_up12 == 0 else 'NOMINAL'"
+- metric:
+    name: bgp.session_flaps
+    value:
+      var: bgp_flaps
+    unit: flaps
+- metric:
+    name: bgp.session_uptime_s
+    value:
+      var: bgp_uptime_s
+    unit: s
+- metric:
+    name: interconnect.bgp_advertised_routes
+    value:
+      var: advertised_routes
+    unit: routes
+- when: "bgp_status == 'NOMINAL'"
+  log: &bgp_check_log
+    level: INFO
+    message: 'cloud-router: router=gcpnet-router-central1 peer=169.254.21.1 asn=65010 state={bgp_state} flaps_10m={bgp_flaps} uptime={bgp_uptime_s}s advertised={advertised_routes} bfd=ENABLED peer_bfd_multiplier={peer_bfd_multiplier} bfd_min_rx_interval={bfd_rx_ms}ms status={bgp_status}'
+    attrs:
+      operation: bgp_check
+      interconnect.bgp_peer: 169.254.21.1
+      interconnect.bgp_state:
+        var: bgp_state
+      interconnect.advertised_routes:
+        var: advertised_routes
+      bgp.peer_name: onprem-peer-1
+      bgp.flaps_10m:
+        var: bgp_flaps
+      bgp.peer_bfd_multiplier:
+        var: peer_bfd_multiplier
+      bgp.bfd_min_rx_interval_ms:
+        var: bfd_rx_ms
+      bgp.status:
+        var: bgp_status
+- when: "bgp_status != 'NOMINAL'"
+  log:
+    <<: *bgp_check_log
+    level: WARN
 - sample:
     vlan_tag:
       randint:
@@ -164,7 +234,7 @@ steps:
 - log:
     level: INFO
     message: 'cloud-interconnect: attachment={attachment} vlan_tag={vlan_tag} packets_in={packets_in} packets_out={packets_out}
-      mtu=1500 encryption=MACsec'
+      mtu=1440 encryption=MACsec'
     attrs:
       operation: vlan_health
       interconnect.vlan_tag:

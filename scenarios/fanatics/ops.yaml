@@ -1,0 +1,112 @@
+# opsctl profile for Fanatics Collectibles (see app/ops_profile.py for the contract).
+# Changes go to network gear, firewalls, wireless controllers and the app platforms. The service
+# that owns the target logs the applied change with its id; network-controller is the fallback.
+extends: [neutral]
+
+banner: "opsctl applies changes to the Fanatics network, security and application estate. Every applied change is written to the change log with a change id."
+
+actors:
+  default: noc/oncall-console
+  auto: netops/auto-remediator
+
+auto_remediate_channels: [16, 17, 18, 19, 20]
+
+verbs:
+  rollback:
+    summary: "Revert firmware, configuration, content or a deployment to an earlier revision (--to-revision N|previous)"
+    example: "opsctl rollback firmware/<device> --to-revision previous\n  opsctl rollback config/<name> --to-revision previous"
+    describe: "{ref} reverted to {rev_text}"
+  patch:
+    summary: "Change settings on a device or policy (--<setting> <value>)"
+    example: "opsctl patch session-policy/<fw> --tcp-timeout 900"
+    describe: "{ref} updated{settings_text}"
+  apply:
+    summary: "Create or update a policy or profile (--<setting> <value>)"
+    example: "opsctl apply policy/<name> --mode enforce"
+    describe: "{ref} applied{settings_text}"
+  run:
+    summary: "Run a migration, job or procedure"
+    example: "opsctl run migration/<name>\n  opsctl run job/<name>"
+    describe: "{ref} started{=(' (' + change_id + ')') if change_id else ''}"
+  renew:
+    summary: "Renew or re-issue a certificate"
+    example: "opsctl renew certificate/<name>"
+    describe: "{ref} re-issued and installed"
+  restore: null
+  rotate: null
+  sync: null
+  drain: null
+  replace: null
+  expand: null
+
+kinds:
+  firmware: {aliases: [fw]}
+  config: {aliases: [cfg]}
+  content: {}
+  route-policy: {}
+  rf-profile: {}
+  session-policy: {}
+  policy: {}
+  migration: {}
+  job: {}
+  model: {}
+  certificate: {aliases: [cert]}
+  deployment: {aliases: [deploy]}
+
+audit:
+  service: [network-controller]
+  default: command_log
+  formats:
+    command_log:
+      body: '[CHG] CHANGE APPLIED opsctl {command} by {actor} change_id={change_id}'
+      attributes:
+        operation: change_applied
+        event.action: "{verb}"
+        change.target: "{target}"
+        change.command: "opsctl {command}"
+        user.name: "{actor}"
+        change.id: "{change_id}"
+        ops.target: null
+        ops.command: null
+      match:
+        tokens: ["{target}"]
+
+runbook:
+  scope_note: "Other sites, devices and services are unaffected and make a useful comparison."
+  recovery_note: "Each query names the fixed device or service, so its result is the value to compare."
+  audit_label: "change log"
+
+guide:
+  scenario: |
+    ## Where Fanatics telemetry is
+    The data is OpenTelemetry. Each platform is a service
+    (`resource.attributes.service.name`): network-controller (switching, routing, VPN),
+    firewall-gateway, wifi-controller, dns-dhcp-service, packaging-fulfillment,
+    card-printing-system, auction-engine, digital-marketplace, cloud-inventory-scanner.
+
+    - **Logs:** `FROM logs.otel.fanatics`. Message in `body.text` (never `body` alone), level
+      in `severity_text`. Error codes (for example `SYSTEM-cpu-critical`) are in `body.text`
+      and `attributes.error.type`; device state and the running revision are in
+      `attributes.*` (for example `attributes.deployment.threat_sig_ver`).
+    - **Metrics:** `FROM metrics-generic.otel-default`, filtered by
+      `resource.attributes.service.name`, fields under `metrics.<area>.*`, for example
+      `metrics.firewall.cpu_dataplane_pct`, `metrics.network.mac_flaps_per_min`,
+      `metrics.wifi.aps_connected`, `metrics.dns.servfail_pct`.
+    - **Changes:** every applied change is a log line from the service that owns the target,
+      `body.text LIKE "[CHG] CHANGE APPLIED*"`, with `attributes.change.id`. Changes that
+      preceded the incident are logged by the device's service as `operation: config_change`
+      or `firmware_load` and carry `attributes.change.request`.
+
+    Readings converge back over the recovery time the runbook states; they do not jump
+    back instantly. Compare a short window after the command with the window before it.
+
+    Example: firewall data plane CPU per minute over the last 15 minutes:
+
+    ```
+    FROM metrics-generic.otel-default
+    | WHERE @timestamp > NOW() - 15 minutes AND resource.attributes.service.name == "firewall-gateway"
+      AND metrics.firewall.cpu_dataplane_pct IS NOT NULL
+    | STATS max = MAX(metrics.firewall.cpu_dataplane_pct)
+        BY minute = BUCKET(@timestamp, 1 minute)
+    | SORT minute DESC
+    ```

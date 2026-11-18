@@ -10,12 +10,16 @@ cascade_services:
 - mission-control
 - range-safety
 description: Fuel tank pressure readings outside nominal range
-investigation_notes: 'Root cause: helium pressurization regulator malfunction or cryogenic propellant boil-off exceeding bleed
-  valve capacity. Check He supply bottle pressure (nominal 2840PSI) and regulator outlet (nominal 280PSI). If both LOX and
-  RP-1 tanks are affected, suspect common-mode regulator failure; if single tank, check individual fill/drain valve seat integrity.
-  Review CCTV for visible frost patterns indicating external leak. Remediation: switch to backup pressurization regulator
-  (REG-B), verify tank pressure stabilizes within 60s, then safe the primary regulator for post-flight inspection.'
+investigation_notes: |-
+  Root cause: REG-A pressurization controller firmware fw-4.2.0-rc1 was loaded shortly before the first PMS-PRESS-ANOMALY. The release candidate changed the {tank_id} ullage pressure control loop and now under-pressurizes that tank: {tank_id} reads {pressure}PSI against a nominal {expected_min}-{expected_max}PSI. The pressurization hardware is healthy: He supply bottle pressure is nominal (~2840PSI) and the regulator outlet holds ~280PSI, and LOX-2, RP1-1 and RP1-2 stay nominal, which rules out a common-mode regulator failure, boil-off or an external leak (no frost patterns on CCTV).
+  Confirm:
+    - fuel-system logs [PMS] sensor=lox_pressure tank={tank_id} ... firmware=fw-4.2.0-rc1 status=ANOMALY (attributes.infra.firmware_rev); metric fuel_system.lox_pressure drops from 240-290PSI to 150-195PSI after the firmware load
+    - the fuel-system line "[PMS] REG-A controller firmware fw-4.2.0-rc1 loaded" comes before the first pressure anomaly
+    - rca attributes propulsion.he_supply_psi and propulsion.reg_outlet_psi stay nominal on the anomaly lines
+  Remediation: roll the REG-A controller firmware back to the previous revision (fw-4.1.7) with opsctl rollback firmware/pms-reg-a --to-revision previous. The controller restores the old control loop and {tank_id} re-pressurizes into the {expected_min}-{expected_max}PSI band over about 60 seconds. Switching to REG-B is not needed: the regulator hardware is fine.
 remediation_action: reset_fuel_system
+remediation_command: |-
+  opsctl rollback firmware/pms-reg-a --to-revision previous
 error_message: '[PMS] PMS-PRESS-ANOMALY: tank={tank_id} pressure={pressure}PSI nominal={expected_min}-{expected_max}PSI status=OUT_OF_BOUNDS'
 stack_trace: |-
   == TELEMETRY FRAME DUMP == PMS PROPULSION MGMT SYSTEM ==
@@ -27,9 +31,9 @@ stack_trace: |-
   RP1-1     248.7PSI   200PSI     310PSI     NOMINAL
   RP1-2     251.2PSI   200PSI     310PSI     NOMINAL
   ---------------------------------------------------------------
-  PRESSURIZATION SYSTEM: He supply=2840PSI | reg_outlet=280PSI
+  PRESSURIZATION SYSTEM: He supply=2840PSI | reg_outlet=280PSI | REG-A fw=fw-4.2.0-rc1
   PMS-PRESS-ANOMALY: Tank {tank_id} reading {pressure}PSI outside bounds
-  ACTION: Verify pressurization regulator and check for leak indications
+  ACTION: Verify pressurization controller firmware and loop configuration
 correlation_attr:
   key: infra.firmware_rev
   value: fw-4.2.0-rc1
@@ -51,6 +55,64 @@ rca_clues:
     telemetry.alert_class: pressure
   range-safety:
     safety.propulsion_status: anomalous
+cascade_messages:
+  mission-control:
+    - severity: WARN
+      message: '[MCC] ALERT subsystem=propulsion code=PMS-PRESS-ANOMALY tank={tank_id} pressure={pressure}PSI; propellant load hold requested'
+  range-safety:
+    - severity: WARN
+      message: '[RSO] propulsion_status=ANOMALOUS source=PMS tank={tank_id} pressure={pressure}PSI below {expected_min}PSI; vehicle safing margins under review'
+fault_scope:
+  workloads: [fuel-system, sensor-validator]
+infrastructure_events:
+  - service: fuel-system
+    severity: INFO
+    offset_seconds: -120
+    body: '[PMS] REG-A controller firmware fw-4.2.0-rc1 loaded (was fw-4.1.7); ullage pressure loop restarted tanks=LOX-1,LOX-2,RP1-1,RP1-2; uploaded by prop-avionics-release (CR-2304)'
+    attributes:
+      user.name: prop-avionics-release
+      change.request: CR-2304
+      operation: firmware_load
+      infra.firmware_rev: fw-4.2.0-rc1
+      propulsion.regulator: REG-A
+      change.summary: 'REG-A firmware: fw-4.1.7 -> fw-4.2.0-rc1'
+remediation_effects:
+  log_events:
+    - service: mission-control
+      severity: INFO
+      offset_seconds: 1
+      body: '[MCC] CMD ACCEPTED opsctl rollback firmware/pms-reg-a --to-revision previous from {actor}: REG-A controller fw-4.2.0-rc1 -> fw-4.1.7'
+      attributes:
+        operation: command
+        command.target: firmware/pms-reg-a
+    - service: fuel-system
+      severity: INFO
+      offset_seconds: 40
+      body: '[PMS] REG-A firmware fw-4.1.7 loaded; LOX-1 pressure 262.4PSI NOMINAL'
+      attributes:
+        operation: firmware_load
+        infra.firmware_rev: fw-4.1.7
+  steady_attributes:
+    fuel-system:
+      infra.firmware_rev: fw-4.1.7
+  verification:
+    - signal: fuel_system.lox_pressure
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "fuel-system"'
+      field: 'metrics.fuel_system.lox_pressure'
+      expect: 'back in 240-290 PSI (was 150-195 PSI)'
+      within_seconds: 120
+    - signal: PMS-PRESS-ANOMALY lines
+      from: 'logs.otel.nova7'
+      where: 'body.text LIKE "*PMS-PRESS-ANOMALY*"'
+      expect: '0 new lines'
+      within_seconds: 120
+    - signal: REG-A firmware revision
+      from: 'logs.otel.nova7'
+      where: 'resource.attributes.service.name == "fuel-system"'
+      field: 'attributes.infra.firmware_rev'
+      expect: 'fw-4.1.7 on every line logged since the fix; fw-4.2.0-rc1 stops appearing'
+      within_seconds: 120
 business_impact:
   - kpi: business.mission_success_probability_pct
     factor: {uniform: [0.65, 0.85]}

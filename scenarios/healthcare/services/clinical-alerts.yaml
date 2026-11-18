@@ -34,7 +34,16 @@ state:
   _alerts_processed:
     init: 0
   _last_cds_report:
-    init: now
+    init: 0
+# Before / during / after (schema 1.3):
+#   ch 13 sepsis-screen v3.0.1-experimental re-evaluates the full rule set on every vitals sample:
+#         ~14,000 evaluations/min against ~1,300 with the same census; the container is CPU-throttled
+#         and p95 evaluation climbs to 5.5-8.5s in ~60s. After the rule set rollback the queue drains
+#         and evaluation is back under 500 ms in ~90s.
+#   ch 14 EHR-NCS-BRIDGE-01 runs hillrom-bridge-v2.4.0-rc1, which does not reconnect after the nurse
+#         call server closes the socket: CLOSE_WAIT, undelivered calls pile up (~1 per 8s). BRIDGE-02
+#         (v2.3.4) reconnected after the same server restart. After rolling BRIDGE-01 back to v2.3.4
+#         it reconnects and replays its queue to the EHR in ~45s.
 steps:
 - sample:
     alert_type:
@@ -70,7 +79,26 @@ steps:
       alert.delivery_ms:
         var: delivery_ms
       alert.status: DELIVERED
+# ── ch 13: CDS rule engine ─────────────────────────────────────────────────
 - sample:
+    cds_eval_ms:
+      expr: "int(220 + (rand.uniform(5500.0, 8500.0) - 220) * min(1.0, elapsed.get(13, 0) / 60.0)) if 13 in all_active
+        else (int(7000 + (max(50.0, min(500.0, rand.gauss(220.0, 60.0))) - 7000) * min(1.0, since_fix.get(13, 0) / 90.0)) if 13 in fixed_channels
+        else int(max(50.0, min(500.0, rand.gauss(220.0, 60.0)))))"
+    cds_queue:
+      expr: "int(4 + (rand.uniform(150.0, 250.0) - 4) * min(1.0, elapsed.get(13, 0) / 60.0)) if 13 in all_active
+        else (int(200 + (rand.randint(0, 10) - 200) * min(1.0, since_fix.get(13, 0) / 90.0)) if 13 in fixed_channels
+        else rand.randint(0, 10))"
+    cds_evals_1m:
+      expr: "int(rand.gauss(14000.0, 600.0)) if 13 in all_active else int(rand.gauss(1300.0, 80.0))"
+    cds_throttled_pct:
+      expr: "round(min(95.0, 2.0 + 90.0 * min(1.0, elapsed.get(13, 0) / 45.0) + rand.gauss(0, 1.5)), 1) if 13 in all_active
+        else (round(max(0.0, 92.0 * (1.0 - min(1.0, since_fix.get(13, 0) / 60.0))) + rand.uniform(0.0, 3.0), 1) if 13 in fixed_channels
+        else round(rand.uniform(0.0, 3.0), 1))"
+    cds_ruleset:
+      expr: "'arden-mlm-v3.0.1-experimental' if 13 in all_active else 'arden-mlm-v2.4.0'"
+    cds_engine:
+      expr: "'OVERLOADED' if 13 in all_active or cds_eval_ms > 2000 else 'NOMINAL'"
     rules_evaluated:
       randint:
       - 5
@@ -80,15 +108,25 @@ steps:
       - 0
       - 3
     eval_ms:
-      randint:
-      - 80
-      - 600
+      expr: "int(cds_eval_ms * rand.uniform(0.6, 1.4))"
+    rule_status:
+      expr: "'OK' if eval_ms < 2000 else 'SLA_BREACH'"
     rule_patient_id:
       expr: f'PT-{rand.randint(100000, 999999)}'
+- metric:
+    name: clinical_alerts.rule_eval_ms
+    value:
+      var: cds_eval_ms
+    unit: ms
+- metric:
+    name: clinical_alerts.rule_queue_depth
+    value:
+      var: cds_queue
+    unit: rules
 - log:
     level: INFO
     message: '[CDS] rule_eval patient={rule_patient_id} rules_checked={rules_evaluated} triggered={triggered} eval_ms={eval_ms}
-      status=OK'
+      status={rule_status}'
     attrs:
       operation: rule_evaluation
       cds.rules_evaluated:
@@ -99,6 +137,76 @@ steps:
         var: eval_ms
       cds.patient_id:
         var: rule_patient_id
+- log:
+    level: INFO
+    message: '[CDS] engine_status pool=RULE-EVAL ruleset=sepsis-screening build={cds_ruleset} evals_1m={cds_evals_1m} queue={cds_queue} p95_eval_ms={cds_eval_ms} cpu_throttled={cds_throttled_pct}% context_cache=current engine={cds_engine}'
+    attrs: &cds_attrs
+      operation: cds_engine_status
+      deployment.cds_rule_engine:
+        var: cds_ruleset
+      cds.evaluations_per_min:
+        var: cds_evals_1m
+      cds.arden_mlm_queue:
+        var: cds_queue
+      cds.p95_eval_ms:
+        var: cds_eval_ms
+      cds.cpu_throttled_pct:
+        var: cds_throttled_pct
+      cds.patient_context_cache_status: current
+      cds.engine_status:
+        var: cds_engine
+  when: "cds_engine == 'NOMINAL'"
+- log:
+    level: WARN
+    message: '[CDS] engine_status pool=RULE-EVAL ruleset=sepsis-screening build={cds_ruleset} evals_1m={cds_evals_1m} queue={cds_queue} p95_eval_ms={cds_eval_ms} cpu_throttled={cds_throttled_pct}% context_cache=current engine={cds_engine}'
+    attrs: *cds_attrs
+  when: "cds_engine != 'NOMINAL'"
+# ── ch 14: nurse call bridges ──────────────────────────────────────────────
+- sample:
+    ncs1_undelivered:
+      expr: "int(min(28.0, elapsed.get(14, 0) / 8.0)) if 14 in all_active
+        else (int(max(0.0, 28.0 * (1.0 - since_fix.get(14, 0) / 45.0))) if 14 in fixed_channels else 0)"
+    ncs1_socket:
+      expr: "'CLOSE_WAIT' if 14 in all_active else 'ESTABLISHED'"
+    ncs1_version:
+      expr: "'hillrom-bridge-v2.3.4' if 14 in fixed_channels else 'hillrom-bridge-v2.4.0-rc1'"
+    ncs1_status:
+      expr: "'DISCONNECTED' if 14 in all_active else ('REPLAYING' if ncs1_undelivered > 0 else 'CONNECTED')"
+- metric:
+    name: clinical_alerts.nurse_call_undelivered
+    value:
+      var: ncs1_undelivered
+    unit: calls
+- log:
+    level: INFO
+    message: '[CDS] ncs_bridge bridge=EHR-NCS-BRIDGE-01 tower=East server=ncs-server:3001 version={ncs1_version} socket={ncs1_socket} undelivered={ncs1_undelivered} status={ncs1_status}'
+    attrs: &ncs1_attrs
+      operation: nurse_call_bridge_status
+      ncs.bridge: EHR-NCS-BRIDGE-01
+      infra.nursecall_bridge_fw:
+        var: ncs1_version
+      ncs.bridge_socket_state:
+        var: ncs1_socket
+      ncs.undelivered_calls:
+        var: ncs1_undelivered
+      ncs.bridge_status:
+        var: ncs1_status
+  when: "ncs1_status == 'CONNECTED'"
+- log:
+    level: WARN
+    message: '[CDS] ncs_bridge bridge=EHR-NCS-BRIDGE-01 tower=East server=ncs-server:3001 version={ncs1_version} socket={ncs1_socket} undelivered={ncs1_undelivered} status={ncs1_status}'
+    attrs: *ncs1_attrs
+  when: "ncs1_status != 'CONNECTED'"
+- log:
+    level: INFO
+    message: '[CDS] ncs_bridge bridge=EHR-NCS-BRIDGE-02 tower=West server=ncs-server:3001 version=hillrom-bridge-v2.3.4 socket=ESTABLISHED undelivered=0 status=CONNECTED'
+    attrs:
+      operation: nurse_call_bridge_status
+      ncs.bridge: EHR-NCS-BRIDGE-02
+      infra.nursecall_bridge_fw: hillrom-bridge-v2.3.4
+      ncs.bridge_socket_state: ESTABLISHED
+      ncs.undelivered_calls: 0
+      ncs.bridge_status: CONNECTED
 - every:
     seconds: 10
     state_key: _last_cds_report
@@ -115,7 +223,7 @@ steps:
     - log:
         level: INFO
         message: '[CDS] engine_summary active_rules={total_rules} alerts_per_hr={alerts_hour} total_processed={_alerts_processed}
-          engine=NOMINAL'
+          engine={cds_engine}'
         attrs:
           operation: cds_summary
           cds.active_rules:
@@ -132,21 +240,6 @@ steps:
     value:
       var: _alerts_processed
     unit: alerts
-- sample:
-    eval_ms_metric:
-      if_active:
-        randint:
-        - 3000
-        - 12000
-      else:
-        randint:
-        - 50
-        - 500
-- metric:
-    name: clinical_alerts.rule_eval_ms
-    value:
-      var: eval_ms_metric
-    unit: ms
 - metric:
     name: clinical_alerts.active_rules
     value:

@@ -1,78 +1,121 @@
 name: API Rate Limit Cascade
 subsystem: gateway
 vehicle_section: rate_limiter
-error_type: GW-RATE-LIMIT-CASCADE
+error_type: 'limiting requests, excess:'
 sensor_type: rate_limiting
 affected_services:
 - api-gateway
 cascade_services:
 - activation-service
 - auth-service
-description: API gateway rate limiter triggering cascade rejection due to retry storm from downstream failures, flooding the edge NGINX with 429 responses
-investigation_notes: |
-  1. Check rate limiter token bucket state — bucket at 0 tokens with refill rate 1000/min means every request above the 1000/min refill rate is rejected with 429 Too Many Requests.
-  2. Root cause is typically a downstream failure (DB, network, auth) causing clients to retry aggressively. The retry storm amplifies traffic 3-5x above baseline, exhausting rate limit budgets.
-  3. Identify the retry source — check api-gateway access logs for client IP distribution. A small number of IPs generating >100 req/min indicates aggressive retry without backoff.
-  4. Enable adaptive rate limiting: increase burst allowance to 2000/min while maintaining sustained rate at 1000/min. This absorbs retry bursts without permanently raising limits.
-  5. Add Retry-After header to 429 responses with exponential backoff suggestion (1s, 2s, 4s, 8s). Well-behaved clients (mobile apps) should honor this header.
-remediation_action: adjust_rate_limits
-error_message: '[GW] GW-RATE-LIMIT-CASCADE: current_rate={gw_current_rate}/min limit={gw_rate_limit}/min rejected={gw_rejected_count} burst_factor={gw_burst_factor}x source={gw_source}'
-stack_trace: |
-  === API GATEWAY RATE LIMITER ===
-  gateway=api-gateway  algorithm=token_bucket
-  --- RATE LIMITER STATUS ---
-    METRIC              VALUE       LIMIT       STATUS
-    requests/min        {gw_current_rate}       {gw_rate_limit}       EXCEEDED
-    burst_tokens        0           200         DEPLETED
-    rejected_count      {gw_rejected_count}       ---         ---
-    retry_amplification {gw_burst_factor}x       ---         STORM
-  --- SOURCE ANALYSIS ---
-    source={gw_source}  unique_clients={gw_unique_clients}
-    top_client_rate={gw_top_client_rate}/min  avg_client_rate=12/min
-    retry_after_honored=23%  aggressive_retry=77%
-  ACTION: adaptive_rate_limit=true  add_retry_after=true  alert=GW-RATE-LIMIT-CASCADE
-infrastructure_events:
-- body: '[CloudWatch] GatewayRateLimitExceeded: service=api-gateway endpoint=/api/v1/* http_429_count=2500 rate_limit=1000/min burst=200 region=eu-central-1'
-  severity: WARN
-  event_name: aws.cloudwatch.alarm.APIGatewayRateLimitExceeded
-  service: api-gateway
-  attributes:
-    cloud.provider: aws
-    cloud.service: apigateway
-    aws.cloudwatch.alarm_name: api-gateway-rate-limit
-    aws.cloudwatch.state: ALARM
-    infrastructure.source: CloudWatch
+description: a gateway configuration migration changed the activation API rate limit from 50 requests per second to 50 per minute
+investigation_notes: |-
+  Root cause: the gateway configuration migration to the new Helm values layout seconds before the first rejection (config/api-gateway-ratelimit revision 31) rendered limit_req_zone activation_api with rate=50r/m instead of rate=50r/s. NGINX now allows less than one request per second per client key on /api/v1/activate and /api/v1/customer/status and answers the rest with 429 ({http_429_per_s}/s). Traffic volume is normal (about 210 requests per second); the backends are healthy and simply receive almost no requests.
+  Confirm:
+    - the api-gateway line "nginx reloaded config api-gateway-ratelimit revision 31 ... rate=50r/m" comes before the first "limiting requests, excess:", and gateway status lines carry attributes.gateway.limit_req_rate 50r/m
+    - metric api_gateway.http_429_per_sec rises from under 1 to about {http_429_per_s} and api_gateway.upstream_requests_per_sec drops from about 205 to under 10
+    - metric api_gateway.requests_per_sec (client requests) stays near 210, which rules out a traffic spike or abusive client
+  Remediation: revert the rate-limit configuration with opsctl rollback config/api-gateway-ratelimit --to-revision previous. NGINX reloads gracefully in about 2 seconds, 429s stop and upstream traffic returns to normal at once. Raising the limit by hand would leave the migrated configuration in place for the next deploy.
+remediation_action: revert_gateway_rate_limit
+error_message: '{nginx_time} [error] 31#31: *{conn_id} limiting requests, excess: {excess} by zone "activation_api", client: {client_ip}, server: api.meridian.eu, request: "POST /api/v1/activate HTTP/2.0", host: "api.meridian.eu"'
+stack_trace: |-
+  limit_req_zone $binary_remote_addr zone=activation_api:20m rate=50r/m;
+  location /api/v1/activate { limit_req zone=activation_api burst=20 nodelay; limit_req_status 429; }
+  zone activation_api: excess={excess} burst=20 rejected_last_s={http_429_per_s}
 correlation_attr:
-  key: deployment.rate_limiter_config
-  value: ratelimit-v1.5.0-aggressive
+  key: gateway.limit_req_rate
+  value: 50r/m
 fault_params:
-  gw_current_rate: {randint: [2000, 8000]}
-  gw_rate_limit: 1000
-  gw_rejected_count: {randint: [500, 5000]}
-  gw_burst_factor: {uniform: [3.0, 5.0], round: 1}
-  gw_source: mobile_app_retry
-  gw_unique_clients: {randint: [50, 500]}
-  gw_top_client_rate: {randint: [120, 180]}
+  conn_id: {randint: [4810000, 4899999]}
+  excess: {uniform: [20.1, 20.9], round: 3}
+  client_ip: {choice: [10.20.4.17, 10.20.5.33, 10.20.6.12]}
+  http_429_per_s: {randint: [180, 205]}
 rca_clues:
   api-gateway:
-    gateway.rate_limit_exhausted: true
-    gateway.retry_amplification: {uniform: [3.0, 5.0], round: 1}
-    gateway.top_client_rate_per_min: {randint: [120, 180]}
+    gateway.limit_req_zone: activation_api
+    gateway.limit_req_rate: 50r/m
+    gateway.http_429_per_sec: {randint: [180, 205]}
   activation-service:
-    activation.429_responses: {randint: [500, 5000]}
-    activation.client_retry_storm: true
+    activation.inbound_rate_drop_pct: {uniform: [90.0, 98.0], round: 1}
   auth-service:
-    auth.rate_limited_requests: {randint: [200, 2000]}
-    auth.legitimate_blocked_pct: {uniform: [30.0, 70.0], round: 0}
+    auth.validate_rate_drop_pct: {uniform: [85.0, 97.0], round: 1}
+remediation_command: |-
+  opsctl rollback config/api-gateway-ratelimit --to-revision previous
+fault_scope:
+  cluster: meridian-eks-cluster
+  workloads: [api-gateway]
+cascade_messages:
+  activation-service:
+    - severity: WARN
+      message: 'inbound activation rate 9/min, 96% below the 7-day baseline for this hour (240/min); no errors from downstream'
+  auth-service:
+    - severity: INFO
+      message: 'level=warning logger=auth.metrics msg="validate request rate far below baseline" source=api-gateway drop_pct=94'
+infrastructure_events:
+  - service: api-gateway
+    severity: INFO
+    offset_seconds: -5
+    event_name: nginx.reload
+    body: '{nginx_time} [notice] 1#1: signal process started; nginx reloaded config api-gateway-ratelimit revision 31 (was 30) helm-release=api-gateway chart=4.0.0: limit_req_zone activation_api rate=50r/m'
+    attributes:
+      operation: config_reload
+      user.name: platform-ci/helm
+      gateway.limit_req_rate: 50r/m
+      change.summary: 'activation_api rate 50r/s -> 50r/m'
+remediation_effects:
+  log_events:
+    - service: api-gateway
+      severity: INFO
+      offset_seconds: 1
+      body: '[NOC-CHG] executed opsctl rollback config/api-gateway-ratelimit --to-revision previous actor={actor}: revision 31 -> 30 (activation_api rate=50r/s)'
+      attributes:
+        operation: change_executed
+        change.target: config/api-gateway-ratelimit
+        gateway.limit_req_rate: 50r/s
+    - service: api-gateway
+      severity: INFO
+      offset_seconds: 3
+      body: '{nginx_time} [notice] 1#1: signal process started; configuration reloaded (activation_api rate=50r/s)'
+      attributes:
+        operation: config_reload
+        gateway.limit_req_rate: 50r/s
+  steady_attributes:
+    api-gateway:
+      gateway.limit_req_rate: 50r/s
+  verification:
+    - signal: api_gateway.http_429_per_sec
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "api-gateway"'
+      field: 'metrics.api_gateway.http_429_per_sec'
+      expect: 'under 1 (was 180-205)'
+      within_seconds: 60
+    - signal: api_gateway.upstream_requests_per_sec
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "api-gateway"'
+      field: 'metrics.api_gateway.upstream_requests_per_sec'
+      expect: 'back near 205 (was under 10)'
+      within_seconds: 60
+    - signal: limiting requests lines
+      from: 'logs.otel.meridian'
+      where: 'body.text LIKE "*limiting requests, excess:*"'
+      expect: '0 new lines'
+      within_seconds: 60
+    - signal: rate limit configuration
+      from: 'logs.otel.meridian'
+      where: 'resource.attributes.service.name == "api-gateway"'
+      field: 'attributes.gateway.limit_req_rate'
+      expect: '50r/s on every gateway status line since the rollback'
+      within_seconds: 60
 business_impact:
   - kpi: business.activations_per_min
-    factor: {uniform: [0.20, 0.50]}
+    factor: {uniform: [0.2, 0.5]}
   - kpi: business.revenue_usd_per_min
-    factor: {uniform: [0.20, 0.50]}
+    factor: {uniform: [0.2, 0.5]}
   - kpi: business.support_tickets_per_min
     factor: {uniform: [2.0, 4.5]}
   - kpi: business.first_call_resolution_pct
-    factor: {uniform: [0.30, 0.60]}
+    factor: {uniform: [0.3, 0.6]}
 generator_impact:
   nginx_otel:
     high_4xx_error_rate: 800.0
+service_lag_seconds: {activation-service: 30, auth-service: 30}

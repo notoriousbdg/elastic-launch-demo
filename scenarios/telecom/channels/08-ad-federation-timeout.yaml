@@ -1,70 +1,126 @@
 name: AD Federation Timeout
 subsystem: authentication
 vehicle_section: identity_federation
-error_type: AUTH-FEDERATION-TIMEOUT
+error_type: Connection to login.microsoftonline.com timed out
 sensor_type: federation
 affected_services:
 - auth-service
 cascade_services:
 - api-gateway
-description: Azure AD federation SAML/OIDC response timeout preventing enterprise SSO authentication
-investigation_notes: |
-  1. Check Azure AD health dashboard — federation timeouts typically correlate with Azure AD regional outages or certificate rotation. Monitor: https://status.azure.com/en-us/status. A DEGRADED Azure AD status with the SAML signing certificate unchanged points to a regional Azure AD outage, not certificate rotation.
-  2. A 30s timeout on the OIDC code-for-token exchange indicates the Azure AD token endpoint is not responding. Verify network connectivity: curl -w '%{time_total}' https://login.microsoftonline.com/{federation_tenant}/v2.0/.well-known/openid-configuration.
-  3. Enterprise SSO users (20% of traffic) are completely blocked when federation is down. Consumer and MVNO users using local auth are unaffected — impact is limited to enterprise segment.
-  4. Enable fallback to cached SAML assertions for recently-authenticated enterprise users. Auth-service maintains a 15-minute assertion cache that can extend active sessions during federation outages.
-  5. For new enterprise login attempts, display a maintenance message directing users to contact their enterprise admin. Do not expose Azure AD error details to end users.
-remediation_action: enable_federation_fallback
-error_message: '[AUTH] AUTH-FEDERATION-TIMEOUT: provider={federation_provider} timeout_ms={federation_timeout_ms} tenant={federation_tenant} sso_users_blocked={sso_blocked_count}'
-stack_trace: |
-  === AD FEDERATION STATUS ===
-  provider={federation_provider}  tenant={federation_tenant}
-  --- FEDERATION PIPELINE ---
-    STEP                    STATUS      ELAPSED_MS
-    authz_request_build     COMPLETE    12
-    idp_redirect            COMPLETE    85
-    oidc_token_exchange     TIMEOUT     {federation_timeout_ms}  <<< STUCK
-    assertion_validate      SKIPPED     ---
-    session_create          SKIPPED     ---
-  --- AZURE AD STATUS ---
-    endpoint=login.microsoftonline.com  response=TIMEOUT
-    region=westeurope  status_page=DEGRADED
-    sso_users_blocked={sso_blocked_count}  enterprise_impact=100%
-    consumer_impact=0%  mvno_impact=0%
-  ACTION: enable_assertion_cache=true  display_maintenance=true  alert=AUTH-FEDERATION-TIMEOUT
-infrastructure_events:
-- body: '[AzureHealth] ResourceHealthChanged: resource=auth-service status=Degraded cause=AzureAD_Federation_Timeout region=westeurope timestamp=2026-03-08T09:12:00Z'
-  severity: WARN
-  event_name: azure.health.ResourceHealthChanged
-  service: auth-service
-  attributes:
-    cloud.provider: azure
-    cloud.service: active_directory
-    azure.health.status: Degraded
-    azure.health.cause: AzureAD_Federation_Timeout
-    infrastructure.source: AzureHealth
+description: an Azure Firewall policy change removed the AKS egress rule for Microsoft Entra ID and enterprise SSO federation times out
+investigation_notes: |-
+  Root cause: a change to Azure Firewall policy meridian-aks-egress about a minute before the first error (CR-88190, "tighten AKS egress") replaced the application rule that allowed login.microsoftonline.com with a network rule on the AzureActiveDirectory service tag in the wrong rule collection group. Traffic from the AKS subnet to Entra ID now falls through to the default deny, which drops it. Enterprise customers sign in through federation with their Entra ID tenants, so every enterprise login waits for the 10 s connect timeout and fails ({fed_fail_per_min}/min). Consumer logins (Keycloak local accounts) and token validation are normal, and Entra ID itself is up (Azure status, other regions).
+  Confirm:
+    - the azure-activity record Microsoft.Network/firewallPolicies/ruleCollectionGroups/write on meridian-aks-egress comes before the first "Connection to login.microsoftonline.com timed out"
+    - Azure Firewall AZFWNetworkRule lines show "Action: Deny ... No rule matched" for 10.240.0.0/16 to Entra ID addresses on 443
+    - metric auth_service.federation_failures_per_min rises from 0 to {fed_fail_per_min} and auth_service.federation_connect_p95_ms sits at the 10,000 ms timeout (normally about 120 ms), while auth_service.jwt_validation_failures_per_min stays near 2, which rules out the token path
+  Remediation: revert the firewall policy with opsctl rollback firewall-policy/meridian-aks-egress --to-revision previous. Azure Firewall takes about 60 seconds to apply a policy update; after that federation succeeds again and failures drop to 0. Enabling a federation fallback or restarting auth-service does not restore egress.
+remediation_action: revert_aks_egress_policy
+error_message: 'level=error logger=auth.federation msg="federation token exchange failed" tenant={tenant} idp=login.microsoftonline.com error="ConnectTimeoutError: Connection to login.microsoftonline.com timed out. (connect timeout=10)" elapsed_ms={connect_ms}'
+stack_trace: |-
+  Traceback (most recent call last):
+    File "/usr/local/lib/python3.12/site-packages/urllib3/connection.py", line 203, in _new_conn
+      sock = connection.create_connection(
+    File "/usr/local/lib/python3.12/site-packages/urllib3/util/connection.py", line 73, in create_connection
+      sock.connect(sa)
+  TimeoutError: timed out
+  The above exception was the direct cause of the following exception:
+  urllib3.exceptions.ConnectTimeoutError: (<urllib3.connection.HTTPSConnection object at 0x7f3a2c1e4d90>, 'Connection to login.microsoftonline.com timed out. (connect timeout=10)')
 correlation_attr:
-  key: auth.saml_library_version
-  value: saml2-v2.4.1-hotfix
+  key: auth.idp_reachable
+  value: 'false'
 fault_params:
-  federation_provider: Azure AD
-  federation_timeout_ms: {randint: [30000, 32000]}
-  federation_tenant: meridian-enterprise.onmicrosoft.com
-  sso_blocked_count: {randint: [100, 1000]}
+  tenant: {choice: [contoso-logistics.onmicrosoft.com, fabrikam-retail.onmicrosoft.com, northwind-energy.onmicrosoft.com]}
+  connect_ms: {randint: [10001, 10040]}
+  fed_fail_per_min: {randint: [120, 260]}
 rca_clues:
   auth-service:
-    auth.federation_timeout_ms: {randint: [30000, 32000]}
-    auth.azure_ad_status: DEGRADED
-    auth.saml_signing_cert_status: unchanged
+    auth.idp: login.microsoftonline.com
+    auth.idp_reachable: 'false'
+    auth.federation_connect_ms: {randint: [10001, 10040]}
+    auth.federation_failures_per_min: {randint: [120, 260]}
   api-gateway:
-    gateway.enterprise_login_blocked: true
-    gateway.consumer_impact: NONE
+    upstream.degraded_subsystem: authentication
+remediation_command: |-
+  opsctl rollback firewall-policy/meridian-aks-egress --to-revision previous
+fault_scope:
+  cluster: meridian-aks-cluster
+  workloads: [auth-service]
+cascade_messages:
+  api-gateway:
+    - severity: WARN
+      message: 'POST /api/v1/auth/sso/callback upstream auth-service timed out after 10012ms (enterprise SSO, tenant={tenant})'
+infrastructure_events:
+  - service: auth-service
+    severity: INFO
+    offset_seconds: -60
+    event_name: azure.activity.write
+    body: 'azure-activity: operationName=Microsoft.Network/firewallPolicies/ruleCollectionGroups/write resourceId=/subscriptions/12d8df88-df58-5730-b296-0c3e02ec0ec3/resourceGroups/meridian-rg/providers/Microsoft.Network/firewallPolicies/meridian-aks-egress/ruleCollectionGroups/DefaultNetworkRuleCollectionGroup caller=netsec-pipeline@meridian.eu status=Succeeded category=Administrative change_request=CR-88190'
+    attributes:
+      cloud.provider: azure
+      azure.activity.operation_name: Microsoft.Network/firewallPolicies/ruleCollectionGroups/write
+      user.name: netsec-pipeline@meridian.eu
+      change.request: CR-88190
+  - service: auth-service
+    severity: WARN
+    offset_seconds: 20
+    event_name: azure.firewall.network_rule
+    body: 'AZFWNetworkRule: TCP request from 10.240.0.37:51344 to 20.190.159.2:443. Action: Deny. Policy: meridian-aks-egress. No rule matched. Proceeding with default action'
+    attributes:
+      cloud.provider: azure
+      azure.firewall.action: Deny
+      azure.firewall.policy: meridian-aks-egress
+remediation_effects:
+  log_taper_seconds: 60
+  log_events:
+    - service: auth-service
+      severity: INFO
+      offset_seconds: 1
+      body: 'azure-activity: operationName=Microsoft.Network/firewallPolicies/ruleCollectionGroups/write resourceId=/subscriptions/12d8df88-df58-5730-b296-0c3e02ec0ec3/resourceGroups/meridian-rg/providers/Microsoft.Network/firewallPolicies/meridian-aks-egress/ruleCollectionGroups/DefaultApplicationRuleCollectionGroup caller={actor} status=Succeeded category=Administrative'
+      attributes:
+        cloud.provider: azure
+        azure.activity.operation_name: Microsoft.Network/firewallPolicies/ruleCollectionGroups/write
+    - service: auth-service
+      severity: INFO
+      offset_seconds: 65
+      body: 'AZFWApplicationRule: HTTPS request from 10.240.0.37:51872 to login.microsoftonline.com:443. Action: Allow. Policy: meridian-aks-egress. Rule Collection: aks-identity. Rule: allow-entra-id'
+      attributes:
+        azure.firewall.action: Allow
+        azure.firewall.policy: meridian-aks-egress
+  steady_attributes:
+    auth-service:
+      auth.idp_reachable: 'true'
+  verification:
+    - signal: auth_service.federation_failures_per_min
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "auth-service"'
+      field: 'metrics.auth_service.federation_failures_per_min'
+      expect: '0 (was 120-260)'
+      within_seconds: 120
+    - signal: auth_service.federation_connect_p95_ms
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "auth-service"'
+      field: 'metrics.auth_service.federation_connect_p95_ms'
+      expect: 'back near 120 ms (was 10,000 ms)'
+      within_seconds: 120
+    - signal: Entra ID timeout lines
+      from: 'logs.otel.meridian'
+      where: 'body.text LIKE "*Connection to login.microsoftonline.com timed out*"'
+      expect: '0 new lines after the policy update has applied'
+      within_seconds: 120
+    - signal: identity provider reachability
+      from: 'logs.otel.meridian'
+      where: 'resource.attributes.service.name == "auth-service"'
+      field: 'attributes.auth.idp_reachable'
+      expect: 'true on every federation health line since the policy update'
+      within_seconds: 120
 business_impact:
   - kpi: business.enterprise_arpu_usd
-    factor: {uniform: [0.20, 0.50]}
+    factor: {uniform: [0.2, 0.5]}
   - kpi: business.activations_per_min
-    factor: {uniform: [0.30, 0.60]}
+    factor: {uniform: [0.3, 0.6]}
   - kpi: business.voluntary_churn_rate_pct
     factor: {uniform: [1.5, 3.5]}
   - kpi: business.nps
     factor: {uniform: [0.35, 0.65]}
+service_lag_seconds: {api-gateway: 12}

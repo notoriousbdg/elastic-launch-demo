@@ -114,6 +114,21 @@ class BaseScenario(ABC):
         return []
 
     @property
+    def dashboard_log_error_services(self) -> list[str]:
+        """Services whose overview tile shows an error-log ratio instead of a trace error rate.
+
+        For infra components that emit logs but no traces (``generates_traces: false``).
+        Default empty: every service keeps the trace-based tile.
+        """
+        return []
+
+    @property
+    def dashboard_cluster_health_tiles(self) -> bool:
+        """Fill overview columns that have no services with per-cluster infra tiles
+        (nodes, pods, restarts, disk, pod CPU/memory, deploys ready). Default off."""
+        return False
+
+    @property
     def executive_trend_charts(self) -> list[dict]:
         """Trend line charts for the Executive Dashboard (6, arranged 3×2).
 
@@ -1033,6 +1048,9 @@ The `remediation_action` value below is the `action_type` to pass to the remedia
             f"Do not use during investigation — use {ns}-triage or "
             f"{ns}-investigation-playbook first."
         )
+        from app.ops_profile import hitl_and_auto_ranges
+
+        hitl_ranges, auto_ranges = hitl_and_auto_ranges(self)
         content = f"""## Remediation Decision Framework
 
 ### When to Remediate
@@ -1106,16 +1124,16 @@ Use `{p_escalation_action}` with:
 - `severity` — `"advisory"`, `"caution"`, `"warning"`, or `"critical"`
 - `justification` — investigation summary
 
-## HITL Channels (1–15)
+## HITL Channels ({hitl_ranges})
 
-Always pass `approval_mode: required`; never pass `approval_mode: skip` for channels 1–15.
+Always pass `approval_mode: required`; never pass `approval_mode: skip` for channels {hitl_ranges}.
 The remediation workflow includes a human-in-the-loop step that requests the operator's
 approval. Call the tool and continue until the workflow stops and requests approval natively
 through its waitForInput step. Relay that approval request to the operator and end your turn.
 The operator's reply to that request is the decision: resume the execution with exactly what
 they answer. The workflow queues the remediation on approval and records the denial otherwise.
 
-## Auto-Remediate Channels (16–20)
+## Auto-Remediate Channels ({auto_ranges})
 
 Pass `approval_mode: skip` only when the Significant Event Auto-Remediate workflow
 message explicitly includes it. Always pass `dry_run: false`.

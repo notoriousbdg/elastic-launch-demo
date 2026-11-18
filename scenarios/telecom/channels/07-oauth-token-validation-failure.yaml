@@ -1,79 +1,110 @@
 name: OAuth Token Validation Failure
 subsystem: authentication
 vehicle_section: auth_pipeline
-error_type: AUTH-TOKEN-INVALID
+error_type: Unable to find a signing key that matches
 sensor_type: token_validation
 affected_services:
 - auth-service
-- identity-db
 cascade_services:
 - api-gateway
 - activation-service
-description: OAuth2 token validation failing due to JWKS key rotation mismatch between auth-service and identity provider
-investigation_notes: |
-  1. Check JWKS endpoint response — if the identity provider rotated signing keys but auth-service cached the old JWKS, tokens signed with the new key fail with UNKNOWN_KID (kid not in the cached key set). Verify: curl https://idp.meridian.eu/.well-known/jwks.json.
-  2. Auth-service JWKS cache TTL is 3600s — if keys rotated mid-TTL (cache age below 3600s), stale keys are used for validation. Force cache refresh: POST /api/v1/auth/jwks/refresh on auth-service.
-  3. Check clock skew between auth-service and identity-db — token expiry validation is sensitive to clock drift. NTP sync status: timedatectl show | grep NTPSynchronized.
-  4. Review token issuer claim (iss) — multiple identity providers (internal, Azure AD, MVNO partner) may have different JWKS endpoints. Ensure all issuers are registered in auth-service config.
-  5. Impact: all API requests through api-gateway require valid tokens. Token validation failures cause 401 responses, blocking all activation and provisioning operations.
+description: Keycloak activated a new signing key without pre-publishing it and auth-service's cached JWKS does not contain the new kid
+investigation_notes: |-
+  Root cause: the Keycloak key rotation job for realm meridian ran about 2 minutes before the first error with the new RS256 key set active immediately, skipping the usual 24-hour pre-publication. Tokens issued since then carry kid kc-meridian-2026-11 while auth-service validates against its cached JWKS (refreshed every 24 h, last refresh {jwks_cache_age_h} h ago), which only contains kc-meridian-2026-08. As access tokens expire (5-minute lifetime) and clients refresh them, more and more requests carry the new kid, so validation failures climb to about {jwt_fail_per_min}/min. Keycloak itself, identity-db and the token endpoint are healthy; tokens with the old kid still validate.
+  Confirm:
+    - the auth-service line "keycloak realm meridian: key rotation ... kid kc-meridian-2026-11 active" comes before the first "Unable to find a signing key that matches", and JWKS status lines carry attributes.auth.jwks_kids kc-meridian-2026-08 only
+    - metric auth_service.jwt_validation_failures_per_min climbs from about 2 to {jwt_fail_per_min}
+    - metric auth_service.token_issue_per_min stays near 2,400 and identity_db.query_latency_p99_ms stays normal, which rules out Keycloak or the database
+  Remediation: refresh the cached key set with opsctl sync jwks-cache/auth-service. Every pod re-fetches https://sso.meridian.eu/realms/meridian/protocol/openid-connect/certs within about 10 seconds and validation failures drop to baseline. Rolling back the Keycloak rotation would invalidate every token issued with the new key.
 remediation_action: refresh_jwks_cache
-error_message: '[AUTH] AUTH-TOKEN-INVALID: issuer={token_issuer} error={token_error} cache_age_s={jwks_cache_age_s} kid={token_kid} affected_requests={auth_affected_requests}'
-stack_trace: |
-  === OAUTH TOKEN VALIDATION FAILURE ===
-  issuer={token_issuer}  kid={token_kid}
-  --- VALIDATION PIPELINE ---
-    STEP                    STATUS      DETAIL
-    token_parse             COMPLETE    JWT format valid
-    issuer_check            COMPLETE    issuer={token_issuer}
-    jwks_lookup             FAILED      kid={token_kid} not in cached JWKS (cache_age={jwks_cache_age_s}s)  <<< MISMATCH
-    signature_verify        SKIPPED     {token_error}
-    claims_validate         SKIPPED     ---
-    scope_check             SKIPPED     ---
-  --- JWKS STATUS ---
-    cache_ttl=3600s  cache_age={jwks_cache_age_s}s  keys_cached=2
-    idp_keys_current=3  mismatch=true  rotation_detected=true
-    affected_requests={auth_affected_requests}  reject_rate=100%
-  ACTION: force_jwks_refresh=true  clear_token_cache=true  alert=AUTH-TOKEN-INVALID
-infrastructure_events:
-- body: '[AzureHealth] TokenValidationDegraded: resource=auth-service error_rate=45% jwks_cache=STALE provider=AzureAD region=westeurope'
-  severity: WARN
-  event_name: azure.health.TokenValidationDegraded
-  service: auth-service
-  attributes:
-    cloud.provider: azure
-    cloud.service: active_directory
-    azure.health.status: Degraded
-    infrastructure.source: AzureHealth
+error_message: 'level=error logger=auth.jwt msg="token validation failed" error="Unable to find a signing key that matches: kc-meridian-2026-11" issuer=https://sso.meridian.eu/realms/meridian jwks_kids=kc-meridian-2026-08 jwks_age_h={jwks_cache_age_h}'
+stack_trace: |-
+  Traceback (most recent call last):
+    File "/app/auth/jwt_validator.py", line 64, in validate
+      signing_key = self._jwks_client.get_signing_key_from_jwt(token)
+    File "/usr/local/lib/python3.12/site-packages/jwt/jwks_client.py", line 125, in get_signing_key_from_jwt
+      return self.get_signing_key(header.get("kid"))
+    File "/usr/local/lib/python3.12/site-packages/jwt/jwks_client.py", line 117, in get_signing_key
+      raise PyJWKClientError(
+  jwt.exceptions.PyJWKClientError: Unable to find a signing key that matches: "kc-meridian-2026-11"
 correlation_attr:
-  key: auth.jwks_cache_version
-  value: jwks-v3.1.0-stale
+  key: auth.jwks_kids
+  value: kc-meridian-2026-08
 fault_params:
-  token_issuer: 'https://idp.meridian.eu'
-  token_error: UNKNOWN_KID
-  jwks_cache_age_s: {randint: [600, 3500]}
-  token_kid: {format: "kid-{n}", n: {randint: [1000, 9999]}}
-  auth_affected_requests: {randint: [500, 5000]}
+  jwks_cache_age_h: {uniform: [6.0, 20.0], round: 1}
+  jwt_fail_per_min: {randint: [900, 1800]}
 rca_clues:
   auth-service:
-    auth.jwks_cache_age_s: {randint: [600, 3500]}
-    auth.key_rotation_detected: true
-    auth.ntp_synchronized: true
-    auth.issuer_registered: true
-  identity-db:
-    db.token_lookup_failures: {randint: [100, 500]}
-    db.cache_miss_rate: {uniform: [0.8, 1.0], round: 2}
+    auth.token_kid: kc-meridian-2026-11
+    auth.jwks_kids: kc-meridian-2026-08
+    auth.jwt_validation_failures_per_min: {randint: [900, 1800]}
   api-gateway:
-    gateway.401_rate: {uniform: [0.5, 1.0], round: 2}
-    gateway.auth_bypass: false
+    upstream.degraded_subsystem: authentication
+    gateway.401_rate: {uniform: [0.2, 0.6], round: 2}
   activation-service:
-    activation.auth_blocked: true
-    activation.queue_depth: {randint: [500, 2000]}
+    upstream.degraded_subsystem: authentication
+remediation_command: |-
+  opsctl sync jwks-cache/auth-service
+fault_scope:
+  cluster: meridian-aks-cluster
+  workloads: [auth-service]
+cascade_messages:
+  api-gateway:
+    - severity: WARN
+      message: 'auth-service /api/v1/auth/validate returned 401 invalid_token for POST /api/v1/activate (client=meridian-app-ios)'
+  activation-service:
+    - severity: WARN
+      message: 'POST http://auth-service/api/v1/auth/token -> 401 invalid_token; service-to-service call to provisioning skipped'
+infrastructure_events:
+  - service: auth-service
+    severity: INFO
+    offset_seconds: -120
+    event_name: keycloak.key_rotation
+    body: 'keycloak realm meridian: key rotation by job keycloak-key-rotator: rsa-generated kid kc-meridian-2026-11 priority 200 active=true (pre-publication skipped); kid kc-meridian-2026-08 passive'
+    attributes:
+      operation: key_rotation
+      user.name: keycloak-key-rotator
+      auth.token_kid: kc-meridian-2026-11
+      change.summary: 'active signing key kc-meridian-2026-08 -> kc-meridian-2026-11'
+remediation_effects:
+  log_taper_seconds: 10
+  log_events:
+    - service: auth-service
+      severity: INFO
+      offset_seconds: 1
+      body: '[NOC-CHG] executed opsctl sync jwks-cache/auth-service actor={actor}: JWKS re-fetched, kids kc-meridian-2026-08,kc-meridian-2026-11'
+      attributes:
+        operation: change_executed
+        change.target: jwks-cache/auth-service
+        auth.jwks_kids: kc-meridian-2026-08,kc-meridian-2026-11
+  steady_attributes:
+    auth-service:
+      auth.jwks_kids: kc-meridian-2026-08,kc-meridian-2026-11
+  verification:
+    - signal: auth_service.jwt_validation_failures_per_min
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "auth-service"'
+      field: 'metrics.auth_service.jwt_validation_failures_per_min'
+      expect: 'back under 10 (was 900-1,800)'
+      within_seconds: 60
+    - signal: signing key lines
+      from: 'logs.otel.meridian'
+      where: 'body.text LIKE "*Unable to find a signing key that matches*"'
+      expect: '0 new lines'
+      within_seconds: 60
+    - signal: cached JWKS key ids
+      from: 'logs.otel.meridian'
+      where: 'resource.attributes.service.name == "auth-service"'
+      field: 'attributes.auth.jwks_kids'
+      expect: 'kc-meridian-2026-08,kc-meridian-2026-11 on every JWKS status line since the sync'
+      within_seconds: 60
 business_impact:
   - kpi: business.activations_per_min
-    factor: {uniform: [0.10, 0.35]}
+    factor: {uniform: [0.1, 0.35]}
   - kpi: business.revenue_usd_per_min
-    factor: {uniform: [0.10, 0.40]}
+    factor: {uniform: [0.1, 0.4]}
   - kpi: business.voluntary_churn_rate_pct
     factor: {uniform: [2.0, 4.5]}
   - kpi: business.support_tickets_per_min
     factor: {uniform: [2.5, 5.0]}
+service_lag_seconds: {api-gateway: 5, activation-service: 10}

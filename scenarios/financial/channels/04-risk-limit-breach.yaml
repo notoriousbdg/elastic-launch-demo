@@ -6,46 +6,56 @@ sensor_type: risk_threshold
 affected_services:
 - risk-calculator
 - order-gateway
+error_services:
+- risk-calculator
 cascade_services:
 - matching-engine
 - compliance-monitor
-description: Trading desk risk exposure exceeds configured limit thresholds
+description: Pre-trade risk checks report a desk far over its gross limit and the kill switch blocks the desk's new orders
+onset_delay_seconds: 0
+service_lag_seconds:
+  order-gateway: 30
+  matching-engine: 30
+  compliance-monitor: 45
 investigation_notes: |-
-  1. Check risk-calculator logs for RISK-LIMIT-BREACH — note desk_id, asset_class, exposure, and utilization percentage.
-  2. Query FROM logs.otel.financial.* | WHERE body.text LIKE "*RISK-LIMIT-BREACH*" | STATS max(exposure) BY desk_id to identify the highest breach.
-  3. Inspect order-gateway kill_switch state — confirm new_orders_blocked=true is active to prevent further exposure growth.
-  4. Check matching-engine for any in-flight orders on the breaching desk that have not yet been risk-checked.
-  5. Notify compliance-monitor to log the breach event; if utilization exceeds 300% escalate to desk head and initiate liquidation queue.
-remediation_action: engage_kill_switch_and_liquidate
-error_message: '[RISK] RISK-LIMIT-BREACH: desk={desk_id} exposure=${exposure} limit=${risk_limit} asset_class={asset_class}'
+  Root cause: today's limits file, risk-limits revision r4412, was loaded from the credit risk system shortly before the first RISK-LIMIT-BREACH, with a dropped zero in the {desk_id} gross limit: 40,000,000 instead of 400,000,000 (previous revision r4411). The desk's exposure is normal: {exposure} gross, the same 124-160M band it runs in every day (31-40% of the real 400M limit), but against the {risk_limit} limit the pre-trade check computes {utilization_pct}% utilization, fails every {desk_id} order and engages the kill switch, so order-gateway blocks the desk's new orders. The risk is unchanged: the exposure history (attributes.risk.exposure_m) is flat across the file load and VaR (metrics.risk_calculator.var_95) does not move, which proves the limit changed, not the positions. The other desks (EQ-FLOW, FI-RATES, FX-SPOT, DRV-VOL) load correct limits from the same file and keep passing at their usual 40-70%, so this is one bad row in the limits file, not a risk engine fault.
+  Confirm:
+    - risk-calculator "[RISK] pre_trade_check desk={desk_id}" lines show limit_m=$40 and limits_rev=r4412 (attributes.risk.limit_m, attributes.risk.limits_file_revision) with result=REJECT, while exposure_m stays 124-160
+    - metric risk_calculator.limit_utilization_pct (EQ-PROP) steps from 31-40% to 310-400% at the file load; order_gateway.kill_switch_blocked_per_min rises from 0-2 to 150-400 per minute at the same time
+    - the risk-calculator line "[RISK] limits_load file=risk-limits revision=r4412" (attributes.operation refdata_load) comes before the first breach
+    - pre_trade_check lines for the other desks still show result=PASS from the same revision
+  Remediation: opsctl rollback refdata/risk-limits --to-revision previous. The risk engine reloads r4411 in about 15 s, re-evaluates {desk_id} at its 400M limit and disengages the kill switch; the utilization gauge (a 30 s average) is back under 40% within about 45 s and the desk's orders flow again. Then ask the credit risk system to reissue today's file with the correct limit. Liquidating positions or raising the limit by hand is wrong: the exposure is within the real limit, liquidation would realize losses for no risk reason, and a hand edit would be overwritten by the next file and leaves the bad row in the record.
+remediation_action: rollback_risk_limits_file
+remediation_command: |-
+  opsctl rollback refdata/risk-limits --to-revision previous
+error_message: '[RISK] RISK-LIMIT-BREACH: desk={desk_id} exposure=${exposure} limit=${risk_limit} utilization={utilization_pct}% asset_class={asset_class} limits_rev=r4412'
 stack_trace: |-
   === RISK CALCULATION REPORT ===
-  desk={desk_id}  asset_class={asset_class}
+  desk={desk_id}  asset_class={asset_class}  limits_file=risk-limits@r4412  business_date={iso_now:.10}
   --- EXPOSURE BREAKDOWN ---
     gross_exposure ${exposure}
     limit          ${risk_limit}
     utilization    {utilization_pct}%  <<< BREACH
-  --- VAR IMPACT ---
-    VaR_95  $18.7M   (pre-breach: $9.2M)
-    VaR_99  $28.1M   (pre-breach: $13.8M)
-    stress_loss  $41.5M  scenario=2008-LEHMAN
-  kill_switch=ARMED  new_orders_blocked=true  liquidation_queue=PENDING
+  --- VAR ---
+    VaR_95  $14.6M   (prior session: $14.2M)
+    VaR_99  $21.9M   (prior session: $21.3M)
+  kill_switch=ENGAGED  new_orders_blocked=true  liquidation_queue=NONE
   ACTION: block_new_orders=true  notify_desk_head=true  alert=RISK-LIMIT-BREACH
 correlation_attr: {}
 fault_params:
-  desk_id:
-    format: "DESK-{t}"
-    t: {choice: [EQ-FLOW, EQ-PROP]}
+  desk_id: EQ-PROP
   exposure:
     format: "{n}M"
-    n: {randint: [310, 400]}
-  risk_limit: 100M
+    n: {randint: [124, 160]}
+  risk_limit: 40M
   utilization_pct: {uniform: [310.0, 400.0], round: 1}
   asset_class: equity
 rca_clues:
   risk-calculator:
     risk.limit_utilization_pct: {uniform: [310.0, 400.0], round: 1}
-    risk.var_99_usd: {randint: [10000000, 50000000]}
+    risk.limits_file_revision: r4412
+    risk.limit_m: 40
+    risk.exposure_m: {uniform: [124.0, 160.0], round: 1}
   order-gateway:
     oms.kill_switch_active: true
     oms.blocked_orders_count: {randint: [10, 500]}
@@ -55,6 +65,86 @@ rca_clues:
   compliance-monitor:
     compliance.risk_breach_events: {randint: [1, 20]}
     compliance.desk_limit_violations: {randint: [1, 5]}
+cascade_messages:
+  order-gateway:
+    - severity: WARN
+      message: '[OMS] order_rejected desk={desk_id} reason=KILL_SWITCH_ENGAGED source=risk-calculator utilization={utilization_pct}% limit=${risk_limit} status=REJECTED'
+  matching-engine:
+    - severity: WARN
+      message: '[ME] mass_cancel desk={desk_id} reason=RISK_KILL_SWITCH source=order-gateway; resting orders pulled from the book'
+  compliance-monitor:
+    - severity: WARN
+      message: '[COMPL] limit_event desk={desk_id} exposure=${exposure} limit=${risk_limit} utilization={utilization_pct}% action=KILL_SWITCH recorded=true'
+fault_scope:
+  cluster: finserv-eks-cluster
+  workloads: [risk-calculator, order-gateway]
+infrastructure_events:
+  - service: risk-calculator
+    severity: INFO
+    offset_seconds: -90
+    body: '[RISK] limits_load file=risk-limits revision=r4412 (was r4411) business_date={iso_now:.10} source=credit-risk-refdata desks=5 changed=EQ-PROP gross_limit 400000000 -> 40000000; loaded by crs-batch (CR-6118)'
+    attributes:
+      user.name: crs-batch
+      change.request: CR-6118
+      operation: refdata_load
+      risk.limits_file_revision: r4412
+      risk.desk: EQ-PROP
+      risk.limit_m: 40
+      change.summary: 'risk-limits r4411 -> r4412 (EQ-PROP gross limit 400000000 -> 40000000)'
+remediation_effects:
+  log_taper_seconds: 15
+  log_events:
+    - service: audit-logger
+      severity: INFO
+      offset_seconds: 1
+      body: '[AUDIT] event_logged stream=change-mgmt type=CHANGE_APPLIED cmd="opsctl rollback refdata/risk-limits --to-revision previous" actor={actor}: risk-limits r4412 -> r4411'
+      attributes:
+        operation: change_applied
+        audit.stream: change-mgmt
+        change.target: refdata/risk-limits
+    - service: risk-calculator
+      severity: INFO
+      offset_seconds: 15
+      body: '[RISK] limits_load file=risk-limits revision=r4411 business_date={iso_now:.10} desks=5 EQ-PROP gross_limit=400000000; pre-trade checks re-evaluated, EQ-PROP result=PASS'
+      attributes:
+        operation: refdata_load
+        risk.limits_file_revision: r4411
+        risk.desk: EQ-PROP
+        risk.limit_m: 400
+    - service: order-gateway
+      severity: INFO
+      offset_seconds: 17
+      body: '[OMS] kill_switch desk=EQ-PROP state=DISENGAGED reason=risk_check_pass source=risk-calculator; new orders accepted'
+      attributes:
+        operation: kill_switch
+        oms.kill_switch_active: false
+  steady_attributes:
+    risk-calculator:
+      risk.limits_file_revision: r4411
+  verification:
+    - signal: risk_calculator.limit_utilization_pct
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "risk-calculator"'
+      field: 'metrics.risk_calculator.limit_utilization_pct'
+      expect: 'EQ-PROP back under 40% (was 310-400%)'
+      within_seconds: 60
+    - signal: order_gateway.kill_switch_blocked_per_min
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "order-gateway"'
+      field: 'metrics.order_gateway.kill_switch_blocked_per_min'
+      expect: 'back to 0-2 per minute once the limits reload and the kill switch disengages (was 150-400)'
+      within_seconds: 60
+    - signal: RISK-LIMIT-BREACH lines
+      from: 'logs.otel.finserv'
+      where: 'body.text LIKE "*RISK-LIMIT-BREACH*"'
+      expect: '0 new lines'
+      within_seconds: 60
+    - signal: risk limits file revision
+      from: 'logs.otel.finserv'
+      where: 'resource.attributes.service.name == "risk-calculator"'
+      field: 'attributes.risk.limits_file_revision'
+      expect: 'r4411 on every line once the limits reload (about 15 s after the fix); r4412 stops appearing'
+      within_seconds: 60
 business_impact:
   - kpi: business.order_flow_per_min
     value: {uniform: [316.2, 363.8]}

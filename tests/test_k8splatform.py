@@ -541,7 +541,8 @@ def _ops_inst():
     class _Inst:
         def __init__(self):
             self.chaos_controller = ChaosController(channel_registry=REG)
-            self.ctx = SimpleNamespace(services={s: {} for s in ("kube-apiserver", "harbor-registry")})
+            self.ctx = SimpleNamespace(services={s: {} for s in ("kube-apiserver", "harbor-registry")},
+                                       scenario=SCN)
 
         def resolve_channel(self, channel, **kw):
             return self.chaos_controller.resolve(channel, **kw)
@@ -753,7 +754,9 @@ def test_fluent_bit_failure_is_seen_centrally_not_from_the_broken_nodes():
 
 
 def test_apf_saturation_rejects_the_other_workload_low_clients_too():
-    recs = _service_records(_controller(5, elapsed=300), cycles=12)
+    # victims are sampled at random (p=0.55 per cycle, 1 of 4 clients), so use enough
+    # cycles that seeing fewer than two distinct clients is vanishingly unlikely
+    recs = _service_records(_controller(5, elapsed=300), cycles=60)
     # grouped on the mapped clue field, the way an investigation queries it
     others = {r["attrs"].get("k8s.audit.user") for r in recs if "code=429" in r["body"]} - {None}
     others.discard("system:serviceaccount:tenant-batch:job-operator")

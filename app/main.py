@@ -813,18 +813,33 @@ async def remediate_channel(channel: int, deployment_id: Optional[str] = None):
         return JSONResponse(status_code=404, content={"error": "No active deployment"})
     # The auto-remediate workflow applies the fix on its own: its change lines name the
     # automation, not a person or Claude Code.
-    from app.chaos.controller import AUTO_REMEDIATOR_ACTOR
-    result = inst.resolve_channel(channel, force=True, actor=AUTO_REMEDIATOR_ACTOR)
+    result = inst.resolve_channel(channel, force=True, actor=inst.chaos_controller.auto_actor)
     return {"action": "remediated", "channel": channel, **result}
 
 
 # ── Platform operations (opsctl) ───────────────────────────────────────────
 
 
+def _ops_profile_for(deployment_id: Optional[str]) -> dict:
+    from app import ops_profile
+    try:
+        inst = _get_instance(deployment_id)
+    except Exception:  # several deployments and no id: neutral help
+        inst = None
+    return ops_profile.profile_for(inst)
+
+
 @app.get("/api/ops/actions")
-async def ops_actions():
+async def ops_actions(deployment_id: Optional[str] = None):
     from app import ops
-    return ops.list_actions()
+    return ops.list_actions(_ops_profile_for(deployment_id))
+
+
+@app.get("/api/ops/profile")
+async def ops_profile_view(deployment_id: Optional[str] = None):
+    """The running scenario's opsctl vocabulary, help and telemetry guide."""
+    from app import ops_profile
+    return ops_profile.public_view(_ops_profile_for(deployment_id))
 
 
 @app.post("/api/ops/actions")

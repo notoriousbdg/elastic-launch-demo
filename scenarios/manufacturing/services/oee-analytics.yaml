@@ -33,101 +33,79 @@ constants:
   - LINE-03
   - LINE-04
   - LINE-05
-  SHIFTS:
-  - A
-  - B
-  - C
 state:
   _calculations_total:
     init: 0
-  _last_shift_report:
-    init: now
+  # OOM kills seen so far (all incidents) and in the current incident.
+  _oom_total:
+    init: 0
+  _oom_seen:
+    init: 0
 steps:
 - sample:
-    line:
-      choice: LINES
+    # Per-channel fault intensity: ramps 0->1 once the fault reaches this service, drains 1->0 after its fix.
+    f4:
+      expr: "min(1.0, max(0.0, elapsed.get(4, 0) - lag.get(4, 0)) / 30.0) if 4 in all_active else (max(0.0, 1.0 - since_fix.get(4, 0) / 60.0) if 4 in fixed_channels else 0.0)"
+    f8:
+      expr: "min(1.0, max(0.0, elapsed.get(8, 0) - lag.get(8, 0)) / 30.0) if 8 in all_active else (max(0.0, 1.0 - since_fix.get(8, 0) / 45.0) if 8 in fixed_channels else 0.0)"
+    f9:
+      expr: "min(1.0, max(0.0, elapsed.get(9, 0) - lag.get(9, 0)) / 60.0) if 9 in all_active else (max(0.0, 1.0 - since_fix.get(9, 0) / 90.0) if 9 in fixed_channels else 0.0)"
+    f10:
+      expr: "min(1.0, max(0.0, elapsed.get(10, 0) - lag.get(10, 0)) / 60.0) if 10 in all_active else (max(0.0, 1.0 - since_fix.get(10, 0) / 120.0) if 10 in fixed_channels else 0.0)"
+    f13:
+      expr: "min(1.0, max(0.0, elapsed.get(13, 0) - lag.get(13, 0)) / 30.0) if 13 in all_active else (max(0.0, 1.0 - since_fix.get(13, 0) / 60.0) if 13 in fixed_channels else 0.0)"
+    f18:
+      expr: "min(1.0, max(0.0, elapsed.get(18, 0) - lag.get(18, 0)) / 30.0) if 18 in all_active else (max(0.0, 1.0 - since_fix.get(18, 0) / 300.0) if 18 in fixed_channels else 0.0)"
+    f20:
+      expr: "min(1.0, max(0.0, elapsed.get(20, 0) - lag.get(20, 0)) / 20.0) if 20 in all_active else (max(0.0, 1.0 - since_fix.get(20, 0) / 120.0) if 20 in fixed_channels else 0.0)"
+- sample:
     availability:
-      uniform:
-      - 82.0
-      - 96.0
-      round: 1
+      expr: "round(rand.uniform(82.0, 96.0) * (1.0 - f8) + rand.uniform(45.0, 74.0) * f8, 1)"
+    planned_downtime_min:
+      expr: "round(rand.uniform(25.0, 45.0) * (1.0 - f8), 1)"
+    unplanned_downtime_min:
+      expr: "round(rand.uniform(2.0, 30.0) + f8 * rand.uniform(35.0, 90.0), 1)"
     performance:
-      uniform:
-      - 85.0
-      - 98.0
-      round: 1
+      expr: "round(rand.uniform(85.0, 98.0) * (1.0 - 0.15 * f10) * (1.0 - 0.15 * f18), 1)"
     quality:
-      uniform:
-      - 94.0
-      - 99.5
-      round: 1
+      expr: "round(rand.uniform(97.5, 99.5) - 1.5 * f9, 1)"
+    calendar_rev:
+      expr: "'23' if 8 in all_active else '22'"
+    calendar_tz:
+      expr: "'UTC' if 8 in all_active else 'America/New_York'"
+    memory_limit:
+      expr: "'512Mi' if 13 in all_active else '1Gi'"
+    memory_limit_mib:
+      expr: "512 if 13 in all_active else 1024"
+    working_set_mib:
+      expr: "int(330.0 + (elapsed.get(13, 0) % 192.0) / 192.0 * 180.0) if 13 in all_active else int(rand.gauss(705.0, 20.0))"
+    oom_this_incident:
+      expr: "int(elapsed.get(13, 0) / 192.0) + 1 if 13 in all_active and elapsed.get(13, 0) >= lag.get(13, 0) else 0"
+    calc_latency_ms:
+      expr: "int(rand.uniform(40.0, 90.0) + f13 * rand.uniform(760.0, 2400.0) + f20 * rand.uniform(560.0, 1700.0) + f4 * rand.uniform(20.0, 80.0))"
+    cache_hit_pct:
+      expr: "round(rand.uniform(94.0, 98.0) * (1.0 - f20) + rand.uniform(35.0, 60.0) * f20, 1)"
+    evicted_per_min:
+      expr: "int(f20 * rand.randint(900, 2400))"
+    redis_used_pct:
+      expr: "round(rand.uniform(74.0, 80.0) * (1.0 - f20) + rand.uniform(98.0, 100.0) * f20, 1)"
+    redis_maxmemory:
+      expr: "'2gb' if 20 in all_active else '4gb'"
+    event_intake_lag_s:
+      expr: "round(rand.uniform(0.5, 3.0) + f18 * rand.uniform(15.0, 75.0) + f4 * rand.uniform(8.0, 45.0) + f13 * rand.uniform(10.0, 60.0), 1)"
+- counter:
+    state_key: _oom_total
+    by:
+      expr: "max(0, oom_this_incident - _oom_seen)"
+- counter:
+    state_key: _oom_seen
+    by:
+      expr: "(max(_oom_seen, oom_this_incident) - _oom_seen) if 13 in all_active else -_oom_seen"
 - sample:
     oee:
       expr: round(availability * performance * quality / 10000, 1)
-- log:
-    level: INFO
-    message: '[OEE] oee_calc line={line} availability={availability}% performance={performance}% quality={quality}% oee={oee}%'
-    attrs:
-      operation: oee_calc
-      oee.line:
-        var: line
-      oee.availability_pct:
-        var: availability
-      oee.performance_pct:
-        var: performance
-      oee.quality_pct:
-        var: quality
-      oee.overall_pct:
-        var: oee
-- sample:
-    tp_line:
-      choice: LINES
-    units:
-      randint:
-      - 40
-      - 220
-    target:
-      randint:
-      - 180
-      - 250
-- sample:
-    attainment:
-      expr: round(units / target * 100, 1)
-- log:
-    level: INFO
-    message: '[OEE] throughput_window line={tp_line} units={units} target={target} attainment_pct={attainment}'
-    attrs:
-      operation: throughput_window
-      oee.line:
-        var: tp_line
-      oee.units_produced:
-        var: units
-      oee.target_units:
-        var: target
-- every:
-    seconds: 10
-    state_key: _last_shift_report
-    steps:
-    - sample:
-        shift:
-          choice: SHIFTS
-        shift_line:
-          choice: LINES
-        downtime:
-          randint:
-          - 2
-          - 32
-    - log:
-        level: INFO
-        message: '[OEE] shift_summary shift={shift} line={shift_line} downtime_min={downtime} status=ON_TARGET'
-        attrs:
-          operation: shift_summary
-          oee.shift:
-            var: shift
-          oee.line:
-            var: shift_line
-          oee.unplanned_downtime_min:
-            var: downtime
+    restarts:
+      expr: "3 + _oom_total"
 - counter:
     state_key: _calculations_total
     by: 1
@@ -137,22 +115,112 @@ steps:
       var: _calculations_total
     unit: calcs
 - metric:
-    name: oee.cache_hit_rate_pct
+    name: oee.availability_pct
     value:
-      uniform:
-      - 82.0
-      - 98.5
-      round: 1
+      var: availability
     unit: '%'
+- metric:
+    name: oee.performance_pct
+    value:
+      var: performance
+    unit: '%'
+- metric:
+    name: oee.quality_pct
+    value:
+      var: quality
+    unit: '%'
+- metric:
+    name: oee.overall_pct
+    value:
+      var: oee
+    unit: '%'
+- metric:
+    name: oee.planned_downtime_min
+    value:
+      var: planned_downtime_min
+    unit: min
+- metric:
+    name: oee.unplanned_downtime_min
+    value:
+      var: unplanned_downtime_min
+    unit: min
+- metric:
+    name: oee.container_memory_limit_mib
+    value:
+      var: memory_limit_mib
+    unit: MiB
+- metric:
+    name: oee.container_memory_working_set_mib
+    value:
+      var: working_set_mib
+    unit: MiB
+- metric:
+    name: oee.container_restarts
+    value:
+      var: restarts
+    unit: restarts
 - metric:
     name: oee.calc_latency_ms
     value:
-      if_active:
-        randint:
-        - 800
-        - 6500
-      else:
-        randint:
-        - 40
-        - 280
+      var: calc_latency_ms
     unit: ms
+- metric:
+    name: oee.cache_hit_rate_pct
+    value:
+      var: cache_hit_pct
+    unit: '%'
+- metric:
+    name: oee.redis_evicted_keys_per_min
+    value:
+      var: evicted_per_min
+    unit: keys/min
+- metric:
+    name: oee.redis_used_memory_pct
+    value:
+      var: redis_used_pct
+    unit: '%'
+- metric:
+    name: oee.event_intake_lag_s
+    value:
+      var: event_intake_lag_s
+    unit: s
+- log:
+    level: INFO
+    message: '[OEE] pod_resources pod=oee-analytics-7c8d9f4b6-q8x2v container=oee-analytics memory_limit={memory_limit} working_set_mib={working_set_mib} restarts={restarts}'
+    attrs:
+      operation: pod_resources
+      k8s.container.memory_limit:
+        var: memory_limit
+      k8s.container.restart_count:
+        var: restarts
+- log:
+    level: INFO
+    message: '[OEE] cache_status cache=oee-results maxmemory={redis_maxmemory} policy=allkeys-lru used_memory_pct={redis_used_pct} hit_rate_pct={cache_hit_pct} evicted_keys_per_min={evicted_per_min}'
+    attrs:
+      operation: cache_status
+      oee.redis_maxmemory:
+        var: redis_maxmemory
+      oee.cache_hit_rate_pct:
+        var: cache_hit_pct
+- sample:
+    line:
+      choice: LINES
+- log:
+    level: INFO
+    message: '[OEE] oee_window line={line} shift=current calendar=plant-p002 calendar_rev={calendar_rev} tz={calendar_tz} availability={availability}% performance={performance}% quality={quality}% oee={oee}% planned_downtime_min={planned_downtime_min} unplanned_downtime_min={unplanned_downtime_min} calc_ms={calc_latency_ms}'
+    attrs:
+      operation: oee_window
+      oee.line:
+        var: line
+      oee.shift_calendar_rev:
+        var: calendar_rev
+      oee.calendar_tz:
+        var: calendar_tz
+      oee.availability_pct:
+        var: availability
+      oee.performance_pct:
+        var: performance
+      oee.quality_pct:
+        var: quality
+      oee.overall_pct:
+        var: oee

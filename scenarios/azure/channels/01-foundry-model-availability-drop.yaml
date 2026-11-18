@@ -5,15 +5,18 @@ error_type: AI-FOUNDRY-AVAILABILITY-DROP
 sensor_type: health_check
 affected_services: [model-router, chat-orchestrator]
 cascade_services: [assistant-web]
-description: The Microsoft Foundry model deployment behind model-router falls below its availability target and answers slowly, so chat-orchestrator retries and assistant-web serves degraded answers.
+description: A model version update on the Microsoft Foundry deployment behind model-router drops its availability below target and makes it answer slowly, so chat-orchestrator retries and assistant-web serves degraded answers.
 investigation_notes: |-
-  1. Search body.text for *AI-FOUNDRY-AVAILABILITY-DROP* and confirm deployment={deployment_name} is the one failing; model_availability_above_threshold fires when availability drops below 99%.
-  2. Compare availability_pct={availability_pct}% against the {target_availability_pct}% target and check latency_high (p95={p95_latency_ms}ms) on the same deployment in the Microsoft Foundry metrics.
-  3. Check the Azure Activity Log for the recent model version update on {deployment_name} and Service Health for region={region}; a version update minutes before the drop while regional Service Health stays Available points at the new model version, not a regional incident.
-  4. Look at chat-orchestrator for retry storms (retries={retry_count} per request) and at assistant-web for degraded-answer fallbacks.
-  5. Confirm the secondary deployment {secondary_deployment} has headroom, then shift model-router traffic to it and watch availability recover.
+  Root cause: the model version of Foundry deployment {deployment_name} was updated from gpt-4o-2024-08-06 to gpt-4o-2024-11-20 shortly before availability fell. The new version times out and returns 5xx under production load: {deployment_name} availability is {availability_pct}% against a {target_availability_pct}% target with p95 latency {p95_latency_ms}ms. Region={region} Service Health stays Available and the secondary deployment {secondary_deployment} is healthy, which rules out a regional incident or capacity shortfall.
+  Confirm:
+    - model-router logs [MODEL_ROUTER] deployment_health deployment={deployment_name} model_version=gpt-4o-2024-11-20 status=ANOMALY (attributes.deployment.foundry_model_version); metric model_router.deployment_availability_pct drops from 99.6-100 to 93-97 and model_router.route_latency_ms rises with it
+    - the Activity Log line azure-activity: operationName=Microsoft.CognitiveServices/accounts/deployments/write on {deployment_name} (change.summary model version 2024-08-06 -> 2024-11-20) comes before the first AI-FOUNDRY-AVAILABILITY-DROP
+    - chat-orchestrator shows retries ({retry_count} per request) and assistant-web degraded-answer fallbacks, both downstream of the model-router; model_router.tpm_quota_used_pct and model_router.canary_traffic_share_pct stay in their baseline bands, which rules out quota and canary routing
+  Remediation: roll {deployment_name} back to its previous revision with opsctl rollback foundry-deployment/{deployment_name} --to-revision previous. Availability returns to 99.5% or better over about 60 seconds and latency follows. Shifting traffic to {secondary_deployment} only hides the bad version and leaves the primary degraded.
 remediation_action: shift_traffic_to_secondary_deployment
-error_message: '[ModelRouter] AI-FOUNDRY-AVAILABILITY-DROP: deployment={deployment_name} region={region} availability={availability_pct}% (target {target_availability_pct}%) p95_latency={p95_latency_ms}ms'
+remediation_command: |-
+  opsctl rollback foundry-deployment/gpt-4o-chat-prod --to-revision previous
+error_message: '[MODEL_ROUTER] AI-FOUNDRY-AVAILABILITY-DROP: deployment={deployment_name} region={region} availability={availability_pct}% (target {target_availability_pct}%) p95_latency={p95_latency_ms}ms upstream=503 ServiceUnavailable'
 stack_trace: |-
   FoundryDeploymentUnavailableException: AI-FOUNDRY-AVAILABILITY-DROP
     at ModelRouter.selectDeployment(deployment={deployment_name})
@@ -28,7 +31,7 @@ correlation_attr:
 fault_params:
   deployment_name: gpt-4o-chat-prod
   secondary_deployment: gpt-4o-chat-weu-secondary
-  region: {choice: [eastus2, eastus]}
+  region: eastus2
   availability_pct: {uniform: [93.0, 97.0], round: 1}
   target_availability_pct: 99.0
   p95_latency_ms: {randint: [7000, 14000]}
@@ -46,6 +49,58 @@ rca_clues:
   assistant-web:
     web.degraded_answer_fallbacks: {randint: [100, 2500]}
     web.answer_latency_p95_ms: {randint: [7000, 15000]}
+cascade_messages:
+  assistant-web:
+    - severity: WARN
+      message: '[WEB] answer served from degraded fallback: model-router latency p95={p95_latency_ms}ms exceeds the 6000ms answer budget'
+service_lag_seconds: {chat-orchestrator: 20, assistant-web: 40}
+fault_scope:
+  workloads: [model-router, chat-orchestrator]
+infrastructure_events:
+  - service: model-router
+    severity: INFO
+    offset_seconds: -120
+    body: 'azure-activity: operationName=Microsoft.CognitiveServices/accounts/deployments/write resourceId=/subscriptions/38514ecc-371c-5d0a-9c14-ab99a396027d/resourceGroups/azureai-rg/providers/Microsoft.CognitiveServices/accounts/deployments/gpt-4o-chat-prod caller=release-pipeline@contoso-demo.onmicrosoft.com status=Succeeded category=Administrative'
+    attributes:
+      cloud.provider: azure
+      azure.activity.operation_name: Microsoft.CognitiveServices/accounts/deployments/write
+      user.name: release-pipeline@contoso-demo.onmicrosoft.com
+      operation: model_version_update
+      deployment.foundry_model_version: gpt-4o-2024-11-20
+      change.summary: 'model version: gpt-4o-2024-08-06 -> gpt-4o-2024-11-20'
+remediation_effects:
+  log_events:
+    - service: model-router
+      severity: INFO
+      offset_seconds: 1
+      body: 'azure-activity: operationName=Microsoft.CognitiveServices/accounts/deployments/write resourceId=/subscriptions/38514ecc-371c-5d0a-9c14-ab99a396027d/resourceGroups/azureai-rg/providers/Microsoft.CognitiveServices/accounts/deployments/gpt-4o-chat-prod caller={actor} status=Succeeded category=Administrative'
+      attributes:
+        cloud.provider: azure
+        azure.activity.operation_name: Microsoft.CognitiveServices/accounts/deployments/write
+        operation: model_version_rollback
+        change.summary: 'model version: gpt-4o-2024-11-20 -> gpt-4o-2024-08-06'
+  steady_attributes:
+    model-router:
+      deployment.foundry_model_version: gpt-4o-2024-08-06
+  verification:
+    - signal: model_router.deployment_availability_pct
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "model-router"'
+      field: 'metrics.model_router.deployment_availability_pct'
+      expect: '>= 99.5 (was 93-97)'
+      within_seconds: 90
+    - signal: model_router.route_latency_ms
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "model-router"'
+      field: 'metrics.model_router.route_latency_ms'
+      expect: 'back under 1600 ms'
+      within_seconds: 90
+    - signal: Foundry model version
+      from: 'logs.otel.azureai'
+      where: 'resource.attributes.service.name == "model-router"'
+      field: 'attributes.deployment.foundry_model_version'
+      expect: 'gpt-4o-2024-08-06 on every line logged since the fix'
+      within_seconds: 90
 business_impact:
 - kpi: business.model_availability_pct
   factor:
@@ -64,3 +119,4 @@ generator_impact:
   azure_ai_foundry:
     model_availability_above_threshold: 950.0
     latency_high: 7000.0
+generator_hold_seconds: {azure_ai_foundry: 60}

@@ -11,12 +11,16 @@ description: >
 
 investigation_notes: |
   1. Search body.text LIKE *REC-BEDROCK-THROTTLED* and confirm model_id={model_id} returns ThrottlingException at rate throttled_pct={throttled_pct}%.
-  2. Compare CloudWatch AWS/Bedrock InvocationThrottles and InvocationLatency for model_id={model_id} against baseline; throttles rising with latency p99 near {latency_ms}ms points to on-demand quota pressure, not a model outage.
-  3. Check recommendation-service request volume: traffic is {traffic_multiplier}x baseline, and the Service Quotas value for requests per minute is {quota_rpm} RPM.
+  2. Compare CloudWatch AWS/Bedrock InvocationThrottles for model_id={model_id} against baseline; throttles rising while client-side invoke latency (SDK retries with backoff included) reaches {latency_ms}ms points to on-demand quota pressure, not a model outage. InvocationClientErrors and InvocationServerErrors stay flat.
+  3. Check recommendation-service request volume: traffic is {traffic_multiplier}x its usual ~750 requests per minute, which exceeds the {quota_rpm} RPM on-demand InvokeModel quota for this model in eu-west-1 (Service Quotas).
   4. Confirm there are no AccessDenied or ValidationException errors and guardrail interventions are flat, so only capacity is limited.
   5. Check storefront-web rca_clues (storefront.recommendations_fallback_rate): the storefront is rendering default carousels while recommendation calls time out.
-  6. Remediation is bounded and safe: route the same model through the EU cross-region inference profile {fallback_profile} so requests spread across EU regions; revert to the single-region model ID once InvocationThrottles returns to baseline.
+  6. Confirm the cause: the recommendation widget rollout raised request volume to {traffic_multiplier}x baseline about 90 seconds before the throttle alarm, and the model id on every invoke log (attributes.gen_ai.request.model) is the single-region {model_id}.
+  7. Confirm the fix target: no AccessDenied, no ValidationException, so only the single-region quota is limiting.
+  8. Remediation: `opsctl patch ecs-service/recommendation-service --bedrock-model-id {fallback_profile}`; the new task definition revision rolls out (about 90 seconds for tasks to start and pass health checks, then the old tasks drain) and invocations spread across eu-west-1, eu-central-1 and eu-west-3 under the profile's own quota, so throttles and latency are back to baseline in about 2.5 minutes.
 remediation_action: fallback_bedrock_model
+remediation_command: |-
+  opsctl patch ecs-service/recommendation-service --bedrock-model-id eu.anthropic.claude-3-haiku-20240307-v1:0
 
 error_message: |
   REC-BEDROCK-THROTTLED: ThrottlingException model_id={model_id} throttled_pct={throttled_pct} latency_ms={latency_ms} quota_rpm={quota_rpm}
@@ -25,17 +29,29 @@ stack_trace: |
   === BEDROCK INVOKE THROTTLING REPORT ===
   service=recommendation-service  region=eu-west-1  api=bedrock-runtime:InvokeModel
   --- ERROR ---
-    botocore.errorfactory.ThrottlingException: Too many requests, please wait before trying again.
+    botocore.errorfactory.ThrottlingException: An error occurred (ThrottlingException) when calling the InvokeModel operation (reached max retries: 4): Too many requests, please wait before trying again.
     model_id={model_id}  retries_exhausted=true
   --- CLOUDWATCH METRICS (AWS/Bedrock) ---
-    InvocationThrottles_pct={throttled_pct}%  InvocationLatency_p99={latency_ms}ms  (baseline ~900ms)
+    InvocationThrottles_pct={throttled_pct}%  client_invoke_latency_with_retries={latency_ms}ms  (baseline ~900ms)
     traffic_vs_baseline={traffic_multiplier}x  quota_rpm={quota_rpm}
   --- ASSESSMENT ---
     access_denied=0  validation_errors=0  cause=on_demand_quota_pressure
   ACTION: fallback_model=true  inference_profile={fallback_profile}  alert=REC-BEDROCK-THROTTLED
 
 infrastructure_events:
-- body: '[CloudWatch] Alarm in ALARM: awsorders-bedrock-invocation-throttles > 50 for 5 datapoints region=eu-west-1'
+- body: '[CloudTrail] UpdateService: service=recommendation-service cluster=awsorders taskDefinition=recommendation-service:58 event_source=ecs.amazonaws.com; home_carousel and cart_upsell widgets enabled for 100% of eu-west-1 traffic, requests per minute to bedrock-runtime now {traffic_multiplier}x baseline'
+  severity: INFO
+  event_name: aws.cloudtrail.UpdateService
+  service: recommendation-service
+  offset_seconds: -90
+  attributes:
+    cloud.provider: aws
+    cloud.service: ecs
+    aws.cloudtrail.event_name: UpdateService
+    change.summary: 'recommendation widget rollout 25% -> 100%'
+    infrastructure.source: CloudTrail
+- offset_seconds: 30
+  body: '[CloudWatch] Alarm in ALARM: awsorders-bedrock-invocation-throttles > 50 for 5 datapoints region=eu-west-1'
   severity: WARN
   event_name: aws.cloudwatch.AlarmStateChange
   service: recommendation-service
@@ -50,19 +66,71 @@ correlation_attr:
   key: bedrock.model_id
   value: anthropic.claude-3-haiku-20240307-v1:0
 
+cascade_messages:
+  storefront-web:
+    - severity: WARN
+      message: 'recommendations upstream timed out after 3000ms; rendering default carousel placement=home_carousel'
+fault_scope:
+  cluster: awsorders-eks-euw1
+  workloads: [recommendation-service]
+service_lag_seconds: {storefront-web: 40}
+onset_delay_seconds: 30
+ramp_seconds: 45
+remediation_effects:
+  transition_seconds: 150
+  log_events:
+    - service: orders-service
+      severity: INFO
+      offset_seconds: 1
+      body: 'cloudtrail: eventSource=ecs.amazonaws.com eventName=UpdateService userIdentity={actor} requestParameters.cluster=awsorders requestParameters.service=recommendation-service errorCode=none'
+      attributes:
+        command.target: ecs-service/recommendation-service
+    - service: recommendation-service
+      severity: INFO
+      offset_seconds: 90
+      body: '(service recommendation-service) has reached a steady state. bedrock model_id=eu.anthropic.claude-3-haiku-20240307-v1:0 cluster=awsorders'
+      attributes:
+        gen_ai.request.model: eu.anthropic.claude-3-haiku-20240307-v1:0
+  steady_attributes:
+    recommendation-service:
+      gen_ai.request.model: eu.anthropic.claude-3-haiku-20240307-v1:0
+  verification:
+    - signal: Bedrock invocation throttles
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "recommendation-service"'
+      field: 'metrics.recommendations.bedrock.invocation_throttles'
+      expect: 'back in 0-1 (was 18-140)'
+      within_seconds: 210
+    - signal: Bedrock invocation latency
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "recommendation-service"'
+      field: 'metrics.recommendations.bedrock.invocation_latency_ms'
+      expect: 'back in 220-780 ms (was 4500-12000 ms)'
+      within_seconds: 210
+    - signal: REC-BEDROCK-THROTTLED lines
+      from: 'logs.otel.awsorders'
+      where: 'body.text LIKE "*REC-BEDROCK-THROTTLED*"'
+      expect: '0 new lines'
+      within_seconds: 210
+    - signal: Bedrock model id
+      from: 'logs.otel.awsorders'
+      where: 'resource.attributes.service.name == "recommendation-service"'
+      field: 'attributes.gen_ai.request.model'
+      expect: 'eu.anthropic.claude-3-haiku-20240307-v1:0 on every line since the fix'
+      within_seconds: 210
 fault_params:
   model_id: anthropic.claude-3-haiku-20240307-v1:0
-  throttled_pct: {randint: [35, 72]}
-  latency_ms: {randint: [2600, 5200]}
-  traffic_multiplier: {uniform: [2.5, 4.5], round: 1}
+  throttled_pct: {randint: [33, 56]}
+  latency_ms: {randint: [4500, 12000]}
+  traffic_multiplier: {uniform: [2.0, 3.0], round: 1}
   quota_rpm: 1000
   fallback_profile: eu.anthropic.claude-3-haiku-20240307-v1:0
 
 rca_clues:
   recommendation-service:
-    bedrock.throttle_rate_pct: {randint: [35, 72]}
+    bedrock.throttle_rate_pct: {randint: [33, 56]}
     bedrock.retry_exhausted_count: {randint: [200, 1500]}
-    bedrock.quota_utilization_pct: {randint: [100, 140]}
+    bedrock.quota_utilization_pct: {randint: [150, 225]}
   storefront-web:
     storefront.recommendations_fallback_rate: {uniform: [0.4, 0.9], round: 2}
     storefront.carousel_timeout_count: {randint: [100, 900]}
@@ -79,3 +147,5 @@ generator_impact:
   aws_bedrock:
     throttle_multiplier: 8.0
     latency_multiplier: 3.0
+# the package streams keep the fault while the scenario's own metrics converge
+generator_hold_seconds: {aws_bedrock: 150}

@@ -20,7 +20,7 @@ Two capabilities for generators under `generators/<id>/`:
 
 | Capability | Purpose | Edits |
 |---|---|---|
-| **validate** | Read-only status: engine `schema_version` vs `generator_engine/schema.yaml` `current`; 1.1 gaps (state_keys, scope, onset/ramp, coherence, `chaos.*` attributes); `SOURCE_INTEGRATION` vs upstream package version; alert ES\|QL emit gaps; SLO template / ML module emit gaps; optional live Kibana rule errors | None |
+| **validate** | Read-only status: engine `schema_version` vs `generator_engine/schema.yaml` `current`; 1.1 gaps (state_keys, scope, onset/ramp, coherence, `chaos.*` attributes); warning for `state_keys` without `ops_bindings`; `SOURCE_INTEGRATION` vs upstream package version; alert ES\|QL emit gaps; SLO template / ML module emit gaps; optional live Kibana rule errors | None |
 | **upgrade** | Bring generator(s) current: re-ground against latest `elastic/integrations` package (primary path); if `schema_version` lags engine `current`, also apply pending `schema.yaml` migration guidance in the same pass | `generators/<id>/` only |
 
 Read [GUARDRAILS.md](GUARDRAILS.md), [CONTRACT.md](CONTRACT.md),
@@ -123,6 +123,24 @@ read its SPEC and `generator.py` and report:
 Recommend **upgrade** for each gap. `generators/kubernetes_otel/` (pinned path)
 and `generators/host_metrics/` (scope) are the 1.1 references.
 
+Also for every generator **at** 1.1 (warning, not a version gap):
+
+- **state_keys without ops_bindings** — `SPEC.state_keys` is non-empty but
+  `SPEC.ops_bindings` is empty, so `opsctl` commands cannot change its
+  telemetry: a fix lands only through a channel's `remediation_effects.state`,
+  and a wrong or partial opsctl change leaves no trace. This is the optional
+  step 6 of the 1.1 guidance in `generator_engine/schema.yaml`; it needs no
+  version bump. Recommend **upgrade** to add bindings when scenarios fix this
+  generator's values with opsctl.
+
+  ```bash
+  .venv/bin/python -c "
+  from generator_engine.registry import GENERATORS
+  for g, s in sorted(GENERATORS.items()):
+      if s.state_keys and not s.ops_bindings: print('WARN', g, 'state_keys without ops_bindings')
+  "
+  ```
+
 ### Alert ES|QL emit gaps (mandatory when templates exist)
 
 For each package-backed generator with `alerting_rule_template`:
@@ -193,6 +211,14 @@ If `list_generators()` shows `outdated_compatible` or `upgrade_required`:
 - Remove every `chaos.*` (and other demo) attribute from the emit.
 - Tests: in-scope entities degrade and out-of-scope ones stay healthy; a
   `remediation_effects.state` row changes the reported value; no `chaos.` keys.
+- (optional, step 6) Declare `SPEC.ops_bindings` for the `state_keys`: rules
+  `{verbs, kinds, when, state: {"<state_key>.<path>": "<template>"},
+  transition_seconds}` or a callable `(scenario, cmd) -> (state, seconds)`
+  (`generators/kubernetes_otel/ops_bindings.py`), with a test that applies a
+  command through `app.ops.change_state` and asserts the returned state.
+
+A generator already at 1.1 that validate flags for missing `ops_bindings` gets
+only that item; keep `schema_version="1.1"`.
 
 Details and code: [add-telemetry-generator SKILL.md](../add-telemetry-generator/SKILL.md)
 Phase 7 and [TEMPLATES.md](../add-telemetry-generator/TEMPLATES.md) §SPEC template.

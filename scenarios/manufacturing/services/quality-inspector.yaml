@@ -26,51 +26,145 @@ db_operations:
 emit_fault_logs: true
 kpi_emitter: false
 constants:
-  STATIONS:
+  VISION_STATIONS:
   - VIS-01
   - VIS-02
   - VIS-03
-  - CMM-01
-  - TORQUE-01
   DEFECT_CODES:
   - SCRATCH
   - DIMENSION_OOT
   - MISSING_FEATURE
   - COSMETIC
   - ASSEMBLY
-  RESULTS:
-  - PASS
-  - PASS
-  - PASS
-  - PASS
-  - FAIL
-  CHARACTERISTICS:
-  - LENGTH_MM
-  - DIAMETER_MM
-  - TORQUE_NM
-  - WEIGHT_G
-  CPK_CHARACTERISTICS:
-  - LENGTH_MM
-  - DIAMETER_MM
-  - TORQUE_NM
 state:
   _inspections_total:
     init: 0
-  _last_cpk_report:
-    init: now
 steps:
 - sample:
+    # Per-channel fault intensity: ramps 0->1 once the fault reaches this service, drains 1->0 after its fix.
+    f3:
+      expr: "min(1.0, max(0.0, elapsed.get(3, 0) - lag.get(3, 0)) / 30.0) if 3 in all_active else (max(0.0, 1.0 - since_fix.get(3, 0) / 90.0) if 3 in fixed_channels else 0.0)"
+    f9:
+      expr: "min(1.0, max(0.0, elapsed.get(9, 0) - lag.get(9, 0)) / 90.0) if 9 in all_active else (max(0.0, 1.0 - since_fix.get(9, 0) / 90.0) if 9 in fixed_channels else 0.0)"
+    f10:
+      expr: "min(1.0, max(0.0, elapsed.get(10, 0) - lag.get(10, 0)) / 60.0) if 10 in all_active else (max(0.0, 1.0 - since_fix.get(10, 0) / 120.0) if 10 in fixed_channels else 0.0)"
+- sample:
+    cmm_cal_rev:
+      expr: "'r42' if 9 in all_active else 'r41'"
+    # The stylus offset is a step: every measurement after r42 loads reads 0.022 mm high.
+    golden_dev_mm:
+      expr: "round(rand.uniform(-0.0006, 0.0006) + (0.022 if 9 in all_active else 0.0), 4)"
+    diameter_mm:
+      expr: "round(rand.gauss(25.402, 0.0105) + (0.022 if 9 in all_active else 0.0), 4)"
+    cpk:
+      expr: "round(rand.uniform(1.45, 1.75) * (1.0 - f9) + rand.uniform(0.78, 0.95) * f9, 2)"
+    defect_rate_pct:
+      expr: "round(rand.uniform(0.3, 1.2) + f9 * rand.uniform(0.5, 1.5), 2)"
+    vision_confidence:
+      expr: "round(rand.uniform(0.55, 0.78), 3) if 10 in all_active else round(rand.uniform(0.93, 0.98), 3)"
+    vision_model:
+      expr: "'defect-yolov8s-v3.4.0' if 10 in all_active else 'defect-yolov8s-v3.3.2'"
+    review_queue:
+      expr: "int(rand.randint(0, 3) + f10 * rand.randint(40, 140))"
+    frames_dropped:
+      expr: "rand.randint(0, 5)"
+    first_pass_yield_pct:
+      expr: "round(rand.uniform(96.0, 99.0) - 2.0 * f9 - f10 * rand.uniform(12.0, 25.0), 2)"
+    batches_on_hold:
+      expr: "int(f3 * rand.randint(2, 6))"
+    spc_status:
+      expr: "'OUT_OF_CONTROL' if f9 > 0.5 else 'IN_CONTROL'"
+- counter:
+    state_key: _inspections_total
+    by: 1
+- metric:
+    name: quality.inspections_total
+    value:
+      var: _inspections_total
+    unit: inspections
+- metric:
+    name: quality.cpk
+    value:
+      var: cpk
+    unit: index
+    attrs:
+      quality.characteristic: DIAMETER_MM
+      quality.line: LINE-04
+- metric:
+    name: quality.golden_part_dev_mm
+    value:
+      var: golden_dev_mm
+    unit: mm
+    attrs:
+      quality.gauge: CMM-01
+- metric:
+    name: quality.diameter_mean_mm
+    value:
+      var: diameter_mm
+    unit: mm
+- metric:
+    name: quality.defect_rate_pct
+    value:
+      var: defect_rate_pct
+    unit: '%'
+- metric:
+    name: quality.first_pass_yield_pct
+    value:
+      var: first_pass_yield_pct
+    unit: '%'
+- metric:
+    name: quality.vision_confidence_avg
+    value:
+      var: vision_confidence
+    unit: score
+    attrs:
+      quality.station: VIS-02
+- metric:
+    name: quality.manual_review_queue
+    value:
+      var: review_queue
+    unit: parts
+- metric:
+    name: quality.vision_frames_dropped
+    value:
+      var: frames_dropped
+    unit: frames
+- metric:
+    name: quality.batches_on_hold
+    value:
+      var: batches_on_hold
+    unit: batches
+- log:
+    level: INFO
+    message: '[QC] spc_sample characteristic=DIAMETER_MM line=LINE-04 gauge=CMM-01 cmm_cal_rev={cmm_cal_rev} value={diameter_mm} nominal=25.4000 usl=25.4500 lsl=25.3500 cpk={cpk} status={spc_status}'
+    attrs:
+      operation: spc_sample
+      quality.characteristic: DIAMETER_MM
+      quality.cmm_cal_rev:
+        var: cmm_cal_rev
+      quality.measured_value:
+        var: diameter_mm
+      quality.cpk:
+        var: cpk
+- log:
+    level: INFO
+    message: '[QC] vision_status station=VIS-02 line=LINE-02 model={vision_model} confidence_avg={vision_confidence} threshold=0.80 frames_dropped={frames_dropped} manual_review_queue={review_queue}'
+    attrs:
+      operation: vision_status
+      quality.station: VIS-02
+      vision.model_version:
+        var: vision_model
+      vision.confidence_avg:
+        var: vision_confidence
+- sample:
     station:
-      choice: STATIONS
+      choice: VISION_STATIONS
     part_id:
-      expr: f'PT-{rand.randint(100000, 999999)}'
-    result:
-      choice: RESULTS
+      expr: f'PRT-{rand.randint(10000000, 99999999)}'
     confidence:
-      uniform:
-      - 0.92
-      - 0.999
-      round: 4
+      expr: "vision_confidence if station == 'VIS-02' else round(rand.uniform(0.93, 0.98), 3)"
+    result:
+      expr: "'REVIEW' if confidence < 0.80 else ('FAIL' if rand.random() < 0.01 else 'PASS')"
 - log:
     level: INFO
     message: '[QC] inspection station={station} part={part_id} result={result} confidence={confidence}'
@@ -82,76 +176,5 @@ steps:
         var: part_id
       quality.result:
         var: result
-- sample:
-    characteristic:
-      choice: CHARACTERISTICS
-    measured_value:
-      uniform:
-      - 48.0
-      - 52.0
-      round: 4
-- log:
-    level: DEBUG
-    message: '[QC] spc_sample characteristic={characteristic} value={measured_value} target=50.0 usl=51.0 lsl=49.0'
-    attrs:
-      operation: spc_sample
-      quality.characteristic:
-        var: characteristic
-      quality.measured_value:
-        var: measured_value
-      quality.target: 50.0
-- every:
-    seconds: 10
-    state_key: _last_cpk_report
-    steps:
-    - sample:
-        cpk_char:
-          choice: CPK_CHARACTERISTICS
-        cpk:
-          uniform:
-          - 1.15
-          - 1.95
-          round: 3
-        sample_size:
-          randint:
-          - 30
-          - 200
-    - log:
-        level: INFO
-        message: '[QC] cpk_report characteristic={cpk_char} cpk={cpk} sample_size={sample_size} status=CAPABLE'
-        attrs:
-          operation: cpk_report
-          quality.characteristic:
-            var: cpk_char
-          quality.cpk:
-            var: cpk
-- counter:
-    state_key: _inspections_total
-    by: 1
-- metric:
-    name: quality.inspections_total
-    value:
-      var: _inspections_total
-    unit: inspections
-- metric:
-    name: quality.defect_rate_pct
-    value:
-      if_active:
-        uniform:
-        - 8.0
-        - 25.0
-        round: 2
-      else:
-        uniform:
-        - 0.4
-        - 2.5
-        round: 2
-    unit: '%'
-- metric:
-    name: quality.first_pass_yield_pct
-    value:
-      uniform:
-      - 94.0
-      - 99.2
-      round: 2
-    unit: '%'
+      quality.confidence:
+        var: confidence

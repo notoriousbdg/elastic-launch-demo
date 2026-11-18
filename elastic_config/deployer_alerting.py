@@ -28,6 +28,8 @@ logger = logging.getLogger("deployer")
 # dispatched: the RCA policies match ``alert_status: active`` (once per fault)
 # and the case-close policy matches ``inactive``.
 
+from app.ops_profile import auto_remediate_channels
+
 V2_RULES = "/api/alerting/v2/rules"
 V2_POLICIES = "/api/alerting/v2/action_policies"
 
@@ -45,13 +47,22 @@ def universal_rule_id(ns: str, ch_int: int) -> str:
     return f"{ns}-ch{ch_int:02d}"
 
 
-def alert_rule_name(scenario_name: str, ch_int: int, name: str) -> str:
+def _is_auto(ch_int: int, auto: "bool | None") -> bool:
+    """Auto-remediated channel? *auto* comes from the scenario's ops profile
+    (``auto_remediate_channels``); without it, the default set (16-20)."""
+    if auto is not None:
+        return bool(auto)
+    from app.ops_profile import DEFAULT_AUTO_CHANNELS
+    return int(ch_int) in DEFAULT_AUTO_CHANNELS
+
+
+def alert_rule_name(scenario_name: str, ch_int: int, name: str, auto: "bool | None" = None) -> str:
     """Display name of a channel's alert rule (also the case title, hence 160 chars).
 
     No channel number in the name: Nightshift and the case title show it to the
     audience.  The channel stays in the rule id, the tags and the ``channel`` column.
     """
-    suffix = " (Auto-Remediate)" if int(ch_int) >= 16 else ""
+    suffix = " (Auto-Remediate)" if _is_auto(ch_int, auto) else ""
     return f"{scenario_name}: {name}{suffix}"[:160]
 
 
@@ -80,9 +91,9 @@ def is_scenario_alert_rule(rule: dict, ns: str, scenario_name: str) -> bool:
     return name.startswith(alert_rule_name_prefix(scenario_name)) and ns in (meta.get("tags") or [])
 
 
-def universal_routing_tag(ns: str, ch_int: int) -> str:
-    """HITL channels (1-15) and auto-remediate channels (16-20) route separately."""
-    return f"{ns}-{'auto' if ch_int >= 16 else 'hitl'}"
+def universal_routing_tag(ns: str, ch_int: int, auto: "bool | None" = None) -> str:
+    """HITL channels and auto-remediate channels (ops profile) route separately."""
+    return f"{ns}-{'auto' if _is_auto(ch_int, auto) else 'hitl'}"
 
 
 def universal_policy_ids(ns: str) -> dict[str, str]:
@@ -94,12 +105,13 @@ def universal_policy_ids(ns: str) -> dict[str, str]:
     }
 
 
-def universal_rule_body(ns: str, scenario_name: str, ch_int: int, ch_data: dict) -> dict:
+def universal_rule_body(ns: str, scenario_name: str, ch_int: int, ch_data: dict,
+                        auto: "bool | None" = None) -> dict:
     """Request body for one chaos channel's Universal alert rule."""
     error_type = ch_data["error_type"]
     ch_int = int(ch_int)
     severity = "critical" if ch_int >= 19 else "high" if ch_int <= 6 else "medium"
-    rule_name = alert_rule_name(scenario_name, ch_int, ch_data["name"])
+    rule_name = alert_rule_name(scenario_name, ch_int, ch_data["name"], auto)
     kql = 'body.text: "{}" AND severity_text: "ERROR"'.format(
         error_type.replace("\\", "\\\\").replace('"', '\\"')
     )
@@ -120,7 +132,7 @@ def universal_rule_body(ns: str, scenario_name: str, ch_int: int, ch_data: dict)
             "name": rule_name,
             # Same 4-tag encoding as the classic rule (ns, error_type, action, channel)
             "tags": [ns, error_type, ch_data.get("remediation_action", ""), str(ch_int)],
-            "routing_tags": [universal_routing_tag(ns, ch_int)],
+            "routing_tags": [universal_routing_tag(ns, ch_int, auto)],
         },
         "time_field": "@timestamp",
         "schedule": {"every": "1m", "lookback": "1m"},
@@ -154,12 +166,12 @@ def universal_policy_bodies(
     out: dict[str, dict] = {}
     if hitl_wf_id:
         out[ids["hitl"]] = policy(
-            "RCA (HITL)", "Runs the HITL notification workflow once per fault (channels 1-15).",
+            "RCA (HITL)", "Runs the HITL notification workflow once per fault (channels not auto-remediated).",
             hitl_wf_id, [f"{ns}-hitl"], "active",
         )
     if auto_wf_id:
         out[ids["auto"]] = policy(
-            "RCA (Auto-Remediate)", "Runs the auto-remediate notification workflow once per fault (channels 16-20).",
+            "RCA (Auto-Remediate)", "Runs the auto-remediate notification workflow once per fault (the ops profile's auto_remediate_channels).",
             auto_wf_id, [f"{ns}-auto"], "active",
         )
     if nightshift_wf_id:
@@ -286,7 +298,7 @@ class AlertingMixin:
             return
 
         if not auto_remediate_wf_id:
-            logger.warning("Auto-remediate workflow not found; channels 16-20 will use HITL workflow")
+            logger.warning("Auto-remediate workflow not found; auto-remediate channels will use HITL workflow")
 
         # Note: the Case Auto-Close workflow is NOT wired into alert rule
         # actions — see the notify_when comment below for why, and
@@ -324,10 +336,10 @@ class AlertingMixin:
             else:
                 severity = "medium"
 
-            # Channels 16-20 use auto-remediation; 1-15 remain HITL
-            auto_remediate = ch_int >= 16
+            # The ops profile's auto_remediate_channels remediate themselves; the rest are HITL
+            auto_remediate = ch_int in auto_remediate_channels(self.scenario)
             # Kibana Cases API enforces a 160-char title limit; rule name becomes the case title
-            rule_name = alert_rule_name(self.scenario.scenario_name, ch_int, name)
+            rule_name = alert_rule_name(self.scenario.scenario_name, ch_int, name, auto_remediate)
 
             es_query = json.dumps({
                 "query": {
@@ -523,7 +535,8 @@ class AlertingMixin:
 
         for ch_num, ch_data in sorted(registry.items()):
             ch_int = int(ch_num)
-            rule = universal_rule_body(self.ns, self.scenario.scenario_name, ch_int, ch_data)
+            rule = universal_rule_body(self.ns, self.scenario.scenario_name, ch_int, ch_data,
+                                       ch_int in auto_remediate_channels(self.scenario))
             rule_id = universal_rule_id(self.ns, ch_int)
             resp = _retry_http(
                 lambda r=rule, i=rule_id: client.put(

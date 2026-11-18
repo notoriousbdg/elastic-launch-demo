@@ -6,43 +6,53 @@ sensor_type: rating_validator
 affected_services:
 - matchmaking-engine
 - leaderboard-api
-cascade_services:
-- analytics-pipeline
-description: Skill rating calculation produces invalid MMR values due to edge cases in the Elo/Glicko algorithm implementation
+cascade_services: []
+error_services:
+- matchmaking-engine
+description: Skill rating updates land outside the valid 0-5000 range after a matchmaking-engine release changed the Glicko-2 volatility solver
+onset_delay_seconds: 10
+ramp_seconds: 30
+service_lag_seconds: {leaderboard-api: 10}
 investigation_notes: |-
-  Root cause: a code defect in the Glicko-2 convergence loop — the volatility (sigma) iterative solver does not clamp intermediate values, allowing sigma to diverge when a player's actual score vastly exceeds expected score (e.g., 0.83 vs 0.41). This produces new_mu values outside the valid [0, max_mmr] range.
-  1. Check convergence iterations: if `convergence_i` approaches max (20, i.e. 17 or more), the Illinois method is not converging. The tau system constant is at its default 0.5, so the unclamped sigma is the cause, not tau.
-  2. Query affected players: `FROM logs WHERE body.text LIKE '*MM-SKILL-RATING-DIVERGE*'` and check how many players have out-of-range MMR in the current season.
-  3. Validate the Glicko-2 implementation against Mark Glickman's reference paper — specifically step 5.1 (volatility estimation) needs a bisection fallback.
-  4. Remediate: issue `reset_skill_ratings` for affected players to recalculate from match history; deploy a hotfix clamping sigma to a sane band (e.g. 0.01 < sigma < 0.2; default 0.06).
-  5. The current CLAMP action masks the defect — the algorithm must be fixed to prevent incorrect competitive matchmaking downstream.
+  Root cause: Argo CD synced matchmaking-engine v3.0.1 (CHG0052041) about two minutes before the first MM-SKILL-RATING-DIVERGE line. The release changed the Glicko-2 volatility solver: system constant tau 0.5 -> 1.2 and convergence tolerance epsilon 1e-6 -> 1e-9. For players on long win or loss streaks the Illinois iteration no longer converges: it stops at the 100-iteration cap with sigma at {volatility}, and the update writes mmr {mmr_value}, outside [0, {max_mmr}]. v3.0.0 rated the same queues without any out-of-range write, and players without long streaks still converge (solver p50 stays at 5-9 iterations), so the match data and the player_ratings table are fine; the solver settings in the new build are the cause.
+  Confirm:
+    - matchmaking-engine rating_status lines carry attributes.deployment.version v3.0.1 and attributes.rating.glicko2_tau 1.2 with status=degraded (v3.0.0 and tau 0.5 before the sync); the Argo CD sync line comes before the first MM-SKILL-RATING-DIVERGE line
+    - metrics.matchmaking.rating.out_of_range_updates_per_min is 40-120 (baseline 0) and metrics.matchmaking.rating.solver_iterations_p99 sits at 100, the iteration cap (baseline 8-15)
+    - leaderboard-api logs rank_write rejected lines for the same players with mmr above {max_mmr}; its own Redis and request latency are normal
+  Remediation: roll matchmaking-engine back with opsctl rollback deployment/matchmaking-engine --to-revision previous, then repair the ratings already written with opsctl run job/mmr-recalculate. The rollout replaces the pods in about 45 seconds; from then on out-of-range updates are 0 per minute and solver p99 is back at 8-15. The job recomputes the affected players from match history and logs how many ratings it corrected. Restarting or scaling out the pods keeps v3.0.1 and the broken solver, and clamping ratings in the leaderboard only hides the wrong values.
 remediation_action: reset_skill_ratings
+remediation_command: |-
+  opsctl rollback deployment/matchmaking-engine --to-revision previous
+  opsctl run job/mmr-recalculate
 error_message: '[MM] MM-SKILL-RATING-DIVERGE: player={player_id} mmr={mmr_value} valid_range=[0,{max_mmr}] volatility={volatility}
-  match={match_id}'
+  solver_iterations={convergence_iter} match={match_id}'
 stack_trace: |-
   === GLICKO-2 CALCULATION TRACE ===
-  player={player_id}  match={match_id}
+  player={player_id}  match={match_id}  build=v3.0.1
   ----------- pre-match state ----------
     mu (rating)     = 1847.3
     phi (deviation) = 142.7
-    sigma (vol)     = {volatility}
     games_in_period = 14
+    streak          = 11 wins
   ----------- match result -------------
     opponents       = 5
     actual_score    = 0.83
     expected_score  = 0.41
-    tau             = 0.5
+  ----------- solver settings ----------
+    tau             = 1.2
+    epsilon         = 1e-09
+    max_iterations  = 100
   ----------- post-match calc ----------
+    new_sigma       = {volatility} (solver did not converge)
+    convergence_i   = {convergence_iter} iterations (cap reached)
     new_mu          = {mmr_value}  <<< OUT OF RANGE [0, {max_mmr}]
     new_phi         = 187.2
-    new_sigma       = {volatility} (solver did not converge)
-    convergence_i   = {convergence_iter} iterations (max 20)
   ----------- action -------------------
-    CLAMP to valid range  FLAG for manual review
+    WRITE player_ratings  FLAG for manual review
   MM-SKILL-RATING-DIVERGE: player {player_id} mmr {mmr_value} outside bounds
 correlation_attr:
-  key: runtime.glicko_impl
-  value: glicko2-v3.0.1-unclamped
+  key: deployment.version
+  value: v3.0.1
 fault_params:
   player_id:
     format: "PLR-{n}"
@@ -50,21 +60,111 @@ fault_params:
   mmr_value: {randint: [5200, 10000]}
   max_mmr: 5000
   volatility: {uniform: [1.25, 2.5], round: 3}
-  convergence_iter: {randint: [17, 20]}
+  convergence_iter: 100
   match_id:
     format: "MATCH-{n}"
     n: {randint: [100000, 999999]}
 rca_clues:
   matchmaking-engine:
-    matchmaking.glicko_convergence_iter: {randint: [17, 20]}
-    matchmaking.glicko_sigma: {uniform: [1.25, 2.5], round: 3}
-    matchmaking.glicko_tau: 0.5
-    matchmaking.sigma_unclamped: true
+    deployment.version: v3.0.1
+    rating.glicko2_tau: 1.2
+    rating.solver_epsilon: '1e-09'
+    rating.solver_iterations: 100
+    rating.glicko2_sigma: {uniform: [1.25, 2.5], round: 3}
   leaderboard-api:
-    leaderboard.out_of_range_players: {randint: [10, 200]}
-    leaderboard.season_integrity: compromised
-  analytics-pipeline:
-    analytics.rating_anomaly_count: {randint: [50, 300]}
+    leaderboard.season: S14
+    leaderboard.rejected_rank_writes_per_min: {randint: [30, 110]}
+cascade_messages:
+  leaderboard-api:
+    - severity: WARN
+      message: '[LB] rank_write rejected board=ranked-solo season=S14 player={player_id} mmr={mmr_value} reason=mmr_out_of_range valid=[0,{max_mmr}]
+        source=matchmaking-engine'
+fault_scope:
+  cluster: gaming-eks-cluster
+  workloads: [matchmaking-engine]
+infrastructure_events:
+  - service: matchmaking-engine
+    severity: INFO
+    offset_seconds: -150
+    body: 'level=info msg="Sync operation to v3.0.1 succeeded" application=argocd/matchmaking-engine dest-server=gaming-eks-cluster dest-namespace=matchmaking
+      revision=v3.0.1 prev-revision=v3.0.0 initiated-by=mm-release-bot change=CHG0052041'
+    attributes:
+      operation: deployment_rollout
+      change.request: CHG0052041
+      user.name: mm-release-bot
+      change.summary: 'matchmaking-engine v3.0.0 -> v3.0.1 (glicko2 tau 0.5 -> 1.2, epsilon 1e-6 -> 1e-9)'
+      deployment.version: v3.0.1
+      rating.glicko2_tau: 1.2
+  - service: matchmaking-engine
+    severity: INFO
+    offset_seconds: -100
+    body: 'deployment "matchmaking-engine" successfully rolled out (12/12 replicas updated, image matchmaking-engine:v3.0.1)'
+    attributes:
+      operation: deployment_rollout
+      change.request: CHG0052041
+      deployment.version: v3.0.1
+remediation_effects:
+  transition_seconds: 45
+  log_taper_seconds: 40
+  log_events:
+    - service: matchmaking-engine
+      severity: INFO
+      offset_seconds: 1
+      body: 'level=info logger=changelog msg="change applied" cmd="opsctl rollback deployment/matchmaking-engine --to-revision previous" actor={actor}
+        result="rolled back to v3.0.0, 12 replicas rolling"'
+      attributes:
+        operation: change_applied
+        change.target: deployment/matchmaking-engine
+    - service: matchmaking-engine
+      severity: INFO
+      offset_seconds: 2
+      body: 'level=info logger=changelog msg="change applied" cmd="opsctl run job/mmr-recalculate" actor={actor} result="job started season=S14"'
+      attributes:
+        operation: change_applied
+        change.target: job/mmr-recalculate
+    - service: matchmaking-engine
+      severity: INFO
+      offset_seconds: 45
+      body: 'deployment "matchmaking-engine" successfully rolled out (12/12 replicas updated, image matchmaking-engine:v3.0.0)'
+      attributes:
+        operation: deployment_rollout
+        deployment.version: v3.0.0
+    - service: matchmaking-engine
+      severity: INFO
+      offset_seconds: 90
+      body: 'level=info logger=jobs msg="job finished" job=mmr-recalculate season=S14 players_scanned=412870 players_corrected=18342 out_of_range_remaining=0
+        duration_s=84'
+      attributes:
+        operation: job_finished
+        job.name: mmr-recalculate
+        job.players_corrected: 18342
+  steady_attributes:
+    matchmaking-engine:
+      deployment.version: v3.0.0
+  verification:
+    - signal: matchmaking.rating.out_of_range_updates_per_min
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "matchmaking-engine"'
+      field: 'metrics.matchmaking.rating.out_of_range_updates_per_min'
+      expect: '0 per minute (was 40-120) once the rollout completes, about 45 seconds after the rollback'
+      within_seconds: 120
+    - signal: matchmaking.rating.solver_iterations_p99
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "matchmaking-engine"'
+      field: 'metrics.matchmaking.rating.solver_iterations_p99'
+      expect: 'back in 8-15 iterations (was 100, the iteration cap)'
+      within_seconds: 120
+    - signal: MM-SKILL-RATING-DIVERGE lines
+      from: 'logs.otel.gaming'
+      where: 'body.text LIKE "*MM-SKILL-RATING-DIVERGE*"'
+      expect: '0 new lines'
+      within_seconds: 120
+    - signal: matchmaking-engine build
+      from: 'logs.otel.gaming'
+      where: 'resource.attributes.service.name == "matchmaking-engine" AND attributes.operation == "rating_status"'
+      field: 'attributes.deployment.version'
+      expect: 'v3.0.0 on every rating_status line since the rollback (was v3.0.1)'
+      within_seconds: 120
 business_impact:
   - kpi: business.matches_played_per_min
     factor: {uniform: [0.25, 0.55]}

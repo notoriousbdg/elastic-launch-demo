@@ -6,19 +6,23 @@ sensor_type: bid_processing
 affected_services:
 - auction-engine
 - digital-marketplace
+error_services:
+- auction-engine
 cascade_services:
 - network-controller
 - firewall-gateway
 description: Real-time bid processing latency exceeding SLA thresholds
 investigation_notes: |-
-  1. Check the bid processing queue depth in the Go auction-engine metrics — a queue depth above 500 indicates the goroutine pool is saturated and is the cause.
-  2. Examine WebSocket broadcast latency: `ws_delay_ms` above 1000ms means the hub.broadcastBidUpdate is falling behind real-time.
-  3. Profile the database: `EXPLAIN ANALYZE` on the bid INSERT and auction UPDATE queries — lock contention on the `auctions` table during high-bid periods is common (lock waits above 100ms); here lock waits stay under 20ms, ruling it out.
-  4. Check Redis pub/sub for bid event fanout delays: `redis-cli --latency-history -i 1` — if Redis is slow (above 50ms), all downstream WebSocket clients stall; here it stays under 5ms.
-  5. Scale horizontally: the auction-engine HPA is already pinned at max replicas, so raise its max replica count in EKS and verify the ALB is distributing WebSocket connections evenly.
-  6. For immediate relief, increase the goroutine pool size and bid queue buffer, and enable connection draining on the load balancer.
+  Root cause: auction-engine revision 47 (CR-2455) was rolled out built with the Go race detector enabled (runtime go1.22-race-detect-enabled, GOFLAGS=-race) shortly before the first BID_LATENCY_SLA_BREACH. A -race binary is several times slower and heavier on memory from its first request, so the worker pool saturates: p99 bid latency is about {bid_latency_ms}ms against a {bid_sla_ms}ms SLA (baseline ~90ms), throughput drops from ~900 to ~500 bids/min and the queue holds about {bid_queue_depth} bids, which matches throughput times latency. The HPA is at max replicas and adding replicas only adds slow ones. The dependencies are healthy and stay nominal: DB lock waits under 20ms, Redis pub/sub latency under 5ms, ALB latency 10-40ms until the queue backs up and firewall inspection overhead under 10ms, which rules out database contention, Redis, the load balancer and the firewall. digital-marketplace only shows a websocket broadcast delay ({ws_delay_ms}ms) after bids start to queue.
+  Confirm:
+    - auction-engine logs "msg=health ... runtime=go1.22-race-detect-enabled status=ANOMALY" (attributes.deployment.auction_runtime); metrics auction.bid_latency_p50_ms, p95 and p99 rise together (p50 < p95 < p99), auction.goroutine_pool_busy_pct goes to ~97 and auction.bids_per_min falls
+    - the auction-engine line "rollout complete deployment=auction-engine ... GOFLAGS=-race" comes before the first BID_LATENCY_SLA_BREACH
+    - the slowdown starts with the first request after the rollout, not gradually with load
+  Remediation: roll auction-engine back to the previous revision (release build) with opsctl rollback deployment/auction-engine --to-revision previous. It is a rolling restart, so old and new pods serve side by side: p50 recovers as pods are replaced, p99 settles under the SLA about 60-90 seconds in, and the queue drains only after that. Scaling out the -race build would only add slow replicas, so do not raise the HPA max.
 remediation_action: scale_auction_service
-error_message: level=error ts=2025-01-15T14:32:01.234Z caller=bid_processor.go:289 msg="BID_LATENCY_SLA_BREACH" auction={auction_id}
+remediation_command: |-
+  opsctl rollback deployment/auction-engine --to-revision previous
+error_message: level=error caller=bid_processor.go:289 msg="BID_LATENCY_SLA_BREACH" auction={auction_id}
   bid={bid_id} latency_ms={bid_latency_ms} sla_ms={bid_sla_ms} queue_depth={bid_queue_depth} ws_delay_ms={ws_delay_ms} affected_bidders={affected_bidders}
 stack_trace: "goroutine 847 [running]:\nruntime/debug.Stack()\n\t/usr/local/go/src/runtime/debug/stack.go:24 +0x5e\ngithub.com/fanatics/auction-engine/internal/processor.(*BidProcessor).ProcessBid(0xc000518000,\
   \ {{0xc000a12480, 0x24}}, {{0xc000a124c0, 0x26}}, 0x{bid_latency_ms})\n\t/app/internal/processor/bid_processor.go:289 +0x3a2\n\
@@ -36,19 +40,19 @@ fault_params:
   bid_id:
     format: "BID-{n}"
     n: {randint: [1000000, 9999999]}
-  bid_latency_ms: {randint: [500, 5000]}
+  bid_latency_ms: {randint: [4700, 5100]}
   bid_sla_ms: 200
-  bid_queue_depth: {randint: [500, 2000]}
-  ws_delay_ms: {randint: [1000, 3000]}
+  bid_queue_depth: {randint: [15, 20]}
+  ws_delay_ms: {randint: [1800, 2400]}
   affected_bidders: {randint: [10, 500]}
 rca_clues:
   auction-engine:
     auction.goroutine_pool_saturated: true
-    auction.bid_queue_depth: {randint: [500, 2000]}
+    auction.bid_queue_depth: {randint: [15, 20]}
     auction.db_lock_wait_ms: {randint: [2, 20]}
     auction.redis_pubsub_latency_ms: {randint: [1, 5]}
   digital-marketplace:
-    marketplace.ws_broadcast_delay_ms: {randint: [1000, 3000]}
+    marketplace.ws_broadcast_delay_ms: {randint: [1800, 2400]}
     marketplace.stale_bid_display_count: {randint: [10, 200]}
   network-controller:
     network.alb_latency_ms: {randint: [10, 40]}
@@ -56,6 +60,76 @@ rca_clues:
   firewall-gateway:
     firewall.ws_inspection_overhead_ms: {randint: [2, 10]}
     firewall.deep_packet_inspection_enabled: true
+cascade_messages:
+  digital-marketplace:
+    - severity: WARN
+      message: 'ws-hub: bid update broadcast delayed {ws_delay_ms}ms for auction {auction_id}; {affected_bidders} bidders seeing stale high bid'
+  network-controller:
+    - severity: WARN
+      message: 'alb auction-engine-ws: target response time elevated, ~{bid_queue_depth} requests queued on targets; health checks still passing'
+fault_scope:
+  workloads: [auction-engine, digital-marketplace]
+infrastructure_events:
+  - service: auction-engine
+    severity: INFO
+    offset_seconds: -150
+    body: 'level=info caller=deploy.go msg="rollout complete" deployment=auction-engine revision=47 image=auction-engine:4.18.2 GOFLAGS=-race runtime=go1.22-race-detect-enabled; released by auction-release-pipeline (CR-2455)'
+    attributes:
+      user.name: auction-release-pipeline
+      change.request: CR-2455
+      operation: deployment_rollout
+      deployment.auction_runtime: go1.22-race-detect-enabled
+      change.summary: 'auction-engine: revision 46 (go1.22-release) -> 47 (go1.22-race-detect-enabled)'
+remediation_effects:
+  log_events:
+    - service: auction-engine
+      severity: INFO
+      offset_seconds: 1
+      body: '[CHG] CHANGE APPLIED opsctl rollback deployment/auction-engine --to-revision previous by {actor}: deployment auction-engine rolled back to revision 46 (go1.22-release)'
+      attributes:
+        operation: change_applied
+        change.target: deployment/auction-engine
+    - service: auction-engine
+      severity: INFO
+      offset_seconds: 3
+      body: 'deployment.apps/auction-engine rolled back; replacing pods one at a time (maxUnavailable=1)'
+      attributes:
+        operation: deployment_rollout
+    - service: auction-engine
+      severity: INFO
+      offset_seconds: 15
+      body: 'level=info caller=main.go:131 msg="shutdown signal received, draining websocket connections" signal=SIGTERM pod=auction-engine-6f9c8d7b54-q2xvn'
+      attributes:
+        operation: deployment_rollout
+    - service: auction-engine
+      severity: INFO
+      offset_seconds: 85
+      body: 'deployment "auction-engine" successfully rolled out: revision=46 updated_replicas=6/6 runtime=go1.22-release'
+      attributes:
+        operation: deployment_rollout
+        deployment.auction_runtime: go1.22-release
+  steady_attributes:
+    auction-engine:
+      deployment.auction_runtime: go1.22-release
+  verification:
+    - signal: auction.bid_latency_p99_ms
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "auction-engine"'
+      field: 'metrics.auction.bid_latency_p99_ms'
+      expect: 'back under the 200 ms SLA (was ~4900 ms); settles 60-90 s after the rollback while old and new pods overlap'
+      within_seconds: 150
+    - signal: auction.bid_queue_depth
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "auction-engine"'
+      field: 'metrics.auction.bid_queue_depth'
+      expect: 'back under 6 (was 15-20); drains after the latency has settled'
+      within_seconds: 240
+    - signal: auction-engine runtime build
+      from: 'logs.otel.fanatics'
+      where: 'resource.attributes.service.name == "auction-engine"'
+      field: 'attributes.deployment.auction_runtime'
+      expect: 'go1.22-release on every health line once the rollout finishes (~85 s); go1.22-race-detect-enabled stops appearing'
+      within_seconds: 150
 business_impact:
   - kpi: business.merch_gmv_usd_per_min
     value: {uniform: [10416.0, 11984.0], round: 1}
@@ -69,3 +143,5 @@ business_impact:
 generator_impact:
   kubernetes_otel:
     hpa_at_max_replicas: 1.0
+# dependents degrade after the component at fault, in dependency order
+service_lag_seconds: {digital-marketplace: 15, network-controller: 45, firewall-gateway: 60}

@@ -5,44 +5,39 @@ error_type: IAP-PURCHASE-FAIL
 sensor_type: transaction_monitor
 affected_services:
 - payment-processor
-- auth-gateway
-cascade_services:
-- analytics-pipeline
-description: In-app purchase transactions failing at the payment gateway level due to provider timeouts or validation errors
+error_services:
+- payment-processor
+cascade_services: []
+description: Stripe purchases time out inside payment-processor after a rollout capped the payment SDK connection pool, while Stripe and the other payment providers stay healthy
+onset_delay_seconds: 10
+ramp_seconds: 30
 investigation_notes: |-
-  Root cause: provider calls are timing out with no response at elevated latency ({provider_latency_ms}ms vs normal <500ms), indicating provider-side degradation. The gateway retry logic compounds the issue by sending duplicate requests that may result in double charges.
-  1. Check provider status: visit the payment provider status page (Stripe/PayPal/Apple/Google) for active incidents — if provider is degraded, enable circuit breaker to fail fast.
-  2. Review error code distribution: TIMEOUT and PROVIDER_ERROR indicate provider issues; DECLINED and INSUFFICIENT_FUNDS are normal user errors and should not trigger alerts.
-  3. Verify idempotency: the `{purchase_id}` key must be reused unchanged on every retry and honored by the provider — check for duplicate gateway_txn IDs in the transaction log.
-  4. Remediate: issue `reset_payment_gateway` to restart connection pools and clear stuck transactions; switch to backup payment provider if primary remains degraded.
-  5. Queue failed purchases for automatic retry once provider recovers; notify affected players with an in-game message about the temporary payment disruption.
+  Root cause: payment-processor 5.14.0 rolled out on gaming-aks-cluster (CHG0052813) about two minutes before the first IAP-PURCHASE-FAIL line. The build upgraded stripe-sdk from v12.0.4 to {stripe_sdk}, whose HttpClient handler caps connections per host at {pool_max_per_host} (v12.0.4 used 50). Stripe calls queue for one of the two connections ({pool_waiting} requests waiting per pod) and hit the 10 s HttpClient timeout before they are sent: {payment_provider} purchases fail with {error_code} after {provider_latency_ms}ms. Stripe itself is healthy: the requests that get a connection complete in about {stripe_api_latency_ms}ms and the Stripe status page is operational. PayPal purchases on the same pods use their own client and stay at 240-380 ms p99, which is the healthy comparison.
+  Confirm:
+    - payment-processor stripe provider_status lines carry attributes.deployment.stripe_sdk v12.1.0-rc2 and attributes.payment.http_pool.max_per_host 2 (was v12.0.4 and 50); the rollout line with change.request CHG0052813 comes before the first IAP-PURCHASE-FAIL line
+    - metrics.payment.transaction_latency_ms rises from 180-400 ms to 4000-12000 ms and metrics.payment.failure_rate from 0.2-1.0% to 15-35%
+    - metrics.payment.http_pool.waiting rises from 0-2 to 150-400 queued requests while the paypal provider_status line stays at waiting=0
+  Remediation: roll the deployment back with opsctl rollback deployment/payment-processor --to-revision previous. The rollout replaces the pods with 5.13.2 (stripe-sdk v12.0.4, 50 connections per host) over about 60 seconds; the queue drains as the old pods go away, and latency and failure rate fall back to baseline within that minute. Scaling payment-processor out only helps a little: each extra pod adds two connections, far short of the 50 per pod the old SDK used. Failing over to another provider is not needed: Stripe is healthy.
 remediation_action: reset_payment_gateway
+remediation_command: |-
+  opsctl rollback deployment/payment-processor --to-revision previous
 error_message: '[IAP] IAP-PURCHASE-FAIL: txn={purchase_id} player={player_id} amount={amount}{currency} provider={payment_provider}
-  code={error_code} retry={retry_count}/{max_retries}'
+  code={error_code} retry={retry_count}/{max_retries} elapsed={provider_latency_ms}ms http_pool={pool_max_per_host}/{pool_max_per_host} waiting={pool_waiting} sdk=stripe-sdk/{stripe_sdk}'
 stack_trace: |-
-  === PAYMENT GATEWAY TRANSACTION TRACE ===
-  txn={purchase_id}  player={player_id}
-  ----------- request -----------------
-    amount       = {amount} {currency}
-    provider     = {payment_provider}
-    item_sku     = SKU-PREMIUM-PACK-01
-    idempotency  = {purchase_id}
-  ----------- provider response -------
-    status_code  = none (client timeout, no response)
-    error_code   = {error_code}
-    latency_ms   = {provider_latency_ms}
-    gateway_txn  = GW-8a4f2e1b-c930
-  ----------- retry state -------------
-    attempt      = {retry_count}/{max_retries}
-    backoff_ms   = 4,000
-    next_retry   = 2026-02-17T14:22:08.000Z
-  ----------- receipt validation ------
-    receipt_valid = false
-    signature    = (not provided — payment not completed)
-  IAP-PURCHASE-FAIL: txn {purchase_id} failed with {error_code} via {payment_provider}
+  System.Threading.Tasks.TaskCanceledException: The request was canceled due to the configured HttpClient.Timeout of 10 seconds elapsing.
+   ---> System.TimeoutException: A task was canceled.
+   ---> System.Threading.Tasks.TaskCanceledException: A task was canceled.
+     at System.Net.Http.HttpConnectionPool.GetHttp11ConnectionAsync(HttpRequestMessage request, Boolean async, CancellationToken cancellationToken)
+     at System.Net.Http.HttpConnectionPool.SendWithVersionDetectionAndRetryAsync(HttpRequestMessage request, Boolean async, Boolean doRequestAuth, CancellationToken cancellationToken)
+     at System.Net.Http.HttpClient.<SendAsync>g__Core|83_0(HttpRequestMessage request, HttpCompletionOption completionOption, CancellationTokenSource cts, Boolean disposeCts, CancellationTokenSource pendingRequestsCts, CancellationToken originalCancellationToken)
+     at Stripe.SystemNetHttpClient.MakeRequestAsync(StripeRequest request, CancellationToken cancellationToken) [stripe-sdk {stripe_sdk}, MaxConnectionsPerServer={pool_max_per_host}]
+     at Stripe.PaymentIntentService.CreateAsync(PaymentIntentCreateOptions options, RequestOptions requestOptions, CancellationToken cancellationToken)
+     at Gaming.Payments.Providers.StripeProvider.ChargeAsync(PurchaseRequest req) in /src/Payments/Providers/StripeProvider.cs:line 118
+     at Gaming.Payments.PurchaseHandler.HandleAsync(PurchaseRequest req) in /src/Payments/PurchaseHandler.cs:line 64
+  txn={purchase_id} player={player_id} provider={payment_provider} attempt={retry_count}/{max_retries} idempotency_key={purchase_id} waiting_for_connection={pool_waiting}
 correlation_attr:
-  key: deployment.payment_sdk
-  value: stripe-sdk-v12.1.0-rc2
+  key: deployment.stripe_sdk
+  value: v12.1.0-rc2
 fault_params:
   purchase_id:
     format: "TXN-{n}"
@@ -55,17 +50,88 @@ fault_params:
   payment_provider: stripe
   error_code: TIMEOUT
   retry_count: {randint: [1, 3]}
-  provider_latency_ms: {randint: [3000, 12000]}
+  provider_latency_ms: {randint: [10000, 10050]}
   max_retries: 3
+  stripe_sdk: v12.1.0-rc2
+  pool_max_per_host: 2
+  pool_waiting: {randint: [150, 400]}
+  stripe_api_latency_ms: {randint: [210, 320]}
 rca_clues:
   payment-processor:
-    payment.provider_latency_ms: {randint: [3000, 12000]}
-    payment.circuit_breaker_state: {choice: [HALF_OPEN, OPEN]}
-  auth-gateway:
-    auth.purchase_identity_verify: success
-    auth.token_valid: true
-  analytics-pipeline:
-    analytics.failed_txn_count: {randint: [100, 2000]}
+    deployment.stripe_sdk: v12.1.0-rc2
+    payment.http_pool.max_per_host: 2
+    payment.stripe_api_latency_ms: {randint: [210, 320]}
+    payment.stripe_status: operational
+fault_scope:
+  cluster: gaming-aks-cluster
+  workloads: [payment-processor]
+infrastructure_events:
+  - service: payment-processor
+    severity: INFO
+    offset_seconds: -150
+    body: 'Helm upgrade payment-processor (chart payment-processor-5.14.0) revision 38 -> 39 in namespace monetization: image gamingacr.azurecr.io/payment-processor:5.14.0 (stripe-sdk v12.0.4 -> v12.1.0-rc2) by monetization-release (CHG0052813)'
+    attributes:
+      operation: deployment_rollout
+      change.request: CHG0052813
+      user.name: monetization-release
+      change.summary: 'payment-processor 5.13.2 -> 5.14.0, stripe-sdk v12.0.4 -> v12.1.0-rc2'
+      deployment.version: 5.14.0
+      deployment.stripe_sdk: v12.1.0-rc2
+  - service: payment-processor
+    severity: INFO
+    offset_seconds: -90
+    body: 'deployment "payment-processor" successfully rolled out (6/6 replicas updated, image payment-processor:5.14.0)'
+    attributes:
+      operation: deployment_rollout
+      change.request: CHG0052813
+      deployment.version: 5.14.0
+      deployment.stripe_sdk: v12.1.0-rc2
+remediation_effects:
+  log_taper_seconds: 45
+  log_events:
+    - service: payment-processor
+      severity: INFO
+      offset_seconds: 1
+      body: 'level=info logger=changelog msg="change applied" cmd="opsctl rollback deployment/payment-processor --to-revision previous" actor={actor} result="deployment/payment-processor revision 39 -> 38 (payment-processor:5.13.2, stripe-sdk v12.0.4)"'
+      attributes:
+        operation: change_applied
+        change.target: deployment/payment-processor
+        deployment.version: 5.13.2
+    - service: payment-processor
+      severity: INFO
+      offset_seconds: 60
+      body: 'deployment "payment-processor" successfully rolled out (6/6 replicas updated, image payment-processor:5.13.2)'
+      attributes:
+        operation: deployment_rollout
+        deployment.version: 5.13.2
+        deployment.stripe_sdk: v12.0.4
+  steady_attributes:
+    payment-processor:
+      deployment.stripe_sdk: v12.0.4
+  verification:
+    - signal: payment.transaction_latency_ms
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "payment-processor"'
+      field: 'metrics.payment.transaction_latency_ms'
+      expect: 'back in 180-400 ms within about 60 seconds (was 4000-12000 ms)'
+      within_seconds: 120
+    - signal: payment.failure_rate
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "payment-processor"'
+      field: 'metrics.payment.failure_rate'
+      expect: 'back in 0.2-1.0% (was 15-35%), with metrics.payment.http_pool.waiting back at 0-2 (was 150-400)'
+      within_seconds: 120
+    - signal: IAP-PURCHASE-FAIL lines
+      from: 'logs.otel.gaming'
+      where: 'body.text LIKE "*IAP-PURCHASE-FAIL*"'
+      expect: '0 new lines'
+      within_seconds: 120
+    - signal: Stripe SDK version
+      from: 'logs.otel.gaming'
+      where: 'resource.attributes.service.name == "payment-processor" AND attributes.operation == "provider_status" AND attributes.payment.provider == "stripe"'
+      field: 'attributes.deployment.stripe_sdk'
+      expect: 'v12.0.4 on every stripe provider_status line since the rollout (was v12.1.0-rc2)'
+      within_seconds: 120
 business_impact:
   - kpi: business.revenue_usd_per_min
     value: {uniform: [4464.0, 5136.0], round: 1}

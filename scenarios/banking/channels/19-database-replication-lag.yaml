@@ -9,56 +9,136 @@ affected_services:
 cascade_services:
 - claims-processor
 - member-portal
-description: Primary-replica database replication lag causing stale reads and balance inconsistencies
+description: The payments read replica falls further behind every second because WAL replay waits on a long reporting query, so members see stale balances.
 investigation_notes: |-
-  1. Replication lag root cause: WAL replay rate (8MB/s) cannot keep up with WAL send rate (12MB/s) — 33% throughput deficit means lag will continue growing. Check replica disk IOPS saturation.
-  2. Stale balance reads affect 33% of queries (round-robin across 3 nodes, 1 lagged) — members may see incorrect available balances, leading to overdrafts or failed transactions.
-  3. Immediate action: route all reads to primary to ensure consistency. This increases primary load but prevents stale data. Point the application's read datasource (or the PgBouncer / RDS Proxy read target) at the writer endpoint; read routing is not a PostgreSQL parameter.
-  4. Scale replica IOPS: aws rds modify-db-instance --db-instance-identifier {db_cluster}-b --iops 10000 --apply-immediately. Current IOPS is SATURATED — RDS gp3 storage allows up to 64,000 IOPS.
-  5. Check for long-running queries on the replica that may be blocking WAL replay: SELECT pid, now()-query_start, query FROM pg_stat_activity WHERE state='active' ORDER BY query_start.
-  6. Monitor pending_txns — if this exceeds 100K, the replica may need to be rebuilt from snapshot. Create a new read replica with aws rds create-db-instance-read-replica; RDS builds it from a snapshot of the primary.
-remediation_action: failover_db_replica
-error_message: '[INFRA] INFRA-DB-REPL-LAG: cluster={db_cluster} lag_ms={db_lag_ms} max_ms={db_max_lag_ms} replica={db_replica}
-  pending_txns={db_pending_txns}'
+  1. Search logs.otel.banking for body.text containing INFRA-DB-REPL-LAG on payment-engine: cluster={db_cluster} replica={db_replica} is {db_lag_ms} ms behind against a {db_max_lag_ms} ms limit with {db_pending_txns} transactions not yet applied. metrics.payment_engine.db_replica_lag_ms normally reads 20-400 ms and is growing by about one second per second.
+  2. Read the shape of the lag: a lag that grows linearly while the replica's CPU and disk are mostly idle means replay is paused, not slow. The replica logs "recovery still waiting ... recovery conflict on snapshot" and pg_stat_activity on the replica shows the ledger reconciliation report running for over 30 minutes; the startup process waits on RecoveryConflictSnapshot.
+  3. Find the change: the replica_status line on payment-engine carries attributes.db.max_standby_streaming_delay. Parameter group banking-pg-payments-replica was changed from 30s to -1 (wait forever) shortly before the lag began, to stop the reconciliation report from being cancelled with "canceling statement due to conflict with recovery". With -1, replay waits behind every long query.
+  4. Rule out storage and the primary: replica IOPS and CPU are well below their limits, the primary's WAL generation rate is normal, and the network between primary and replica is healthy. Adding IOPS or failing over does not help, and RDS will not accept another storage change for six hours after one.
+  5. Fix: opsctl restore db-parameter-group/banking-pg-payments-replica --max-standby-streaming-delay 30s. The parameter is dynamic, so no reboot: the conflicting report query is cancelled within 30 s, replay resumes, and the lag drains in about a minute and a half. Move the reconciliation report to a dedicated reporting replica instead.
+  6. Recovery: db.max_standby_streaming_delay reads 30s, db_replica_lag_ms back under 400 ms, stale_read_pct back near zero on mobile-gateway, and no new INFRA-DB-REPL-LAG lines.
+remediation_action: restore_standby_delay
+remediation_command: |-
+  opsctl restore db-parameter-group/banking-pg-payments-replica --max-standby-streaming-delay 30s
+error_message: '[INFRA] INFRA-DB-REPL-LAG: cluster={db_cluster} lag_ms={db_lag_ms} max_ms={db_max_lag_ms} replica={db_replica} pending_txns={db_pending_txns} replay=waiting wait_event=RecoveryConflictSnapshot'
 stack_trace: |-
   === DATABASE REPLICATION STATUS ===
-  cluster={db_cluster}  engine=RDS_PostgreSQL_15.4 (streaming replication)
+  cluster={db_cluster}  engine=RDS for PostgreSQL 15.7 (streaming replication)
   --- REPLICATION TOPOLOGY ---
-    NODE              ROLE        LAG_MS    STATUS
-    {db_cluster}-a    PRIMARY     0         OK
-    {db_cluster}-b    REPLICA     {db_lag_ms}     BEHIND  <<< ALERT
-    {db_cluster}-c    REPLICA     1,240     WARNING
-  --- LAG ANALYSIS ---
-    current_lag={db_lag_ms}ms  max_allowed={db_max_lag_ms}ms  breach=true
-    pending_txns={db_pending_txns}  wal_send_rate=12MB/s  wal_replay_rate=8MB/s
-    disk_iops=SATURATED  cpu_replica=94%
+    NODE                     ROLE        LAG_MS    STATUS
+    {db_cluster}             PRIMARY     0         OK
+    {db_replica}             REPLICA     {db_lag_ms}     BEHIND  <<< ALERT
+  --- REPLICA ---
+    max_standby_streaming_delay=-1  hot_standby_feedback=off
+    startup process wait_event=RecoveryConflictSnapshot
+    blocking query: pid={blocking_pid} application_name=ledger-recon-report runtime={blocking_runtime_min}min
+    cpu=14%  read_iops=820/12000
   --- IMPACT ---
-    stale_balance_reads=POSSIBLE  affected_members=~12,000
-    read_routing=ROUND_ROBIN  stale_read_pct=33%
-  ACTION: route_reads_primary=true  scale_replica_iops=true  alert=INFRA-DB-REPL-LAG
+    stale_balance_reads=YES  read_routing=replica (balance, history)
+  ACTION: alert=INFRA-DB-REPL-LAG
 correlation_attr:
-  key: infra.aurora_replica_config
-  value: rds-pg15-replica-iops-tuned-v2
+  key: db.max_standby_streaming_delay
+  value: '-1'
 fault_params:
-  db_cluster: {choice: [banking-aurora-payments, banking-aurora-members, banking-aurora-claims]}
-  db_lag_ms: {randint: [5000, 60000]}
+  db_cluster: banking-pg-payments
+  db_lag_ms: {randint: [15000, 60000]}
   db_max_lag_ms: 3000
-  db_replica: replica-b
-  db_pending_txns: {randint: [1000, 50000]}
+  db_replica: banking-pg-payments-replica-1
+  db_pending_txns: {randint: [8000, 50000]}
+  blocking_pid: {randint: [18000, 32000]}
+  blocking_runtime_min: {randint: [31, 48]}
 rca_clues:
   payment-engine:
-    payment.db_repl_lag_ms: {randint: [5000, 30000]}
-    payment.wal_replay_deficit_pct: {uniform: [20, 50], round: 0}
-    payment.replica_disk_iops_util_pct: {uniform: [97, 100], round: 0}
+    db.max_standby_streaming_delay: '-1'
+    db.replica_wait_event: RecoveryConflictSnapshot
+    db.blocking_application: ledger-recon-report
   mobile-gateway:
-    gateway.stale_balance_reads_pct: {uniform: [25, 40], round: 1}
-    gateway.read_routing_policy: ROUND_ROBIN
+    gateway.stale_balance_reads_pct: {uniform: [28, 36], round: 1}
   claims-processor:
     claims.claim_status_stale: true
-    claims.db_read_routing: REPLICA_LAGGED
   member-portal:
     portal.balance_inconsistency_reports: {randint: [50, 200]}
-    portal.overdraft_risk_elevated: true
+error_services:
+- payment-engine
+service_lag_seconds:
+  mobile-gateway: 20
+  claims-processor: 60
+  member-portal: 60
+cascade_messages:
+  mobile-gateway:
+  - severity: WARN
+    message: '[MOBILE] balance_read source=replica replica_lag_ms={db_lag_ms} posted_txns_missing=true endpoint=/api/v1/mobile/accounts status=STALE'
+  claims-processor:
+  - severity: INFO
+    message: '[CLAIMS] claim_status_read source=replica replica_lag_ms={db_lag_ms} status=STALE'
+  member-portal:
+  - severity: WARN
+    message: '[PORTAL] member_feedback type=COMPLAINT topic=balance_missing_transaction status=OPEN'
+fault_scope:
+  cluster: banking-eks-cluster
+  workloads: [payment-engine]
+infrastructure_events:
+- service: payment-engine
+  severity: INFO
+  offset_seconds: -120
+  body: '[INFRA] cloudtrail eventName=ModifyDBParameterGroup dbParameterGroupName=banking-pg-payments-replica parameter=max_standby_streaming_delay 30000 -> -1 applyMethod=immediate userIdentity=assumed-role/data-eng-oncall reason="ledger-recon-report keeps getting cancelled"'
+  attributes:
+    operation: cloudtrail
+    aws.cloudtrail.event_name: ModifyDBParameterGroup
+    db.max_standby_streaming_delay: '-1'
+    user.name: assumed-role/data-eng-oncall
+- service: payment-engine
+  severity: WARN
+  offset_seconds: -30
+  body: '[INFRA] postgres replica=banking-pg-payments-replica-1 LOG: recovery still waiting after 30012.431 ms: recovery conflict on snapshot DETAIL: Conflicting process: 24117 (ledger-recon-report)'
+  attributes:
+    operation: replica_log
+    db.replica_wait_event: RecoveryConflictSnapshot
+remediation_effects:
+  transition_seconds: 90
+  log_events:
+  - service: payment-engine
+    severity: INFO
+    offset_seconds: 1
+    body: '[change-audit] change applied action=restore target=db-parameter-group/banking-pg-payments-replica cmd="opsctl restore db-parameter-group/banking-pg-payments-replica --max-standby-streaming-delay 30s" actor={actor} result="max_standby_streaming_delay -1 -> 30000 (immediate)"'
+    attributes:
+      operation: change_applied
+      change.target: db-parameter-group/banking-pg-payments-replica
+      db.max_standby_streaming_delay: 30s
+  - service: payment-engine
+    severity: INFO
+    offset_seconds: 30
+    body: '[INFRA] postgres replica=banking-pg-payments-replica-1 FATAL: terminating connection due to conflict with recovery DETAIL: User query might have needed to see row versions that must be removed. application_name=ledger-recon-report'
+    attributes:
+      operation: replica_log
+      db.max_standby_streaming_delay: 30s
+  steady_attributes:
+    payment-engine:
+      db.max_standby_streaming_delay: 30s
+  verification:
+  - signal: payment_engine.db_replica_lag_ms
+    from: metrics-generic.otel-default
+    where: resource.attributes.service.name == "payment-engine"
+    field: metrics.payment_engine.db_replica_lag_ms
+    expect: back under 400 ms (was growing past 15,000 ms)
+    within_seconds: 150
+  - signal: mobile_gateway.stale_read_pct
+    from: metrics-generic.otel-default
+    where: resource.attributes.service.name == "mobile-gateway"
+    field: metrics.mobile_gateway.stale_read_pct
+    expect: back under 0.5% (was 28-36%)
+    within_seconds: 150
+  - signal: replica max_standby_streaming_delay
+    from: logs.otel.banking
+    where: resource.attributes.service.name == "payment-engine" AND attributes.operation == "replica_status"
+    field: attributes.db.max_standby_streaming_delay
+    expect: 30s on every line logged since the fix
+    within_seconds: 60
+  - signal: INFRA-DB-REPL-LAG lines
+    from: logs.otel.banking
+    where: body.text LIKE "*INFRA-DB-REPL-LAG*"
+    expect: 0 new lines
+    within_seconds: 150
 business_impact:
   - kpi: business.active_digital_sessions
     value: {uniform: [7254.0, 8346.0]}
