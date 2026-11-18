@@ -6,62 +6,146 @@ sensor_type: state_validator
 affected_services:
 - game-server
 - matchmaking-engine
-cascade_services:
-- analytics-pipeline
-description: Game state diverges between server authoritative state and client prediction, causing rubber-banding and rollback
-  cascades
+error_services: [game-server]
+cascade_services: []
+description: Canary game servers force full-state reconciles on clients after a build rollout, causing rubber-banding and rollbacks
+onset_delay_seconds: 15
+ramp_seconds: 30
 investigation_notes: |-
-  Root cause: client-side prediction drift exceeds reconciliation threshold due to UDP packet loss on the game channel (above 2% loss; jitter stays nominal, under 20ms). The server authoritative state and client extrapolation diverge beyond 0.5m, triggering forced rollbacks.
-  1. Check network quality: run `netstat -su` on game-server pods for UDP packet drops; check ENA drop counters on the node with `ethtool -S eth0 | grep -E 'allowance_exceeded'` (pps/bw allowance drops).
-  2. Inspect tick alignment: query `FROM logs WHERE body.text LIKE '*NET-STATE-DESYNC*'` and correlate `seq` gaps — 2+ ticks behind would indicate client CPU starvation or GC pauses; here the client is in tick sync.
-  3. Verify interpolation buffer: `interp_delay` of {interp_delay_ms}ms is below the 100ms minimum — increase to 150ms to absorb loss-driven gaps.
-  4. Remediate: if widespread, issue `reset_game_state` to force all clients to re-download authoritative world state and rebuild prediction buffers from scratch.
-  5. Long-term: audit the client prediction model — consider switching from dead-reckoning to hermite interpolation for smoother reconciliation under packet loss.
-remediation_action: reset_game_state
-error_message: '[Net] NET-STATE-DESYNC: player={player_id} pos_delta={position_delta}m threshold=0.5m tick={tick_number} match={match_id}'
+  Root cause: Argo CD synced the game-server-canary deployment (30 of the 600 servers, track=canary) from v7.2.0 to v7.2.1-canary (CHG0071401) about two minutes before the first NET-STATE-DESYNC. The new build ships with snapshot delta compression disabled, so every server snapshot is a full-state snapshot of {snapshot_bytes} bytes. That is above the {mtu_bytes}-byte MTU, so each snapshot is split into {fragments} UDP fragments, and losing any one fragment (normal background loss of {udp_loss_pct}%) discards the whole snapshot and forces a full-state reconcile. Only the canary track is affected: the stable game-server deployment still runs v7.2.0 with delta compression on, 600-900-byte snapshots and 0-3 reconciles per minute, on the same nodes and network. Matchmaking only sees the consequence: {rematch_requests} rematch requests per minute from players dropped by servers in pool gs-canary.
+  Confirm:
+    - game-server `[Net] build-status track=canary` lines carry attributes.deployment.server_build v7.2.1-canary and net.delta_compression off, and they start after the Argo CD sync line with change.request CHG0071401; the track=stable line stays on v7.2.0
+    - metric game_server.snapshot_bytes with attributes.deployment.track canary reads 2400-3200 bytes (baseline 600-900, stable track still 600-900)
+    - metric game_server.state_reconciles_per_min for the canary track reads 150-400 (baseline 0-3), while the UDP loss on the desync lines (net.udp_loss_pct) is at its usual sub-1% level, so the network is not the cause
+  Remediation: roll the canary back with opsctl rollback deployment/game-server-canary --to-revision previous. The canary pods are replaced with v7.2.0 over about 60 seconds; snapshot_bytes on the canary track falls back to 600-900, state_reconciles_per_min back to 0-3, and the NET-STATE-DESYNC lines stop. Restarting the canary pods or raising the client interpolation delay would not help: the restarted pods run the same build, and a larger buffer does not bring back lost fragments.
+remediation_action: rollback_canary_build
+remediation_command: |-
+  opsctl rollback deployment/game-server-canary --to-revision previous
+error_message: '[Net] NET-STATE-DESYNC: match={match_id} player={player_id} build=v7.2.1-canary snapshot={snapshot_bytes}B mtu={mtu_bytes} fragments={fragments}
+  lost_fragment={lost_fragment} pos_delta={position_delta}m -> FORCE_RECONCILE tick={tick_number}'
 stack_trace: |-
   === NET STATE RECONCILIATION DUMP ===
-  match={match_id}  tick={tick_number}  player={player_id}
-  ----------- server state -----------
-    pos  = (1247.32, 45.00, -892.17)
-    vel  = (3.41, 0.00, -1.22)
-    yaw  = 127.4 deg
-    seq  = 48201
+  match={match_id}  tick={tick_number}  player={player_id}  build=v7.2.1-canary  track=canary
+  ----------- snapshot ---------------
+    type          = FULL (delta_compression=off, baseline_ack ignored)
+    size          = {snapshot_bytes} bytes  (mtu {mtu_bytes})
+    fragments     = {fragments}  received={received_fragments}  missing=#{lost_fragment}
+    udp_loss      = {udp_loss_pct}%
   ----------- client state -----------
-    pos  = (extrapolated from last acked input)  delta={position_delta}m
-    vel  = (4.02, 0.00, -1.87)
-    yaw  = 128.1 deg
-    seq  = 48201  (0 behind)
+    last_full_snapshot = DISCARDED (incomplete)
+    pos_delta          = {position_delta}m  (threshold 0.5m)
   ----------- action -----------------
-    FORCE_RECONCILE  rollback_ticks=3  bandwidth_cost=2.4KB
-    client_rtt=47ms  jitter=8ms  udp_loss={udp_loss_pct}%  interp_delay={interp_delay_ms}ms
-  NET-STATE-DESYNC: threshold exceeded — forced reconcile for player {player_id}
+    FORCE_RECONCILE  rollback_ticks=3
+  NET-STATE-DESYNC: snapshot {snapshot_bytes}B fragmented into {fragments}, fragment #{lost_fragment} lost, forced reconcile for player {player_id}
 correlation_attr:
   key: deployment.server_build
-  value: game-server-v7.2.1-canary
+  value: v7.2.1-canary
 fault_params:
   player_id:
     format: "PLR-{n}"
     n: {randint: [100000, 999999]}
-  position_delta: {uniform: [1.0, 25.0], round: 2}
-  udp_loss_pct: {uniform: [3.0, 12.0], round: 1}
-  interp_delay_ms: {randint: [50, 90]}
-  tick_number: {randint: [100000, 9999999]}
   match_id:
     format: "MATCH-{n}"
     n: {randint: [100000, 999999]}
+  tick_number: {randint: [100000, 9999999]}
+  snapshot_bytes: {randint: [2400, 3200]}
+  mtu_bytes: 1200
+  fragments: 3
+  received_fragments: 2
+  lost_fragment: {randint: [1, 3]}
+  position_delta: {uniform: [1.0, 25.0], round: 2}
+  udp_loss_pct: {uniform: [0.3, 0.8], round: 1}
+  rematch_requests: {randint: [40, 120]}
 rca_clues:
   game-server:
-    net.udp_loss_pct: {uniform: [3.0, 12.0], round: 1}
-    net.interp_delay_ms: {randint: [50, 90]}
-    net.jitter_ms: {randint: [5, 12]}
-    net.client_seq_lag_ticks: 0
+    deployment.server_build: v7.2.1-canary
+    deployment.track: canary
+    net.delta_compression: 'off'
+    net.snapshot_bytes: {randint: [2400, 3200]}
+    net.snapshot_fragments: 3
+    net.udp_loss_pct: {uniform: [0.3, 0.8], round: 1}
   matchmaking-engine:
-    matchmaking.server_pool_exhausted: true
-    matchmaking.fallback_region: {choice: [us-west-2, eu-west-1]}
-  analytics-pipeline:
-    analytics.desync_event_rate: {randint: [50, 200]}
-    analytics.data_quality: degraded
+    matchmaking.rematch_requests_per_min: {randint: [40, 120]}
+    matchmaking.rematch_server_pool: gs-canary
+cascade_messages:
+  matchmaking-engine:
+    - severity: WARN
+      message: 'level=warn component=rematch msg="rematch requested after client desync disconnect" match={match_id} player={player_id} server_pool=gs-canary reason=STATE_RECONCILE_TIMEOUT'
+    - severity: WARN
+      message: 'level=warn component=rematch msg="rematch rate above threshold" server_pool=gs-canary rematch_requests_1m={rematch_requests} other_pools=normal'
+fault_scope:
+  cluster: gaming-eks-cluster
+  workloads: [game-server]
+service_lag_seconds: {matchmaking-engine: 30}
+infrastructure_events:
+  - service: game-server
+    severity: INFO
+    offset_seconds: -150
+    body: 'level=info msg="Sync operation to 8c41d2e succeeded" application=game-server-canary dest-namespace=game-servers dest-server=gaming-eks-cluster revision=8c41d2e image=game-server:v7.2.1-canary initiator=r.alvarez'
+    attributes:
+      operation: deployment_rollout
+      change.request: CHG0071401
+      user.name: r.alvarez
+      change.summary: 'game-server-canary image: v7.2.0 -> v7.2.1-canary'
+      deployment.server_build: v7.2.1-canary
+      deployment.track: canary
+      net.delta_compression: 'off'
+  - service: game-server
+    severity: INFO
+    offset_seconds: -90
+    body: 'deployment "game-server-canary" successfully rolled out (revision 42, image game-server:v7.2.1-canary, 30/30 replicas updated)'
+    attributes:
+      operation: deployment_rollout
+      change.request: CHG0071401
+      deployment.server_build: v7.2.1-canary
+      deployment.track: canary
+remediation_effects:
+  transition_seconds: 60
+  log_taper_seconds: 45
+  log_events:
+    - service: game-server
+      severity: INFO
+      offset_seconds: 1
+      body: 'level=info logger=changelog msg="change applied" cmd="opsctl rollback deployment/game-server-canary --to-revision previous" actor={actor} result="deployment/game-server-canary rolled back to revision 41 (game-server:v7.2.0)"'
+      attributes:
+        operation: change_applied
+        change.target: deployment/game-server-canary
+        deployment.server_build: v7.2.0
+    - service: game-server
+      severity: INFO
+      offset_seconds: 55
+      body: 'deployment "game-server-canary" successfully rolled out (revision 43, image game-server:v7.2.0, 30/30 replicas updated)'
+      attributes:
+        operation: deployment_rollout
+        deployment.server_build: v7.2.0
+        deployment.track: canary
+  steady_attributes:
+    game-server:
+      deployment.server_build: v7.2.0
+  verification:
+    - signal: canary snapshot size
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "game-server" AND attributes.deployment.track == "canary"'
+      field: 'metrics.game_server.snapshot_bytes'
+      expect: 'back in 600-900 bytes (was 2400-3200) within about 60 seconds of the rollback'
+      within_seconds: 120
+    - signal: canary full-state reconciles
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "game-server" AND attributes.deployment.track == "canary"'
+      field: 'metrics.game_server.state_reconciles_per_min'
+      expect: 'back to 0-3 per minute (was 150-400)'
+      within_seconds: 120
+    - signal: NET-STATE-DESYNC lines
+      from: 'logs.otel.gaming'
+      where: 'body.text LIKE "*NET-STATE-DESYNC*"'
+      expect: '0 new lines'
+      within_seconds: 120
+    - signal: canary build
+      from: 'logs.otel.gaming'
+      where: 'resource.attributes.service.name == "game-server" AND attributes.operation == "build_status" AND attributes.deployment.track == "canary"'
+      field: 'attributes.deployment.server_build'
+      expect: 'v7.2.0 on every canary build-status line since the rollback (was v7.2.1-canary)'
+      within_seconds: 120
 business_impact:
   - kpi: business.matches_played_per_min
     value: {uniform: [229.71, 264.29]}

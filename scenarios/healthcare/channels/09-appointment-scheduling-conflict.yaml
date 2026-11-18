@@ -10,8 +10,12 @@ cascade_services:
 - billing-processor
 description: Double-booking or resource conflict detected in appointment scheduling engine
 investigation_notes: |-
-  Root Cause: Scheduling conflicts arise from race conditions in the appointment booking engine when multiple schedulers attempt to reserve the same provider/resource/time slot simultaneously. The optimistic locking mechanism in the scheduling database fails under high concurrency during morning booking windows. Five or more concurrent bookings on the same slot with optimistic-lock version conflicts, while the scheduling DB pool stays below 70% active, point to a locking race rather than connection pool exhaustion: the conflict-retry path re-checks only the appointment row's version, not the provider/resource slot, so a retried booking commits into a slot another request already took.
-  Remediation: 1) Review the conflicting bookings: `sched-admin conflicts --provider {provider_id} --date today`. 2) Release the conflicting slot lock: `sched-admin release-lock --slot {time_slot} --resource {resource_type}`. 3) Restart the scheduling conflict resolver: `systemctl restart scheduling-conflict-engine`. 4) Rebook the displaced patient into the next available slot: `sched-admin rebook --patient {patient_id} --provider {provider_id} --type new-patient`. 5) Enable pessimistic locking for high-demand providers during peak booking hours. 6) Verify the scheduling database connection pool is not exhausted: `sched-admin db-pool-status`.
+  Root cause: the feature flag booking-lock-v2 was turned on shortly before the first SCHED-CONFLICT. It switches the booking engine to optimistic-lock-v2.1-exp, whose conflict-retry path re-checks only the appointment row version, not the provider slot. A retried booking therefore commits into slot {time_slot} for provider {provider_id} ({resource_type}) that another request already took: patient {patient_id}, encounter {encounter_id}. Double bookings run at 2-8 per minute (normally 0) while the scheduling database pool stays under 70% active. This is a locking race, not pool exhaustion.
+  Confirm:
+    - scheduling-api logs [SCHED] booking_engine flag=booking-lock-v2:on lock_mode=optimistic-lock-v2.1-exp ... status=CONFLICTS (attributes.deployment.scheduler_lock_mode)
+    - metric scheduling.double_bookings_per_min rises from 0 to 2-8 after the flag change
+    - the scheduling-api line "feature flag booking-lock-v2 enabled" comes before the first conflict
+  Remediation: turn the flag off with opsctl patch flag/booking-lock-v2 --enabled false. The engine goes back to slot-row-lock-v2.0 and new double bookings stop within about 15 seconds. Patients double-booked during the incident still have to be rebooked by the scheduling desk. Restarting the conflict resolver or releasing slot locks does not remove the race.
 remediation_action: resolve_scheduling_conflict
 error_message: '[SCHED] SCHED-CONFLICT: provider={provider_id} slot={time_slot} patient={patient_id} encounter={encounter_id}
   resource={resource_type}'
@@ -57,6 +61,69 @@ rca_clues:
   billing-processor:
     billing.duplicate_encounter_charge: true
     billing.held_claims: {randint: [2, 10]}
+remediation_command: |-
+  opsctl patch flag/booking-lock-v2 --enabled false
+error_services: [scheduling-api]
+service_lag_seconds:
+  ehr-system: 15
+  billing-processor: 45
+cascade_messages:
+  ehr-system:
+    - severity: WARN
+      message: '[EHR] encounter_conflict provider={provider_id} slot={time_slot} patient={patient_id} encounter={encounter_id}; two encounters for one slot'
+  billing-processor:
+    - severity: WARN
+      message: '[CLAIMS] duplicate_encounter_hold encounter={encounter_id} provider={provider_id}; charge held for review'
+fault_scope:
+  workloads: [scheduling-api]
+infrastructure_events:
+  - service: scheduling-api
+    severity: INFO
+    offset_seconds: -120
+    body: '[SCHED] feature flag booking-lock-v2 enabled for all clinics: lock_mode slot-row-lock-v2.0 -> optimistic-lock-v2.1-exp by access-center-eng (CHG0032140)'
+    attributes:
+      user.name: access-center-eng
+      change.request: CHG0032140
+      operation: flag_change
+      deployment.scheduler_lock_mode: optimistic-lock-v2.1-exp
+      change.summary: 'booking-lock-v2: off -> on'
+remediation_effects:
+  log_events:
+    - service: scheduling-api
+      severity: INFO
+      offset_seconds: 1
+      body: '[CHG] CHANGE IMPLEMENTED opsctl patch flag/booking-lock-v2 --enabled false by {actor}: lock_mode optimistic-lock-v2.1-exp -> slot-row-lock-v2.0'
+      attributes:
+        operation: change_implemented
+        change.target: flag/booking-lock-v2
+    - service: scheduling-api
+      severity: INFO
+      offset_seconds: 3
+      body: '[SCHED] booking_engine flag=booking-lock-v2:off lock_mode=slot-row-lock-v2.0; slot row locks enforced'
+      attributes:
+        operation: booking_engine_status
+        deployment.scheduler_lock_mode: slot-row-lock-v2.0
+  steady_attributes:
+    scheduling-api:
+      deployment.scheduler_lock_mode: slot-row-lock-v2.0
+  verification:
+    - signal: scheduling.double_bookings_per_min
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "scheduling-api"'
+      field: 'metrics.scheduling.double_bookings_per_min'
+      expect: 'back to 0 (was 2-8 per minute) within about 15 seconds'
+      within_seconds: 60
+    - signal: SCHED-CONFLICT lines
+      from: 'logs.otel.healthcare'
+      where: 'body.text LIKE "*SCHED-CONFLICT*"'
+      expect: '0 new lines'
+      within_seconds: 60
+    - signal: deployment.scheduler_lock_mode
+      from: 'logs.otel.healthcare'
+      where: 'resource.attributes.service.name == "scheduling-api"'
+      field: 'attributes.deployment.scheduler_lock_mode'
+      expect: 'slot-row-lock-v2.0 on every booking_engine line since the fix; optimistic-lock-v2.1-exp stops appearing'
+      within_seconds: 60
 business_impact:
   - kpi: business.appointment_no_show_rate_pct
     factor: {uniform: [1.5, 3.0]}

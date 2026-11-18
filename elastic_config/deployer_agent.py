@@ -31,7 +31,7 @@ class AgentMixin:
                     "description": (
                         "Execute remediation actions for anomalies. Triggers the "
                         "Remediation Action workflow. Pass approval_mode (string): "
-                        "required for HITL / channels 1–15 (pauses at waitForInput); "
+                        "required for HITL channels (pauses at waitForInput); "
                         "skip only for Significant Event Auto-Remediate. Pass "
                         "dry_run: false to resolve the fault."
                     ),

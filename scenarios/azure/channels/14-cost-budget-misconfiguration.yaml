@@ -6,20 +6,25 @@ sensor_type: health_check
 affected_services: [cost-guard, chat-orchestrator]
 cascade_services: [model-router]
 
-description: Cost-guard budget thresholds were set in the wrong currency and unit, so model-router never throttles expensive deployments.
+description: Budget revision budget-rev-2026-10-17 set the cost-guard budget in EUR-cents instead of USD, so the budget looks almost unused and model-router never throttles premium deployments.
 
-investigation_notes: |
-  1. Search body.text LIKE *COST-BUDGET-MISCONFIG* and read configured_budget={configured_budget} {configured_unit} against the intended {intended_budget} {intended_unit}.
-  2. Compare spend_to_date={spend_to_date} {intended_unit} with the threshold; threshold_pct_used={threshold_pct_used}% means the throttle trigger can never fire.
-  3. Check the budget config revision budget.config_revision={config_revision} in the Activity Log or config repo to find who changed the unit or currency and when.
-  4. Verify model-router behavior: throttle_decisions={throttle_decisions} stays at zero while premium deployment "{premium_deployment}" keeps taking {premium_share_pct}% of traffic.
-  5. Cross-check Cost Management for the actual daily spend; if it exceeds the intended budget while cost-guard reports headroom, the misconfiguration is confirmed.
-  6. Get approval, then correct the thresholds to the intended currency and unit and confirm model-router starts throttling.
-
+investigation_notes: |-
+  Root cause: budget revision {config_revision} changed budget {budget_name} to {configured_budget} {configured_unit} instead of the intended {intended_budget} {intended_unit}, a 100x larger number. Spend of {spend_to_date} USD is therefore evaluated as {threshold_pct_used}% of the budget and the throttle trigger can never fire, while the real budget is exceeded.
+  Confirm:
+    - cost-guard metric cost_guard.budget_utilization_pct is 1-3% (before the change it was in the normal 35-70% band) while spend is {spend_to_date} USD; cost_guard.throttle_decisions is 0 although premium deployment {premium_deployment} takes {premium_share_pct}% of traffic
+    - cost-guard log attributes budget.config_revision={config_revision} and budget.unit={configured_unit} with budget.limit={configured_budget} on the spend_snapshot line
+    - the config-service line "change applied budget/{budget_name}" by finops-automation (cause event) comes before the first COST-BUDGET-MISCONFIG
+    - Cost Management shows the actual spend above {intended_budget} {intended_unit}, so the usage itself is not the problem: no runaway token loop (burn rate and tokens per minute stay in their normal bands)
+  Remediation: roll the budget back to its previous revision with opsctl rollback budget/{budget_name} --to-revision previous. The limit returns to {intended_budget} {intended_unit}, utilization reads about 190% and cost-guard starts throttling premium traffic within about a minute. Raising the limit or disabling the premium deployment would hide the wrong unit instead of correcting it.
 remediation_action: correct_budget_thresholds
+remediation_command: |-
+  opsctl rollback budget/monthly-genai-prod --to-revision previous
 
-error_message: |
-  [CostGuard] COST-BUDGET-MISCONFIG: budget={budget_name} configured="{configured_budget} {configured_unit}" intended="{intended_budget} {intended_unit}" spend_to_date={spend_to_date} threshold_used={threshold_pct_used}%
+service_lag_seconds: {chat-orchestrator: 20, model-router: 30}
+fault_scope:
+  workloads: [cost-guard, model-router]
+
+error_message: '[CostGuard] COST-BUDGET-MISCONFIG: budget={budget_name} configured="{configured_budget} {configured_unit}" intended="{intended_budget} {intended_unit}" spend_to_date={spend_to_date} threshold_used={threshold_pct_used}% revision={config_revision}'
 
 stack_trace: |
   BudgetConfigurationException: COST-BUDGET-MISCONFIG
@@ -35,26 +40,89 @@ stack_trace: |
 
 correlation_attr:
   key: budget.config_revision
-  value: budget-rev-2026-10-17-unit-eur-cents
+  value: budget-rev-2026-10-17
 
 fault_params:
-  budget_name: {choice: [monthly-genai-prod, daily-premium-models, team-assistant-budget]}
+  budget_name: monthly-genai-prod
   configured_budget: 750000
   configured_unit: EUR-cents
   intended_budget: 7500
   intended_unit: USD
-  spend_to_date: {randint: [8300, 19500]}
-  threshold_pct_used: {uniform: [1.1, 2.6], round: 1}
+  spend_to_date: 14250
+  threshold_pct_used: 1.9
   config_revision: "budget-rev-2026-10-17"
-  premium_deployment: {choice: [gpt-4o-premium-eus2, foundry-reasoning-large-eus2]}
+  premium_deployment: gpt-4o-premium-eus2
   premium_share_pct: {randint: [70, 95]}
   throttle_decisions: 0
+
+cascade_messages:
+  model-router:
+    - severity: WARN
+      message: '[ModelRouter] premium deployment {premium_deployment} taking {premium_share_pct}% of traffic; cost-guard reports budget {budget_name} at {threshold_pct_used}% so no throttle decision applied (throttle_decisions={throttle_decisions})'
+
+infrastructure_events:
+  - service: cost-guard
+    severity: INFO
+    offset_seconds: -120
+    body: 'config-service: change applied budget/monthly-genai-prod cmd="opsctl patch budget/monthly-genai-prod --limit 750000 --unit EUR-cents" by=finops-automation@contoso-demo.onmicrosoft.com change_id=chg-fin-2026-10-17 : revision budget-rev-2026-10-17'
+    attributes:
+      operation: config_change
+      event.action: patch
+      config.target: budget/monthly-genai-prod
+      user.name: finops-automation@contoso-demo.onmicrosoft.com
+      change.id: chg-fin-2026-10-17
+      budget.config_revision: budget-rev-2026-10-17
+      budget.unit: EUR-cents
+      change.summary: 'budget/monthly-genai-prod limit: 7500 USD -> 750000 EUR-cents (budget-rev-2026-09-30 -> budget-rev-2026-10-17)'
+
+remediation_effects:
+  log_events:
+    - service: cost-guard
+      severity: INFO
+      offset_seconds: 1
+      body: 'config-service: change applied budget/monthly-genai-prod cmd="opsctl rollback budget/monthly-genai-prod --to-revision previous" by={actor} : budget-rev-2026-10-17 -> budget-rev-2026-09-30'
+      attributes:
+        operation: config_change
+        event.action: rollback
+        config.target: budget/monthly-genai-prod
+        budget.config_revision: budget-rev-2026-09-30
+        budget.unit: USD
+        change.summary: 'budget/monthly-genai-prod limit: 750000 EUR-cents -> 7500 USD (budget-rev-2026-10-17 -> budget-rev-2026-09-30)'
+  steady_attributes:
+    cost-guard:
+      budget.config_revision: budget-rev-2026-09-30
+      budget.unit: USD
+  verification:
+    - signal: cost_guard.budget_utilization_pct
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "cost-guard"'
+      field: 'metrics.cost_guard.budget_utilization_pct'
+      expect: 'above 100% (about 190% of the 7500 USD budget; was 1-3%)'
+      within_seconds: 90
+    - signal: cost_guard.throttle_decisions
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "cost-guard"'
+      field: 'metrics.cost_guard.throttle_decisions'
+      expect: 'above 0 (was 0): premium traffic is throttled again'
+      within_seconds: 90
+    - signal: budget unit
+      from: 'logs.otel.azureai'
+      where: 'resource.attributes.service.name == "cost-guard"'
+      field: 'attributes.budget.unit'
+      expect: 'USD on every line logged since the fix; EUR-cents stops appearing'
+      within_seconds: 90
+    - signal: model_router.premium_traffic_share_pct
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "model-router"'
+      field: 'metrics.model_router.premium_traffic_share_pct'
+      expect: 'back to 25-40% (was 70-95%) as premium traffic is throttled'
+      within_seconds: 90
 
 rca_clues:
   cost-guard:
     cost.configured_budget_unit_mismatch: true
-    cost.threshold_pct_used: {uniform: [1.1, 2.6], round: 1}
-    cost.actual_spend_over_intended_pct: {randint: [110, 260]}
+    cost.threshold_pct_used: 1.9
+    cost.actual_spend_over_intended_pct: 190
   model-router:
     router.throttle_decisions_last_hour: 0
     router.premium_traffic_share_pct: {randint: [70, 95]}

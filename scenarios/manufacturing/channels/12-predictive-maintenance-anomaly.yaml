@@ -1,59 +1,114 @@
 name: Predictive Maintenance Anomaly
 subsystem: maintenance
-vehicle_section: predictive_engine
+vehicle_section: predictive_model
 error_type: PREDICTIVE-MAINT-ANOMALY
-sensor_type: vibration_sensor
+sensor_type: vibration_rms_mm_s
 affected_services:
 - maintenance-scheduler
 cascade_services:
 - mes-controller
-- scada-gateway
-description: Vibration / thermal anomaly on a critical asset; remaining useful life estimate dropped
+description: A vibration gateway profile change lowered the high-pass filter; integration noise inflates velocity RMS on every asset behind that gateway and the RUL model predicts imminent failures
 investigation_notes: |-
-  Root Cause: Vibration RMS climbing above ISO 10816 zone B for a Class A motor or spindle is an early warning of bearing wear, misalignment, or unbalance. Thermal deltas above 8°C between matched bearings are an early warning of inadequate lubrication or imminent failure. Energy at the bearing outer-race defect frequency (BPFO) above 0.3 g indicates bearing wear; dominant energy at 1x running speed would point to unbalance and at 2x to misalignment. Lubrication within the last 30 days rules out inadequate lubrication, so a thermal delta above 8°C here signals imminent bearing failure.
-  Remediation: 1) Pull the trend: `cmms-admin signal-trend --asset {asset_id} --sensor vibration_rms_mm_s`. 2) Schedule a precision alignment check next available window. 3) Lubricate per the manufacturer's spec if not already done in the last cycle. 4) Order spare bearing assembly to local stock if not already on hand. 5) If RMS exceeds zone C (per ISO 10816), schedule a planned shutdown for the next changeover, do NOT wait for unplanned failure.
-remediation_action: schedule_predictive_intervention
-error_message: '[CMMS] PREDICTIVE-MAINT-ANOMALY: asset={asset_id} sensor={sensor_type} value={sensor_value} rul_days={rul_days}
-  confidence={ml_confidence}'
+  Root cause: sensor profile vib-gw-02 was updated from r6 to r7 shortly before the first PREDICTIVE-MAINT-ANOMALY (by reliability-eng, CHG-7381), lowering the high-pass filter from 10 Hz to 2 Hz. The accelerometers behind VIB-GW-02 are integrated from acceleration to velocity on the gateway; with the filter at 2 Hz, low-frequency noise is amplified by the integration (the "ski slope" at the left of the spectrum) and velocity RMS rises from 1.4-2.4 to {sensor_value} mm/s on all four assets behind the gateway (MTR-CONV-01, SPN-MILL-04, PMP-COOL-02, CMP-AIR-01) in the same minute. That is ISO 10816 zone C, so the RUL model drops remaining useful life from months to {rul_days} days and raises urgent work requests. The machines are fine: the extra energy is below 10 Hz with no peaks at bearing defect frequencies (BPFO, BPFI), bearing temperatures and motor currents are unchanged, and assets on VIB-GW-01 are normal. Four unrelated assets degrading at the same moment points at the measurement chain, not the machines.
+  Confirm:
+    - maintenance-scheduler vibration_profile lines for vib-gw-02 show profile_rev=r7 hp_filter_hz=2 (attributes.maintenance.sensor_profile_rev, attributes.maintenance.hp_filter_hz); metric maintenance.vibration_rms_max_mm_s rises from 1.4-2.4 to 4.6-7.0 and maintenance.rul_days_min drops from 120-400 to 3-21
+    - the maintenance-scheduler sensor profile line (CHG-7381) comes before the first PREDICTIVE-MAINT-ANOMALY
+    - the anomaly lines show dominant_band=0-10Hz and no BPFO/BPFI peak; maintenance.bearing_temp_max_c stays at 48-56 °C
+  Remediation: roll the profile back with opsctl rollback sensor-profile/vib-gw-02 --to-revision previous. The gateway applies the 10 Hz filter on the next acquisition block; velocity RMS returns to 1.4-2.4 mm/s within about 30 s and the RUL model recovers on its next scoring cycle. The urgent work requests raised by the false predictions should be cancelled in the CMMS.
+remediation_action: rollback_sensor_profile
+remediation_command: |-
+  opsctl rollback sensor-profile/vib-gw-02 --to-revision previous
+error_message: '[CMMS] PREDICTIVE-MAINT-ANOMALY: asset={asset_id} gateway=VIB-GW-02 sensor={sensor_type} value={sensor_value} iso10816_zone=C dominant_band=0-10Hz bpfo_peak=none rul_days={rul_days} confidence={ml_confidence}'
 stack_trace: |-
-  === PREDICTIVE MAINTENANCE — {asset_id} ===
-  Sensor: {sensor_type} | Current: {sensor_value} | ISO 10816 Zone: C
+  === PREDICTIVE MAINTENANCE — VIB-GW-02 (profile r7, high-pass 2 Hz) ===
   ------------------------------------------------------------------------
-  TIME (h ago) | VALUE   | TREND
+  ASSET         | VEL RMS (mm/s) | ZONE | DOMINANT BAND | BPFO/BPFI | BEARING TEMP
   ------------------------------------------------------------------------
-  168          | 1.8     | ↑ slow
-  72           | 2.4     | ↑ slow
-  24           | 4.1     | ↑ accelerating
-  1            | {sensor_value}   | ↑ accelerating
+  {asset_id}   | {sensor_value}           | C    | 0-10 Hz       | none      | 52 C
+  SPN-MILL-04   | 5.9            | C    | 0-10 Hz       | none      | 49 C
+  PMP-COOL-02   | 4.8            | C    | 0-10 Hz       | none      | 51 C
+  CMP-AIR-01    | 6.3            | C    | 0-10 Hz       | none      | 55 C
   ------------------------------------------------------------------------
-  Remaining Useful Life: {rul_days} days (ML confidence: {ml_confidence})
-  PREDICTIVE-MAINT-ANOMALY: schedule intervention before next changeover
+  Remaining Useful Life (min): {rul_days} days (ML confidence: {ml_confidence})
+  PREDICTIVE-MAINT-ANOMALY: zone C vibration on all assets behind VIB-GW-02
 correlation_attr:
-  key: infra.predictive_model_version
-  value: rul-xgboost-v2.1-rc1
+  key: maintenance.sensor_profile_rev
+  value: r7
 fault_params:
-  asset_id: {choice: [MTR-CONV-01, SPN-MILL-04, PMP-COOL-02, CMP-AIR-01]}
+  asset_id: MTR-CONV-01
   sensor_type: vibration_rms_mm_s
   sensor_value: {uniform: [4.6, 7.0], round: 2}
   rul_days: {randint: [3, 21]}
-  ml_confidence: {uniform: [0.78, 0.96], round: 3}
+  ml_confidence: {uniform: [0.78, 0.92], round: 3}
 rca_clues:
   maintenance-scheduler:
-    cmms.vibration_zone: C
-    cmms.rul_days: {randint: [3, 21]}
-    cmms.dominant_vibration_component: BPFO
-    cmms.bpfo_amplitude_g: {uniform: [0.5, 1.5], round: 2}
-    cmms.last_lubrication_days: {randint: [5, 20]}
+    maintenance.hp_filter_hz: 2
+    cmms.dominant_vibration_band: 0-10Hz
+    cmms.bpfo_peak: none
+    cmms.assets_affected: 4
   mes-controller:
-    mes.asset_at_risk: true
-  scada-gateway:
-    scada.thermal_dt_c: {uniform: [8.0, 18.0], round: 1}
+    mes.maintenance_requests_open: {randint: [3, 6]}
+cascade_messages:
+  mes-controller:
+    - severity: WARN
+      message: '[MES] maintenance request URGENT for MTR-CONV-01, SPN-MILL-04, PMP-COOL-02, CMP-AIR-01 (RUL < 21 days); planner asked to schedule stops on LINE-01 and LINE-03'
+fault_scope:
+  cluster: mfg-gke-cluster
+  workloads: [maintenance-scheduler]
+infrastructure_events:
+  - service: maintenance-scheduler
+    severity: INFO
+    offset_seconds: -90
+    body: '[CMMS] sensor profile vib-gw-02 r6 -> r7 pushed to gateway VIB-GW-02 (high_pass_hz 10 -> 2, integration acc->vel); changed by reliability-eng (CHG-7381)'
+    attributes:
+      operation: config_change
+      user.name: reliability-eng
+      change.request: CHG-7381
+      maintenance.sensor_profile_rev: r7
+      maintenance.hp_filter_hz: 2
+      change.summary: 'vib-gw-02 sensor profile: r6 (HP 10 Hz) -> r7 (HP 2 Hz)'
+service_lag_seconds:
+  mes-controller: 30
+remediation_effects:
+  log_events:
+    - service: maintenance-scheduler
+      severity: INFO
+      offset_seconds: 1
+      body: '[CHG] CHANGE APPLIED opsctl rollback sensor-profile/vib-gw-02 --to-revision previous by {actor}: VIB-GW-02 profile r7 -> r6 (high_pass_hz 10)'
+      attributes:
+        operation: change_applied
+        change.target: sensor-profile/vib-gw-02
+  steady_attributes:
+    maintenance-scheduler:
+      maintenance.sensor_profile_rev: r6
+      maintenance.hp_filter_hz: 10
+  log_taper_seconds: 20
+  verification:
+    - signal: maintenance.vibration_rms_max_mm_s
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "maintenance-scheduler"'
+      field: 'metrics.maintenance.vibration_rms_max_mm_s'
+      expect: 'back to 1.4-2.4 mm/s (was 4.6-7.0)'
+      within_seconds: 60
+    - signal: maintenance.rul_days_min
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "maintenance-scheduler"'
+      field: 'metrics.maintenance.rul_days_min'
+      expect: 'back above 120 days (was 3-21)'
+      within_seconds: 120
+    - signal: PREDICTIVE-MAINT-ANOMALY lines
+      from: 'logs.otel.mfg'
+      where: 'body.text LIKE "*PREDICTIVE-MAINT-ANOMALY*"'
+      expect: '0 new lines'
+      within_seconds: 60
+    - signal: vib-gw-02 sensor profile
+      from: 'logs.otel.mfg'
+      where: 'resource.attributes.service.name == "maintenance-scheduler" AND body.text LIKE "*vibration_profile gateway=VIB-GW-02*"'
+      field: 'attributes.maintenance.sensor_profile_rev'
+      expect: 'r6 on every line logged since the fix; r7 stops appearing'
+      within_seconds: 60
 business_impact:
-  - kpi: business.mtbf_hours
-    factor: {uniform: [0.25, 0.55]}
-  - kpi: business.mttr_minutes
-    factor: {uniform: [2.0, 4.5]}
+  - kpi: business.maintenance_backlog_count
+    factor: {uniform: [2.0, 2.6]}
   - kpi: business.spare_parts_stockout_risk_pct
     factor: {uniform: [2.0, 4.0]}
-  - kpi: business.oee_availability_pct
-    factor: {uniform: [0.40, 0.70]}

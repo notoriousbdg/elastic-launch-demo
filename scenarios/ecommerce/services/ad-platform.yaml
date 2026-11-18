@@ -33,33 +33,100 @@ db_operations:
   - UPDATE ad_campaigns SET daily_spend = daily_spend + ?, impressions = impressions + 1 WHERE campaign_id = ?
 emit_fault_logs: true
 kpi_emitter: true
+state:
+  ad_t:
+    init: now
+  ad_click_backlog:
+    init: 0
+  s_idx_age_min:
+    init: 0
+  s_fill02:
+    init: 1.0
+  s_cpc:
+    init: 1.0
+  s_capped:
+    init: 0
 steps:
 - sample:
-    revenue_per_minute_usd:
-      uniform:
-      - 850.0
-      - 3200.0
-      round: 2
-    impressions_per_sec:
-      uniform:
-      - 8000.0
-      - 28000.0
-      round: 1
+    dt:
+      expr: "min(10.0, max(0.0, time.time() - ad_t))"
+- counter:
+    state_key: ad_t
+    by:
+      expr: "dt"
+# Ch 2: targeting-index-builder 3.8.0 fails on every run (segment_ids ARRAY<INT64> -> ARRAY<STRING>),
+# so the published index ages past the ad servers' 30 min max age and targeted decisioning stops.
+# After the rollback and a manual run (~20s) a fresh index is published and the servers hot-load it
+# over ~70s, so fill rate is back at ~89% about 90s after the fix.
+- sample:
+    idx_age_min:
+      expr: "round(31.0 + elapsed.get(2, 0) / 60.0, 1) if 2 in all_active else (round(s_idx_age_min + since_fix.get(2, 0) / 60.0, 1)
+        if (2 in fixed_channels and since_fix.get(2, 0) < 20) else (round(min(1.0 + max(0.0, since_fix.get(2, 0) - 20.0) / 60.0,
+        max(3.0, 7.0 + rand.gauss(0, 2.0))), 1) if 2 in fixed_channels else round(max(3.0, 7.0 + rand.gauss(0, 2.0)), 1)))"
+    fill02:
+      expr: "1.0 - (1.0 - 3.0 / 89.0) * min(1.0, elapsed.get(2, 0) / 60.0) if 2 in all_active else (s_fill02 + (1.0 - s_fill02)
+        * min(1.0, max(0.0, since_fix.get(2, 0) - 20.0) / 70.0) if 2 in fixed_channels else 1.0)"
+    idx_generation:
+      expr: "18343 if (2 in fixed_channels and since_fix.get(2, 0) >= 20) else 18342"
+    idx_builder_version:
+      expr: "'3.8.0' if 2 in all_active else '3.7.4'"
+    idx_servers_loaded:
+      expr: "(min(12, int(12.0 * max(0.0, since_fix.get(2, 0) - 20.0) / 70.0)) if 2 in fixed_channels else 12) if 2 not in all_active
+        else 0"
+- counter:
+    state_key: s_idx_age_min
+    by:
+      expr: "(idx_age_min - s_idx_age_min) if 2 in all_active else 0"
+- counter:
+    state_key: s_fill02
+    by:
+      expr: "(fill02 - s_fill02) if 2 in all_active else 0"
+# Ch 17: autobidder revision 47 sets bid_multiplier 3.0 (was 1.3) for sponsored products: CPC
+# triples within ~60s and the largest campaigns hit their daily caps (up to ~38). The rollback brings
+# CPC back within ~30s; the make-good job credits the overcharge and campaigns resume over ~60s.
+- sample:
+    cpc_lvl:
+      expr: "1.0 + 2.0 * min(1.0, elapsed.get(17, 0) / 60.0) if 17 in all_active else (s_cpc + (1.0 - s_cpc) * min(1.0,
+        since_fix.get(17, 0) / 30.0) if 17 in fixed_channels else 1.0)"
+    capped_lvl:
+      expr: "1.0 + 37.0 * min(1.0, max(0.0, elapsed.get(17, 0) - 15.0) / 180.0) if 17 in all_active else (s_capped * (1.0 -
+        min(1.0, max(0.0, since_fix.get(17, 0) - 10.0) / 60.0)) if 17 in fixed_channels else 0.5)"
+- counter:
+    state_key: s_cpc
+    by:
+      expr: "(cpc_lvl - s_cpc) if 17 in all_active else 0"
+- counter:
+    state_key: s_capped
+    by:
+      expr: "(capped_lvl - s_capped) if 17 in all_active else 0"
+- sample:
+    fill17:
+      expr: "1.0 - 0.13 * max(0.0, capped_lvl - 1.0) / 37.0"
+    avg_cpc_usd:
+      expr: "round(max(0.8, cpc_lvl * (1.0 + rand.gauss(0, 0.04))), 2)"
+    budget_capped_campaigns:
+      expr: "max(0, round(capped_lvl + rand.gauss(0, 0.5)))"
+    auction_win_rate_pct:
+      expr: "round(34.0 + 26.0 * (cpc_lvl - 1.0) / 2.0 + rand.gauss(0, 1.5), 1)"
+    bid_multiplier:
+      expr: "3.0 if 17 in all_active else 1.3"
+    autobidder_revision:
+      expr: "47 if 17 in all_active else 46"
+# Fill rate composes both channels: Ch 2 removes targeted decisions (~89% -> ~3%), Ch 17 removes
+# the capped campaigns' demand (~89% -> ~77%). Impressions and revenue follow fill rate.
+- sample:
     fill_rate_pct:
-      uniform:
-      - 82.0
-      - 96.0
-      round: 2
+      expr: "round(max(0.0, 89.0 * fill02 * fill17 * (1.0 + rand.gauss(0, 0.0135))), 2)"
+    ad_requests_per_sec:
+      expr: "16300.0 + rand.gauss(0, 200.0)"
+    impressions_per_sec:
+      expr: "round(ad_requests_per_sec * fill_rate_pct / 100.0, 1)"
     cpm_usd:
-      uniform:
-      - 1.8
-      - 7.5
-      round: 2
+      expr: "round(2.4 + rand.gauss(0, 0.08), 2)"
+    revenue_per_minute_usd:
+      expr: "round(impressions_per_sec * 60.0 * cpm_usd / 1000.0, 2)"
     click_through_rate_pct:
-      uniform:
-      - 0.8
-      - 3.5
-      round: 3
+      expr: "round(1.8 + rand.gauss(0, 0.08), 3)"
 - metric:
     name: ads.revenue_per_minute_usd
     value:
@@ -102,21 +169,134 @@ steps:
       ads.click_through_rate_pct:
         var: click_through_rate_pct
 - sample:
-    active_campaigns:
-      randint:
-      - 45
-      - 280
-    budget_utilization_pct:
-      uniform:
-      - 35.0
-      - 85.0
-      round: 1
+    idx_decisioning:
+      expr: "'house_ad_fallback' if idx_age_min > 30.0 else ('targeted' if idx_servers_loaded >= 12 else 'loading')"
+    idx_status:
+      expr: "'ANOMALY' if (idx_age_min > 30.0 or fill02 < 0.95) else 'NOMINAL'"
+- metric:
+    name: ads.targeting_index_age_min
+    value:
+      var: idx_age_min
+    unit: min
 - log:
     level: INFO
-    message: ads.campaign_health active_campaigns={active_campaigns} budget_utilization={budget_utilization_pct}%
+    message: "adplatform.serving.index: targeting index generation={idx_generation} age_min={idx_age_min} max_age_min=30
+      servers_loaded={idx_servers_loaded}/12 builder=targeting-index-builder:{idx_builder_version} decisioning={idx_decisioning}
+      status={idx_status}"
+    attrs:
+      operation: targeting_index_status
+      ads.targeting_index_generation:
+        var: idx_generation
+      ads.targeting_index_age_min:
+        var: idx_age_min
+      ads.index_builder_version:
+        var: idx_builder_version
+      ads.decisioning_mode:
+        var: idx_decisioning
+      ads.index_status:
+        var: idx_status
+# Ch 8: KEDA maxReplicaCount 24 -> 4 on click-attribution. ad-clicks has 24 partitions and ~12,000
+# events/s; each consumer handles ~750/s, so 4 consumers fall behind by ~9,000/s (lag capped at
+# ~2,000,000 by retention). After the patch KEDA scales to 24 over ~30s and they drain ~18,000/s,
+# net ~6,000/s, back to the ~1,200 baseline lag.
+- sample:
+    click_max_replicas:
+      expr: "4 if 8 in all_active else 24"
+    click_replicas:
+      expr: "4 if 8 in all_active else (min(24, 4 + int(20.0 * since_fix.get(8, 0) / 30.0)) if 8 in fixed_channels else 24)"
+    click_ingest_eps:
+      expr: "round(12000.0 + rand.gauss(0, 250.0))"
+    click_delta:
+      expr: "min(2000000.0 - ad_click_backlog, max(-ad_click_backlog, (click_ingest_eps - 750.0 * click_replicas) * dt))"
+- counter:
+    state_key: ad_click_backlog
+    by:
+      expr: "click_delta"
+- sample:
+    click_queue_depth:
+      expr: "round(max(200.0, 1200.0 + rand.gauss(0, 300.0)) + ad_click_backlog)"
+    click_consume_eps:
+      expr: "round(750.0 * click_replicas * (1.0 + rand.gauss(0, 0.01))) if ad_click_backlog > 1.0 else click_ingest_eps"
+    attribution_delay_s:
+      expr: "round(click_queue_depth / 12000.0, 1)"
+    click_status:
+      expr: "'ANOMALY' if click_queue_depth > 5000 else 'NOMINAL'"
+- metric:
+    name: ads.click_queue_depth
+    value:
+      var: click_queue_depth
+    unit: events
+- metric:
+    name: ads.click_consumer_replicas
+    value:
+      var: click_replicas
+    unit: replicas
+- metric:
+    name: ads.attribution_delay_s
+    value:
+      var: attribution_delay_s
+    unit: s
+- log:
+    level: INFO
+    message: "adplatform.attribution.consumer: group=click-attribution topic=ad-clicks partitions=24 replicas={click_replicas}/{click_max_replicas}
+      lag={click_queue_depth} produce_eps={click_ingest_eps} consume_eps={click_consume_eps} attribution_delay_s={attribution_delay_s}
+      dlq=20 status={click_status}"
+    attrs:
+      operation: click_attribution_status
+      messaging.kafka.consumer.group: click-attribution
+      messaging.destination.name: ad-clicks
+      ads.click_queue_depth:
+        var: click_queue_depth
+      ads.click_consumer_replicas:
+        var: click_replicas
+      ads.click_consumer_max_replicas:
+        var: click_max_replicas
+      ads.attribution_delay_s:
+        var: attribution_delay_s
+      ads.click_status:
+        var: click_status
+- sample:
+    active_campaigns:
+      expr: "212 - budget_capped_campaigns"
+    budget_utilization_pct:
+      expr: "round(58.0 + 30.0 * max(0.0, capped_lvl - 1.0) / 37.0 + rand.gauss(0, 1.5), 1)"
+    campaign_status:
+      expr: "'ANOMALY' if (budget_capped_campaigns > 3 or avg_cpc_usd > 1.3) else 'NOMINAL'"
+- metric:
+    name: ads.avg_cpc_usd
+    value:
+      var: avg_cpc_usd
+    unit: USD
+- metric:
+    name: ads.budget_capped_campaigns
+    value:
+      var: budget_capped_campaigns
+    unit: campaigns
+- metric:
+    name: ads.auction_win_rate_pct
+    value:
+      var: auction_win_rate_pct
+    unit: '%'
+- log:
+    level: INFO
+    message: ads.campaign_health active_campaigns={active_campaigns} budget_capped={budget_capped_campaigns} budget_utilization={budget_utilization_pct}%
+      avg_cpc=${avg_cpc_usd} win_rate={auction_win_rate_pct}% autobidder_rev={autobidder_revision} bid_multiplier={bid_multiplier}
+      status={campaign_status}
     attrs:
       operation: campaign_health
       ads.active_campaigns:
         var: active_campaigns
       ads.budget_utilization_pct:
         var: budget_utilization_pct
+      ads.budget_capped_campaigns:
+        var: budget_capped_campaigns
+      ads.avg_cpc_usd:
+        var: avg_cpc_usd
+      ads.auction_win_rate_pct:
+        var: auction_win_rate_pct
+      ads.autobidder_revision:
+        var: autobidder_revision
+      ads.bid_multiplier:
+        var: bid_multiplier
+      ads.campaign_status:
+        var: campaign_status

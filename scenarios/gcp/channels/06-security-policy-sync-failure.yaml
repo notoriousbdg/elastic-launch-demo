@@ -10,16 +10,16 @@ cascade_services:
 - cloud-load-balancer
 description: Cloud Armor security policy failing to sync across backend services while the Cloud SQL for MySQL policy store is stuck on row lock waits
 investigation_notes: |-
-  Root cause: cloud-armor-waf keeps its security_policies table in Cloud SQL for MySQL. Concurrent policy edits contend for the same rows, so InnoDB row lock waits and slow queries pile up and the sync job can't read a consistent policy version to push to the backends. Confirm on the GCP Cloud SQL for MySQL OTel dashboards (InnoDB row lock waits, slow queries). Cloud Armor policy updates propagate asynchronously to all backend services. Propagation typically takes 60-90 seconds but can stall if backends are unhealthy or if there is a version conflict from concurrent policy edits. During sync gaps, stale backends enforce the previous policy version, creating an inconsistent security posture. Check sync status:
-    gcloud compute backend-services describe <backend> --global --format='value(securityPolicy)'
-    gcloud compute security-policies describe <policy> --format='value(fingerprint,creationTimestamp)'
-  Remediation: Force a policy re-attachment to lagging backends:
-    gcloud compute backend-services update <backend> --global --security-policy=<policy>
-  If the version conflict persists, export the policy and re-import it; the fingerprint in the exported file makes the import fail on a concurrent change instead of overwriting it:
-    gcloud compute security-policies export <policy> --file-name=policy-backup.yaml
-    gcloud compute security-policies import <policy> --file-name=policy-backup.yaml
-  Serialize policy edits so only one writer changes the policy at a time.
+  Root cause: rollout of armor-policy-sync to armor-sync-v2.1.0-beta (deployment armor-policy-sync, namespace security). The beta agent pushes policy edits concurrently, so {armor_policy} (version {policy_version}) hits "{policy_sync_error}" and InnoDB row lock waits pile up on the security_policies table in Cloud SQL for MySQL; only {backends_synced} of {backends_total} backends receive the current version. Backend health is ruled out (lb.backend_health_state stays HEALTHY on every backend) and so is a Cloud SQL capacity problem (the lock waits start after the rollout and no other table is slow).
+  Confirm:
+    - cloud-armor-waf metric armor.backends_synced is 1-3 (6 before) and armor.policy_sync_lag_s is 120-600 (about 20 before)
+    - cloud-armor-waf "policy_sync_status" lines carry armor.sync_agent_version=armor-sync-v2.1.0-beta and armor.status=ANOMALY
+    - the vpc-network-manager line "armor-policy-sync rolled out armor-sync-v2.1.0-beta" comes before the first sync failure; Cloud SQL MySQL InnoDB row lock waits and slow queries rise at the same time
+  Remediation: roll the sync agent back, then force a re-push. opsctl rollback deployment/armor-policy-sync --to-revision previous restores armor-sync-v2.0.4, then opsctl sync security-policy/{armor_policy} pushes the current policy. armor.backends_synced returns to 6 and armor.policy_sync_lag_s to about 20 over about 60 seconds.
 remediation_action: reset_security_policy
+remediation_command: |-
+  opsctl rollback deployment/armor-policy-sync --to-revision previous
+  opsctl sync security-policy/gcpnet-waf-policy
 error_message: '[CloudArmor] ARMOR-POLICY-SYNC-FAILURE policy={armor_policy} version={policy_version} backends_synced={backends_synced}/{backends_total}
   last_sync={policy_last_sync_sec}s ago error="{policy_sync_error}"'
 stack_trace: |-
@@ -36,8 +36,8 @@ correlation_attr:
   key: network.policy_push_agent
   value: armor-sync-v2.1.0-beta
 fault_params:
-  armor_policy: {choice: [gcpnet-waf-policy, gcpnet-ddos-policy, gcpnet-edge-policy]}
-  policy_version: {randint: [10, 50]}
+  armor_policy: gcpnet-waf-policy
+  policy_version: 42
   backends_synced: {randint: [1, 3]}
   backends_total: 6
   policy_last_sync_sec: {randint: [120, 600]}
@@ -65,3 +65,66 @@ generator_impact:
   gcp_cloudsql_mysql_otel:
     innodb_lock_waits_high: 40.0
     slow_queries_high: 15.0
+fault_scope:
+  cluster: gcpnet-gke-east1
+  workloads: [cloud-armor-waf, vpc-network-manager]
+infrastructure_events:
+  - service: vpc-network-manager
+    severity: INFO
+    offset_seconds: -90
+    body: 'rollout: armor-policy-sync rolled out armor-sync-v2.1.0-beta (was armor-sync-v2.0.4) in namespace security by sec-platform-release (CR-5120)'
+    attributes:
+      user.name: sec-platform-release
+      change.request: CR-5120
+      operation: deployment_rollout
+      network.policy_push_agent: armor-sync-v2.1.0-beta
+cascade_messages:
+  cloud-load-balancer:
+    - severity: WARN
+      message: 'lb: policy enforcement gap on policy={armor_policy}; backends without current policy'
+remediation_effects:
+  log_events:
+    - service: vpc-network-manager
+      severity: INFO
+      offset_seconds: 1
+      body: 'gcp-audit: logName=cloudaudit.googleapis.com/activity serviceName=k8s.io methodName=io.k8s.apps.v1.deployments.patch resourceName=namespaces/security/deployments/armor-policy-sync principalEmail={actor} status=OK'
+      attributes:
+        operation: audit
+        command.target: deployment/armor-policy-sync
+    - service: vpc-network-manager
+      severity: INFO
+      offset_seconds: 3
+      body: 'gcp-audit: logName=cloudaudit.googleapis.com/activity serviceName=compute.googleapis.com methodName=v1.compute.securityPolicies.patch resourceName=projects/gcpnet-prod-001/global/securityPolicies/gcpnet-waf-policy principalEmail={actor} status=OK'
+      attributes:
+        operation: audit
+        command.target: security-policy/gcpnet-waf-policy
+    - service: cloud-armor-waf
+      severity: INFO
+      offset_seconds: 15
+      body: 'cloud-armor: policy=gcpnet-waf-policy push by armor-sync-v2.0.4 started; backends re-attaching'
+      attributes:
+        operation: policy_sync
+        armor.sync_agent_version: armor-sync-v2.0.4
+  steady_attributes:
+    cloud-armor-waf:
+      armor.sync_agent_version: armor-sync-v2.0.4
+  verification:
+    - signal: armor.backends_synced
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "cloud-armor-waf"'
+      field: 'metrics.armor.backends_synced'
+      expect: '6 (was 1-3)'
+      within_seconds: 120
+    - signal: armor.policy_sync_lag_s
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "cloud-armor-waf"'
+      field: 'metrics.armor.policy_sync_lag_s'
+      expect: 'about 20 (was 120-600)'
+      within_seconds: 120
+    - signal: sync agent version
+      from: 'logs.otel.gcpnet'
+      where: 'resource.attributes.service.name == "cloud-armor-waf"'
+      field: 'attributes.armor.sync_agent_version'
+      expect: 'armor-sync-v2.0.4 on every line since the fix (was armor-sync-v2.1.0-beta)'
+      within_seconds: 120
+  log_taper_seconds: 60

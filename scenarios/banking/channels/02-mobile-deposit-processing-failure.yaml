@@ -7,57 +7,128 @@ affected_services:
 - mobile-gateway
 - document-vault
 cascade_services:
-- claims-processor
 - payment-engine
-description: Mobile check deposit image capture and processing pipeline failure
+- member-portal
+description: Mobile check deposits are rejected at amount verification because check images are now captured below the resolution the amount recognition needs.
 investigation_notes: |-
-  1. Check the amount_verify stage — OCR-extracted amount vs member-entered amount mismatch is the most common failure. Review image quality scores; quality <85% correlates with OCR errors.
-  2. Inspect MICR line extraction: routing and account numbers must parse correctly from the magnetic ink character recognition scan. Failed MICR reads require manual keying or re-capture.
-  3. Verify Reg CC hold policies are correctly applied — military early pay eligibility and next-business-day availability depend on correct member tier classification in the deposit rules engine.
-  4. Check document-vault connectivity — deposit images must be stored before processing continues. Blob Storage upload failures in document-vault will block the entire deposit pipeline.
-  5. Review duplicate detection window — 90-day lookback should catch re-deposited checks. If duplicate_check passes but amount_verify fails, the issue is OCR accuracy, not fraud.
-remediation_action: restart_deposit_processor
-error_message: '[MOBILE] MOBILE-DEPOSIT-FAIL: deposit={deposit_id} amount=${deposit_amount} member={member_id} stage={deposit_stage}
-  error={deposit_error}'
+  1. Search logs.otel.banking for body.text containing MOBILE-DEPOSIT-FAIL on mobile-gateway: deposits fail at stage={deposit_stage} with error={deposit_error}; the image quality score is {ocr_quality}%. metrics.mobile_gateway.deposit_car_lar_match_pct (courtesy and legal amount recognition agreeing with the amount the member entered) normally reads 96.5-99.2% and has dropped to 58-72%.
+  2. Find the change on mobile-gateway that came just before the first failure: ConfigMap deposit-capture-config was updated to rev-14, which lowers the capture resolution from 200 to 150 dpi to cut upload size. The deposit_pipeline status line carries attributes.deposit.image_dpi and attributes.deposit.capture_config_rev; they read 150 and rev-14 since the change.
+  3. Rule out the other stages: MICR parsing still succeeds (routing={routing_number} parsed), duplicate detection passes, and document-vault stores the front and back images without errors (document.blob_upload_status=OK). Check 21 image exchange expects 200 dpi; at 150 dpi the amount recognition confidence falls below the auto-accept threshold, so the amounts no longer match.
+  4. Follow the cascade: payment-engine has fewer deposits to post and Reg CC holds are not created; member-portal shows deposit rejections and complaint volume rises. These are effects, not causes.
+  5. Fix the capture setting, not the threshold: lowering the amount-match confidence threshold would accept misread amounts. Roll the ConfigMap back: opsctl rollback configmap/deposit-capture-config -n digital --to-revision previous. The mobile-gateway pods reload it within seconds; deposits already captured at 150 dpi in the app queue still fail, so the match rate converges back over about a minute.
+  6. Recovery: deposit.image_dpi reads 200 on the deposit_pipeline lines, deposit_car_lar_match_pct back above 96%, and no new MOBILE-DEPOSIT-FAIL lines. Ask members whose deposits were rejected to retake the photo; nothing was posted, so there is nothing to reverse.
+remediation_action: rollback_deposit_capture_config
+remediation_command: |-
+  opsctl rollback configmap/deposit-capture-config -n digital --to-revision previous
+error_message: '[MOBILE] MOBILE-DEPOSIT-FAIL: deposit={deposit_id} amount=${deposit_amount} member={member_id} stage={deposit_stage} error={deposit_error} image_dpi=150 car_lar_confidence={car_lar_confidence}'
 stack_trace: |-
   === MOBILE DEPOSIT PIPELINE ===
   deposit={deposit_id}  member={member_id}  amount=${deposit_amount}
   --- PROCESSING STAGES ---
     STAGE                STATUS      DETAIL
-    image_capture        COMPLETE    front+back captured, quality={ocr_quality}% (warn <85%, accepted)
-    ocr_extraction       COMPLETE    MICR: routing={routing_number} acct=****{acct_last4}
+    image_capture        COMPLETE    front+back captured 150dpi grayscale, quality={ocr_quality}%
+    micr_read            COMPLETE    routing={routing_number} acct=****{acct_last4}
     duplicate_check      COMPLETE    no duplicates in 90-day window
-    amount_verify        FAILED      entered=${deposit_amount} ocr_car_lar=NO_MATCH confidence=LOW  <<< MISMATCH
+    amount_verify        FAILED      entered=${deposit_amount} car_lar=NO_MATCH confidence={car_lar_confidence}  <<< MISMATCH
     fraud_screen         SKIPPED     blocked by amount_verify failure
     funds_hold           SKIPPED     ---
   stage={deposit_stage}  error={deposit_error}
-  hold_policy=REG-CC  availability=NEXT_BUSINESS_DAY  risk_tier=LOW
+  capture_config=deposit-capture-config rev-14  image_dpi=150 (Check 21 image exchange: 200)
   ACTION: reject_deposit=true  notify_member=true  alert=MOBILE-DEPOSIT-FAIL
 correlation_attr:
-  key: infra.ocr_engine_version
-  value: tesseract-v5.3.4-patch1
+  key: deposit.capture_config_rev
+  value: rev-14
 fault_params:
   deposit_id: {format: "DEP-{n}", n: {randint: [100000, 999999]}}
   deposit_amount: {uniform: [50.0, 5000.0], round: 2}
-  member_id: {format: "{p}-{n}", p: {choice: [M, MBR, USR]}, n: {randint: [1000000, 9999999]}}
+  member_id: {format: "{p}-{n}", p: {choice: [M, MBR]}, n: {randint: [1000000, 9999999]}}
   deposit_stage: amount_verify
   deposit_error: AMOUNT_MISMATCH
-  ocr_quality: {uniform: [55, 84], round: 1}
-  routing_number: {randint: [100000000, 999999999]}
+  ocr_quality: {uniform: [55, 72], round: 1}
+  car_lar_confidence: {uniform: [0.41, 0.68], round: 2}
+  routing_number: {choice: ['314074269', '114994196', '031101169']}
   acct_last4: {randint: [1000, 9999]}
 rca_clues:
   mobile-gateway:
-    gateway.deposit_ocr_quality: {uniform: [55, 84], round: 1}
-    gateway.image_capture_retries: {randint: [2, 5]}
+    deposit.image_dpi: 150
+    deposit.car_lar_confidence: {uniform: [0.41, 0.68], round: 2}
+    deposit.capture_config_rev: rev-14
   document-vault:
     document.blob_upload_status: OK
-    document.queue_depth: {randint: [5, 40]}
-  claims-processor:
-    claims.deposit_image_missing: false
-    claims.deposit_rejected_reason: AMOUNT_MISMATCH
+    document.deposit_image_dpi: 150
   payment-engine:
-    payment.deposit_hold_policy: REG_CC_EXTENDED
     payment.micr_parse_status: OK
+    payment.deposits_pending_post_drop_pct: {randint: [30, 45]}
+  member-portal:
+    portal.deposit_rejection_notices: {randint: [80, 300]}
+error_services:
+- mobile-gateway
+service_lag_seconds:
+  payment-engine: 30
+  member-portal: 60
+cascade_messages:
+  document-vault:
+  - severity: INFO
+    message: '[DOC] document_upload type=CHECK_IMAGE side=front dpi=150 size=0.11MB container=deposits-raw status=STORED'
+  payment-engine:
+  - severity: WARN
+    message: '[PAY] deposit_post skipped deposit={deposit_id} reason=amount_verify_failed reg_cc_hold=not_created status=SKIPPED'
+  member-portal:
+  - severity: WARN
+    message: '[PORTAL] notice_sent type=DEPOSIT_REJECTED deposit={deposit_id} reason="we could not read the check amount" status=SENT'
+fault_scope:
+  cluster: banking-eks-cluster
+  workloads: [mobile-gateway]
+infrastructure_events:
+- service: mobile-gateway
+  severity: INFO
+  offset_seconds: -90
+  body: '[MOBILE] config_reload configmap=digital/deposit-capture-config rev-13 -> rev-14 image_dpi 200 -> 150 jpeg_quality 85 -> 70 applied_by=argocd/mobile-config status=RELOADED'
+  attributes:
+    operation: config_reload
+    deposit.capture_config_rev: rev-14
+    deposit.image_dpi: 150
+    user.name: argocd/mobile-config
+remediation_effects:
+  transition_seconds: 60
+  log_events:
+  - service: mobile-gateway
+    severity: INFO
+    offset_seconds: 1
+    body: '[change-audit] change applied action=rollback target=configmap/deposit-capture-config namespace=digital cmd="opsctl rollback configmap/deposit-capture-config -n digital --to-revision previous" actor={actor} result="rev-14 -> rev-13 (image_dpi 200)"'
+    attributes:
+      operation: change_applied
+      change.target: configmap/deposit-capture-config
+      deposit.capture_config_rev: rev-13
+  - service: mobile-gateway
+    severity: INFO
+    offset_seconds: 6
+    body: '[MOBILE] config_reload configmap=digital/deposit-capture-config rev-14 -> rev-13 image_dpi 150 -> 200 jpeg_quality 70 -> 85 status=RELOADED'
+    attributes:
+      operation: config_reload
+      deposit.capture_config_rev: rev-13
+      deposit.image_dpi: 200
+  steady_attributes:
+    mobile-gateway:
+      deposit.capture_config_rev: rev-13
+  verification:
+  - signal: mobile_gateway.deposit_car_lar_match_pct
+    from: metrics-generic.otel-default
+    where: resource.attributes.service.name == "mobile-gateway"
+    field: metrics.mobile_gateway.deposit_car_lar_match_pct
+    expect: back in 96.5-99.2% (was 58-72%)
+    within_seconds: 120
+  - signal: capture resolution on the deposit pipeline
+    from: logs.otel.banking
+    where: resource.attributes.service.name == "mobile-gateway" AND attributes.operation == "deposit_pipeline"
+    field: attributes.deposit.image_dpi
+    expect: 200 on every line logged since the fix; 150 stops appearing
+    within_seconds: 60
+  - signal: MOBILE-DEPOSIT-FAIL lines
+    from: logs.otel.banking
+    where: body.text LIKE "*MOBILE-DEPOSIT-FAIL*"
+    expect: 0 new lines
+    within_seconds: 120
 business_impact:
   - kpi: business.mobile_logins_per_min
     value: {uniform: [148.8, 171.2]}

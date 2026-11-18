@@ -1,0 +1,152 @@
+name: SSL Certificate Provisioning Failed
+subsystem: traffic_management
+vehicle_section: ssl_termination
+error_type: LB-SSL-CERT-PROVISIONING-FAILED
+sensor_type: certificate
+affected_services:
+- cloud-load-balancer
+- cloud-cdn-service
+error_services:
+- cloud-load-balancer
+cascade_services:
+- cloud-armor-waf
+description: New Google-managed certificate gcpnet-managed-cert-02 is stuck PROVISIONING on the new HTTPS load balancer because the public A record for api.gcpnet.example.com still points at the old load balancer IP, so Google's CA cannot validate the domain and the new load balancer has no serving certificate for the host
+error_message: '[CloudLB] LB-SSL-CERT-PROVISIONING-FAILED certificate={ssl_cert_name} domain={ssl_domain} managed_status={ssl_managed_status}
+  domain_status={ssl_domain_status} a_record={ssl_old_ip} lb_ip={ssl_new_ip} target_proxy={ssl_target_proxy} serving_certificate=none'
+correlation_attr:
+  key: deployment.cert_name
+  value: gcpnet-managed-cert-02
+fault_params:
+  ssl_cert_name: gcpnet-managed-cert-02
+  ssl_domain: api.gcpnet.example.com
+  ssl_old_ip: 34.120.173.58
+  ssl_new_ip: 34.149.212.91
+  ssl_target_proxy: gcpnet-https-proxy-new
+  ssl_managed_status: PROVISIONING
+  ssl_domain_status: FAILED_NOT_VISIBLE
+rca_clues:
+  cloud-load-balancer:
+    lb.managed_cert_status: PROVISIONING
+    lb.managed_cert_domain_status: FAILED_NOT_VISIBLE
+    lb.dns_a_record_target: 34.120.173.58
+    lb.frontend_ip: 34.149.212.91
+    lb.dns_points_at_frontend: false
+    lb.caa_blocks_pki_goog: false
+    lb.ssl_cert_quota_ok: true
+    lb.backend_health_ok: true
+    lb.cert_domain: api.gcpnet.example.com
+  cloud-cdn-service:
+    cdn.https_serving_degraded: true
+  cloud-armor-waf:
+    armor.ssl_policy_affected: true
+business_impact:
+  - kpi: business.api_success_rate_pct
+    factor: {uniform: [0.25, 0.55]}
+  - kpi: business.requests_per_min
+    factor: {uniform: [0.20, 0.50]}
+  - kpi: business.uptime_pct
+    factor: {uniform: [0.68, 0.88]}
+  - kpi: business.customer_sla_breach_count
+    factor: {uniform: [5.0, 12.0]}
+investigation_notes: |-
+  Root cause: a domain cutover was made out of order. Google-managed certificate {ssl_cert_name} was created and attached to the new HTTPS load balancer (target proxy {ssl_target_proxy}, frontend {ssl_new_ip}) for {ssl_domain} before the public DNS record was moved. The A record for {ssl_domain} in managed zone gcpnet-public-zone still resolves to the old load balancer IP {ssl_old_ip}, so Google's CA cannot see the domain on the load balancer that holds the certificate: managed status {ssl_managed_status}, domain status {ssl_domain_status}. Until the certificate is ACTIVE the new load balancer has no certificate it can serve for the host, so clients that already reach {ssl_new_ip} fail the TLS handshake or get the default certificate with a name mismatch. One cause: the A record target.
+  Ruled out: a CAA problem (the zone has no CAA record that excludes pki.goog; lb.caa_blocks_pki_goog=false), certificate quota (lb.ssl_cert_quota_ok=true), expiry of an existing certificate (the certificate has never been issued, it did not expire), and backend health (lb.backend_health_ok=true, backends are healthy).
+  Confirm:
+    - cloud-load-balancer logs "cloud-lb: ssl_cert=gcpnet-managed-cert-02 ... managed_status=PROVISIONING domain_status=FAILED_NOT_VISIBLE dns_a_record=34.120.173.58 ... status=ANOMALY" (attributes.lb.ssl_managed_status, lb.ssl_domain_status, lb.ssl_dns_a_record)
+    - metrics.lb.ssl_cert_active is 0 (it was 1) and metrics.lb.tls_handshake_failures rises from 0-2 to 300-1500
+    - rca attributes lb.dns_a_record_target=34.120.173.58 differs from lb.frontend_ip=34.149.212.91
+    - the vpc-network-manager audit record targetHttpsProxies.setSslCertificates (the cutover change) and the load balancer record that the A record still resolves to 34.120.173.58 both come before the first LB-SSL-CERT-PROVISIONING-FAILED
+  Remediation: one command, opsctl patch dns-record/api.gcpnet.example.com --zone gcpnet-public-zone --type A --rrdata 34.149.212.91, moves the A record to the new load balancer. The record change is immediate, then DNS TTL and Google's domain validation apply: domain status stays FAILED_NOT_VISIBLE for about 30 seconds, then PROVISIONING while Google validates and issues, and the certificate is ACTIVE about 3 minutes after the fix. Handshake failures fall to 0-2 only once the certificate is ACTIVE; recheck about 5 minutes after the fix.
+remediation_action: point_dns_at_new_lb
+remediation_command: |-
+  opsctl patch dns-record/api.gcpnet.example.com --zone gcpnet-public-zone --type A --rrdata 34.149.212.91
+stack_trace: |-
+  SSL Certificate Status Report
+  -------------------------------
+  Certificate:      {ssl_cert_name}
+  Domain:           {ssl_domain}
+  Managed Status:   {ssl_managed_status}
+  Domain Status:    {ssl_domain_status}
+  Target Proxy:     {ssl_target_proxy}
+  Frontend IP:      {ssl_new_ip}
+  DNS A Record:     {ssl_old_ip}
+  Serving Cert:     none
+  Action: Review certificate provisioning and the domain's DNS records
+fault_scope:
+  cluster: gcpnet-gke-central1
+  workloads: [cloud-load-balancer, cloud-cdn-service]
+infrastructure_events:
+  - service: vpc-network-manager
+    severity: INFO
+    offset_seconds: -330
+    body: 'gcp-audit: logName=cloudaudit.googleapis.com/activity serviceName=compute.googleapis.com methodName=v1.compute.sslCertificates.insert resourceName=projects/gcpnet-prod-001/global/sslCertificates/gcpnet-managed-cert-02 principalEmail=platform-release@gcpnet-project.iam.gserviceaccount.com status=OK change="managed certificate gcpnet-managed-cert-02 domains=api.gcpnet.example.com"'
+    attributes:
+      user.name: platform-release@gcpnet-project.iam.gserviceaccount.com
+      change.request: CHG-7795
+      operation: ssl_cert_insert
+  - service: vpc-network-manager
+    severity: INFO
+    offset_seconds: -300
+    body: 'gcp-audit: logName=cloudaudit.googleapis.com/activity serviceName=compute.googleapis.com methodName=v1.compute.targetHttpsProxies.setSslCertificates resourceName=projects/gcpnet-prod-001/global/targetHttpsProxies/gcpnet-https-proxy-new principalEmail=platform-release@gcpnet-project.iam.gserviceaccount.com status=OK change="sslCertificates [] -> [gcpnet-managed-cert-02]; forwardingRule gcpnet-fr-https-new frontend 34.149.212.91 now serves api.gcpnet.example.com"'
+    attributes:
+      user.name: platform-release@gcpnet-project.iam.gserviceaccount.com
+      change.request: CHG-7795
+      operation: domain_cutover
+      deployment.cert_name: gcpnet-managed-cert-02
+  - service: cloud-load-balancer
+    severity: WARN
+    offset_seconds: -240
+    body: 'cloud-lb: managed certificate gcpnet-managed-cert-02 for api.gcpnet.example.com managed_status=PROVISIONING domain_status=FAILED_NOT_VISIBLE; A record api.gcpnet.example.com still resolves to 34.120.173.58 (frontend 34.149.212.91)'
+    attributes:
+      operation: ssl_cert_status
+      lb.ssl_cert: gcpnet-managed-cert-02
+      lb.ssl_managed_status: PROVISIONING
+      lb.ssl_domain_status: FAILED_NOT_VISIBLE
+      lb.ssl_dns_a_record: 34.120.173.58
+cascade_messages:
+  cloud-cdn-service:
+    - severity: WARN
+      message: '[CloudCDN] TLS handshake failures on https frontend 34.149.212.91 for {ssl_domain}; edge cannot establish HTTPS to the new load balancer'
+  cloud-armor-waf:
+    - severity: WARN
+      message: 'cloud-armor: request volume for {ssl_domain} fell sharply, no policy matches; clients are not completing TLS handshakes'
+remediation_effects:
+  log_events:
+    - service: vpc-network-manager
+      severity: INFO
+      offset_seconds: 2
+      body: 'gcp-audit: logName=cloudaudit.googleapis.com/activity serviceName=dns.googleapis.com methodName=dns.changes.create resourceName=projects/gcpnet-prod-001/managedZones/gcpnet-public-zone/rrsets/api.gcpnet.example.com principalEmail={actor} status=OK'
+    - service: cloud-load-balancer
+      severity: INFO
+      offset_seconds: 35
+      body: 'cloud-lb: A record api.gcpnet.example.com now resolves to 34.149.212.91; managed certificate gcpnet-managed-cert-02 domain validation in progress, managed_status=PROVISIONING'
+      attributes:
+        operation: ssl_cert_status
+        lb.ssl_dns_a_record: 34.149.212.91
+    - service: cloud-load-balancer
+      severity: INFO
+      offset_seconds: 180
+      body: 'cloud-lb: managed certificate gcpnet-managed-cert-02 for api.gcpnet.example.com issued; managed_status=ACTIVE, serving on target proxy gcpnet-https-proxy-new'
+      attributes:
+        operation: ssl_cert_status
+        lb.ssl_managed_status: ACTIVE
+        lb.ssl_domain_status: ACTIVE
+  verification:
+    - signal: lb.ssl_cert_active
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "cloud-load-balancer"'
+      field: 'metrics.lb.ssl_cert_active'
+      expect: '1 (was 0); about 3 minutes after the fix, after DNS and domain validation'
+      within_seconds: 300
+    - signal: lb.tls_handshake_failures
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "cloud-load-balancer"'
+      field: 'metrics.lb.tls_handshake_failures'
+      expect: 'back to 0-2 (was 300-1500), only once the certificate is ACTIVE'
+      within_seconds: 300
+    - signal: managed certificate status
+      from: 'logs.otel.gcpnet'
+      where: 'resource.attributes.service.name == "cloud-load-balancer" AND body.text LIKE "*ssl_cert=gcpnet-managed-cert-02*"'
+      field: 'attributes.lb.ssl_managed_status'
+      expect: 'PROVISIONING for about 3 minutes after the fix (domain status FAILED_NOT_VISIBLE, then PROVISIONING), then ACTIVE with domain status ACTIVE'
+      within_seconds: 300

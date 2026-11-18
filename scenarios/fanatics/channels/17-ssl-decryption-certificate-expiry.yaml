@@ -7,46 +7,39 @@ affected_services: [firewall-gateway, dns-dhcp-service, digital-marketplace]
 cascade_services: [auction-engine]
 description: SSL decryption forward proxy certificate expiring or expired, breaking TLS inspection
 investigation_notes: |-
-  1. Run `show sslmgr-store config-certificate-info` to check expiration dates for all installed certificates.
-  2. Identify which decryption profile references the expiring cert: `show config running | match ssl-decrypt`.
-  3. Count affected policy rules: `show rule-hit-count vsys vsys-name vsys1 rule-base decryption rules all` — each rule referencing this profile will fail.
-  4. Generate a new CSR from PAN-OS: `request certificate generate ...` or import a renewed cert from the internal CA.
-  5. After replacement, commit and verify: `request certificate info` and test with `curl -v https://<internal-url>` from a client behind the firewall.
-  6. Set up certificate expiration monitoring: configure SNMP traps or syslog alerts for certs expiring within 30 days to prevent recurrence.
+  Root cause: certificate chain bundle internal-ca-v2-cross-signed was imported for the ssl-forward-trust decryption certificate (previous bundle: internal-ca-v2). The cross-signed chain ends in intermediate Fanatics-Internal-CA-X1, which reached its Not After date at the moment the first SYSTEM-cert-expire was logged. From that second, clients behind pa-5260-edge reject the re-signed certificates, so decryption fails for the {cert_affected_rules} policy rules that use decryption profile {cert_profile}. The firewall itself is healthy: data plane CPU, packet buffer and the session table are normal.
+  Confirm:
+    - firewall-gateway cert-status lines show days-remaining=0 and chain=internal-ca-v2-cross-signed (attributes.infra.cert_chain_bundle); metric firewall.cert_days_remaining reads 1 for the last day of validity and 0 from the expiry
+    - the firewall-gateway line "cert-import ... internal-ca-v2-cross-signed imported" comes before the first SYSTEM-cert-expire
+    - firewall.ssl_decrypt_failures steps from 0 to about 650 per minute at the expiry and firewall.ssl_decrypted drops by about 85% at the same moment; firewall.cpu_dataplane_pct and firewall.session_utilization_pct stay normal
+  Remediation: re-issue the forward-trust certificate from the internal CA with opsctl renew certificate/ssl-forward-trust. The new certificate (valid 365 days, chain internal-ca-v2-renewed) is installed and the decryption profile reloads; decrypt failures stop and decrypted flows recover immediately, there is no gradual recovery.
 remediation_action: renew_certificate
-error_message: 1,2025/01/15 14:32:01,007200001234,SYSTEM,general,0,SYSTEM-cert-expire,Certificate '{cert_cn}' (serial {cert_serial})
-  expires in {cert_days_remaining} days, decryption profile {cert_profile}, affecting {cert_affected_rules} policy rules
+error_message: '1,{nginx_time},007200001234,SYSTEM,general,0,{nginx_time},,SYSTEM-cert-expire,ssl-forward-trust,0,0,general,critical,"Certificate {cert_cn} (serial {cert_serial}) expired, days remaining {cert_days_remaining}, decryption profile {cert_profile}, affecting {cert_affected_rules} policy rules"'
 stack_trace: |-
-  > show system certificate detail
-  Certificate '{cert_cn}'
-    Serial Number: {cert_serial}
-    Issuer: CN=Fanatics-Internal-CA,O=Fanatics Inc
-    Subject: CN={cert_cn}
-    Not Before: Jan 15 00:00:00 2024 GMT
-    Not After:  Jan 18 00:00:00 2025 GMT
-    Days Remaining: {cert_days_remaining}
-    Key Size: 2048
+  > show sslmgr-store config-certificate-info
+  Certificate ssl-forward-trust
+    Common name: {cert_cn}
+    Serial number: {cert_serial}
+    Issuer: CN=Fanatics-Internal-CA-X1,O=Fanatics Inc
+    Chain bundle: internal-ca-v2-cross-signed
+    Days remaining: {cert_days_remaining}
+    Key size: 2048
     Used by decryption profile: {cert_profile}
     Policy rules referencing: {cert_affected_rules}
-    Status: EXPIRING/EXPIRED (days remaining {cert_days_remaining})
+    Status: EXPIRED
 correlation_attr:
   key: infra.cert_chain_bundle
   value: internal-ca-v2-cross-signed
 fault_params:
-  cert_cn:
-    choice:
-    - "*.fanatics.internal"
-    - forward-proxy.fanatics.com
-    - ssl-inspect.collectibles.prod
-    - tls-decrypt.warehouse.local
+  cert_cn: "*.fanatics.internal"
   cert_serial: "A3F21C"
-  cert_days_remaining: {randint: [-5, 3]}
-  cert_profile: {choice: [ssl-forward-proxy, ssl-inbound-inspection, tls-decrypt-all]}
+  cert_days_remaining: 0
+  cert_profile: ssl-forward-proxy
   cert_affected_rules: {randint: [15, 80]}
 rca_clues:
   firewall-gateway:
     firewall.cert_serial: "A3F21C"
-    firewall.decryption_bypass_count: {randint: [100, 5000]}
+    firewall.decryption_bypass_count: {randint: [500, 800]}
   dns-dhcp-service:
     dns.tls_dot_failures: {randint: [10, 200]}
     dns.fallback_to_udp: true
@@ -56,6 +49,76 @@ rca_clues:
   auction-engine:
     auction.wss_handshake_failures: {randint: [10, 100]}
     auction.bidder_disconnects: {randint: [5, 80]}
+remediation_command: |-
+  opsctl renew certificate/ssl-forward-trust
+fault_scope:
+  workloads: [firewall-gateway, dns-dhcp-service, digital-marketplace]
+cascade_messages:
+  dns-dhcp-service:
+    - severity: WARN
+      message: '{nginx_time} [named] dot-forwarder: TLS handshake to upstream failed: certificate verify failed (self-signed certificate in certificate chain); falling back to udp/53'
+  digital-marketplace:
+    - severity: ERROR
+      message: '{{"level":"error","ts":"{iso_now}","msg":"checkout call failed","error":"x509: certificate has expired or is not yet valid","dependency":"payments-api","via":"edge-firewall"}}'
+  auction-engine:
+    - severity: WARN
+      message: '{iso_now} WARN ws-gateway: websocket handshake failed: tls: failed to verify certificate: x509: certificate has expired; bidder session dropped'
+infrastructure_events:
+  - service: firewall-gateway
+    severity: INFO
+    offset_seconds: -90
+    body: '1,{nginx_time},007200001234,SYSTEM,general,0,{nginx_time},,cert-import,ssl-forward-trust,0,0,general,informational,"Certificate chain bundle internal-ca-v2-cross-signed imported for ssl-forward-trust (was internal-ca-v2); intermediate Fanatics-Internal-CA-X1 valid until 45 seconds from now; decryption profile reloaded; imported by pki-automation (CR-4502)"'
+    attributes:
+      user.name: pki-automation
+      change.request: CR-4502
+      operation: cert_import
+      infra.cert_chain_bundle: internal-ca-v2-cross-signed
+      change.summary: 'ssl-forward-trust chain: internal-ca-v2 -> internal-ca-v2-cross-signed'
+remediation_effects:
+  log_events:
+    - service: firewall-gateway
+      severity: INFO
+      offset_seconds: 1
+      body: '1,{nginx_time},007200001234,SYSTEM,general,0,{nginx_time},,config-commit,ssl-forward-trust,0,0,general,informational,"[CHG] CHANGE APPLIED opsctl renew certificate/ssl-forward-trust by {actor}: forward-trust certificate re-issued by Fanatics-Internal-CA (365 days)"'
+      attributes:
+        operation: change_applied
+        change.target: certificate/ssl-forward-trust
+    - service: firewall-gateway
+      severity: INFO
+      offset_seconds: 3
+      body: '1,{nginx_time},007200001234,SYSTEM,general,0,{nginx_time},,cert-import,ssl-forward-trust,0,0,general,informational,"Certificate ssl-forward-trust installed (valid 365 days, chain internal-ca-v2-renewed); decryption profile reloaded"'
+      attributes:
+        operation: cert_import
+        infra.cert_chain_bundle: internal-ca-v2-renewed
+  steady_attributes:
+    firewall-gateway:
+      infra.cert_chain_bundle: internal-ca-v2-renewed
+  verification:
+    - signal: firewall.cert_days_remaining
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "firewall-gateway"'
+      field: 'metrics.firewall.cert_days_remaining'
+      expect: '365 (was 0)'
+      within_seconds: 60
+    - signal: firewall.ssl_decrypt_failures
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "firewall-gateway"'
+      field: 'metrics.firewall.ssl_decrypt_failures'
+      expect: '0 (was about 650 per minute)'
+      within_seconds: 60
+    - signal: SYSTEM-cert-expire lines
+      from: 'logs.otel.fanatics'
+      where: 'body.text LIKE "*SYSTEM-cert-expire*"'
+      expect: '0 new lines'
+      within_seconds: 60
+    - signal: forward-trust chain bundle
+      from: 'logs.otel.fanatics'
+      where: 'resource.attributes.service.name == "firewall-gateway"'
+      field: 'attributes.infra.cert_chain_bundle'
+      expect: 'internal-ca-v2-renewed on every line logged since the fix; internal-ca-v2-cross-signed stops appearing'
+      within_seconds: 60
+error_services: [firewall-gateway]
+onset_delay_seconds: 45
 business_impact:
   - kpi: business.app_sessions_per_min
     value: {uniform: [334.8, 385.2]}
@@ -65,3 +128,5 @@ business_impact:
     value: {uniform: [10881.0, 12519.0], round: 1}
   - kpi: business.churn_risk_index_0_100
     factor: {uniform: [2.0, 4.5]}
+# dependents degrade after the component at fault, in dependency order
+service_lag_seconds: {dns-dhcp-service: 15, digital-marketplace: 30, auction-engine: 60}

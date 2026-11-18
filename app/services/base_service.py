@@ -165,13 +165,24 @@ class BaseService(ABC):
         """Check if a specific chaos channel is currently active."""
         return self.chaos_controller.is_active(channel)
 
+    def _service_lag(self, ch_def: dict) -> float:
+        """This service's extra onset delay for *ch_def* (``service_lag_seconds``), else 0."""
+        lag = (ch_def.get("service_lag_seconds") or {}).get(self.SERVICE_NAME, 0)
+        try:
+            return max(0.0, float(lag or 0))
+        except (TypeError, ValueError):
+            return 0.0
+
     def _onset_reached(self, channel: int, ch_def: dict) -> bool:
         """Symptoms start ``onset_delay_seconds`` after the trigger (schema 1.3).
 
         The change event that caused the fault is emitted right away (backdated by its
         ``offset_seconds``), so the cause always precedes the effect in the telemetry.
+        A channel may also set ``service_lag_seconds: {service: seconds}``: that much
+        extra delay for the named service only, so a dependent shows its symptoms after
+        the component at fault instead of at the same moment.
         """
-        delay = float(ch_def.get("onset_delay_seconds", 0) or 0)
+        delay = float(ch_def.get("onset_delay_seconds", 0) or 0) + self._service_lag(ch_def)
         if delay <= 0:
             return True
         getter = getattr(self.chaos_controller, "get_channel_elapsed", None)

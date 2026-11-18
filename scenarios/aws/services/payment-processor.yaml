@@ -40,55 +40,45 @@ constants:
   - card_expired
   - do_not_honor
   - avs_mismatch
-  FUNCTION_NAME: awsorders-payment-charge
+  FUNCTION_NAME: awsorders-payment-processor
 
 state:
   _invocations: {init: 0}
 
 steps:
 - sample:
+    # Per-channel fault intensity: ramps 0->1 while the fault is active, drains 1->0 after its fix.
+    ch3_i:
+      expr: "min(1.0, max(0.0, elapsed.get(3, 0) - lag.get(3, 0)) / 30.0) if 3 in all_active else (max(0.0, 1.0 - since_fix.get(3, 0) / 90.0) if 3 in fixed_channels else 0.0)"
+    ch12_i:
+      expr: "min(1.0, max(0.0, elapsed.get(12, 0) - lag.get(12, 0)) / 45.0) if 12 in all_active else (max(0.0, 1.0 - since_fix.get(12, 0) / 120.0) if 12 in fixed_channels else 0.0)"
+    ch15_i:
+      expr: "min(1.0, max(0.0, elapsed.get(15, 0) - lag.get(15, 0)) / 30.0) if 15 in all_active else (max(0.0, 1.0 - since_fix.get(15, 0) / 90.0) if 15 in fixed_channels else 0.0)"
+    ch18_i:
+      expr: "min(1.0, max(0.0, elapsed.get(18, 0) - lag.get(18, 0)) / 60.0) if 18 in all_active else (max(0.0, 1.0 - since_fix.get(18, 0) / 210.0) if 18 in fixed_channels else 0.0)"
     invocations_per_min:
       uniform:
       - 120.0
       - 520.0
       round: 0
     duration_ms:
-      if_active:
-        uniform:
-        - 2500.0
-        - 9500.0
-        round: 1
-      else:
-        uniform:
-        - 85.0
-        - 320.0
-        round: 1
+      expr: "round(rand.uniform(85.0, 320.0) + ch3_i * rand.gauss(700.0, 40.0) + ch12_i * rand.gauss(4000.0, 180.0) + ch18_i * rand.gauss(180.0, 12.0), 1)"
     error_rate_pct:
-      if_active:
-        uniform:
-        - 12.0
-        - 45.0
-        round: 2
-      else:
-        uniform:
-        - 0.05
-        - 0.8
-        round: 2
+      expr: "round(rand.uniform(0.05, 0.8) + ch3_i * rand.gauss(25.0, 1.2), 2)"
     throttles:
-      if_active:
-        randint:
-        - 5
-        - 60
-      else: 0
+      expr: "0"
     concurrent_executions:
-      if_active:
-        randint:
-        - 180
-        - 250
-      else:
-        randint:
-        - 12
-        - 70
+      expr: "int(rand.randint(12, 70) + ch3_i * rand.gauss(30.0, 3.0) + ch12_i * rand.gauss(145.0, 6.0) + ch18_i * rand.gauss(65.0, 4.0))"
+    lambda_status:
+      expr: "'ANOMALY' if (3 in all_active or 12 in all_active or 15 in all_active or 18 in all_active or (3 in fixed_channels and since_fix.get(3, 0) < 90) or (12 in fixed_channels and since_fix.get(12, 0) < 120) or (15 in fixed_channels and since_fix.get(15, 0) < 90) or (18 in fixed_channels and since_fix.get(18, 0) < 210)) else 'NOMINAL'"
+    layer_version:
+      expr: "'payment-deps:42' if 3 in all_active else 'payment-deps:41'"
+    kms_cache_ttl_s:
+      expr: "0 if 12 in all_active else 300"
+    fn_version:
+      expr: "'v2.8.0' if 15 in all_active else 'v2.7.4'"
+    provisioned_concurrency:
+      expr: "120 if 18 in fixed_channels and 18 not in all_active else 10"
 - counter:
     state_key: _invocations
     by: 1
@@ -119,10 +109,10 @@ steps:
     unit: executions
 - log:
     level: INFO
-    message: 'lambda[awsorders-payment-charge]: health invocations_per_min={invocations_per_min} avg_duration_ms={duration_ms} error_rate={error_rate_pct}% throttles={throttles} concurrent={concurrent_executions}'
+    message: 'lambda[awsorders-payment-processor]: health status={lambda_status} invocations_per_min={invocations_per_min} avg_duration_ms={duration_ms} error_rate={error_rate_pct}% throttles={throttles} concurrent={concurrent_executions} layer={layer_version} version={fn_version} provisioned_concurrency={provisioned_concurrency}'
     attrs:
       operation: lambda_health
-      faas.name: awsorders-payment-charge
+      faas.name: awsorders-payment-processor
       faas.invocations_per_min:
         var: invocations_per_min
       faas.duration_ms:
@@ -131,36 +121,21 @@ steps:
         var: error_rate_pct
       faas.throttles:
         var: throttles
+      status:
+        var: lambda_status
+      aws.lambda.layer_version:
+        var: layer_version
+      kms.data_key_cache_ttl_s:
+        var: kms_cache_ttl_s
+      service.version:
+        var: fn_version
+      aws.lambda.provisioned_concurrency:
+        var: provisioned_concurrency
 - sample:
     cold_start:
-      if_active:
-        choice:
-        - true
-        - true
-        - false
-      else:
-        choice:
-        - false
-        - false
-        - false
-        - false
-        - false
-        - false
-        - false
-        - false
-        - false
-        - true
+      expr: "rand.random() < 0.1 + 0.6 * ch18_i"
     init_duration_ms:
-      if_active:
-        uniform:
-        - 1800.0
-        - 4200.0
-        round: 1
-      else:
-        uniform:
-        - 220.0
-        - 520.0
-        round: 1
+      expr: "round(rand.uniform(220.0, 520.0) + ch18_i * rand.gauss(1500.0, 120.0), 1)"
     network:
       choice: CARD_NETWORKS
     amount_usd:
@@ -169,16 +144,7 @@ steps:
       - 640.0
       round: 2
     auth_ms:
-      if_active:
-        uniform:
-        - 1500.0
-        - 8000.0
-        round: 1
-      else:
-        uniform:
-        - 70.0
-        - 280.0
-        round: 1
+      expr: "round(rand.uniform(70.0, 280.0) + ch3_i * rand.gauss(700.0, 40.0) + ch12_i * rand.gauss(3700.0, 170.0) + ch18_i * rand.gauss(850.0, 50.0), 1)"
     request_id:
       format: 'req-{n}'
       n:
@@ -197,7 +163,7 @@ steps:
     unit: ms
 - log:
     level: INFO
-    message: 'lambda[awsorders-payment-charge]: charge authorized request_id={request_id} network={network} amount_usd={amount_usd} auth_ms={auth_ms} cold_start={cold_start} init_ms={init_duration_ms}'
+    message: 'lambda[awsorders-payment-processor]: charge authorized request_id={request_id} network={network} amount_usd={amount_usd} auth_ms={auth_ms} cold_start={cold_start} init_ms={init_duration_ms}'
     attrs:
       operation: charge_authorize
       faas.coldstart:
@@ -214,16 +180,7 @@ steps:
         var: request_id
 - sample:
     capture_success_pct:
-      if_active:
-        uniform:
-        - 55.0
-        - 88.0
-        round: 2
-      else:
-        uniform:
-        - 98.5
-        - 99.9
-        round: 2
+      expr: "round(max(30.0, rand.uniform(98.5, 99.9) - ch3_i * rand.gauss(28.0, 1.3) - ch12_i * rand.gauss(14.0, 0.6) - ch15_i * rand.gauss(4.0, 0.2)), 2)"
     decline_rate_pct:
       uniform:
       - 2.0
@@ -231,6 +188,10 @@ steps:
       round: 2
     decline_reason:
       choice: DECLINE_REASONS
+    kms_throttled_requests:
+      expr: "int(rand.randint(0, 2) + max(0.0, ch12_i * rand.gauss(3000.0, 135.0)))"
+    idempotency_collisions:
+      expr: "int(rand.randint(0, 1) + max(0.0, ch15_i * rand.gauss(200.0, 9.0)))"
 - metric:
     name: payments.capture_success_pct
     value:
@@ -241,9 +202,19 @@ steps:
     value:
       var: decline_rate_pct
     unit: '%'
+- metric:
+    name: payments.kms_throttled_requests
+    value:
+      var: kms_throttled_requests
+    unit: count
+- metric:
+    name: payments.idempotency_collisions
+    value:
+      var: idempotency_collisions
+    unit: count
 - log:
     level: INFO
-    message: 'lambda[awsorders-payment-charge]: capture_summary capture_success={capture_success_pct}% decline_rate={decline_rate_pct}% top_decline_reason={decline_reason}'
+    message: 'lambda[awsorders-payment-processor]: capture_summary status={lambda_status} capture_success={capture_success_pct}% decline_rate={decline_rate_pct}% top_decline_reason={decline_reason} kms_throttled={kms_throttled_requests} idempotency_collisions={idempotency_collisions} key_cache_ttl_s={kms_cache_ttl_s} version={fn_version}'
     attrs:
       operation: capture_summary
       payment.capture_success_pct:
@@ -252,3 +223,13 @@ steps:
         var: decline_rate_pct
       payment.top_decline_reason:
         var: decline_reason
+      status:
+        var: lambda_status
+      payments.kms_throttled_requests:
+        var: kms_throttled_requests
+      payments.idempotency_collisions:
+        var: idempotency_collisions
+      kms.data_key_cache_ttl_s:
+        var: kms_cache_ttl_s
+      service.version:
+        var: fn_version

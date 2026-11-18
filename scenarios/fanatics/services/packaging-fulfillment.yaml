@@ -29,25 +29,105 @@ db_operations:
 emit_fault_logs: true
 kpi_emitter: false
 steps:
+# Scanner fleet (channel 4: MDM policy moves the wh01 MC9300 fleet to firmware 3.0.5).
+# Devices only change firmware when they check in with MDM, so desync spreads over ~4 minutes
+# (f_scn 0 -> 1). After the rollback devices pick the old firmware up at their next check-in and
+# re-register, so the fleet is back in sync after ~5 minutes. The worst last_sync stays high until
+# the last devices recover.
+- sample:
+    f_scn:
+      expr: "min(1.0, elapsed.get(4, 0) / 240.0) if 4 in all_active
+        else (1.0 - min(1.0, since_fix.get(4, 0) / 300.0) if 4 in fixed_channels else 0.0)"
+    scn_lag_c:
+      expr: "5.0 + 265.0 * (min(1.0, f_scn / 0.2) if 4 in fixed_channels else f_scn)"
+    scanner_sync_lag_val:
+      expr: "round(max(1.0, scn_lag_c + rand.gauss(0, max(0.8, 0.03 * scn_lag_c))), 1)"
+    scanner_desync_val:
+      expr: "max(0, min(214, int(214 * f_scn * 0.92 + rand.gauss(0, 1.5))))"
+    scanner_sync_status:
+      expr: "'ANOMALY' if scanner_sync_lag_val > 60.0 else 'NOMINAL'"
+    scanner_fw_rev:
+      expr: "'mc9300-fw-3.0.5-known-bug' if 4 in all_active else 'mc9300-fw-3.1.4'"
+- metric:
+    name: fulfillment.scanner_sync_lag_s
+    value:
+      var: scanner_sync_lag_val
+    unit: s
+- metric:
+    name: fulfillment.scanner_devices_out_of_sync
+    value:
+      var: scanner_desync_val
+    unit: devices
+- log:
+    level: INFO
+    message: 'wms.scanner_sync fleet=MC9300 site=wh01 devices=214 out_of_sync={scanner_desync_val} max_last_sync={scanner_sync_lag_val}s limit=60s firmware_policy={scanner_fw_rev} status={scanner_sync_status}'
+    attrs:
+      operation: scanner_sync
+      check.result:
+        expr: "'FAIL' if scanner_sync_status == 'ANOMALY' else 'PASS'"
+      fulfillment.scanner_sync_lag_s:
+        var: scanner_sync_lag_val
+      fulfillment.scanner_status:
+        var: scanner_sync_status
+      deployment.scanner_firmware:
+        var: scanner_fw_rev
+# Shipping label printers (channel 6: ZPL template v6.1-patched pushed to the shipping bay).
+# The bad template fails at the first print after the push (a step). The rollback fixes new jobs
+# at once, so the failure rate drops within seconds; the backlog of failed jobs then has to be
+# reprinted or purged, which takes ~2.5 minutes. The queue grows at about the failure rate
+# (~34/min) until operators hold new jobs at ~210.
+- sample:
+    f_lbl:
+      expr: "min(1.0, elapsed.get(6, 0) / 8.0) if 6 in all_active
+        else (1.0 - min(1.0, since_fix.get(6, 0) / 10.0) if 6 in fixed_channels else 0.0)"
+    lbl_fail_c:
+      expr: "0.6 + 33.4 * f_lbl"
+    label_failures_val:
+      expr: "round(max(0.0, lbl_fail_c + rand.gauss(0, max(0.4, 0.03 * lbl_fail_c))), 1)"
+    lbl_queue_c:
+      expr: "12.0 + 198.0 * min(1.0, elapsed.get(6, 0) / 360.0) if 6 in all_active
+        else (12.0 + 198.0 * (1.0 - min(1.0, since_fix.get(6, 0) / 150.0)) if 6 in fixed_channels else 12.0)"
+    label_queue_val:
+      expr: "max(0, int(lbl_queue_c + rand.gauss(0, max(2.0, 0.03 * lbl_queue_c))))"
+    label_printer_state:
+      expr: "'PAUSED' if label_failures_val > 5.0 else 'ONLINE'"
+    label_alert:
+      expr: "'PAPER_OUT' if label_failures_val > 5.0 else 'NONE'"
+    label_zpl_rev:
+      expr: "'zebra-zpl-ii-v6.1-patched' if 6 in all_active else 'zebra-zpl-ii-v6.0.4'"
+- metric:
+    name: fulfillment.label_print_failures_per_min
+    value:
+      var: label_failures_val
+    unit: labels/min
+- metric:
+    name: fulfillment.label_queue_depth
+    value:
+      var: label_queue_val
+    unit: shipments
+- log:
+    level: INFO
+    message: 'wms.shipping printers=ZBR-SHIP-01,ZBR-SHIP-02,ZBR-DOCK-01 model=ZT411 status={label_printer_state} alert={label_alert} failed_labels_1m={label_failures_val} queue_depth={label_queue_val} template={label_zpl_rev}'
+    attrs:
+      operation: label_printer_status
+      label.status:
+        var: label_printer_state
+      fulfillment.label_failures_per_min:
+        var: label_failures_val
+      fulfillment.label_queue_depth:
+        var: label_queue_val
+      infra.label_zpl_version:
+        var: label_zpl_rev
+# General health. Pending orders, labels printed and scan accuracy follow the two faults above.
 - sample:
     orders_pending:
-      randint:
-      - 50
-      - 400
+      expr: "max(0, int(rand.gauss(220, 22) + (label_queue_val - 12) * 0.8))"
     labels_printed:
-      randint:
-      - 200
-      - 800
+      expr: "max(0, int(rand.gauss(500, 35) * (1.0 - 0.85 * f_lbl)))"
     scan_accuracy:
-      uniform:
-      - 99.2
-      - 100.0
-      round: 2
+      expr: "round(min(100.0, max(88.0, 99.7 - 6.0 * f_scn + rand.gauss(0, 0.08))), 2)"
     pick_rate:
-      uniform:
-      - 120.0
-      - 250.0
-      round: 1
+      expr: "round(max(60.0, rand.gauss(185.0, 8.0) * (1.0 - 0.25 * f_scn)), 1)"
 - metric:
     name: fulfillment.orders_pending
     value:
@@ -82,9 +162,3 @@ steps:
         var: scan_accuracy
       fulfillment.pick_rate:
         var: pick_rate
-- log:
-    level: INFO
-    message: wms.scanner_sync status=nominal all_readers=synced
-    attrs:
-      operation: scanner_sync
-      check.result: PASS

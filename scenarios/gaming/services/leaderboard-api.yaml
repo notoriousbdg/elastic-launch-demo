@@ -28,19 +28,7 @@ constants:
   - seasonal-solo
   - guild-wars
   - tournament-finals
-  SEASONS:
-  - S1
-  - S2
-  - S3
-  - S4
-  - S5
-  - S6
-  - S7
-  - S8
-  - S9
-  - S10
-  - S11
-  - S12
+  SEASON: S14
 state:
   _rank_updates:
     init: 0
@@ -75,11 +63,14 @@ steps:
       expr: max(1, old_rank + rank_delta)
 - log:
     level: INFO
-    message: '[LB] rank_update board={board} player={lb_player_id} old_rank={old_rank} new_rank={new_rank} score={score} zset_ops=2'
+    message: '[LB] rank_update board={board} season={SEASON} player={lb_player_id} old_rank={old_rank} new_rank={new_rank} score={score}
+      zset_ops=2'
     attrs:
       operation: rank_update
       leaderboard.board:
         var: board
+      leaderboard.season:
+        var: SEASON
       leaderboard.player_id:
         var: lb_player_id
       leaderboard.old_rank:
@@ -88,6 +79,220 @@ steps:
         var: new_rank
       leaderboard.score:
         var: score
+# Channel 9: a Terraform apply put the staging sizing on Memorystore lb-redis-prod (16 GB ->
+# 4 GB, noeviction -> allkeys-lru). Rank ZSETs are evicted and rebuilt partially from writes,
+# so ZCARD and ranks drift from rank_history. The rollback stops evictions within ~60 s; the
+# leaderboard-rebuild job then repopulates the boards from rank_history over ~240 s.
+- sample:
+    lb_fixed:
+      expr: "9 in fixed_channels and 9 not in all_active"
+    lb_ramp:
+      expr: "min(1.0, max(0.0, elapsed.get(9, 0) - lag.get(9, 0)) / 45.0)"
+    lb_since:
+      expr: "since_fix.get(9, 0) if lb_fixed else 0.0"
+    lb_rebuild_k:
+      expr: "max(0.0, 1.0 - lb_since / 240.0) if lb_fixed else 0.0"
+    lb_k:
+      expr: "lb_ramp if 9 in all_active else lb_rebuild_k"
+    evicted_per_s:
+      expr: "round(rand.uniform(200.0, 500.0) * lb_ramp) if 9 in all_active else (round(rand.uniform(200.0, 500.0) * max(0.0, 1.0 - lb_since / 60.0)) if lb_fixed else 0)"
+    mismatched:
+      expr: "max(0, min(40000, round(120.0 * max(0.0, elapsed.get(9, 0) - lag.get(9, 0)) + rand.gauss(0, 150)))) if 9 in all_active else (round(30000 * lb_rebuild_k) if lb_fixed else 0)"
+    lb_base_pct:
+      expr: "rand.uniform(33.0, 42.0)"
+    mem_used_pct:
+      expr: "round(lb_base_pct + (rand.uniform(97.0, 100.0) - lb_base_pct) * lb_ramp, 1) if 9 in all_active else (round(lb_base_pct - (lb_base_pct - 25.0) * lb_rebuild_k, 1) if lb_fixed else round(lb_base_pct, 1))"
+    mem_size_gb:
+      expr: "4 if 9 in all_active else 16"
+    mem_used_gb:
+      expr: "round(mem_size_gb * mem_used_pct / 100.0, 2)"
+    lb_policy:
+      expr: "'allkeys-lru' if 9 in all_active else 'noeviction'"
+    zcard:
+      expr: "round(1284301 + rand.gauss(0, 120) - 0.9 * mismatched)"
+    lb_status:
+      expr: "'DEGRADED' if 9 in all_active and lb_ramp > 0 else ('REBUILDING' if mismatched > 0 else 'OK')"
+    query_latency:
+      expr: "round(rand.uniform(2.0, 15.0) + rand.uniform(40.0, 160.0) * lb_k, 1)"
+    lb_progress:
+      expr: "round(100.0 * (1.0 - lb_rebuild_k))"
+- metric:
+    name: leaderboard.redis.evicted_keys_per_s
+    value:
+      var: evicted_per_s
+    unit: keys/s
+- metric:
+    name: leaderboard.redis.memory_used_pct
+    value:
+      var: mem_used_pct
+    unit: '%'
+- metric:
+    name: leaderboard.consistency.mismatched_entries
+    value:
+      var: mismatched
+    unit: entries
+- metric:
+    name: leaderboard.query_latency_ms
+    value:
+      var: query_latency
+    unit: ms
+- metric:
+    name: leaderboard.total_entries
+    value:
+      var: zcard
+    unit: entries
+- when: "9 in all_active"
+  log:
+    level: WARN
+    message: '[LB] redis_status instance=lb-redis-prod memory={mem_used_gb}GB/{mem_size_gb}GB used_pct={mem_used_pct}% maxmemory_policy={lb_policy}
+      evicted_keys_per_s={evicted_per_s} season={SEASON} zcard={zcard} mismatched_vs_txlog={mismatched} consistency={lb_status}'
+    attrs:
+      operation: redis_status
+      cache.instance: lb-redis-prod
+      cache.maxmemory_policy:
+        var: lb_policy
+      cache.memory_size_gb:
+        var: mem_size_gb
+      cache.memory_used_pct:
+        var: mem_used_pct
+      cache.evicted_keys_per_s:
+        var: evicted_per_s
+      leaderboard.season:
+        var: SEASON
+      leaderboard.mismatched_entries:
+        var: mismatched
+      leaderboard.consistency:
+        var: lb_status
+- when: "9 not in all_active"
+  log:
+    level: INFO
+    message: '[LB] redis_status instance=lb-redis-prod memory={mem_used_gb}GB/{mem_size_gb}GB used_pct={mem_used_pct}% maxmemory_policy={lb_policy}
+      evicted_keys_per_s={evicted_per_s} season={SEASON} zcard={zcard} mismatched_vs_txlog={mismatched} consistency={lb_status}'
+    attrs:
+      operation: redis_status
+      cache.instance: lb-redis-prod
+      cache.maxmemory_policy:
+        var: lb_policy
+      cache.memory_size_gb:
+        var: mem_size_gb
+      cache.memory_used_pct:
+        var: mem_used_pct
+      cache.evicted_keys_per_s:
+        var: evicted_per_s
+      leaderboard.season:
+        var: SEASON
+      leaderboard.mismatched_entries:
+        var: mismatched
+      leaderboard.consistency:
+        var: lb_status
+- when: "lb_fixed and mismatched > 0"
+  log:
+    level: INFO
+    message: '[LB] job=leaderboard-rebuild season={SEASON} source=rank_history progress={lb_progress}% mismatched_remaining={mismatched}'
+    attrs:
+      operation: leaderboard_rebuild
+      leaderboard.season:
+        var: SEASON
+      leaderboard.mismatched_entries:
+        var: mismatched
+- log:
+    level: INFO
+    message: '[LB] redis_status instance=lb-redis-tournament memory=2.1GB/8GB used_pct=26.3% maxmemory_policy=noeviction evicted_keys_per_s=0
+      board=tournament-finals season={SEASON} mismatched_vs_txlog=0 consistency=OK'
+    attrs:
+      operation: redis_status
+      cache.instance: lb-redis-tournament
+      cache.maxmemory_policy: noeviction
+      cache.memory_size_gb: 8
+      leaderboard.season:
+        var: SEASON
+      leaderboard.mismatched_entries: 0
+      leaderboard.consistency: OK
+# Channel 10: leaderboard-api v4.8.0 turned on enable.auto.commit for the xp-events consumer and
+# needs more memory than the 512Mi limit. Pods are OOMKilled, every restart rebalances the
+# leaderboard-season-pass group, and the offsets already auto-committed for unprocessed records
+# are lost. The rollback replaces pods over ~60 s; the xp replay job re-applies the missed XP
+# over ~300 s.
+- sample:
+    sp_fixed:
+      expr: "10 in fixed_channels and 10 not in all_active"
+    sp_ramp:
+      expr: "min(1.0, max(0.0, elapsed.get(10, 0) - lag.get(10, 0)) / 30.0)"
+    sp_since:
+      expr: "since_fix.get(10, 0) if sp_fixed else 0.0"
+    sp_roll_k:
+      expr: "sp_ramp if 10 in all_active else (max(0.0, 1.0 - sp_since / 60.0) if sp_fixed else 0.0)"
+    xp_dropped:
+      expr: "round(rand.uniform(300.0, 1200.0) * sp_roll_k)"
+    rebalances:
+      expr: "round(rand.uniform(4.0, 12.0) * sp_ramp) if 10 in all_active else (round(rand.uniform(1.0, 3.0) * sp_roll_k) if sp_fixed else 0)"
+    out_of_sync:
+      expr: "min(15000, round(25.0 * max(0.0, elapsed.get(10, 0) - lag.get(10, 0)))) if 10 in all_active else (round(12000 * max(0.0, 1.0 - sp_since / 300.0)) if sp_fixed else 0)"
+    sp_members:
+      expr: "max(0, min(6, round(6 - rand.uniform(3.0, 6.0) * sp_roll_k)))"
+    sp_lag:
+      expr: "round(rand.uniform(0.0, 40.0)) if 10 in all_active and sp_ramp > 0 else round(rand.uniform(20.0, 200.0))"
+    sp_version:
+      expr: "'v4.8.0' if 10 in all_active else 'v4.7.3'"
+    sp_autocommit:
+      expr: "'true' if 10 in all_active else 'false'"
+    sp_status:
+      expr: "'DEGRADED' if (10 in all_active and sp_ramp > 0) or xp_dropped > 0 else ('REPLAYING' if out_of_sync > 0 else 'OK')"
+- metric:
+    name: leaderboard.season_pass.xp_events_dropped_per_min
+    value:
+      var: xp_dropped
+    unit: events/min
+- metric:
+    name: leaderboard.consumer.rebalances_per_min
+    value:
+      var: rebalances
+    unit: rebalances/min
+- metric:
+    name: leaderboard.season_pass.players_out_of_sync
+    value:
+      var: out_of_sync
+    unit: players
+- when: "10 in all_active"
+  log:
+    level: WARN
+    message: '[LB] xp_consumer group=leaderboard-season-pass topic=xp-events version={sp_version} enable.auto.commit={sp_autocommit}
+      members={sp_members}/6 rebalances_1m={rebalances} xp_dropped_1m={xp_dropped} lag={sp_lag} players_out_of_sync={out_of_sync} status={sp_status}'
+    attrs:
+      operation: xp_consumer_status
+      deployment.version:
+        var: sp_version
+      kafka.enable_auto_commit:
+        var: sp_autocommit
+      kafka.consumer_group: leaderboard-season-pass
+      kafka.consumer_group.members:
+        var: sp_members
+      kafka.consumer_group.lag:
+        var: sp_lag
+      season.xp_events_dropped_per_min:
+        var: xp_dropped
+      season.status:
+        var: sp_status
+- when: "10 not in all_active"
+  log:
+    level: INFO
+    message: '[LB] xp_consumer group=leaderboard-season-pass topic=xp-events version={sp_version} enable.auto.commit={sp_autocommit}
+      members={sp_members}/6 rebalances_1m={rebalances} xp_dropped_1m={xp_dropped} lag={sp_lag} players_out_of_sync={out_of_sync} status={sp_status}'
+    attrs:
+      operation: xp_consumer_status
+      deployment.version:
+        var: sp_version
+      kafka.enable_auto_commit:
+        var: sp_autocommit
+      kafka.consumer_group: leaderboard-season-pass
+      kafka.consumer_group.members:
+        var: sp_members
+      kafka.consumer_group.lag:
+        var: sp_lag
+      season.xp_events_dropped_per_min:
+        var: xp_dropped
+      season.status:
+        var: sp_status
 - sample:
     sp_player_id:
       format: PLR-{n}
@@ -95,8 +300,6 @@ steps:
         randint:
         - 100000
         - 999999
-    season:
-      choice: SEASONS
     tier:
       randint:
       - 1
@@ -107,11 +310,11 @@ steps:
       - 5000
 - log:
     level: INFO
-    message: '[LB] season_progress season={season} player={sp_player_id} tier={tier} xp_gained={xp_gained} premium=true'
+    message: '[LB] season_progress season={SEASON} player={sp_player_id} tier={tier} xp_gained={xp_gained}'
     attrs:
       operation: season_progress
       season.id:
-        var: season
+        var: SEASON
       season.player_id:
         var: sp_player_id
       season.tier:
@@ -124,40 +327,9 @@ steps:
     steps:
     - log:
         level: INFO
-        message: '[LB] snapshot rank_updates={_rank_updates} boards=4 redis_mem=142MB consistency=OK'
+        message: '[LB] snapshot rank_updates={_rank_updates} boards=4 season={SEASON}'
         attrs:
           operation: board_snapshot
           snapshot.rank_updates:
             var: _rank_updates
           snapshot.board_count: 4
-- sample:
-    query_latency:
-      if_active:
-        uniform:
-        - 50.0
-        - 500.0
-        round: 1
-      else:
-        uniform:
-        - 2.0
-        - 15.0
-        round: 1
-    total_entries:
-      randint:
-      - 500000
-      - 2000000
-- metric:
-    name: leaderboard.query_latency_ms
-    value:
-      var: query_latency
-    unit: ms
-- metric:
-    name: leaderboard.rank_updates
-    value:
-      var: _rank_updates
-    unit: updates
-- metric:
-    name: leaderboard.total_entries
-    value:
-      var: total_entries
-    unit: entries

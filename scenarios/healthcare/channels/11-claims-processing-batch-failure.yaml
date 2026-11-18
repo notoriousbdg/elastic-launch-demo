@@ -11,8 +11,12 @@ cascade_services:
 - scheduling-api
 description: Batch claims processing pipeline fails during X12 837 generation or submission
 investigation_notes: |-
-  Root Cause: X12 837 Professional/Institutional claim rejections are stage-specific. Validation-stage failures indicate missing/invalid CLM segment data (DX codes, CPT codes, NPI). Submission-stage failures point to clearinghouse connectivity or envelope (ISA/GS) formatting issues. Adjudication-stage rejections come from payer business rules (timely filing, authorization requirements). A 999 rejection with IK3 pointing at the CLM segment, an ISA/GS envelope that passes validation and no payer 277 rejections place the failure at the validation stage (invalid CLM data).
-  Remediation by stage: VALIDATION — run claim scrubber: `claims-admin scrub --batch {batch_id} --fix-codes`. SUBMISSION — verify clearinghouse connection: `claims-admin ch-status --payer {payer_id}` and resubmit: `claims-admin resubmit --batch {batch_id} --claims-only REJECTED`. ADJUDICATION — review the 999/277 response for specific rejection reason codes and correct per payer guidelines. General: 1) Reset the X12 837 gateway: `systemctl restart claims-submission-engine`. 2) Verify the 5010 companion guide for the rejecting payer is current. 3) Resubmit corrected claims: `claims-admin resubmit --batch {batch_id} --stage {claim_stage}`.
+  Root cause: claims-837-generator x12-837-processor-v5.1.2-beta was rolled out shortly before the first X12-837-REJECT. It builds the CLM segment incorrectly, so payer 999 acknowledgments reject the claims at segment CLM (IK3*CLM): batch {batch_id}, claim {claim_id} for patient {patient_id} to {payer_id}. 30-46% of claims are rejected (normally 1-3%). ISA envelope validation passes and payer 277 rejections are 0, so the claims never reach adjudication. The generator is producing bad claims; the payers are not denying good ones.
+  Confirm:
+    - billing-processor logs [CLAIMS] batch_status ... ack_999=P generator=x12-837-processor-v5.1.2-beta ... rcm=REJECTIONS (attributes.deployment.claims_engine_build, attributes.x12.batch_rejection_rate_pct)
+    - metric billing.claim_999_reject_pct rises from 1-3% to 30-46% after the rollout
+    - the billing-processor line "claims-837-generator rolled out x12-837-processor-v5.1.2-beta" comes before the first rejection
+  Remediation: two steps, in order. opsctl rollback deployment/claims-837-generator --to-revision previous returns the generator to v5.1.1. opsctl run job/resubmit-rejected-837 then regenerates and resubmits the rejected claims. The rejection rate is back to 1-3% within about 90 seconds. Resubmitting without the rollback only produces more rejections.
 remediation_action: resubmit_claims_batch
 error_message: '[CLAIMS] X12-837-REJECT: batch={batch_id} claim={claim_id} patient={patient_id} payer={payer_id} stage={claim_stage}'
 stack_trace: |-
@@ -54,7 +58,7 @@ fault_params:
     n: {randint: [100000, 999999]}
 rca_clues:
   billing-processor:
-    x12.batch_rejection_rate_pct: {uniform: [15, 60], round: 1}
+    x12.batch_rejection_rate_pct: {uniform: [30, 46], round: 1}
     x12.isa_envelope_validation: pass
     x12.ik3_error_segment: CLM
     x12.payer_277_rejections: 0
@@ -65,6 +69,74 @@ rca_clues:
     ehr.unbilled_encounters: {randint: [20, 100]}
   scheduling-api:
     sched.charge_capture_lag_s: {randint: [300, 1800]}
+remediation_command: |-
+  opsctl rollback deployment/claims-837-generator --to-revision previous
+  opsctl run job/resubmit-rejected-837
+error_services: [billing-processor]
+service_lag_seconds:
+  data-warehouse: 20
+  ehr-system: 30
+  scheduling-api: 45
+cascade_messages:
+  data-warehouse:
+    - severity: WARN
+      message: '[DW] claims_feed_hold batch={batch_id} claim={claim_id} payer={payer_id} reason=999_REJECTED; revenue cycle extract waiting'
+  ehr-system:
+    - severity: WARN
+      message: '[EHR] encounter_unbilled patient={patient_id} claim={claim_id} reason=CLAIM_REJECTED_999'
+  scheduling-api:
+    - severity: WARN
+      message: '[SCHED] charge_capture_hold patient={patient_id} claim={claim_id} payer={payer_id}'
+fault_scope:
+  workloads: [billing-processor]
+infrastructure_events:
+  - service: billing-processor
+    severity: INFO
+    offset_seconds: -120
+    body: '[CLAIMS] deployment claims-837-generator rolled out x12-837-processor-v5.1.2-beta (was x12-837-processor-v5.1.1): CLM segment builder refactor by rcm-engineering-release (CHG0032188)'
+    attributes:
+      user.name: rcm-engineering-release
+      change.request: CHG0032188
+      operation: deployment
+      deployment.claims_engine_build: x12-837-processor-v5.1.2-beta
+      change.summary: 'claims-837-generator: v5.1.1 -> v5.1.2-beta'
+remediation_effects:
+  log_events:
+    - service: billing-processor
+      severity: INFO
+      offset_seconds: 1
+      body: '[CHG] CHANGE IMPLEMENTED opsctl rollback deployment/claims-837-generator --to-revision previous by {actor}: x12-837-processor-v5.1.2-beta -> x12-837-processor-v5.1.1'
+      attributes:
+        operation: change_implemented
+        change.target: deployment/claims-837-generator
+    - service: billing-processor
+      severity: INFO
+      offset_seconds: 2
+      body: '[CHG] CHANGE IMPLEMENTED opsctl run job/resubmit-rejected-837 by {actor}: regenerating 999-rejected claims with x12-837-processor-v5.1.1'
+      attributes:
+        operation: change_implemented
+        change.target: job/resubmit-rejected-837
+  steady_attributes:
+    billing-processor:
+      deployment.claims_engine_build: x12-837-processor-v5.1.1
+  verification:
+    - signal: billing.claim_999_reject_pct
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "billing-processor"'
+      field: 'metrics.billing.claim_999_reject_pct'
+      expect: 'back to 1-3% (was 30-46%) within about 90 seconds'
+      within_seconds: 180
+    - signal: X12-837-REJECT lines
+      from: 'logs.otel.healthcare'
+      where: 'body.text LIKE "*X12-837-REJECT*"'
+      expect: '0 new lines'
+      within_seconds: 180
+    - signal: deployment.claims_engine_build
+      from: 'logs.otel.healthcare'
+      where: 'resource.attributes.service.name == "billing-processor"'
+      field: 'attributes.deployment.claims_engine_build'
+      expect: 'x12-837-processor-v5.1.1 on every batch_status line since the fix; v5.1.2-beta stops appearing'
+      within_seconds: 120
 business_impact:
   - kpi: business.claims_submitted_per_min
     value: {uniform: [7.25, 8.35]}

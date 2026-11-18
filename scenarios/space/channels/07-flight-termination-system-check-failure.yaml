@@ -9,15 +9,17 @@ affected_services:
 cascade_services:
 - mission-control
 description: Flight termination system self-check returning anomalous results
-investigation_notes: 'Root cause: FTS self-test failure code (non-zero) indicates a fault in the command decoder, safe/arm
-  logic, or destruct initiator continuity circuit. Unit is in SAFED state with both inhibits ON — no destruct risk, but a
-  failed FTS is a mandatory launch hold per Range Safety requirements. Check command uplink integrity (AES-256 encrypted link
-  must show LOCKED decoder status). Battery at 98.2% rules out power issues. Error code mapping: 0x01-0x0F = decoder, 0x10-0x1F
-  = safe/arm relay, 0x20-0xFF = initiator circuit. Remediation: power-cycle the FTS unit (RSO_FTS_POWER {unit_id} CYCLE), wait
-  30s for POST completion, then re-run self-test (RSO_FTS_SELFTEST {unit_id}). If error persists, request Range Safety Officer
-  approval for FTS unit swap — requires pad access and minimum 2-hour recertification window. FTS-B can serve as backup if
-  FTS-A is non-recoverable.'
+investigation_notes: |-
+  Root cause: unit {unit_id} was loaded with firmware fts-controller-v5.2.0-rc1 (was fts-controller-v5.1.4) shortly before the first self-test failure. The release candidate changed the safe/arm relay timing, so the relay continuity check in the self-test returns code {error_code}. Error code mapping: 0x01-0x0F = command decoder, 0x10-0x1F = safe/arm relay, 0x20-0xFF = initiator circuit. The unit is SAFED with both inhibits ON, so there is no destruct risk, but a failed FTS is a mandatory launch hold per Range Safety requirements. The command uplink is healthy (decoder LOCKED on the AES-256 link) and the battery at 95-99% rules out power; FTS-B on the old firmware passes.
+  Confirm:
+    - range-safety logs the {unit_id} firmware load of fts-controller-v5.2.0-rc1 before the first RSO-FTS-CHECK-FAIL line
+    - range-safety fts_selftest lines: firmware=fts-controller-v5.2.0-rc1 self_test=FAIL code=0x10-0x1F status=ANOMALY; attributes.deployment.fts_firmware
+    - metrics.range_safety.fts_selftest_pass is 0 (1 when healthy)
+    - safety_check lines for flight_termination_system show result=FAIL
+  Remediation: roll {unit_id} back to the previous firmware (opsctl rollback firmware/fts-a --to-revision previous). The unit reboots on fts-controller-v5.1.4, its POST completes in about 30 s and the self-test passes again (code 0x00, fts_selftest_pass back to 1). A power cycle alone does not help because the unit boots the same firmware. Only if the self-test still fails on v5.1.4, request Range Safety Officer approval for an FTS unit swap (pad access, minimum 2-hour recertification).
 remediation_action: reset_safety_system
+remediation_command: |-
+  opsctl rollback firmware/fts-a --to-revision previous
 error_message: '[RSO] RSO-FTS-CHECK-FAIL: unit={unit_id} self_test=FAIL code={error_code} arm_state=SAFED'
 stack_trace: |-
   == RANGE SAFETY STATUS == FLIGHT TERMINATION SYSTEM ==
@@ -27,10 +29,11 @@ stack_trace: |-
   {unit_id}     FAIL        {error_code}     SAFED       98.2%
   FTS-B     PASS        0x00       SAFED       97.8%
   ---------------------------------------------------------------
+  FIRMWARE: {unit_id} fts-controller-v5.2.0-rc1 | FTS-B fts-controller-v5.1.4
   COMMAND_LINK: UP | DECODER: LOCKED | ENCRYPT: AES-256
   DESTRUCT_SAFE_ARM: SAFE | INHIBIT_1: ON | INHIBIT_2: ON
   RSO-FTS-CHECK-FAIL: Unit {unit_id} self-test returned code {error_code}, expected 0x00
-  ACTION: Recycle FTS power, repeat self-test sequence
+  ACTION: Check {unit_id} firmware revision, repeat self-test sequence
 correlation_attr:
   key: deployment.fts_firmware
   value: fts-controller-v5.2.0-rc1
@@ -51,6 +54,51 @@ rca_clues:
   mission-control:
     upstream.degraded_subsystem: safety
     telemetry.launch_hold: FTS
+cascade_messages:
+  mission-control:
+    - severity: WARN
+      message: '[MCC] LAUNCH HOLD: range safety reports {unit_id} self-test FAIL code {error_code}; count held pending RSO clearance'
+fault_scope:
+  workloads: [range-safety, sensor-validator]
+infrastructure_events:
+  - service: range-safety
+    severity: INFO
+    offset_seconds: -90
+    body: '[RSO] FTS-A firmware load complete: fts-controller-v5.2.0-rc1 (was fts-controller-v5.1.4); unit rebooted, POST running; loaded by rso-avionics-release (CR-2317)'
+    attributes:
+      user.name: rso-avionics-release
+      change.request: CR-2317
+      deployment.fts_firmware: fts-controller-v5.2.0-rc1
+      safety.fts_unit: FTS-A
+      operation: firmware_load
+remediation_effects:
+  log_events:
+    - service: mission-control
+      severity: INFO
+      offset_seconds: 2
+      body: '[MCC] CMD ACCEPTED opsctl rollback firmware/fts-a --to-revision previous from {actor}: FTS-A firmware fts-controller-v5.2.0-rc1 -> fts-controller-v5.1.4'
+    - service: range-safety
+      severity: INFO
+      offset_seconds: 35
+      body: '[RSO] FTS-A POST complete on fts-controller-v5.1.4; self_test=PASS code=0x00 arm_state=SAFED'
+  verification:
+    - signal: range_safety.fts_selftest_pass
+      from: 'metrics-generic.otel-default'
+      field: 'metrics.range_safety.fts_selftest_pass'
+      where: 'resource.attributes.service.name == "range-safety"'
+      expect: '1 (was 0) once the POST completes, about 30 s after the rollback'
+      within_seconds: 90
+    - signal: RSO-FTS-CHECK-FAIL errors
+      from: 'logs.otel.nova7'
+      where: 'body.text LIKE "*RSO-FTS-CHECK-FAIL*"'
+      expect: '0 new lines'
+      within_seconds: 90
+    - signal: FTS-A firmware
+      from: 'logs.otel.nova7'
+      where: 'resource.attributes.service.name == "range-safety"'
+      field: 'attributes.deployment.fts_firmware'
+      expect: 'fts-controller-v5.1.4 on the latest fts_selftest lines (was fts-controller-v5.2.0-rc1)'
+      within_seconds: 90
 business_impact:
   - kpi: business.launch_readiness_index_0_100
     factor: {uniform: [0.3, 0.55]}

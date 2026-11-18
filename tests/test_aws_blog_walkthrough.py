@@ -80,7 +80,8 @@ def test_the_leak_shows_up_as_the_blog_describes(workflow, inputs, monkeypatch):
                    if field(d, "attributes.stat") == "Average"
                    and field(d, "attributes.MetricName") == "DatabaseConnections"
                    and field(d, "attributes.DBInstanceIdentifier") == inputs["db_instance_identifier"]]
-    assert connections and min(connections) == max(connections) == 117  # plateau above the alert's 100
+    # plateau just under max_connections (410, 5 reserved slots), far above the alert's 100
+    assert connections and min(connections) == max(connections) == 402
 
     _specs, rds_log = _docs(steps["db_connection_refusals"], monkeypatch)
     refusals = [d for d in rds_log if "FATAL" in str(field(d, "message"))]
@@ -102,4 +103,5 @@ def test_the_healthy_baseline_has_no_refusals_and_a_low_connection_count(workflo
     connections = [number(field(d, "metrics.amazonaws.com/AWS/RDS/DatabaseConnections")) for d in metrics
                    if field(d, "attributes.stat") == "Average"
                    and field(d, "attributes.MetricName") == "DatabaseConnections"]
-    assert connections and max(connections) <= 2
+    # healthy baseline (30-80, scaled by the time-of-day load) stays under the alert's 100
+    assert connections and max(connections) <= 80

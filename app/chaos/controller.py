@@ -20,8 +20,10 @@ STANDBY = "STANDBY"
 ACTIVE = "ACTIVE"
 
 # Who a fix's log lines name as the actor ({actor} in remediation_effects.log_events).
+# Fallbacks only: a scenario's ops profile (ops.yaml `actors`) sets its own, passed to
+# ChaosController(actors=...) and read back through default_actor / auto_actor.
 DEFAULT_FIX_ACTOR = "opsctl/oncall"  # a person resolving from the Chaos UI
-AUTO_REMEDIATOR_ACTOR = "system:serviceaccount:platform-automation:auto-remediator"
+AUTO_REMEDIATOR_ACTOR = "automation/auto-remediator"  # the workflow, approval skipped
 
 
 def with_actor(value: Any, actor: str) -> Any:
@@ -62,8 +64,15 @@ class ChaosController:
         chaos_store: ChaosStore | None = None,
         deployment_id: str = "",
         on_resolve: "Callable[[], None] | None" = None,
+        actors: dict[str, str] | None = None,
     ):
         self._lock = threading.RLock()
+        actors = actors or {}
+        self.default_actor = str(actors.get("default") or DEFAULT_FIX_ACTOR)
+        self.auto_actor = str(actors.get("auto") or AUTO_REMEDIATOR_ACTOR)
+        # Latest applied opsctl flags per target ("kind/name" -> {flag: value}), for the
+        # service DSL's `applied` (a change shows in telemetry whether or not it fixes).
+        self._applied: dict[str, dict[str, Any]] = {}
         self._channel_registry = channel_registry or CHANNEL_REGISTRY
         self._store = chaos_store
         self._deployment_id = deployment_id
@@ -99,6 +108,10 @@ class ChaosController:
         # channel -> (fixed_at, taper_seconds): fault log lines fade out after a fix
         # instead of stopping on the instant (pods roll one at a time).
         self._tapers: dict[int, tuple[float, float]] = {}
+        # Channels whose fault auto-expired (CHANNEL_TIMEOUT) before anyone fixed it.
+        # Expiry is not a fix, so a correct fix applied afterwards must still leave its
+        # remediation_effects (reload lines, steady state) rather than only an audit line.
+        self._expired_unfixed: set[int] = set()
         # Restore persisted state from SQLite
         self._restore_from_store()
 
@@ -182,6 +195,7 @@ class ChaosController:
             self._pending_events = [e for e in self._pending_events if e.get("channel") != channel]
             self._emitted_fix_events.pop(channel, None)
             self._tapers.pop(channel, None)
+            self._expired_unfixed.discard(channel)
 
         if had_fix and self._store and self._deployment_id:
             for r in dropped:
@@ -243,7 +257,23 @@ class ChaosController:
         with self._lock:
             ch = self._channels[channel]
             if ch["state"] == STANDBY:
-                return {"status": "already_standby", "channel": channel}
+                if channel not in self._expired_unfixed:
+                    return {"status": "already_standby", "channel": channel}
+                # Late fix of a fault that already auto-expired: nothing to return to
+                # STANDBY, but the fix's effects still have to be recorded.
+                self._expired_unfixed.discard(channel)
+                late_fix = True
+            else:
+                late_fix = False
+        if late_fix:
+            ch_def = self._channel_registry[channel]
+            logger.info("CHAOS: Channel %d [%s] fixed after auto-expiry", channel, ch_def["name"])
+            if apply_effects:
+                self.apply_remediation_effects(channel, actor=actor)
+            return {"status": "resolved", "channel": channel, "name": ch_def["name"]}
+
+        with self._lock:
+            ch = self._channels[channel]
 
             # Session ownership check (skip if force=True or channel has no owner)
             if not force and ch["session_id"]:
@@ -302,6 +332,7 @@ class ChaosController:
                 ch["callback_url"] = ""
                 ch["user_email"] = ""
                 expired_ids.append(ch_id)
+                self._expired_unfixed.add(ch_id)
                 ch_def = self._channel_registry[ch_id]
                 logger.info(
                     "CHAOS: Channel %d [%s] AUTO-EXPIRED after %ds",
@@ -412,6 +443,15 @@ class ChaosController:
                 )
             ]
 
+    def get_unfixed_channels(self) -> list[int]:
+        """Active channels plus those whose fault auto-expired without a fix."""
+        with self._lock:
+            self._expire_stale()
+            return [
+                ch_id for ch_id, ch in self._channels.items()
+                if ch["state"] == ACTIVE or ch_id in self._expired_unfixed
+            ]
+
     def get_active_channels(self) -> list[int]:
         with self._lock:
             return [
@@ -449,7 +489,7 @@ class ChaosController:
         effects = ch_def.get("remediation_effects")
         if not isinstance(effects, dict) or not effects:
             return False
-        actor = (actor or DEFAULT_FIX_ACTOR).strip() or DEFAULT_FIX_ACTOR
+        actor = (actor or self.default_actor).strip() or self.default_actor
         now = time.time()
         state = effects.get("state") or {}
         transition = float(effects.get("transition_seconds", 0) or 0)
@@ -528,6 +568,24 @@ class ChaosController:
     def get_fixed_channels(self) -> list[int]:
         with self._lock:
             return [r["channel"] for r in self._platform_rows if r["channel"] > 0]
+
+    def get_since_fix(self) -> dict[int, float]:
+        """Seconds since each fixed channel's fix was applied (the DSL's ``since_fix``)."""
+        now = time.time()
+        with self._lock:
+            return {r["channel"]: max(0.0, now - float(r.get("applied_at") or now))
+                    for r in self._platform_rows if r["channel"] > 0}
+
+    def record_applied(self, target: str, verb: str, flags: dict[str, Any]) -> None:
+        """Remember an applied opsctl change (the DSL's ``applied``)."""
+        entry = {k: v for k, v in (flags or {}).items()}
+        entry["_verb"] = verb
+        with self._lock:
+            self._applied[target] = {**self._applied.get(target, {}), **entry}
+
+    def get_applied(self) -> dict[str, dict[str, Any]]:
+        with self._lock:
+            return {t: dict(f) for t, f in self._applied.items()}
 
     def apply_change_state(self, state: dict[str, Any], transition_seconds: float = 0.0) -> None:
         """Record the effect of one applied platform change (an opsctl patch, scale...).
@@ -619,6 +677,8 @@ class ChaosController:
             self._pending_events = []
             self._emitted_fix_events = {}
             self._tapers = {}
+            self._expired_unfixed = set()
+            self._applied = {}
         if self._store and self._deployment_id:
             self._store.delete_platform_state(self._deployment_id)
 

@@ -1,0 +1,138 @@
+name: mTLS Client Certificate From Untrusted CA
+subsystem: gateway
+vehicle_section: tls_termination
+error_type: 'remote error: tls: unknown certificate authority'
+sensor_type: certificate
+affected_services:
+- api-gateway
+- auth-service
+cascade_services:
+- activation-service
+description: the gateway's mTLS client certificate was renewed from a new subordinate CA that auth-service does not trust yet
+investigation_notes: |-
+  Root cause: an Argo CD sync about 45 minutes before the incident moved the AWSPCAClusterIssuer meridian-pca-issuer to a new AWS Private CA subordinate (meridian-mtls-ca-2026, part of a CA rotation). The trust-manager Bundle that auth-service's Envoy sidecar trusts still holds only meridian-mtls-ca-2025; adding the new CA was a later step of the rotation. Existing certificates were not affected until cert-manager renewed certificate meridian-mtls (the api-gateway client certificate for calls to auth-service, 30-day duration, renewBefore 10 days) on schedule when the incident started. api-gateway hot-reloaded the new certificate (serial 9c:3e:51:a0), and auth-service's Envoy rejects it with unknown_ca because it cannot build a chain to a trusted root, so every token validation call from api-gateway fails the TLS handshake ({handshake_fail_per_min}/min). The new certificate itself is valid (30 days remaining); other services' certificates were issued before the issuer change and still chain to meridian-mtls-ca-2025.
+  Confirm:
+    - the Argo CD sync of meridian-pca-issuer (ca-2025 -> ca-2026) and the cert-manager "Certificate issued" line for meridian-mtls with ca=meridian-mtls-ca-2026 come before the first "remote error: tls: unknown certificate authority"
+    - gateway TLS status lines carry attributes.tls.client_cert_issuer_ca meridian-mtls-ca-2026 and serial 9c:3e:51:a0 from the renewal on (meridian-mtls-ca-2025 and serial 4f:9a:1c:e2 before it), and metric api_gateway.client_cert_days_remaining jumps from about 10 to 30, so the certificate is fresh, not expired
+    - metric api_gateway.mtls_handshake_failures_per_min rises from 0 to about {handshake_fail_per_min}, and auth-service logs CERTIFICATE_VERIFY_FAILED for the api-gateway SPIFFE identity only
+  Remediation: point the issuer back at the trusted CA, then re-issue the certificate: opsctl rollback config/meridian-pca-issuer --to-revision previous, then opsctl renew certificate/meridian-mtls. cert-manager issues the new certificate from meridian-mtls-ca-2025 in about 20 seconds and api-gateway reloads it without a restart; handshake failures stop within about 30 seconds. Renewing without rolling back the issuer issues another certificate from the untrusted CA. Adding meridian-mtls-ca-2026 to the trust bundle would also work, but every mTLS server has to reload the bundle first; that is the rotation step to finish afterwards.
+remediation_action: rollback_pca_issuer_renew_mtls
+error_message: 'auth-service validate call failed: Post "https://auth-service.meridian.svc:8443/api/v1/auth/validate": remote error: tls: unknown certificate authority (client_cert=meridian-mtls serial=9c:3e:51:a0 issuer="CN=Meridian mTLS CA 2026")'
+stack_trace: |-
+  goroutine 18233 [running]:
+  meridian.eu/gateway/internal/authclient.(*Client).Validate(0xc0004a2f00, {0x1a2c3e0, 0xc0019d6ab0}, {0xc00211e000, 0x3f2})
+  	/src/internal/authclient/client.go:142 +0x3a5
+  meridian.eu/gateway/internal/middleware.Auth.func1({0x1a2a1c8, 0xc0002e61c0}, 0xc001f3e900)
+  	/src/internal/middleware/auth.go:61 +0x1d4
+  error: Post "https://auth-service.meridian.svc:8443/api/v1/auth/validate": remote error: tls: unknown certificate authority
+correlation_attr:
+  key: tls.client_cert_issuer_ca
+  value: meridian-mtls-ca-2026
+fault_params:
+  conn: {randint: [88100, 88999]}
+  handshake_fail_per_min: {randint: [1800, 2600]}
+rca_clues:
+  api-gateway:
+    tls.client_cert: meridian-mtls
+    tls.client_cert_serial: 9c:3e:51:a0
+    tls.client_cert_issuer_ca: meridian-mtls-ca-2026
+    tls.handshake_failures_per_min: {randint: [1800, 2600]}
+  auth-service:
+    tls.peer_identity: spiffe://meridian.eu/ns/meridian/sa/api-gateway
+    tls.verify_error: CERTIFICATE_VERIFY_FAILED
+    tls.trust_bundle: meridian-mtls-ca-2025
+  activation-service:
+    upstream.degraded_subsystem: gateway
+remediation_command: |-
+  opsctl rollback config/meridian-pca-issuer --to-revision previous
+  opsctl renew certificate/meridian-mtls
+fault_scope:
+  cluster: meridian-eks-cluster
+  workloads: [api-gateway]
+error_services: [api-gateway]
+cascade_messages:
+  auth-service:
+    - severity: WARN
+      message: '[envoy] [C{conn}] TLS error: 268435581:SSL routines:OPENSSL_internal:CERTIFICATE_VERIFY_FAILED peer=spiffe://meridian.eu/ns/meridian/sa/api-gateway trust_bundle=meridian-mtls-ca-2025'
+  activation-service:
+    - severity: WARN
+      message: 'POST https://api.meridian.eu/api/v1/activate returned 502 from api-gateway (auth upstream TLS failure)'
+infrastructure_events:
+  - service: api-gateway
+    severity: INFO
+    offset_seconds: -2700
+    event_name: argocd.app.sync
+    body: 'argocd-application-controller: Sync operation to 71d0e3b succeeded; app=cert-manager-issuers namespace=cert-manager AWSPCAClusterIssuer/meridian-pca-issuer arn .../certificate-authority/meridian-mtls-ca-2025 -> .../certificate-authority/meridian-mtls-ca-2026 initiatedBy=platform-security'
+    attributes:
+      operation: config_change
+      user.name: platform-security
+      change.summary: 'meridian-pca-issuer meridian-mtls-ca-2025 -> meridian-mtls-ca-2026'
+  - service: api-gateway
+    severity: INFO
+    offset_seconds: -3
+    event_name: cert_manager.certificate_issued
+    body: 'I{klog_time}       1 conditions.go:192] "Certificate issued" certificate="meridian/meridian-mtls" serial="9c:3e:51:a0" issuer="meridian-pca-issuer" ca="meridian-mtls-ca-2026" reason="Renewing certificate as renewal was scheduled" notAfter="+30d"'
+    attributes:
+      operation: certificate_issue
+      tls.client_cert: meridian-mtls
+      tls.client_cert_serial: 9c:3e:51:a0
+      tls.client_cert_issuer_ca: meridian-mtls-ca-2026
+remediation_effects:
+  log_events:
+    - service: api-gateway
+      severity: INFO
+      offset_seconds: 1
+      body: '[NOC-CHG] executed opsctl rollback config/meridian-pca-issuer --to-revision previous actor={actor}: AWSPCAClusterIssuer arn .../meridian-mtls-ca-2026 -> .../meridian-mtls-ca-2025'
+      attributes:
+        operation: change_executed
+        change.target: config/meridian-pca-issuer
+    - service: api-gateway
+      severity: INFO
+      offset_seconds: 3
+      body: '[NOC-CHG] executed opsctl renew certificate/meridian-mtls actor={actor}: CertificateRequest meridian/meridian-mtls-r7x4d created'
+      attributes:
+        operation: change_executed
+        change.target: certificate/meridian-mtls
+    - service: api-gateway
+      severity: INFO
+      offset_seconds: 22
+      body: 'I{klog_time}       1 conditions.go:192] "Certificate issued" certificate="meridian/meridian-mtls" serial="7b:21:e0:5d" issuer="meridian-pca-issuer" ca="meridian-mtls-ca-2025" reason="Re-issuance requested" notAfter="+30d"'
+      attributes:
+        operation: certificate_issue
+        tls.client_cert_serial: 7b:21:e0:5d
+        tls.client_cert_issuer_ca: meridian-mtls-ca-2025
+  steady_attributes:
+    api-gateway:
+      tls.client_cert_serial: 7b:21:e0:5d
+      tls.client_cert_issuer_ca: meridian-mtls-ca-2025
+  verification:
+    - signal: api_gateway.mtls_handshake_failures_per_min
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "api-gateway"'
+      field: 'metrics.api_gateway.mtls_handshake_failures_per_min'
+      expect: '0 (was 1,800-2,600)'
+      within_seconds: 90
+    - signal: unknown certificate authority lines
+      from: 'logs.otel.meridian'
+      where: 'body.text LIKE "*remote error: tls: unknown certificate authority*"'
+      expect: '0 new lines'
+      within_seconds: 90
+    - signal: client certificate issuing CA
+      from: 'logs.otel.meridian'
+      where: 'resource.attributes.service.name == "api-gateway"'
+      field: 'attributes.tls.client_cert_issuer_ca'
+      expect: 'meridian-mtls-ca-2025 on every TLS status line since the re-issue (serial 7b:21:e0:5d)'
+      within_seconds: 90
+business_impact:
+  - kpi: business.activations_per_min
+    factor: {uniform: [0.1, 0.4]}
+  - kpi: business.revenue_usd_per_min
+    factor: {uniform: [0.1, 0.4]}
+  - kpi: business.voluntary_churn_rate_pct
+    factor: {uniform: [2.0, 4.5]}
+  - kpi: business.support_tickets_per_min
+    factor: {uniform: [2.5, 5.0]}
+generator_impact:
+  nginx_otel:
+    error_log_spike: 120.0
+service_lag_seconds: {auth-service: 2, activation-service: 10}

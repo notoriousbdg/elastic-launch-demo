@@ -7,13 +7,16 @@ affected_services: [wifi-controller, network-controller, packaging-fulfillment]
 cascade_services: [card-printing-system]
 description: Multiple wireless access points simultaneously losing connectivity to the controller
 investigation_notes: |-
-  1. Check the Mist dashboard for AP connectivity status and last-seen timestamps across the affected site.
-  2. Verify upstream switch port status: `show interface status | include AP` — a switch reboot or PoE budget exhaustion can take down multiple APs simultaneously. The switch did not reboot here.
-  3. Check PoE allocation: `show power inline` — if the switch PoE budget is exceeded (under 15W available), lower-priority APs will be shut down, and the PoE shortfall is the cause.
-  4. Verify AP-to-cloud connectivity: Mist APs reach the Mist cloud over TLS on TCP 443 (ep-terminator) — firewall rules may be blocking it (they are not here).
-  5. If APs are on a shared VLAN, check for a broadcast storm or STP issue on that VLAN that could saturate AP management traffic.
-  6. As immediate remediation, raise `power inline priority` on AP ports, shed non-critical PoE loads or add PoE budget (second PSU), then confirm APs reconnect in the Mist console.
+  Root cause: Mist auto-upgrade rolled the beta AP firmware mist-fw-0.14.29313-beta out to the warehouse fleet ap-site-wh01 (AP-WAREHOUSE-01, AP-WAREHOUSE-02, AP-PRINT-FLOOR-01, AP-SHIPPING-01) shortly before the first AP_DISCONNECTED. The build loses its cloud connection after the upgrade reboot, so the APs drop one wave at a time: {ap_disconnect_count} APs, {ap_name} among them, are gone within about {ap_disconnect_window}s. The network underneath is healthy: switch ports stay up, PoE budget is not exhausted (about 110W free), the access switch did not reboot and the firewall allows TCP 443 to the Mist cloud. The office APs (AP-OFFICE-01, AP-OFFICE-02) are not in the fleet, stay on mist-fw-0.14.28870 and stay online.
+  Confirm:
+    - wifi-controller WLC_HEALTH lines show fleet_firmware=mist-fw-0.14.29313-beta status=ANOMALY; metric wifi.aps_connected steps down from 6 to 2 over about two and a half minutes
+    - the wifi-controller line "[MIST] auto-upgrade ... mist-fw-0.14.29313-beta" comes before the first AP_DISCONNECTED; the fleet APs stop reporting AP_STATS while the office APs keep reporting
+    - rca attributes wifi.poe_budget_exceeded=false and network.switch_reboot_detected=false on the fault lines
+  Downstream, after the first APs drop: packaging-fulfillment scanners lose association first, then card-printing-system loses its line controllers on the print floor.
+  Remediation: roll the fleet back to the previous firmware with opsctl rollback firmware/ap-site-wh01 --to-revision previous. Each AP reboots onto mist-fw-0.14.28870 (3-5 minutes), so wifi.aps_connected climbs back from 2 to 6 in steps over about five minutes.
 remediation_action: restart_access_point
+remediation_command: |-
+  opsctl rollback firmware/ap-site-wh01 --to-revision previous
 error_message: 'AP_DISCONNECTED event_id=mist-evt-{ap_disconnect_count}: {ap_disconnect_count} APs lost connectivity in {ap_disconnect_window}s,
   including {ap_name} (site {ap_site}), last cloud heartbeat {ap_last_heartbeat}s ago'
 stack_trace: '{{"type": "AP_DISCONNECTED", "event_id": "mist-evt-{ap_disconnect_count}", "org_id": "fanatics-org-001", "site_id":
@@ -23,33 +26,86 @@ correlation_attr:
   key: deployment.ap_firmware
   value: mist-fw-0.14.29313-beta
 fault_params:
-  ap_disconnect_count: {randint: [5, 20]}
-  ap_disconnect_window: {randint: [10, 60]}
+  ap_disconnect_count: 4
+  ap_disconnect_window: {randint: [130, 160]}
   ap_name:
     choice:
     - AP-WAREHOUSE-01
     - AP-WAREHOUSE-02
     - AP-PRINT-FLOOR-01
-    - AP-OFFICE-01
     - AP-SHIPPING-01
-    - AP-DOCK-01
-  ap_site: {choice: [warehouse-east, print-facility, office-hq, shipping-dock]}
-  ap_last_heartbeat: {randint: [30, 300]}
+  ap_site: warehouse-east
+  ap_last_heartbeat: {randint: [30, 90]}
 rca_clues:
   wifi-controller:
-    wifi.capwap_tunnel_down: {randint: [5, 20]}
-    wifi.poe_budget_exceeded: true
-    wifi.capwap_udp_blocked: false
+    wifi.ap_cloud_connection_lost: 4
+    wifi.poe_budget_exceeded: false
+    wifi.cloud_tls_443_blocked: false
+    wifi.ap_firmware: mist-fw-0.14.29313-beta
   network-controller:
-    network.switch_port_down_count: {randint: [3, 15]}
-    network.poe_watts_available: {randint: [0, 10]}
+    network.switch_port_down_count: 0
+    network.poe_watts_available: {randint: [90, 130]}
     network.switch_reboot_detected: false
   packaging-fulfillment:
-    warehouse.scanner_offline_count: {randint: [2, 10]}
+    warehouse.scanner_offline_count: {randint: [4, 12]}
     warehouse.pick_rate_degraded: true
   card-printing-system:
     print.mes_connectivity_lost: true
     print.jobs_queued_offline: {randint: [10, 100]}
+cascade_messages:
+  card-printing-system:
+    - severity: WARN
+      message: 'mes-gateway: line controllers on the print floor ({ap_site}) unreachable, no wifi association for {ap_last_heartbeat}s; print jobs buffered locally'
+fault_scope:
+  workloads: [wifi-controller, packaging-fulfillment]
+infrastructure_events:
+  - service: wifi-controller
+    severity: INFO
+    offset_seconds: -100
+    body: '[MIST] auto-upgrade site=warehouse-east fleet=ap-site-wh01 firmware mist-fw-0.14.28870 -> mist-fw-0.14.29313-beta; APs rebooting in waves (CR-3118)'
+    attributes:
+      user.name: mist-autoupgrade
+      change.request: CR-3118
+      operation: firmware_load
+      deployment.ap_firmware: mist-fw-0.14.29313-beta
+      change.summary: 'AP firmware: mist-fw-0.14.28870 -> mist-fw-0.14.29313-beta'
+remediation_effects:
+  log_events:
+    - service: wifi-controller
+      severity: INFO
+      offset_seconds: 1
+      body: '[CHG] CHANGE APPLIED opsctl rollback firmware/ap-site-wh01 --to-revision previous by {actor}: fleet ap-site-wh01 target firmware mist-fw-0.14.29313-beta -> mist-fw-0.14.28870; APs rebooting in batches'
+      attributes:
+        operation: change_applied
+        change.target: firmware/ap-site-wh01
+    - service: wifi-controller
+      severity: INFO
+      offset_seconds: 290
+      body: 'mist-event type=AP_CONNECTED fleet=ap-site-wh01 firmware=mist-fw-0.14.28870 aps_online=6/6 status=nominal'
+      attributes:
+        operation: firmware_load
+        deployment.ap_firmware: mist-fw-0.14.28870
+  steady_attributes:
+    wifi-controller:
+      deployment.ap_firmware: mist-fw-0.14.28870
+  verification:
+    - signal: wifi.aps_connected
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "wifi-controller"'
+      field: 'metrics.wifi.aps_connected'
+      expect: 'climbs back to 6 in steps as each AP reboots (was 2)'
+      within_seconds: 360
+    - signal: AP_DISCONNECTED lines
+      from: 'logs.otel.fanatics'
+      where: 'body.text LIKE "*AP_DISCONNECTED*"'
+      expect: '0 new lines'
+      within_seconds: 360
+    - signal: fleet firmware revision
+      from: 'logs.otel.fanatics'
+      where: 'resource.attributes.service.name == "wifi-controller"'
+      field: 'attributes.deployment.ap_firmware'
+      expect: 'mist-fw-0.14.28870 on every line logged since the fix; mist-fw-0.14.29313-beta stops appearing'
+      within_seconds: 120
 business_impact:
   - kpi: business.app_sessions_per_min
     value: {uniform: [334.8, 385.2]}
@@ -59,3 +115,5 @@ business_impact:
     factor: {uniform: [1.5, 3.0]}
   - kpi: business.loyalty_points_redeemed_per_min
     value: {uniform: [9300.0, 10700.0]}
+# dependents degrade after the component at fault, in dependency order
+service_lag_seconds: {network-controller: 20, packaging-fulfillment: 60, card-printing-system: 120}

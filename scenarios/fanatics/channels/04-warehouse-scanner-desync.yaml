@@ -6,18 +6,22 @@ sensor_type: barcode_scanner
 affected_services:
 - packaging-fulfillment
 - cloud-inventory-scanner
+error_services:
+- packaging-fulfillment
 cascade_services:
 - digital-marketplace
 - card-printing-system
 description: Barcode scanners losing synchronization with inventory management system
 investigation_notes: |-
-  1. Check scanner WiFi signal strength: scanners need at least -67 dBm for reliable real-time sync in warehouse environments; at {scanner_rssi_dbm} dBm the signal is good, so WiFi coverage is not the cause.
-  2. Verify the scanner firmware version: v3.0.x has known sync bugs with the WMS REST API — if the scanners run v3.0.5, that firmware is the cause; upgrade to v3.2.1 which includes the keepalive fix.
-  3. Battery below 40% can cause intermittent WiFi disconnections on Zebra MC9300 scanners; at {scanner_battery_pct}% the battery is not the cause.
-  4. Missed scans create inventory deltas — run a zone reconciliation: `wms-cli reconcile --zone <zone> --source physical-count`.
-  5. If multiple scanners in the same zone are desyncing, the issue is likely the WiFi AP in that zone — check AP health (correlate with Channel 7/8).
-  6. As a workaround, switch scanners to batch/store-and-forward mode until WiFi is stable, then bulk-upload when connectivity is restored.
+  Root cause: the MDM policy CR-2417 moved the wh01 MC9300 fleet from firmware 3.1.4 to 3.0.5 (mc9300-fw-3.0.5-known-bug). Devices only change firmware when they check in with MDM, so the desync spreads over about four minutes: out_of_sync climbs towards ~195 of 214 devices and the worst last_sync reaches {scanner_last_sync_sec}s against a {scanner_sync_max_sec}s limit. Firmware 3.0.x has a known keepalive bug against the WMS REST API, so upgraded scanners stop pushing scans and every missed scan becomes an inventory delta. The radio and the devices are healthy: RSSI is {scanner_rssi_dbm} dBm (above the -67 dBm floor) and battery is {scanner_battery_pct}%, so WiFi coverage, AP health and battery are ruled out, and devices that have not checked in yet stay in sync.
+  Confirm:
+    - packaging-fulfillment logs "wms.scanner_sync fleet=MC9300 site=wh01 ... firmware_policy=mc9300-fw-3.0.5-known-bug status=ANOMALY" (attributes.deployment.scanner_firmware); metric fulfillment.scanner_sync_lag_s climbs from ~5s to ~270s and fulfillment.scanner_devices_out_of_sync rises with it while fulfillment.scan_accuracy_pct falls
+    - the packaging-fulfillment line "[MDM] MC9300 fleet site=wh01 firmware policy applied" comes before the first WMS-SCANNER-DESYNC
+    - cloud-inventory-scanner then reports physical/digital mismatches for the zones those scanners cover
+  Remediation: roll the wh01 MC9300 firmware policy back to the previous release (3.1.4) with opsctl rollback firmware/mc9300-wh01 --to-revision previous. Each scanner installs 3.1.4 at its next MDM check-in and re-registers with the WMS, so out_of_sync falls to 0 and last_sync back under 10 seconds over about five minutes, not at once. After that run a zone reconciliation (wms-cli reconcile --zone <zone> --source physical-count) to clear the inventory deltas the desync created.
 remediation_action: resync_scanners
+remediation_command: |-
+  opsctl rollback firmware/mc9300-wh01 --to-revision previous
 error_message: wms.inventory WMS-SCANNER-DESYNC scanner={scanner_id} zone={scanner_zone} last_sync={scanner_last_sync_sec}s
   (max {scanner_sync_max_sec}s) missed_scans={scanner_missed_scans} inventory_delta={inventory_delta} firmware=v{scanner_firmware}
 stack_trace: |-
@@ -28,19 +32,19 @@ stack_trace: |-
   Last Sync:      {scanner_last_sync_sec}s ago (threshold: {scanner_sync_max_sec}s)
   Missed Scans:   {scanner_missed_scans}
   Inventory Delta: {inventory_delta} items
-  Firmware:       v{scanner_firmware}
+  Firmware:       v{scanner_firmware} (fleet policy mc9300-fw-3.0.5-known-bug)
   WiFi Signal:    {scanner_rssi_dbm} dBm (good)
   Battery Level:  {scanner_battery_pct}%
-  Recommended Action: Upgrade firmware v{scanner_firmware} to v3.2.1 (known sync bug)
+  Recommended Action: Roll the MC9300 fleet firmware policy back to the previous release
 correlation_attr:
   key: deployment.scanner_firmware
   value: mc9300-fw-3.0.5-known-bug
 fault_params:
   scanner_id: {choice: [SCN-WH-01, SCN-WH-02, SCN-WH-03, SCN-DOCK-01]}
   scanner_zone: {choice: [receiving, storage-A, storage-B, packing, shipping]}
-  scanner_last_sync_sec: {randint: [120, 600]}
+  scanner_last_sync_sec: {randint: [250, 290]}
   scanner_sync_max_sec: 60
-  scanner_missed_scans: {randint: [20, 200]}
+  scanner_missed_scans: {randint: [55, 80]}
   inventory_delta: {randint: [5, 50]}
   scanner_firmware: "3.0.5"
   scanner_rssi_dbm: {randint: [-62, -52]}
@@ -60,6 +64,79 @@ rca_clues:
   card-printing-system:
     print.reprint_triggered_by_desync: {randint: [3, 30]}
     print.inventory_hold: true
+cascade_messages:
+  cloud-inventory-scanner:
+    - severity: WARN
+      message: 'inventory.reconcile zone={scanner_zone} physical count differs from WMS by {inventory_delta} items; scanner feed stale for {scanner_last_sync_sec}s, reconciliation deferred'
+  digital-marketplace:
+    - severity: WARN
+      message: 'inventory-sync: availability for zone={scanner_zone} is stale ({scanner_last_sync_sec}s); {inventory_delta} SKUs flagged as possible phantom stock, oversell guard enabled'
+  card-printing-system:
+    - severity: WARN
+      message: 'print-staging: inventory hold placed on zone={scanner_zone} while WMS reports scanner desync (last_sync={scanner_last_sync_sec}s)'
+fault_scope:
+  workloads: [packaging-fulfillment, cloud-inventory-scanner]
+infrastructure_events:
+  - service: packaging-fulfillment
+    severity: INFO
+    offset_seconds: -120
+    body: '[MDM] MC9300 fleet site=wh01 firmware policy applied: 3.1.4 -> 3.0.5; devices targeted=214, install at next check-in; pushed by wms-mdm-release (CR-2417)'
+    attributes:
+      user.name: wms-mdm-release
+      change.request: CR-2417
+      operation: firmware_load
+      deployment.scanner_firmware: mc9300-fw-3.0.5-known-bug
+      change.summary: 'MC9300 wh01 firmware policy: 3.1.4 -> 3.0.5'
+remediation_effects:
+  log_events:
+    - service: packaging-fulfillment
+      severity: INFO
+      offset_seconds: 1
+      body: '[CHG] CHANGE APPLIED opsctl rollback firmware/mc9300-wh01 --to-revision previous by {actor}: MC9300 wh01 firmware policy rolled back 3.0.5 -> 3.1.4'
+      attributes:
+        operation: change_applied
+        change.target: firmware/mc9300-wh01
+    - service: packaging-fulfillment
+      severity: INFO
+      offset_seconds: 120
+      body: '[MDM] MC9300 fleet site=wh01 firmware 3.1.4 installed on 118/214 devices; remaining devices install at next check-in'
+      attributes:
+        operation: firmware_load
+        deployment.scanner_firmware: mc9300-fw-3.1.4
+    - service: packaging-fulfillment
+      severity: INFO
+      offset_seconds: 300
+      body: '[MDM] MC9300 fleet site=wh01 firmware 3.1.4 installed on 214/214 devices; all scanners re-registered with WMS'
+      attributes:
+        operation: firmware_load
+        deployment.scanner_firmware: mc9300-fw-3.1.4
+  steady_attributes:
+    packaging-fulfillment:
+      deployment.scanner_firmware: mc9300-fw-3.1.4
+  verification:
+    - signal: fulfillment.scanner_sync_lag_s
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "packaging-fulfillment"'
+      field: 'metrics.fulfillment.scanner_sync_lag_s'
+      expect: 'back under 10 s (was ~270 s); falls over about 5 minutes as devices check in'
+      within_seconds: 360
+    - signal: fulfillment.scanner_devices_out_of_sync
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "packaging-fulfillment"'
+      field: 'metrics.fulfillment.scanner_devices_out_of_sync'
+      expect: 'under 5 of 214 devices (was ~195)'
+      within_seconds: 360
+    - signal: WMS-SCANNER-DESYNC lines
+      from: 'logs.otel.fanatics'
+      where: 'body.text LIKE "*WMS-SCANNER-DESYNC*"'
+      expect: '0 new lines'
+      within_seconds: 120
+    - signal: MC9300 firmware policy
+      from: 'logs.otel.fanatics'
+      where: 'resource.attributes.service.name == "packaging-fulfillment"'
+      field: 'attributes.deployment.scanner_firmware'
+      expect: 'mc9300-fw-3.1.4 on every sync line logged since the fix; mc9300-fw-3.0.5-known-bug stops appearing'
+      within_seconds: 120
 business_impact:
   - kpi: business.merch_gmv_usd_per_min
     value: {uniform: [10416.0, 11984.0], round: 1}
@@ -69,3 +146,5 @@ business_impact:
     factor: {uniform: [1.5, 3.0]}
   - kpi: business.sponsored_inventory_seconds_per_min
     value: {uniform: [148.8, 171.2]}
+# dependents degrade after the component at fault, in dependency order
+service_lag_seconds: {cloud-inventory-scanner: 60, digital-marketplace: 120, card-printing-system: 150}

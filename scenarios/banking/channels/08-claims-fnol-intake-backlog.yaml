@@ -9,54 +9,138 @@ affected_services:
 cascade_services:
 - payment-engine
 - member-portal
-description: First Notice of Loss intake queue backlogged on the FNOL intake Kafka topic after catastrophic weather event
+description: A hailstorm triples first notice of loss volume and the FNOL intake consumers cannot scale past an autoscaler limit lowered earlier, so the claims-fnol-intake topic backs up.
 investigation_notes: |-
-  1. Activate CAT (catastrophe) response team — surge staffing protocol brings in adjusters from unaffected regions. Check CAT team deployment status and estimated time to field.
-  2. Monitor intake vs processing rate deficit — at 55 claims/hr deficit, the backlog grows by ~1,320 claims per day. Enable virtual adjusting and photo-based estimates to increase processing throughput.
-  3. Review claim distribution by type — auto_comp (hail/flood) claims marked HIGH severity require field inspection. Property claims marked SEVERE may need emergency mitigation services.
-  4. Enable self-service FNOL paths: mobile app photo submission, automated triage chatbot, and simplified loss reporting forms to reduce call center load and queue depth.
-  5. Check military base proximity — catastrophic events near military installations (Fort Bragg, Fort Hood, NAS Jacksonville) affect concentrated member populations. Coordinate with base family readiness groups for member outreach. Priority-queue SCRA-protected members.
-remediation_action: activate_cat_response
-error_message: '[CLAIMS] CLAIMS-FNOL-BACKLOG: queue_depth={claims_queue} avg_wait_min={claims_wait_min} cat_event={cat_event}
-  region={cat_region} pending={claims_pending}'
+  1. Search logs.otel.banking for body.text containing CLAIMS-FNOL-BACKLOG on claims-processor: queue_depth={claims_queue}, members wait {claims_wait_min} minutes for claim acknowledgement, cat_event={cat_event} in {cat_region}. metrics.claims_processor.fnol_consumer_lag (Kafka consumer lag of group fnol-intake on topic claims-fnol-intake) normally reads under 150 and is climbing past 50,000.
+  2. The demand is real: metrics.claims_processor.fnol_intake_per_min went from 8-14 to 30-45 when the CAT event was declared, and it stays high after the fix. The question is why processing did not keep up.
+  3. Check the autoscaler: the fnol_intake_status line carries attributes.k8s.hpa.max_replicas and attributes.k8s.hpa.scaling_limited. metrics.claims_processor.fnol_consumer_replicas is pinned at 6 with ScalingLimited=True reason TooManyReplicas, while the HPA wants about 19. maxReplicas was lowered from 24 to 6 by a cost-optimisation change last week, when traffic was normal. The topic has 24 partitions, so 24 consumers can run in parallel.
+  4. Rule out the downstream: document-vault stores FNOL photos normally and the claims database is not saturated; adding adjusters or pausing self-service FNOL does not drain a consumer backlog.
+  5. Fix: opsctl patch hpa/fnol-intake -n claims --max-replicas 24. The HPA scales out within about a minute, consumers rebalance across the 24 partitions, and the lag drains over about four minutes. Intake stays elevated for the rest of the CAT event, which is expected.
+  6. Recovery: k8s.hpa.max_replicas reads 24 and scaling_limited false, fnol_consumer_replicas above 6, fnol_consumer_lag back under 1,000, and no new CLAIMS-FNOL-BACKLOG lines. Keep maxReplicas at 24 during the CAT event and review the FinOps limit afterwards; priority-queue SCRA-protected members still waiting.
+remediation_action: raise_fnol_hpa_limit
+remediation_command: |-
+  opsctl patch hpa/fnol-intake -n claims --max-replicas 24
+error_message: '[CLAIMS] CLAIMS-FNOL-BACKLOG: queue_depth={claims_queue} avg_wait_min={claims_wait_min} cat_event={cat_event} region={cat_region} pending={claims_pending} consumers=6/6 hpa_max=6'
 stack_trace: |-
-  === FNOL INTAKE STATUS ===
-  cat_event={cat_event}  region={cat_region}
-  --- QUEUE METRICS ---
-    queue_depth={claims_queue}  avg_wait={claims_wait_min}min  sla=15min
-    intake_rate=142/hr  processing_rate=87/hr  deficit=55/hr
-  --- CLAIM DISTRIBUTION ---
-    TYPE              COUNT     PCT     AVG_SEVERITY
-    auto_collision    {claims_pending}     42%     MODERATE
-    auto_comp         320       28%     HIGH (hail/flood)
-    property          180       16%     SEVERE
-    renters           160       14%     LOW
-  --- ADJUSTER POOL ---
-    available=42  in_field=28  cat_team_deployed=true
-    virtual_adjusting=ENABLED  photo_estimate=ACTIVE
-  ACTION: activate_cat_response=true  deploy_surge_staff=true  alert=CLAIMS-FNOL-BACKLOG
+  === FNOL INTAKE BACKLOG ===
+  topic=claims-fnol-intake  partitions=24  group=fnol-intake
+  --- CONSUMERS ---
+    replicas=6  hpa_desired={hpa_desired}  hpa_max=6  condition=ScalingLimited/TooManyReplicas
+    lag={claims_queue}  intake_per_min={intake_per_min}  processed_per_min={processed_per_min}
+  --- CAT EVENT ---
+    event={cat_event}  region={cat_region}  pending_acknowledgement={claims_pending}
+  ACTION: alert=CLAIMS-FNOL-BACKLOG
 correlation_attr:
-  key: deployment.claims_intake_build
-  value: fnol-intake-v3.7.0-beta
+  key: k8s.hpa.max_replicas
+  value: '6'
 fault_params:
-  claims_queue: {randint: [200, 2000]}
+  claims_queue: {randint: [52000, 80000]}
   claims_wait_min: {randint: [30, 240]}
   cat_event: CAT-2026-TX-HAILSTORM
   cat_region: {choice: [San Antonio TX, Killeen TX, Austin TX]}
-  claims_pending: {randint: [100, 1000]}
+  claims_pending: {randint: [400, 1000]}
+  hpa_desired: {randint: [18, 21]}
+  intake_per_min: {randint: [30, 45]}
+  processed_per_min: {randint: [12, 14]}
 rca_clues:
   claims-processor:
-    claims.intake_rate_per_hr: {randint: [120, 180]}
-    claims.processing_rate_per_hr: {randint: [60, 95]}
+    k8s.hpa.max_replicas: 6
+    k8s.hpa.desired_replicas: {randint: [18, 21]}
+    k8s.hpa.scaling_limited: true
   document-vault:
-    document.fnol_image_queue: {randint: [500, 2000]}
-    document.cat_event_volume: SURGE
+    document.fnol_photo_uploads_per_min: {randint: [300, 900]}
+    document.blob_upload_status: OK
   payment-engine:
     payment.claim_advance_requests: {randint: [50, 200]}
-    payment.rental_extensions_pending: {randint: [80, 300]}
   member-portal:
-    portal.fnol_self_service_enabled: true
-    portal.claims_status_queries_spike: {randint: [3000, 10000]}
+    portal.claims_status_queries_per_min: {randint: [3000, 10000]}
+error_services:
+- claims-processor
+service_lag_seconds:
+  member-portal: 60
+  payment-engine: 90
+cascade_messages:
+  document-vault:
+  - severity: INFO
+    message: '[DOC] document_upload type=CLAIM_PHOTO cat_event={cat_event} container=claims-fnol size=3.2MB status=STORED'
+  payment-engine:
+  - severity: WARN
+    message: '[PAY] claim_advance_request pending reason=claim_not_acknowledged cat_event={cat_event} status=WAITING'
+  member-portal:
+  - severity: WARN
+    message: '[PORTAL] page_view page=/claims/status claim_status=NOT_YET_ACKNOWLEDGED wait_min={claims_wait_min} status=200'
+fault_scope:
+  cluster: banking-eks-cluster
+  workloads: [claims-processor]
+infrastructure_events:
+- service: claims-processor
+  severity: WARN
+  offset_seconds: -120
+  body: '[CLAIMS] cat_event_declared event=CAT-2026-TX-HAILSTORM source=NWS severe_thunderstorm_warning hail_in=2.75 counties=Bexar,Bell,Travis members_in_area=184000 status=ACTIVE'
+  attributes:
+    operation: cat_event
+    claims.cat_event: CAT-2026-TX-HAILSTORM
+- service: claims-processor
+  severity: INFO
+  offset_seconds: -60
+  body: '[CLAIMS] hpa fnol-intake ScalingLimited=True reason=TooManyReplicas desired=19 current=6 maxReplicas=6 (lowered 24 -> 6 by finops-rightsizing CHG0047921)'
+  attributes:
+    operation: hpa_status
+    k8s.hpa.max_replicas: 6
+    k8s.hpa.scaling_limited: true
+remediation_effects:
+  transition_seconds: 240
+  log_events:
+  - service: claims-processor
+    severity: INFO
+    offset_seconds: 1
+    body: '[change-audit] change applied action=patch target=hpa/fnol-intake namespace=claims cmd="opsctl patch hpa/fnol-intake -n claims --max-replicas 24" actor={actor} result="maxReplicas 6 -> 24"'
+    attributes:
+      operation: change_applied
+      change.target: hpa/fnol-intake
+      k8s.hpa.max_replicas: 24
+  - service: claims-processor
+    severity: INFO
+    offset_seconds: 45
+    body: '[CLAIMS] hpa fnol-intake scaled 6 -> 19 ScalingLimited=False; consumer group fnol-intake rebalanced partitions=24 members=19'
+    attributes:
+      operation: hpa_status
+      k8s.hpa.max_replicas: 24
+      k8s.hpa.scaling_limited: false
+  steady_attributes:
+    claims-processor:
+      k8s.hpa.max_replicas: 24
+  verification:
+  - signal: claims_processor.fnol_consumer_lag
+    from: metrics-generic.otel-default
+    where: resource.attributes.service.name == "claims-processor"
+    field: metrics.claims_processor.fnol_consumer_lag
+    expect: draining back under 1,000 (was 52,000-80,000)
+    within_seconds: 300
+  - signal: claims_processor.fnol_consumer_replicas
+    from: metrics-generic.otel-default
+    where: resource.attributes.service.name == "claims-processor"
+    field: metrics.claims_processor.fnol_consumer_replicas
+    expect: above 6 (was pinned at 6)
+    within_seconds: 120
+  - signal: FNOL intake HPA limit
+    from: logs.otel.banking
+    where: resource.attributes.service.name == "claims-processor" AND attributes.operation == "fnol_intake_status"
+    field: attributes.k8s.hpa.max_replicas
+    expect: 24 on every line logged since the fix
+    within_seconds: 60
+  - signal: CLAIMS-FNOL-BACKLOG lines
+    from: logs.otel.banking
+    where: body.text LIKE "*CLAIMS-FNOL-BACKLOG*"
+    expect: 0 new lines
+    within_seconds: 300
+generator_impact:
+  kafka_otel:
+    high_consumer_lag_by_topic: 80000.0
+  kubernetes_otel:
+    hpa_at_max_replicas: 1.0
+generator_hold_seconds:
+  kafka_otel: 240
 business_impact:
   - kpi: business.net_satisfaction_proxy_nps
     value: {uniform: [14.28, 16.42], round: 1}
@@ -67,6 +151,3 @@ business_impact:
   - kpi: business.churn_risk_index_0_100
     factor: {uniform: [2.0, 4.0]}
 
-generator_impact:
-  kafka_otel:
-    high_consumer_lag_by_topic: 80000.0

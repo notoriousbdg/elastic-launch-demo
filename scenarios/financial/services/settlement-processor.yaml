@@ -32,6 +32,7 @@ constants:
   - Morgan Stanley
   - JP Morgan
   - Citadel
+  - Virtu Financial
   INSTRUMENTS:
   - US.AAPL
   - US.GOOGL
@@ -42,7 +43,145 @@ state:
     init: 0
   _last_netting_run:
     init: now
+  # last reading while a fault was active, so the backlog drains from where it got to
+  _unbooked_peak:
+    init: 0
+  _virtu_unmatched_peak:
+    init: 0
+  _lack_peak:
+    init: 0
 steps:
+# Ch 6: topic fills went from 12 to 24 partitions; trade capture is pinned to 0-11 by a manual
+# assign(), so the fills hashed to 12-23 (about 20 of 40 fills/s) are never booked. After the
+# patch the pods roll (~30 s, still 20/s unbooked), then the group consumer reads 12-23 from the
+# earliest offset at ~400 fills/s: net drain 380/s.
+- sample:
+    t6:
+      expr: "max(0.0, elapsed.get(6, 0) - lag.get(6, 0))"
+    f6:
+      expr: "since_fix.get(6, 0)"
+    unbooked_fills:
+      expr: >-
+        (round(20.0 * t6 * (1.0 + rand.gauss(0, 0.003))) + rand.randint(0, 3)) if 6 in all_active
+        else ((round(max(0.0, (_unbooked_peak if _unbooked_peak > 0 else 12000.0) + 20.0 * min(f6, 30.0)
+        - 380.0 * max(0.0, f6 - 30.0))) + rand.randint(0, 3)) if 6 in fixed_channels
+        else rand.randint(0, 3))
+    fills_assignment:
+      expr: "'group:settlement-fills' if (6 in fixed_channels and (f6 >= 30.0 or rand.random() < f6 / 30.0)) else 'manual:0-11'"
+    fills_topic_partitions:
+      expr: "24 if (6 in all_active or 6 in fixed_channels) else 12"
+    fills_partitions_seen:
+      expr: "24 if fills_assignment.startswith('group') else 12"
+    fills_group_lag:
+      expr: "max(0, round(rand.gauss(14.0, 6.0)))"
+    fills_status:
+      expr: "'ANOMALY' if unbooked_fills > 10 else 'NOMINAL'"
+- counter:
+    state_key: _unbooked_peak
+    by:
+      expr: "(unbooked_fills - _unbooked_peak) if 6 in all_active else (0 if 6 in fixed_channels else -_unbooked_peak)"
+# Ch 7: ssi-virtu rev 42 transposed Virtu's DTC participant (7351 -> 7315); every DVP delivery to
+# Virtu sits unmatched (~0.9 new instructions/s). After the rollback the reinstruct job resends
+# them (~15 s) and DTC matches them over ~2 min.
+- sample:
+    t7:
+      expr: "max(0.0, elapsed.get(7, 0) - lag.get(7, 0))"
+    f7:
+      expr: "since_fix.get(7, 0)"
+    virtu_frac:
+      expr: "min(1.0, t7 / 120.0) if 7 in all_active else (max(0.0, 1.0 - max(0.0, f7 - 15.0) / 120.0) if 7 in fixed_channels else 0.0)"
+    cns_base:
+      randint: [0, 4]
+    virtu_unmatched:
+      expr: >-
+        (cns_base + round(min(2400.0, 0.9 * t7 * (1.0 + rand.gauss(0, 0.005))))) if 7 in all_active
+        else ((cns_base + round((_virtu_unmatched_peak if _virtu_unmatched_peak > 0 else 540.0) * virtu_frac)) if 7 in fixed_channels
+        else cns_base)
+    other_unmatched:
+      randint: [0, 4]
+    ssi_dtc:
+      expr: "7315 if 7 in all_active else 7351"
+    ssi_rev:
+      expr: "42 if 7 in all_active else 41"
+    cns_status:
+      expr: "'ANOMALY' if virtu_unmatched > 10 else 'NOMINAL'"
+- counter:
+    state_key: _virtu_unmatched_peak
+    by:
+      expr: "(virtu_unmatched - _virtu_unmatched_peak) if 7 in all_active else (0 if 7 in fixed_channels else -_virtu_unmatched_peak)"
+# Ch 8: equilend-ngt-api-key v14 expired; auto-borrow gets HTTP 401 (reported as UNAVAILABLE), so
+# shortfalls fail PEND//LACK. After the rotation the client reloads v15 (~20 s), failures stop by
+# ~45 s and the recycle loop settles the pending LACK fails by ~140 s.
+- sample:
+    t8:
+      expr: "max(0.0, elapsed.get(8, 0) - lag.get(8, 0))"
+    f8:
+      expr: "since_fix.get(8, 0)"
+    borrow_ramp:
+      expr: "min(1.0, t8 / 60.0) if 8 in all_active else ((1.0 - min(1.0, max(0.0, f8 - 20.0) / 25.0)) if 8 in fixed_channels else 0.0)"
+    borrow_fail_base:
+      expr: "round(min(1.0, max(0.0, rand.gauss(0.3, 0.3))), 1)"
+    auto_borrow_failures:
+      expr: "round(borrow_fail_base + borrow_ramp * min(60.0, max(20.0, rand.gauss(38.0, 6.0))), 1)"
+    lack_base:
+      randint: [2, 9]
+    lack_fails_pending:
+      expr: >-
+        (lack_base + round(min(1500.0, 0.63 * max(0.0, t8 - 30.0)))) if 8 in all_active
+        else ((lack_base + round((_lack_peak if _lack_peak > 0 else 360.0) * max(0.0, 1.0 - max(0.0, f8 - 20.0) / 120.0))) if 8 in fixed_channels
+        else lack_base)
+    borrow_http:
+      expr: "401 if (8 in all_active or (8 in fixed_channels and f8 < 20.0)) else 200"
+    borrow_secret_ver:
+      expr: "'v15' if (8 in fixed_channels and f8 >= 20.0) else 'v14'"
+    borrow_result:
+      expr: "'UNAVAILABLE' if borrow_http == 401 else 'FILLED'"
+    borrow_status:
+      expr: "'ANOMALY' if (auto_borrow_failures > 5 or lack_fails_pending > 25) else 'NOMINAL'"
+- counter:
+    state_key: _lack_peak
+    by:
+      expr: "(lack_fails_pending - _lack_peak) if 8 in all_active else (0 if 8 in fixed_channels else -_lack_peak)"
+# Ch 9: 4.3.0 takes the netting cutoff date from the UTC clock, so post-cutoff amendments land in
+# the batch: a step of exactly $1,000,000.00 at the first netting run. After the rollback (~30 s
+# rolling) the recompute job rebuilds the batch, balanced again ~45 s after the fix.
+- sample:
+    t9:
+      expr: "elapsed.get(9, 0) - lag.get(9, 0)"
+    f9:
+      expr: "since_fix.get(9, 0)"
+    net_mismatch_usd:
+      expr: "1000000.0 if ((9 in all_active and t9 >= 0) or (9 in fixed_channels and f9 < 45.0)) else 0.0"
+    netting_version:
+      expr: "'4.3.0' if 9 in all_active else (('4.3.0' if rand.random() > f9 / 30.0 else '4.2.1') if (9 in fixed_channels and f9 < 30.0) else '4.2.1')"
+    netting_cutoff_tz:
+      expr: "'UTC' if netting_version == '4.3.0' else 'America/New_York'"
+    netting_hold:
+      expr: "1.0 if net_mismatch_usd > 0.01 else ((max(0.0, 1.0 - (f9 - 45.0) / 45.0)) if (9 in fixed_channels and f9 < 90.0) else 0.0)"
+    fmt_mismatch:
+      expr: "f'{net_mismatch_usd:,.2f}'"
+    netting_status:
+      expr: "'ANOMALY' if net_mismatch_usd >= 0.01 else 'NOMINAL'"
+# Settlement queue and fail rate: Virtu deliveries (7) and LACK fails (8) sit in the queue; a held
+# netting batch (9) and false margin calls (5) hold some settlements; slower confirmations (15)
+# and audit replication lag (17) add a little.
+- sample:
+    pending:
+      expr: >-
+        max(0, round(min(250.0, max(10.0, rand.gauss(110.0, 30.0)))
+        + (virtu_unmatched - cns_base) + (lack_fails_pending - lack_base) + 300.0 * netting_hold
+        + (150.0 * min(1.0, max(0.0, elapsed.get(5, 0) - lag.get(5, 0)) / 120.0) if 5 in all_active
+           else (150.0 * max(0.0, 1.0 - since_fix.get(5, 0) / 120.0) if 5 in fixed_channels else 0.0))
+        + (30.0 * min(1.0, max(0.0, elapsed.get(15, 0) - lag.get(15, 0)) / 120.0) if 15 in all_active
+           else (30.0 * max(0.0, 1.0 - since_fix.get(15, 0) / 120.0) if 15 in fixed_channels else 0.0))
+        + (20.0 * min(1.0, max(0.0, elapsed.get(17, 0) - lag.get(17, 0)) / 120.0) if 17 in all_active
+           else (20.0 * max(0.0, 1.0 - since_fix.get(17, 0) / 120.0) if 17 in fixed_channels else 0.0))))
+    fail_rate:
+      expr: >-
+        round(min(100.0, max(0.1, min(1.5, rand.gauss(0.6, 0.25)))
+        + (auto_borrow_failures - borrow_fail_base) / 6.0 + 8.0 * virtu_frac + 1.5 * netting_hold
+        + (1.0 * min(1.0, max(0.0, elapsed.get(5, 0) - lag.get(5, 0)) / 120.0) if 5 in all_active
+           else (1.0 * max(0.0, 1.0 - since_fix.get(5, 0) / 120.0) if 5 in fixed_channels else 0.0))), 2)
 - sample:
     counterparty:
       choice: COUNTERPARTIES
@@ -54,13 +193,17 @@ steps:
       - 10000
     settle_value:
       expr: round(qty * rand.uniform(50, 400), 2)
+    settle_status:
+      expr: >-
+        'PENDING_MATCH' if (counterparty == 'Virtu Financial' and virtu_unmatched > 10)
+        else ('FAILED_LACK' if rand.random() < (auto_borrow_failures - borrow_fail_base) / 600.0 else 'SETTLED')
 - counter:
     state_key: _settlements_processed
     by: 1
 - log:
     level: INFO
     message: '[SETTLE] settlement_processed instrument={instrument} qty={qty} value=${settle_value} counterparty={counterparty}
-      status=SETTLED'
+      status={settle_status}'
     attrs:
       operation: settlement_process
       settlement.instrument:
@@ -71,7 +214,8 @@ steps:
         var: settle_value
       settlement.counterparty:
         var: counterparty
-      settlement.status: SETTLED
+      settlement.status:
+        var: settle_status
 - sample:
     net_payable:
       uniform:
@@ -87,9 +231,11 @@ steps:
       expr: f'${net_payable:,.2f}'
     fmt_receivable:
       expr: f'${net_receivable:,.2f}'
+    obligation_status:
+      expr: "'BALANCED' if net_mismatch_usd < 0.01 else 'UNBALANCED'"
 - log:
     level: INFO
-    message: '[SETTLE] obligation_status payable={fmt_payable} receivable={fmt_receivable} status=BALANCED'
+    message: '[SETTLE] obligation_status payable={fmt_payable} receivable={fmt_receivable} status={obligation_status}'
     attrs:
       operation: obligation_status
       obligation.net_payable:
@@ -114,10 +260,12 @@ steps:
           - 60.0
           - 90.0
           round: 1
+        netting_run_status:
+          expr: "'COMPLETE' if net_mismatch_usd < 0.01 else 'HELD'"
     - log:
         level: INFO
         message: '[SETTLE] netting_run batches={batches} counterparties={counterparty_count} reduction_pct={reduction_pct}
-          status=COMPLETE'
+          status={netting_run_status}'
         attrs:
           operation: netting_run
           netting.batch_count:
@@ -131,35 +279,111 @@ steps:
     value:
       var: _settlements_processed
     unit: settlements
-- sample:
-    pending:
-      if_active:
-        randint:
-        - 200
-        - 2000
-      else:
-        randint:
-        - 10
-        - 200
 - metric:
     name: settlement.pending_count
     value:
       var: pending
     unit: settlements
-- sample:
-    fail_rate:
-      if_active:
-        uniform:
-        - 5.0
-        - 20.0
-        round: 2
-      else:
-        uniform:
-        - 0.1
-        - 1.5
-        round: 2
 - metric:
     name: settlement.fail_rate
     value:
       var: fail_rate
     unit: '%'
+- metric:
+    name: settlement.unbooked_fills
+    value:
+      var: unbooked_fills
+    unit: fills
+- log:
+    level: INFO
+    message: '[SETTLE] trade_capture_health topic=fills consumer_group=settlement-fills assignment={fills_assignment}
+      partitions_seen={fills_partitions_seen}/{fills_topic_partitions} group_lag={fills_group_lag} unbooked_vs_oms_dropcopy={unbooked_fills}
+      status={fills_status}'
+    attrs:
+      operation: trade_capture_health
+      kafka.topic: fills
+      kafka.consumer.assignment:
+        var: fills_assignment
+      kafka.topic.partitions:
+        var: fills_topic_partitions
+      kafka.topic.partitions_seen:
+        var: fills_partitions_seen
+      kafka.consumer.group_lag:
+        var: fills_group_lag
+      settlement.unbooked_fills:
+        var: unbooked_fills
+      settlement.health:
+        var: fills_status
+- metric:
+    name: settlement.cns_unmatched_instructions
+    value:
+      var: virtu_unmatched
+    unit: instructions
+    attrs:
+      settlement.counterparty: Virtu Financial
+- log:
+    level: INFO
+    message: '[SETTLE] dtc_match_status counterparty=VIRTU contra_dtc={ssi_dtc} ssi=ssi-virtu rev={ssi_rev} unmatched_dvp={virtu_unmatched}
+      other_counterparties_unmatched={other_unmatched} status={cns_status}'
+    attrs:
+      operation: dtc_match_status
+      settlement.counterparty: Virtu Financial
+      ssi.virtu.dtc_participant:
+        var: ssi_dtc
+      ssi.revision:
+        var: ssi_rev
+      settlement.cns_unmatched_instructions:
+        var: virtu_unmatched
+      settlement.other_unmatched_instructions:
+        var: other_unmatched
+      settlement.health:
+        var: cns_status
+- metric:
+    name: settlement.auto_borrow_failures_per_min
+    value:
+      var: auto_borrow_failures
+    unit: failures/min
+- metric:
+    name: settlement.lack_fails_pending
+    value:
+      var: lack_fails_pending
+    unit: fails
+- log:
+    level: INFO
+    message: '[SETTLE] auto_borrow_client provider=EquiLend-NGT credential=equilend-ngt-api-key version={borrow_secret_ver}
+      borrow_result_last={borrow_result} failures_per_min={auto_borrow_failures} lack_fails_pending={lack_fails_pending}
+      status={borrow_status}'
+    attrs:
+      operation: auto_borrow_client
+      secret.name: equilend-ngt-api-key
+      secret.version:
+        var: borrow_secret_ver
+      borrow.http_status:
+        var: borrow_http
+      borrow.result:
+        var: borrow_result
+      settlement.auto_borrow_failures_per_min:
+        var: auto_borrow_failures
+      settlement.lack_fails_pending:
+        var: lack_fails_pending
+      settlement.health:
+        var: borrow_status
+- metric:
+    name: settlement.net_mismatch_usd
+    value:
+      var: net_mismatch_usd
+    unit: USD
+- log:
+    level: INFO
+    message: '[SETTLE] netting_integrity batch_cutoff=16:00 cutoff_tz={netting_cutoff_tz} version={netting_version}
+      computed_vs_cns_projection=${fmt_mismatch} tolerance=$0.01 status={netting_status}'
+    attrs:
+      operation: netting_integrity
+      deployment.version:
+        var: netting_version
+      netting.cutoff_tz:
+        var: netting_cutoff_tz
+      settlement.net_mismatch_usd:
+        var: net_mismatch_usd
+      settlement.health:
+        var: netting_status

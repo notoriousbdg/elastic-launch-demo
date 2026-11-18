@@ -10,12 +10,16 @@ cascade_services:
 - mission-control
 - range-safety
 description: Thermal sensor calibration drifts outside acceptable bounds in the engine bay
-investigation_notes: 'Root cause: thermocouple junction degradation or reference junction compensation failure causes progressive
-  drift in TC-47 readings. Check calibration epoch age — epochs older than 4 hours under thermal cycling indicate recalibration
-  is overdue. Verify cold-junction compensation circuit on the signal conditioning board (SCB-4). Cross-reference with adjacent
-  sensors TC-48/49/50 to isolate single-sensor vs zone-wide drift. Remediation: run TCS_RECAL procedure from MCC console,
-  update calibration coefficients in the sensor registry, and confirm readings converge within 2.5K tolerance band.'
+investigation_notes: |-
+  Root cause: TCS calibration config v2.3.1-canary was pushed to the sensor registry shortly before the first TCS-DRIFT-CRITICAL. It carries wrong cold-junction compensation coefficients for TC-47, so the calibrated reading drifts +{deviation}K from the 310.2K nominal (epoch {epoch}). The thermocouple itself is healthy: adjacent sensors TC-48/49/50 stay within 1.2K and the signal conditioning board (SCB-4) reports no fault, which rules out junction degradation and points to a single-sensor calibration error.
+  Confirm:
+    - fuel-system logs [TCS] sensor=TC-47 cal_offset=...K status=ANOMALY with cal_rev=v2.3.1-canary (attributes.deployment.config_version); metric fuel_system.engine_thermal_cal_offset_k rises from under 1K to 3-12K after the config load
+    - the fuel-system line "[TCS] calibration table loaded from sensor registry ... rev=v2.3.1-canary" comes before the first drift alert
+    - sensor-validator flags drift on TC-47 only (validation.adjacent_sensor_max_delta_k stays small)
+  Remediation: roll the TCS calibration config back to the previous revision with opsctl rollback config/tcs-calibration --to-revision previous. The TCS reloads the v2.3.0 coefficients on the next frames and the TC-47 calibration offset converges back under the 2.5K tolerance band within about 45-60 seconds. Recalibrating the sensor (TCS_RECAL) is not needed and would bake the bad coefficients into a new epoch.
 remediation_action: recalibrate_engine
+remediation_command: |-
+  opsctl rollback config/tcs-calibration --to-revision previous
 error_message: '[TCS] TCS-DRIFT-CRITICAL: sensor=TC-47 nominal=310.2K deviation=+{deviation}K epoch={epoch}'
 stack_trace: |-
   == TELEMETRY FRAME DUMP == TCS THERMAL CONTROL SUBSYSTEM ==
@@ -49,6 +53,63 @@ rca_clues:
     telemetry.quality: degraded
   range-safety:
     safety.propulsion_status: degraded
+cascade_messages:
+  mission-control:
+    - severity: WARN
+      message: '[MCC] ALERT subsystem=propulsion code=TCS-DRIFT-CRITICAL sensor=TC-47 deviation=+{deviation}K; engine ignition poll set NO-GO pending thermal data review'
+  range-safety:
+    - severity: WARN
+      message: '[RSO] propulsion_status=DEGRADED source=TCS sensor=TC-47 thermal data quality flagged; engine-out prediction confidence reduced'
+fault_scope:
+  workloads: [fuel-system, sensor-validator]
+infrastructure_events:
+  - service: fuel-system
+    severity: INFO
+    offset_seconds: -90
+    body: '[TCS] calibration table loaded from sensor registry: config=tcs-calibration rev=v2.3.1-canary (was v2.3.0) sensors=TC-40..TC-55 push=registry-canary by svc-sensor-registry-ci (CR-2291, canary rollout)'
+    attributes:
+      user.name: svc-sensor-registry-ci
+      change.request: CR-2291
+      operation: config_load
+      deployment.config_version: v2.3.1-canary
+      change.summary: 'tcs-calibration: v2.3.0 -> v2.3.1-canary'
+remediation_effects:
+  log_events:
+    - service: mission-control
+      severity: INFO
+      offset_seconds: 1
+      body: '[MCC] CMD ACCEPTED opsctl rollback config/tcs-calibration --to-revision previous from {actor}: TCS calibration v2.3.1-canary -> v2.3.0'
+      attributes:
+        operation: command
+        command.target: config/tcs-calibration
+    - service: fuel-system
+      severity: INFO
+      offset_seconds: 30
+      body: '[TCS] calibration table v2.3.0 loaded; TC-47 cal_offset 0.6K within 2.5K tolerance status=NOMINAL'
+      attributes:
+        operation: config_load
+        deployment.config_version: v2.3.0
+  steady_attributes:
+    fuel-system:
+      deployment.config_version: v2.3.0
+  verification:
+    - signal: fuel_system.engine_thermal_cal_offset_k
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "fuel-system"'
+      field: 'metrics.fuel_system.engine_thermal_cal_offset_k'
+      expect: 'back under 2.5 K (0-1 K steady; was 3-12 K)'
+      within_seconds: 90
+    - signal: TCS-DRIFT-CRITICAL lines
+      from: 'logs.otel.nova7'
+      where: 'body.text LIKE "*TCS-DRIFT-CRITICAL*"'
+      expect: '0 new lines'
+      within_seconds: 90
+    - signal: TCS calibration revision
+      from: 'logs.otel.nova7'
+      where: 'resource.attributes.service.name == "fuel-system"'
+      field: 'attributes.deployment.config_version'
+      expect: 'v2.3.0 on every line logged since the fix; v2.3.1-canary stops appearing'
+      within_seconds: 90
 business_impact:
   - kpi: business.mission_success_probability_pct
     factor: {uniform: [0.75, 0.92]}

@@ -238,7 +238,10 @@ def test_emitter_ignores_malformed_impact_and_stays_nominal(caplog):
 # ── dashboards react in proportion to the fault's scope (checks 31-33) ──
 
 def test_channel_without_entry_service_is_an_error(broken):
-    _rewrite_channel(_first_channel(broken), lambda d: d.update(affected_services=["not-an-entry-service"]))
+    def unscoped(d):
+        d.update(affected_services=["not-an-entry-service"])
+        d.pop("fault_scope", None)
+    _rewrite_channel(_first_channel(broken), unscoped)
     assert any("no trace entry service" in e for e in _errors())
 
 

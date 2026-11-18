@@ -11,35 +11,40 @@ cascade_services:
 - network-intelligence
 description: Dedicated Interconnect circuit losing link, failing over to backup path
 investigation_notes: |-
-  Root cause: Dedicated Interconnect circuit link is DOWN, indicating a physical layer issue. LACP state DETACHED means the link aggregation group has lost member links. Common causes: fiber cut at colocation facility, optics degradation, or cross-connect issue. Diagnose with:
-    gcloud compute interconnects describe <interconnect> --format='value(state,operationalStatus,circuitInfos)'
-    gcloud compute interconnects attachments describe <attachment> --region=<region>
-    Console > Hybrid Connectivity > Interconnect > <name> > Diagnostics tab
-  Remediation: If failover is ACTIVE_ON_BACKUP, traffic is flowing via the secondary path. Contact the colocation provider to inspect the cross-connect and verify optic light levels (receive light below -14 dBm on a 100G LR4 optic indicates optics degradation; a fiber cut reads no light, about -40 dBm). Pull per-link light levels and LACP state with: gcloud compute interconnects get-diagnostics <name>. Check the Interconnect maintenance notifications for planned work at the location. If NO_BACKUP, immediately engage VPN as emergency backup:
-    gcloud compute vpn-tunnels create emergency-tunnel --region=<region> --vpn-gateway=<ha-vpn-gateway> --interface=0 --peer-external-gateway=<peer-gateway> --peer-external-gateway-interface=0 --ike-version=2 --shared-secret=<secret> --router=<router>  (then add a BGP peer for the tunnel on the router)
+  Root cause: the 100G LR4 optic on link 1 of {interconnect_name} (circuit {circuit_id}, {interconnect_location}, optic batch lr4-100g-batch-2026q2) degraded after the provider's maintenance notice on that batch. Receive light fell from about -2.5 dBm to {rx_light_dbm} dBm, far below the -14 dBm degraded threshold, so the link dropped and LACP detached the member (lacp_state DETACHED, link_up 0). The BGP session on the attachment went down with the link (cloud-router log bgp_check state IDLE, advertised 0, no flapping) and its routes were withdrawn, so traffic fails over to the backup path (failover FAILOVER_IN_PROGRESS). This is an optic fault, not a fiber cut (a cut reads no light, about -40 dBm), not a router or BGP problem (the Cloud Router peer config is unchanged and the session drops only because the link is gone), and gcpnet-interconnect-secondary stays up.
+  Confirm:
+    - cloud-interconnect metrics.interconnect.rx_light_dbm drops from about -2.5 to -22..-16 on {interconnect_name}; metrics.interconnect.link_up goes 1 -> 0
+    - cloud-interconnect log "optic_diagnostics" attributes.interconnect.lacp_state DETACHED, attributes.interconnect.optic_batch lr4-100g-batch-2026q2, attributes.interconnect.status ANOMALY
+    - cloud-interconnect metrics.interconnect.bgp_advertised_routes goes 48 -> 0 and interconnect.utilization_pct (attachment gcpnet-interconnect-secondary) rises while the primary reads 0
+    - cloud-interconnect attachment=gcpnet-interconnect-secondary stays link=UP; the provider notice precedes the first INTERCONNECT-CIRCUIT-DOWN line
+  Remediation: have the colocation provider's remote hands swap the failing optic on link 1 with a spare from a different batch: opsctl replace transceiver/{interconnect_name} --link 1. Receive light is back at about -2.5 dBm as soon as the optic is swapped, but the link then has to retrain: link_up returns to 1 after about 60-90 s, the LACP member attaches right after, the BGP session on the attachment re-establishes and the primary routes are re-advertised after about 150-180 s, and only then does traffic fail back from gcpnet-interconnect-secondary to the primary (full recovery within about 5 minutes). Do not engage the emergency VPN: the backup path is carrying traffic meanwhile.
 remediation_action: reset_interconnect_attachment
-error_message: '[Interconnect] INTERCONNECT-CIRCUIT-DOWN attachment={interconnect_name} circuit_id={circuit_id} location={interconnect_location}
-  link_status=DOWN since {circuit_down_sec}s bandwidth={interconnect_bw_gbps}Gbps failover={failover_status}'
+remediation_command: |-
+  opsctl replace transceiver/gcpnet-interconnect-primary --link 1
+error_message: '[Interconnect] INTERCONNECT-CIRCUIT-DOWN interconnect={interconnect_name} circuit_id={circuit_id} location={interconnect_location}
+  link_status=DOWN since {circuit_down_sec}s rx_light={rx_light_dbm}dBm bandwidth={interconnect_bw_gbps}Gbps failover={failover_status}'
 stack_trace: |-
   Cloud Interconnect Circuit Report
   -----------------------------------
-  Attachment:   {interconnect_name}
+  Interconnect: {interconnect_name}
   Circuit ID:   {circuit_id}
   Location:     {interconnect_location}
   Link Status:  DOWN
   Down Since:   {circuit_down_sec}s
   Bandwidth:    {interconnect_bw_gbps} Gbps
+  Rx Light:     {rx_light_dbm} dBm (link 1, optic lr4-100g-batch-2026q2)
   Failover:     {failover_status}
   LACP State:   DETACHED
-  Action: Contact colo provider, verify cross-connect
+  Action: Contact colo provider, replace the optic on link 1
 correlation_attr:
   key: infra.interconnect_optic
-  value: lr4-100g-batch-2024q3
+  value: lr4-100g-batch-2026q2
 fault_params:
   interconnect_name: gcpnet-interconnect-primary
-  circuit_id: {format: "CIR-{n}", n: {randint: [100000, 999999]}}
-  interconnect_location: {choice: [iad-zone1-1, dfw-zone1-1, ams-zone1-1]}
-  circuit_down_sec: {randint: [10, 300]}
+  circuit_id: CIR-482913
+  interconnect_location: iad-zone1-1
+  circuit_down_sec: 180
+  rx_light_dbm: -19.0
   interconnect_bw_gbps: 100
   failover_status: FAILOVER_IN_PROGRESS
 rca_clues:
@@ -50,11 +55,121 @@ rca_clues:
     vpc.onprem_route_withdrawn: true
     vpc.bgp_routes_lost: {randint: [10, 50]}
   cloud-vpn-gateway:
-    vpn.failover_activated: true
+    vpn.failover_activated: false
     vpn.backup_tunnel_latency_ms: {randint: [15, 80]}
   network-intelligence:
     ni.interconnect_path_test: UNREACHABLE
     ni.failover_status: IN_PROGRESS
+cascade_messages:
+  cloud-vpn-gateway:
+    - severity: WARN
+      message: 'cloud-vpn: primary interconnect {interconnect_name} ({interconnect_location}) is down, traffic carried by gcpnet-interconnect-secondary; VPN tunnels remain on standby'
+  network-intelligence:
+    - severity: WARN
+      message: 'network-intelligence: path test {interconnect_name} UNREACHABLE, failover to backup in progress'
+fault_scope:
+  cluster: gcpnet-gke-europe1
+  workloads: [cloud-interconnect, vpc-network-manager]
+infrastructure_events:
+  - service: cloud-interconnect
+    severity: WARN
+    offset_seconds: -90
+    body: 'cloud-interconnect: provider maintenance notice PN-77120 for {interconnect_location}: optic batch lr4-100g-batch-2026q2 on circuit {circuit_id} link 1 reports receive light degrading'
+    attributes:
+      user.name: colo-provider-noc
+      change.request: PN-77120
+      operation: provider_notice
+      infra.interconnect_optic: lr4-100g-batch-2026q2
+      change.summary: 'optic batch lr4-100g-batch-2026q2 degrading on link 1 of gcpnet-interconnect-primary'
+service_lag_seconds: {vpc-network-manager: 30, network-intelligence: 45, cloud-vpn-gateway: 60}
+remediation_effects:
+  transition_seconds: 165
+  log_events:
+    - service: vpc-network-manager
+      severity: INFO
+      offset_seconds: 2
+      body: 'gcp-audit: logName=cloudaudit.googleapis.com/activity serviceName=compute.googleapis.com methodName=v1.compute.interconnects.patch resourceName=projects/gcpnet-prod-001/global/interconnects/gcpnet-interconnect-primary principalEmail={actor} status=OK'
+      attributes:
+        operation: command
+        command.target: transceiver/gcpnet-interconnect-primary
+    - service: cloud-interconnect
+      severity: INFO
+      offset_seconds: 5
+      body: 'cloud-interconnect: attachment=gcpnet-interconnect-primary link 1 optic replaced (lr4-100g-batch-2026q4), rx_light -2.4dBm; link retraining, lacp=DETACHED'
+      attributes:
+        operation: optic_replaced
+        interconnect.optic_batch: lr4-100g-batch-2026q4
+    - service: cloud-interconnect
+      severity: INFO
+      offset_seconds: 75
+      body: 'cloud-interconnect: attachment=gcpnet-interconnect-primary link 1 up, waiting for LACP member to attach'
+      attributes:
+        operation: link_state
+        interconnect.optic_batch: lr4-100g-batch-2026q4
+    - service: cloud-interconnect
+      severity: INFO
+      offset_seconds: 90
+      body: 'cloud-interconnect: attachment=gcpnet-interconnect-primary LACP member 1 attached (lacp=ATTACHED); BGP session not yet established'
+      attributes:
+        operation: lacp_state
+        interconnect.lacp_state: ATTACHED
+        interconnect.optic_batch: lr4-100g-batch-2026q4
+    - service: cloud-interconnect
+      severity: INFO
+      offset_seconds: 165
+      body: 'cloud-router: router=gcpnet-router-central1 peer=169.254.21.1 state=ESTABLISHED, 48 routes re-advertised; failing traffic back from gcpnet-interconnect-secondary to gcpnet-interconnect-primary'
+      attributes:
+        operation: bgp_check
+        interconnect.bgp_state: ESTABLISHED
+        interconnect.advertised_routes: 48
+        interconnect.optic_batch: lr4-100g-batch-2026q4
+  steady_attributes:
+    cloud-interconnect:
+      interconnect.optic_batch: lr4-100g-batch-2026q4
+  log_taper_seconds: 0
+  verification:
+    - signal: interconnect.rx_light_dbm
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "cloud-interconnect"'
+      field: 'metrics.interconnect.rx_light_dbm'
+      expect: 'back at about -3.2 to -1.8 dBm right after the swap (was -22 to -16 dBm)'
+      within_seconds: 60
+    - signal: interconnect.link_up
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "cloud-interconnect"'
+      field: 'metrics.interconnect.link_up'
+      expect: '1 (was 0), after the link retrains in about 60-90 s'
+      within_seconds: 120
+    - signal: LACP member state
+      from: 'logs.otel.gcpnet'
+      where: 'resource.attributes.service.name == "cloud-interconnect" AND attributes.interconnect.attachment == "gcpnet-interconnect-primary"'
+      field: 'attributes.interconnect.lacp_state'
+      expect: 'ATTACHED (was DETACHED), shortly after link_up returns to 1'
+      within_seconds: 150
+    - signal: interconnect.bgp_advertised_routes
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "cloud-interconnect"'
+      field: 'metrics.interconnect.bgp_advertised_routes'
+      expect: '48 (was 0): the BGP session is established and the routes are re-advertised after about 150-180 s'
+      within_seconds: 300
+    - signal: BGP session state
+      from: 'logs.otel.gcpnet'
+      where: 'resource.attributes.service.name == "cloud-interconnect" AND attributes.bgp.peer_name == "onprem-peer-1"'
+      field: 'attributes.interconnect.bgp_state'
+      expect: 'ESTABLISHED on every line once the session is up (was IDLE)'
+      within_seconds: 300
+    - signal: interconnect.utilization_pct (gcpnet-interconnect-primary)
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "cloud-interconnect" AND attributes.interconnect.attachment == "gcpnet-interconnect-primary"'
+      field: 'metrics.interconnect.utilization_pct'
+      expect: 'back at about 45% (was 0) once the BGP session is up and traffic fails back from the secondary'
+      within_seconds: 300
+    - signal: optic batch on link 1
+      from: 'logs.otel.gcpnet'
+      where: 'resource.attributes.service.name == "cloud-interconnect" AND attributes.interconnect.attachment == "gcpnet-interconnect-primary"'
+      field: 'attributes.interconnect.optic_batch'
+      expect: 'lr4-100g-batch-2026q4 on every line logged since the fix; lr4-100g-batch-2026q2 stops appearing'
+      within_seconds: 60
 business_impact:
   - kpi: business.interconnect_utilization_pct
     value: {uniform: [8.18, 9.42], round: 2}

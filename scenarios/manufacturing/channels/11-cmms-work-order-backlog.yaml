@@ -1,57 +1,139 @@
 name: CMMS Work Order Backlog
 subsystem: maintenance
-vehicle_section: cmms_scheduler
+vehicle_section: cmms_queue
 error_type: CMMS-WORK-ORDER-BACKLOG
-sensor_type: cmms_scheduler
+sensor_type: cmms_queue
 affected_services:
 - maintenance-scheduler
 cascade_services:
 - mes-controller
 - oee-analytics
-description: Preventive maintenance backlog growing across multiple critical assets; MTBF risk
+description: A new release of the CMMS confirmation sync rejects technician confirmations, so completed maintenance work orders stay open and the PM backlog appears to explode
 investigation_notes: |-
-  Root Cause: PM backlogs grow when scheduling priority is dominated by reactive (corrective) work, when craft labor is short, or when a parts shortage blocks a critical PM. Backlogs over 90 days for Class A assets correlate strongly with future unplanned downtime. Reactive work above 40% of scheduled maintenance hours means reactive work dominates; craft labor within ±5% of plan and zero parts-blocked work orders rule out labor and parts.
-  Remediation: 1) Pull backlog by criticality: `cmms-admin backlog --asset-class A --overdue-days 30`. 2) Reprioritize and approve overtime if MTBF is dropping. 3) Confirm parts availability: `cmms-admin parts-status --asset {asset_id}`. 4) Re-balance the schedule: `cmms-admin rebalance-schedule --week-of {week}`. 5) Escalate to maintenance manager if Class A backlog exceeds policy threshold.
-remediation_action: rebalance_pm_schedule
-error_message: '[CMMS] CMMS-WORK-ORDER-BACKLOG: overdue={overdue_count} class_a_overdue={class_a_overdue} oldest_days={oldest_days}'
+  Root cause: the cmms-confirmation-sync deployment was upgraded from 3.9.2 to 4.0.0 shortly before the first CMMS-WORK-ORDER-BACKLOG (by maint-it, CHG-7376). 4.0.0 posts confirmations to the SAP PM IW41 API with a new field, actual_work_unit, which the API rejects with HTTP 422 (unknown field). Every confirmation a technician submits from the mobile app is moved to the dead-letter queue cmms.confirmations.dlq, so work orders that were completed on the floor stay open in the CMMS. Overdue PMs climb ({overdue_count} overdue, {class_a_overdue} class A) and PM compliance falls, but the work itself is being done: technician labour hours are on plan and parts issues are normal. The SAP PM API answers health checks normally; only the confirmation calls fail.
+  Confirm:
+    - maintenance-scheduler confirmation_sync lines show version=4.0.0 and HTTP 422 (attributes.cmms.sync_version); metric maintenance.confirmations_rejected_per_min rises from 0 to 6-14 and maintenance.confirmation_dlq_depth grows
+    - the maintenance-scheduler deployment line (CHG-7376) comes before the first CMMS-WORK-ORDER-BACKLOG
+    - metric maintenance.backlog_count rises from 30-45 to 90-160 while maintenance.labor_hours_vs_plan_pct stays at 97-103%
+  Remediation: two steps, both required. 1) Roll the sync back: opsctl rollback deployment/cmms-confirmation-sync --to-revision previous; new confirmations are accepted again. 2) Replay the rejected confirmations: opsctl run job/replay-confirmation-dlq; the job re-posts the messages from the DLQ with the 3.9.2 payload format and closes the work orders. The rollback alone stops the growth but leaves the backlog inflated until the DLQ is replayed.
+remediation_action: rollback_and_replay
+remediation_command: |-
+  opsctl rollback deployment/cmms-confirmation-sync --to-revision previous
+  opsctl run job/replay-confirmation-dlq
+error_message: '[CMMS] CMMS-WORK-ORDER-BACKLOG: overdue={overdue_count} class_a_overdue={class_a_overdue} confirmations_rejected={rejected_count} dlq=cmms.confirmations.dlq depth={dlq_depth} last_error="422 Unprocessable Entity: unknown field actual_work_unit"'
 stack_trace: |-
-  === CMMS BACKLOG REPORT ===
-  Total overdue: {overdue_count} | Class A overdue: {class_a_overdue} | Oldest: {oldest_days}d
+  === CMMS CONFIRMATION SYNC — cmms-confirmation-sync 4.0.0 ===
+  Target: SAP PM IW41 confirmation API | DLQ: cmms.confirmations.dlq ({dlq_depth} messages)
   ------------------------------------------------------------------------
-  ASSET         | CLASS | TYPE       | OVERDUE (d)  | LAST PM
+  WORK ORDER    | ASSET         | TYPE       | TECH STATUS | CMMS STATUS | SYNC RESULT
   ------------------------------------------------------------------------
-  {asset_id}    | A     | preventive | {oldest_days}d           | --
-  SPN-MILL-04    | A     | preventive | 45           | 2026-01-14
-  PMP-COOL-02    | B     | preventive | 22           | 2026-02-01
-  CMP-AIR-01     | A     | predictive | 18           | 2026-02-08
+  4000812231    | {asset_id}   | preventive | completed   | open        | 422 unknown field actual_work_unit
+  4000812240    | SPN-MILL-04   | preventive | completed   | open        | 422 unknown field actual_work_unit
+  4000812247    | PMP-COOL-02   | preventive | completed   | open        | 422 unknown field actual_work_unit
   ------------------------------------------------------------------------
-  CMMS-WORK-ORDER-BACKLOG: PM compliance trending down; MTBF risk increasing
+  CMMS-WORK-ORDER-BACKLOG: {overdue_count} overdue work orders; {rejected_count} confirmations rejected
 correlation_attr:
-  key: deployment.cmms_scheduler_config
-  value: scheduler-v4.0.0-aggressive
+  key: cmms.sync_version
+  value: 4.0.0
 fault_params:
-  overdue_count: {randint: [15, 95]}
-  class_a_overdue: {randint: [3, 18]}
-  oldest_days: {randint: [30, 120]}
+  overdue_count: {randint: [90, 160]}
+  class_a_overdue: {randint: [8, 24]}
+  rejected_count: {randint: [40, 180]}
+  dlq_depth: {randint: [40, 180]}
   asset_id: MTR-CONV-01
-  week: 2026-W19
 rca_clues:
   maintenance-scheduler:
-    cmms.class_a_overdue: {randint: [3, 18]}
-    cmms.oldest_overdue_days: {randint: [30, 120]}
-    cmms.reactive_wo_share_pct: {uniform: [60, 80], round: 0}
-    cmms.craft_labor_vs_plan_pct: {uniform: [97, 103], round: 0}
+    cmms.labor_hours_vs_plan_pct: {uniform: [97, 103], round: 0}
     cmms.parts_blocked_wo_count: 0
+    http.response.status_code: 422
   mes-controller:
-    mes.maintenance_at_risk_lines: {randint: [1, 4]}
+    mes.maintenance_hold_requests: {randint: [1, 4]}
   oee-analytics:
-    oee.mtbf_hours_trend: decreasing
+    oee.pm_compliance_pct: {uniform: [55, 72], round: 0}
+cascade_messages:
+  mes-controller:
+    - severity: WARN
+      message: '[MES] maintenance_check line=LINE-01 asset MTR-CONV-01 shows class A PM overdue in CMMS; release of next work order requires supervisor override'
+  oee-analytics:
+    - severity: WARN
+      message: '[OEE] PM compliance for plant P002 dropped below 80% (source: maintenance-scheduler)'
+fault_scope:
+  cluster: mfg-gke-cluster
+  workloads: [maintenance-scheduler]
+infrastructure_events:
+  - service: maintenance-scheduler
+    severity: INFO
+    offset_seconds: -120
+    body: '[CMMS] deployment cmms-confirmation-sync 3.9.2 -> 4.0.0 rolled out (2/2 ready); release note: "send actual_work_unit with IW41 confirmations"; deployed by maint-it (CHG-7376)'
+    attributes:
+      operation: config_change
+      user.name: maint-it
+      change.request: CHG-7376
+      cmms.sync_version: 4.0.0
+      change.summary: 'cmms-confirmation-sync: 3.9.2 -> 4.0.0'
+service_lag_seconds:
+  mes-controller: 45
+  oee-analytics: 60
+remediation_effects:
+  log_events:
+    - service: maintenance-scheduler
+      severity: INFO
+      offset_seconds: 1
+      body: '[CHG] CHANGE APPLIED opsctl rollback deployment/cmms-confirmation-sync --to-revision previous by {actor}: cmms-confirmation-sync 4.0.0 -> 3.9.2'
+      attributes:
+        operation: change_applied
+        change.target: deployment/cmms-confirmation-sync
+    - service: maintenance-scheduler
+      severity: INFO
+      offset_seconds: 2
+      body: '[CHG] CHANGE APPLIED opsctl run job/replay-confirmation-dlq by {actor}: replaying cmms.confirmations.dlq with 3.9.2 payload format'
+      attributes:
+        operation: change_applied
+        change.target: job/replay-confirmation-dlq
+    - service: maintenance-scheduler
+      severity: INFO
+      offset_seconds: 90
+      body: '[CMMS] replay-confirmation-dlq completed: replayed=all accepted=all failed=0; work orders closed, dlq depth 0'
+      attributes:
+        operation: dlq_replay
+  steady_attributes:
+    maintenance-scheduler:
+      cmms.sync_version: 3.9.2
+  log_taper_seconds: 30
+  verification:
+    - signal: maintenance.confirmations_rejected_per_min
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "maintenance-scheduler"'
+      field: 'metrics.maintenance.confirmations_rejected_per_min'
+      expect: '0 (was 6-14)'
+      within_seconds: 60
+    - signal: maintenance.confirmation_dlq_depth
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "maintenance-scheduler"'
+      field: 'metrics.maintenance.confirmation_dlq_depth'
+      expect: '0 after the replay job'
+      within_seconds: 150
+    - signal: maintenance.backlog_count
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "maintenance-scheduler"'
+      field: 'metrics.maintenance.backlog_count'
+      expect: 'back to 30-45 (was 90-160)'
+      within_seconds: 180
+    - signal: CMMS-WORK-ORDER-BACKLOG lines
+      from: 'logs.otel.mfg'
+      where: 'body.text LIKE "*CMMS-WORK-ORDER-BACKLOG*"'
+      expect: '0 new lines'
+      within_seconds: 120
+    - signal: confirmation sync version
+      from: 'logs.otel.mfg'
+      where: 'resource.attributes.service.name == "maintenance-scheduler" AND body.text LIKE "*confirmation_sync*"'
+      field: 'attributes.cmms.sync_version'
+      expect: '3.9.2 on every line logged since the fix'
+      within_seconds: 60
 business_impact:
   - kpi: business.pm_compliance_pct
-    factor: {uniform: [0.30, 0.60]}
-  - kpi: business.mtbf_hours
-    factor: {uniform: [0.35, 0.65]}
+    factor: {uniform: [0.55, 0.80]}
   - kpi: business.maintenance_backlog_count
-    factor: {uniform: [2.0, 4.5]}
-  - kpi: business.unplanned_downtime_min_per_shift
     factor: {uniform: [2.0, 4.0]}
+  - kpi: business.on_time_delivery_pct
+    factor: {uniform: [0.86, 0.90]}

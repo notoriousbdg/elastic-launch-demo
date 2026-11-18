@@ -33,14 +33,16 @@ constants:
   - SETTLEMENT_INIT
   - RISK_CHECK
   - COMPLIANCE_ALERT
+  # westus: DR replica over the eastus-westus ExpressRoute link (1 Gbps);
+  # northeurope: compliance archive copy on its own 10 Gbps link
   REPLICATION_DESTS:
-  - eu-west-1
-  - us-west-2
+  - westus
+  - northeurope
 state:
   _events_logged:
     init: 0
   _last_integrity_check:
-    init: now
+    init: 0
   _sequence_counters:
     init_per_key:
       keys_from: STREAMS
@@ -48,6 +50,11 @@ state:
         randint:
         - 1000000
         - 5000000
+  # open sequence gaps (ch02) and westus replication lag (ch17) when the fix landed
+  _c02_open_peak:
+    init: 0
+  _c17_lag_peak:
+    init: 0
 steps:
 - sample:
     stream:
@@ -74,43 +81,223 @@ steps:
       audit.event_type:
         var: event_type
       audit.status: COMMITTED
+# Audit ingest follows what the other services record: rejects, cancels, exceptions and
+# re-instructions add events (ramping in after the channel's lag, fading after its fix);
+# slow confirmation dispatch (ch15) removes dispatch records, then the drain adds them back.
+- sample:
+    w01:
+      expr: "min(1.0, max(0.0, elapsed.get(1, 0) - lag.get(1, 0)) / 60.0) if 1 in all_active else (max(0.0, 1.0 - since_fix.get(1, 0) / 120.0) if 1 in fixed_channels else 0.0)"
+    w06:
+      expr: "min(1.0, max(0.0, elapsed.get(6, 0) - lag.get(6, 0)) / 60.0) if 6 in all_active else (max(0.0, 1.0 - since_fix.get(6, 0) / 120.0) if 6 in fixed_channels else 0.0)"
+    w07:
+      expr: "min(1.0, max(0.0, elapsed.get(7, 0) - lag.get(7, 0)) / 60.0) if 7 in all_active else (max(0.0, 1.0 - since_fix.get(7, 0) / 150.0) if 7 in fixed_channels else 0.0)"
+    w08:
+      expr: "min(1.0, max(0.0, elapsed.get(8, 0) - lag.get(8, 0)) / 60.0) if 8 in all_active else (max(0.0, 1.0 - since_fix.get(8, 0) / 90.0) if 8 in fixed_channels else 0.0)"
+    w09:
+      expr: "min(1.0, max(0.0, elapsed.get(9, 0) - lag.get(9, 0)) / 60.0) if 9 in all_active else (max(0.0, 1.0 - since_fix.get(9, 0) / 150.0) if 9 in fixed_channels else 0.0)"
+    w11:
+      expr: "min(1.0, max(0.0, elapsed.get(11, 0) - lag.get(11, 0)) / 60.0) if 11 in all_active else (max(0.0, 1.0 - since_fix.get(11, 0) / 120.0) if 11 in fixed_channels else 0.0)"
+    w13:
+      expr: "min(1.0, max(0.0, elapsed.get(13, 0) - lag.get(13, 0)) / 60.0) if 13 in all_active else (max(0.0, 1.0 - since_fix.get(13, 0) / 60.0) if 13 in fixed_channels else 0.0)"
+    w15:
+      expr: "-min(1.0, max(0.0, elapsed.get(15, 0) - lag.get(15, 0)) / 30.0) if 15 in all_active else ((3.3 if 30.0 <= since_fix.get(15, 0) < 220.0 else 0.0) if 15 in fixed_channels else 0.0)"
+    w19:
+      expr: "min(1.0, max(0.0, elapsed.get(19, 0) - lag.get(19, 0)) / 60.0) if 19 in all_active else (max(0.0, 1.0 - since_fix.get(19, 0) / 90.0) if 19 in fixed_channels else 0.0)"
+    w20:
+      expr: "min(1.0, max(0.0, elapsed.get(20, 0) - lag.get(20, 0)) / 60.0) if 20 in all_active else (max(0.0, 1.0 - since_fix.get(20, 0) / 90.0) if 20 in fixed_channels else 0.0)"
+    ingest_per_s:
+      expr: "round(max(1700.0, min(1900.0, rand.gauss(1800.0, 25.0))) + 150.0 * w01 + 60.0 * w06 + 250.0 * w07 + 80.0 * w08 + 100.0 * w09 + 300.0 * w11 + 200.0 * w13 + 70.0 * w15 + 400.0 * w19 + 120.0 * w20, 1)"
+# Ch 02: config rev 47 set the WORM sink to overflow_policy=drop with a 4096-record buffer. At
+# peak the immutable container's write p99 rises to a few hundred ms, the buffer fills and the
+# writer drops records it already consumed from Kafka: sequence gaps, broken hash chain, and a
+# consumer lag that stays normal. The rollback (rolling, ~30 s) restores block/65536; the
+# audit-gap-replay job then re-reads the missing offsets from Kafka and closes every gap by ~110 s,
+# backpressuring the live consumer briefly.
+- sample:
+    c02_t:
+      expr: "max(0.0, elapsed.get(2, 0) - lag.get(2, 0))"
+    c02_s:
+      expr: "since_fix.get(2, 0)"
+    gaps_fault:
+      expr: "min(80.0, max(30.0, rand.gauss(55.0, 10.0)))"
+    seq_gaps_per_min:
+      expr: "round(gaps_fault * min(1.0, c02_t / 30.0)) if 2 in all_active else (round(gaps_fault * max(0.0, 1.0 - c02_s / 30.0)) if 2 in fixed_channels else 0)"
+    avg_gap_len:
+      expr: "min(120.0, max(20.0, rand.gauss(48.0, 8.0)))"
+    dropped_per_min:
+      expr: "round(seq_gaps_per_min * avg_gap_len)"
+    open_core:
+      expr: "55.0 * max(0.0, c02_t - 15.0) / 60.0 if 2 in all_active else ((_c02_open_peak if _c02_open_peak > 0 else 536.0) * max(0.0, 1.0 - max(0.0, c02_s - 30.0) / 80.0) if 2 in fixed_channels else 0.0)"
+- counter:
+    state_key: _c02_open_peak
+    by:
+      expr: "(open_core - _c02_open_peak) if 2 in all_active else (0.0 if 2 in fixed_channels else -_c02_open_peak)"
+- sample:
+    open_gaps:
+      expr: "int(round(open_core))"
+    c02_w:
+      expr: "min(1.0, c02_t / 30.0) if 2 in all_active else (max(0.0, 1.0 - c02_s / 120.0) if 2 in fixed_channels else 0.0)"
+    replay_bump:
+      expr: "(min(1.0, c02_s / 40.0) if c02_s < 40.0 else max(0.0, (130.0 - c02_s) / 90.0)) if 2 in fixed_channels and 2 not in all_active else 0.0"
+    sink_write_p99_ms:
+      expr: "round(max(6.0, min(30.0, rand.gauss(14.0, 4.0))) + (min(450.0, max(180.0, rand.gauss(300.0, 70.0))) - 14.0) * c02_w, 1)"
+    sink_buffer_records:
+      expr: "4096 if 2 in all_active else 65536"
+    sink_overflow_policy:
+      expr: "'drop' if 2 in all_active else 'block'"
+    sink_buffer_fill_pct:
+      expr: "round(min(100.0, max(92.0, rand.gauss(99.0, 1.5))) if (2 in all_active and c02_t >= 30.0) else (max(1.0, min(8.0, rand.gauss(4.0, 1.5))) + (95.0 * c02_t / 30.0 if 2 in all_active else 25.0 * replay_bump)), 1)"
+    consumer_lag:
+      expr: "round(max(20.0, min(400.0, rand.gauss(180.0, 60.0))) + 9000.0 * replay_bump)"
+    hash_chain:
+      expr: "'BROKEN' if open_gaps > 0 else 'VALID'"
+    streams_valid:
+      expr: "max(0, len(STREAMS) - min(len(STREAMS), open_gaps))"
+    config_revision:
+      expr: "'47' if 2 in all_active else '46'"
+    integrity_status:
+      expr: "'ANOMALY' if (seq_gaps_per_min > 0 or open_gaps > 0) else 'NOMINAL'"
+- metric:
+    name: audit_logger.sequence_gaps_per_min
+    value:
+      var: seq_gaps_per_min
+    unit: '{gap}/min'
+- metric:
+    name: audit_logger.dropped_records_per_min
+    value:
+      var: dropped_per_min
+    unit: '{record}/min'
+- metric:
+    name: audit_logger.open_sequence_gaps
+    value:
+      var: open_gaps
+    unit: '{gap}'
+- metric:
+    name: audit_logger.sink_write_p99_ms
+    value:
+      var: sink_write_p99_ms
+    unit: ms
+- metric:
+    name: audit_logger.sink_buffer_fill_pct
+    value:
+      var: sink_buffer_fill_pct
+    unit: '%'
+- metric:
+    name: audit_logger.kafka_consumer_lag
+    value:
+      var: consumer_lag
+    unit: '{record}'
+- metric:
+    name: audit_logger.ingest_events_per_s
+    value:
+      var: ingest_per_s
+    unit: '{event}/s'
+# Ch 17: the replication library upgrade dropped the implicit zstd (ratio ~4.2), so the
+# eastus->westus stream sends ~4x the bytes and saturates the 1 Gbps link; the backlog grows
+# ~90 ms of lag per second up to ~52 s. Back on zstd the link has headroom again: utilisation
+# falls below 60% at once while the backlog drains (~120 s), then settles at 25-40%.
+- sample:
+    c17_t:
+      expr: "max(0.0, elapsed.get(17, 0) - lag.get(17, 0))"
+    c17_s:
+      expr: "since_fix.get(17, 0)"
+    rep_core:
+      expr: "min(52000.0, 90.0 * c17_t) if 17 in all_active else ((_c17_lag_peak if _c17_lag_peak > 0 else 52000.0) * max(0.0, 1.0 - c17_s / 120.0) if 17 in fixed_channels else 0.0)"
+- counter:
+    state_key: _c17_lag_peak
+    by:
+      expr: "(rep_core - _c17_lag_peak) if 17 in all_active else (0.0 if 17 in fixed_channels else -_c17_lag_peak)"
 - sample:
     rep_lag_ms:
-      randint:
-      - 50
-      - 800
-    rep_dest:
-      choice: REPLICATION_DESTS
+      expr: "round(rand.uniform(50.0, 800.0) + rep_core * (1.0 + rand.gauss(0, 0.03)))"
+    wan_util_base:
+      expr: "max(25.0, min(40.0, rand.gauss(32.0, 3.0)))"
+    wan_util_pct:
+      expr: "round(wan_util_base + (min(99.0, max(91.0, rand.gauss(96.0, 2.0))) - wan_util_base) * min(1.0, c17_t / 20.0) if 17 in all_active else (wan_util_base + 22.0 * max(0.0, 1.0 - c17_s / 115.0) if 17 in fixed_channels else wan_util_base), 1)"
+    rep_compression:
+      expr: "'none' if 17 in all_active else 'zstd'"
+    rep_ratio:
+      expr: "round(max(1.0, rand.gauss(1.0, 0.01)), 2) if 17 in all_active else round(max(3.6, min(4.8, rand.gauss(4.2, 0.12))), 2)"
+    rep_pending:
+      expr: "round(rep_lag_ms / 1000.0 * ingest_per_s)"
+    rep_state:
+      expr: "'BEHIND' if rep_lag_ms > 3000 else 'SYNCED'"
+    rep_status:
+      expr: "'ANOMALY' if rep_lag_ms > 3000 else 'NOMINAL'"
 - log:
     level: INFO
-    message: '[AUDIT] replication_status source=eastus dest={rep_dest} lag_ms={rep_lag_ms} status=SYNCED'
+    message: '[AUDIT] replication_status source=eastus dest=westus lag_ms={rep_lag_ms} pending={rep_pending} link_util_pct={wan_util_pct}
+      compression={rep_compression} ratio={rep_ratio} state={rep_state} status={rep_status}'
     attrs:
       operation: replication_status
       replication.source: eastus
-      replication.destination:
-        var: rep_dest
+      replication.destination: westus
       replication.lag_ms:
         var: rep_lag_ms
-      replication.status: SYNCED
+      replication.pending_events:
+        var: rep_pending
+      replication.link_utilization_pct:
+        var: wan_util_pct
+      replication.compression:
+        var: rep_compression
+      replication.compression_ratio:
+        var: rep_ratio
+      replication.state:
+        var: rep_state
+      replication.status:
+        var: rep_status
 - every:
     seconds: 12
     state_key: _last_integrity_check
     steps:
     - sample:
-        streams_ok:
-          expr: len(STREAMS)
         total_events:
           expr: sum(_sequence_counters.values())
+        ne_lag_ms:
+          randint:
+          - 60
+          - 900
+        ne_util_pct:
+          expr: "round(max(8.0, min(20.0, rand.gauss(12.0, 2.0))) * (3.0 if 17 in all_active else 1.0), 1)"
     - log:
         level: INFO
-        message: '[AUDIT] integrity_check streams_valid={streams_ok}/{streams_ok} total_events={total_events} hash_chain=VALID'
+        message: '[AUDIT] integrity_check streams_valid={streams_valid}/5 total_events={total_events} open_gaps={open_gaps}
+          hash_chain={hash_chain} sink=worm-azblob overflow_policy={sink_overflow_policy} buffer_records={sink_buffer_records}
+          config_revision={config_revision} status={integrity_status}'
         attrs:
           operation: integrity_check
           integrity.streams_valid:
-            var: streams_ok
+            var: streams_valid
           integrity.total_events:
             var: total_events
-          integrity.hash_chain: VALID
+          integrity.open_gaps:
+            var: open_gaps
+          integrity.hash_chain:
+            var: hash_chain
+          audit.sink.overflow_policy:
+            var: sink_overflow_policy
+          audit.sink.buffer_records:
+            var: sink_buffer_records
+          config.revision:
+            var: config_revision
+          integrity.status:
+            var: integrity_status
+    - log:
+        level: INFO
+        message: '[AUDIT] replication_status source=eastus dest=northeurope lag_ms={ne_lag_ms} link_util_pct={ne_util_pct}
+          compression={rep_compression} state=SYNCED status=NOMINAL'
+        attrs:
+          operation: replication_status
+          replication.source: eastus
+          replication.destination: northeurope
+          replication.lag_ms:
+            var: ne_lag_ms
+          replication.link_utilization_pct:
+            var: ne_util_pct
+          replication.compression:
+            var: rep_compression
+          replication.state: SYNCED
+          replication.status: NOMINAL
 - counter:
     state_key: _events_logged
     by: 1
@@ -122,15 +309,25 @@ steps:
 - metric:
     name: audit_logger.replication_lag_ms
     value:
-      randint:
-      - 50
-      - 800
+      var: rep_lag_ms
     unit: ms
+- metric:
+    name: audit_logger.replication_pending_events
+    value:
+      var: rep_pending
+    unit: '{event}'
+- metric:
+    name: audit_logger.wan_link_utilization_pct
+    value:
+      var: wan_util_pct
+    unit: '%'
+- metric:
+    name: audit_logger.replication_compression_ratio
+    value:
+      var: rep_ratio
+    unit: '1'
 - metric:
     name: audit_logger.storage_used_gb
     value:
-      uniform:
-      - 100.0
-      - 500.0
-      round: 1
+      expr: "round(312.0 + _events_logged * 0.00002 + rand.gauss(0, 0.05), 2)"
     unit: GB

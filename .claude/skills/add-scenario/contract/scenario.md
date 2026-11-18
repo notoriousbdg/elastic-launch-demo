@@ -6,6 +6,7 @@ The runtime reads scenario data from three sources:
 - `scenarios/<id>/scenario.yaml` — scenario-level properties (identity, infra, agent, KPIs, trace attrs, generators)
 - `scenarios/<id>/channels/NN-<slug>.yaml` — one file per fault channel
 - `scenarios/<id>/services/<svc>.yaml` — one file per service (identity, topology, telemetry DSL)
+- `scenarios/<id>/ops.yaml` — the scenario's opsctl profile (see §ops.yaml below)
 
 Reference implementation: [`scenario_engine/yaml_scenario.py`](scenario_engine/yaml_scenario.py)
 
@@ -278,6 +279,56 @@ raw_log_profile:
     - /api/v1/products
   change_point_path: /api/v1/checkout   # highest-revenue path; spikes during faults
 ```
+
+---
+
+## ops.yaml (schema 1.3)
+
+`scenarios/<id>/ops.yaml` is the scenario's **ops profile**: what `opsctl` (the CLI Claude Code uses to apply a fix, backed by `app/ops.py`) looks like for this scenario. It lives in the scenario folder, so an exported scenario carries it. The engine holds no scenario knowledge. Contract: the `app/ops_profile.py` module docstring and AGENTS.MD "Ops profile". References: `scenarios/k8splatform/ops.yaml` (Kubernetes + AWS) and `scenarios/space/ops.yaml` (no Kubernetes).
+
+The profile is built from scenario-neutral presets in `app/ops_presets/` — `neutral` (always first), then `extends` in order (`kubernetes`, `aws-cloudtrail`, `gcp-audit`, `azure-activity`) — then this file. Mappings merge key by key (`null` removes a key), `side_effects` / `state_changes` concatenate, anything else replaces.
+
+| Key | What to write |
+|---|---|
+| `extends` | Presets for the platform the fixes are applied to; omit for `neutral` only. |
+| `banner` | One sentence for `opsctl --help`: what opsctl changes and where changes are logged. |
+| `actors` | `{default, auto}`: who a Chaos UI resolve and the auto-remediation workflow are, as `{actor}` in fix lines. opsctl itself is always `opsctl/claude-code`. |
+| `auto_remediate_channels` | Channels the workflow fixes without approval (default `[16, 17, 18, 19, 20]`). Drives the `(Auto-Remediate)` rule suffix and KB approval mode. |
+| `verbs` | `{verb: {summary, example, describe, plan, audit_verb}}`. Reuse preset verbs (rollback, restore, renew, rotate, sync, drain, replace, patch, apply, expand, run, delete, restart), overriding `summary` / `example` / `describe` in the scenario's terms. Add a verb only when no existing one reads naturally; remove unused ones with `null`. Every verb needs `summary` and `example`. |
+| `kinds` | Resource kinds the commands target, when they need `aliases`, an `audit` format, `plural`, `group`. |
+| `audit` | `service` (candidate services in order; default the first service), `default` (format name) and `formats.<name>` `{body, attributes, match: {prefix, tokens}}`. The body reads like the platform's own command log. `match` decides when a channel's `{actor}` line in `remediation_effects.log_events` stands in for the command's audit record. |
+| `side_effects`, `state_changes` | Optional extra records after a command; generator state a command sets (keys from that generator's `SPEC.state_keys`). |
+| `runbook` | `{scope_note, recovery_note, audit_label}` phrases the Wiki runbooks use. |
+| `guide` | Markdown shown by `opsctl guide`: where the logs, metrics and command records are, with one runnable ES\|QL example. |
+
+Templates use `{key}` / `{=expr}` over the command context (`command`, `verb`, `kind`, `name`, `target`, `namespace`, `flags`, `actor`, `change_id`, `flag(name)`, `vars`...).
+
+Minimal non-Kubernetes example (from `scenarios/space/ops.yaml`, shortened):
+
+```yaml
+extends: [neutral]
+actors: {default: flight-ops/fcr-console-3, auto: fdir/autonomy-manager}
+auto_remediate_channels: [16, 17, 18, 19, 20]
+verbs:
+  rollback:
+    summary: "Revert firmware, software or a configuration to an earlier revision (--to-revision N|previous)"
+    example: "opsctl rollback firmware/<unit> --to-revision previous"
+  renew: null                       # not used here
+audit:
+  service: [mission-control]
+  default: command_log
+  formats:
+    command_log:
+      body: '[MCC] CMD ACCEPTED opsctl {command} from {actor} change_id={change_id}'
+      attributes: {event.action: "{verb}", command.target: "{target}", user.name: "{actor}", change.id: "{change_id}"}
+      match: {tokens: ["{target}"]}  # a fix line naming {actor} and the target replaces the generic record
+guide:
+  scenario: |
+    ## Where telemetry is
+    - Logs: `FROM logs.otel.<ns>` ... Metrics: `FROM metrics-generic.otel-default` ...
+```
+
+A channel fixed with `opsctl rollback firmware/pms-reg-a --to-revision previous` then carries the log event `'[MCC] CMD ACCEPTED opsctl rollback firmware/pms-reg-a --to-revision previous from {actor}: ...'` on `mission-control`. The verifier validates the file (Check 45) and accepts only its verbs in `remediation_command` (Check 37).
 
 ---
 

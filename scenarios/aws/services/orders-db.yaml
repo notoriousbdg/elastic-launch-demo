@@ -43,29 +43,22 @@ constants:
 
 steps:
 - sample:
+    # ch1 (connection leak) ramps in over 60s and converges back over 90s after the rollback.
+    # max_connections is pinned to 410 in the orders-pg15 parameter group (the db.r6g.large default would be ~1,700);
+    # 6 orders-service tasks x maximumPoolSize 70 = 420 can never all connect, and 5 slots stay reserved for superusers.
+    f1:
+      expr: "min(1.0, elapsed.get(1, 0) / 60.0) if 1 in all_active else (max(0.0, 1.0 - since_fix.get(1, 0) / 90.0) if 1 in fixed_channels else 0.0)"
     table:
       choice: DB_TABLES
     db_connections:
-      if_active:
-        randint:
-        - 392
-        - 410
-      else:
-        randint:
-        - 90
-        - 220
+      expr: "int(round(rand.uniform(30.0, 80.0) * (1.0 - f1) + max(398.0, min(405.0, 402.0 + rand.gauss(0, 1.5))) * f1))"
     max_connections: 410
     conn_utilization_pct:
       expr: round(db_connections / max_connections * 100, 1)
     idle_in_txn:
-      if_active:
-        randint:
-        - 180
-        - 320
-      else:
-        randint:
-        - 2
-        - 25
+      expr: "int(round(rand.uniform(2.0, 25.0) * (1.0 - f1) + max(300.0, min(370.0, 335.0 + rand.gauss(0, 8.0))) * f1))"
+    db_status:
+      expr: "'ANOMALY' if (1 in all_active or (1 in fixed_channels and since_fix.get(1, 0) < 90.0)) else 'NOMINAL'"
 - metric:
     name: aws.rds.database_connections
     value:
@@ -83,7 +76,7 @@ steps:
     unit: sessions
 - log:
     level: INFO
-    message: 'postgresql[orders-prod-pg-01]: connections active={db_connections}/{max_connections} utilization={conn_utilization_pct}% idle_in_transaction={idle_in_txn}'
+    message: 'postgresql[orders-prod-pg-01]: connections active={db_connections}/{max_connections} utilization={conn_utilization_pct}% idle_in_transaction={idle_in_txn} status={db_status}'
     attrs:
       operation: connection_health
       db.system: postgresql
@@ -95,53 +88,19 @@ steps:
         var: conn_utilization_pct
       db.idle_in_transaction:
         var: idle_in_txn
+      db.status:
+        var: db_status
 - sample:
     client:
       choice: DB_CLIENTS
     commit_latency_ms:
-      if_active:
-        uniform:
-        - 120.0
-        - 900.0
-        round: 1
-      else:
-        uniform:
-        - 1.0
-        - 6.0
-        round: 1
+      expr: "round(rand.uniform(1.0, 6.0) * (1.0 - f1) + max(9.0, min(18.0, 12.0 + rand.gauss(0, 1.0))) * f1, 1)"
     read_latency_ms:
-      if_active:
-        uniform:
-        - 80.0
-        - 700.0
-        round: 1
-      else:
-        uniform:
-        - 0.8
-        - 4.0
-        round: 1
+      expr: "round(rand.uniform(0.8, 4.0) * (1.0 - f1) + max(6.0, min(12.0, 8.5 + rand.gauss(0, 0.8))) * f1, 1)"
     replica_lag_ms:
-      if_active:
-        uniform:
-        - 800.0
-        - 6000.0
-        round: 1
-      else:
-        uniform:
-        - 5.0
-        - 60.0
-        round: 1
+      expr: "round(rand.uniform(5.0, 60.0), 1)"
     cpu_utilization_pct:
-      if_active:
-        uniform:
-        - 72.0
-        - 96.0
-        round: 1
-      else:
-        uniform:
-        - 18.0
-        - 48.0
-        round: 1
+      expr: "round(rand.uniform(18.0, 48.0), 1)"
 - metric:
     name: aws.rds.commit_latency_ms
     value:
@@ -179,42 +138,26 @@ steps:
         var: replica_lag_ms
 - sample:
     slow_queries:
-      if_active:
-        randint:
-        - 40
-        - 160
-      else:
-        randint:
-        - 0
-        - 3
+      expr: "int(round(rand.uniform(0.0, 3.0) * (1.0 - f1) + max(3.0, min(9.0, 6.0 + rand.gauss(0, 1.0))) * f1))"
     cache_hit_ratio:
-      if_active:
-        uniform:
-        - 0.72
-        - 0.86
-        round: 3
-      else:
-        uniform:
-        - 0.97
-        - 0.995
-        round: 3
+      expr: "round(rand.uniform(0.97, 0.995), 3)"
     refused_connections:
-      if_active:
-        randint:
-        - 25
-        - 140
-      else: 0
+      expr: "int(round(max(25.0, min(140.0, 80.0 + rand.gauss(0, 5.0))) * f1))"
+    pg_ok:
+      choice:
+      - 'LOG: checkpoint complete: wrote 412 buffers (0.3%); sync files=18, longest=0.004 s'
+      - 'LOG: automatic vacuum of table "orders.public.order_items": index scans: 1, pages removed: 0'
+      - 'LOG: automatic analyze of table "orders.public.orders"'
+    pg_leak:
+      choice:
+      - 'FATAL: remaining connection slots are reserved for roles with privileges of the "rds_reserved" role'
+      - 'FATAL: remaining connection slots are reserved for roles with privileges of the "rds_reserved" role'
+      - 'LOG: duration: 4812.337 ms statement: SELECT order_id, status FROM orders WHERE customer_id = $1 ORDER BY created_at DESC LIMIT 20'
+    pg_auth:
+      choice:
+      - 'FATAL: password authentication failed for user "orders_app"'
     pg_event:
-      if_active:
-        choice:
-        - 'FATAL: remaining connection slots are reserved for roles with privileges of the "rds_reserved" role'
-        - 'FATAL: remaining connection slots are reserved for roles with privileges of the "rds_reserved" role'
-        - 'LOG: duration: 4812.337 ms statement: SELECT order_id, status FROM orders WHERE customer_id = $1 ORDER BY created_at DESC LIMIT 20'
-      else:
-        choice:
-        - 'LOG: checkpoint complete: wrote 412 buffers (0.3%); sync files=18, longest=0.004 s'
-        - 'LOG: automatic vacuum of table "orders.public.order_items": index scans: 1, pages removed: 0'
-        - 'LOG: automatic analyze of table "orders.public.orders"'
+      expr: "pg_leak if f1 > 0.5 else (pg_auth if (13 in all_active and rand.uniform(0.0, 1.0) < 0.6) else pg_ok)"
 - metric:
     name: orders_db.slow_query_count
     value:

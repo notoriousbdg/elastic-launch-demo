@@ -5,66 +5,141 @@ error_type: IAP-LEDGER-INCONSIST
 sensor_type: ledger_auditor
 affected_services:
 - payment-processor
-- leaderboard-api
-cascade_services:
-- moderation-engine
-- analytics-pipeline
-description: Virtual currency ledger double-entry balances fail reconciliation, indicating potential duplication or lost transactions
+error_services:
+- payment-processor
+cascade_services: []
+description: Wallet balances drift from the ledger after a configuration change lowered the transaction isolation level, so concurrent spends on one wallet overwrite each other
+onset_delay_seconds: 20
+ramp_seconds: 60
 investigation_notes: |-
-  Root cause: a race condition in the ledger write path — concurrent purchase and spend operations execute without database-level serialization, allowing the cached balance to drift from the ledger transaction sum. The likely scenario is a duplicate LTXN application.
-  1. Check for duplicate transactions: query the ledger for `{last_transaction_id}` — if it appears twice, the idempotency key was not enforced during a retry after timeout.
-  2. Verify balance derivation: `cached_balance` is updated optimistically in Redis while `ledger_sum` is the authoritative SQL sum — the discrepancy of {discrepancy} units must be reconciled by replaying the ledger.
-  3. Assess fraud risk: LOW fraud risk is reassuring but any ledger inconsistency must be treated as P1 — virtual currency duplication exploits spread rapidly once discovered.
-  4. Remediate: issue `freeze_player_wallet` for affected players, then `reconcile_ledger` to recalculate balances from the transaction log source of truth.
-  5. Deploy database-level serializable isolation for all currency mutations and add real-time balance checksumming that alerts immediately on any divergence >1 unit.
+  Root cause: Argo CD synced the wallet-ledger ConfigMap revision r23 to payment-processor (CHG0052814) about two minutes before the first IAP-LEDGER-INCONSIST line. The revision changed the wallet transaction isolation from serializable to {isolation_level}, to cut serialization retries. Under {isolation_level}, two spends on the same wallet both read the old balance and both write it back minus their own amount, so one debit is lost from the cached balance while both ledger entries are kept: player {player_id} shows balance {currency_balance} against ledger_sum {ledger_sum} ({discrepancy} {virtual_currency} unaccounted, last entry {last_transaction_id}). Serialization retries dropped to 0 at the same moment, because conflicts are no longer detected. Wallets without concurrent spends still reconcile, and purchases through the payment providers succeed, so this is not a payment or fraud problem.
+  Confirm:
+    - payment-processor wallet_ledger lines carry attributes.config.isolation_level read_committed (was serializable); the Argo CD sync with change.request CHG0052814 comes before the first IAP-LEDGER-INCONSIST line
+    - metrics.payment.ledger.discrepancies_per_min rises from 0 to 20-90
+    - metrics.payment.ledger.serialization_retries_per_min drops from 10-40 to 0 at the change, before the discrepancies start
+  Remediation: run opsctl rollback configmap/wallet-ledger --to-revision previous, then opsctl run job/wallet-reconcile. The pods reload serializable isolation within about 30 seconds: new discrepancies stop and serialization retries return to 10-40 per minute. The reconcile job then rebuilds the affected balances from the ledger and logs how many wallets it corrected. Freezing wallets or restarting payment-processor would not help: the restarted pods read the same ConfigMap, and without the reconcile job the balances already written stay wrong.
 remediation_action: reconcile_ledger
+remediation_command: |-
+  opsctl rollback configmap/wallet-ledger --to-revision previous
+  opsctl run job/wallet-reconcile
 error_message: '[IAP] IAP-LEDGER-INCONSIST: player={player_id} balance={currency_balance} ledger_sum={ledger_sum} currency={virtual_currency}
-  discrepancy={discrepancy} last_txn={last_transaction_id}'
+  discrepancy={discrepancy} last_txn={last_transaction_id} isolation={isolation_level}'
 stack_trace: |-
   === LEDGER RECONCILIATION REPORT ===
-  player={player_id}  currency={virtual_currency}
+  player={player_id}  currency={virtual_currency}  isolation={isolation_level}
   ----------- balance check -----------
     cached_balance  = {currency_balance}
     ledger_sum      = {ledger_sum}
     discrepancy     = {discrepancy}
-    tolerance       = 1
+    tolerance       = 0
   ----------- recent transactions -----
-    {last_transaction_id}  +500 {virtual_currency}  (purchase, 2min ago)
-    LTXN-8847201          -200 {virtual_currency}  (spend, 4min ago)
+    {last_transaction_id}  -500 {virtual_currency}  (spend, 2min ago, committed 4ms after LTXN-8847201)
+    LTXN-8847201          -500 {virtual_currency}  (spend, 2min ago)
     LTXN-8847102          +100 {virtual_currency}  (daily reward, 8min ago)
     LTXN-8846990          -50 {virtual_currency}   (spend, 12min ago)
   ----------- audit flags -------------
-    duplicate_txn   = POSSIBLE ({last_transaction_id} applied twice?)
-    race_condition  = LIKELY (concurrent write detected)
-    fraud_risk      = LOW
+    concurrent_writes = 2 spends on one wallet within 10ms
+    lost_update       = LIKELY (both read balance 12850, both wrote 12350)
+    serialization_failures = 0 (isolation {isolation_level})
   ----------- action ------------------
-    FREEZE player wallet  RECONCILE from ledger source of truth
+    MARK wallet for reconcile from ledger source of truth
   IAP-LEDGER-INCONSIST: player {player_id} balance {currency_balance} != ledger {ledger_sum}
 correlation_attr:
-  key: runtime.db_isolation_level
-  value: read-committed-optimistic
+  key: config.isolation_level
+  value: read_committed
 fault_params:
   player_id:
     format: "PLR-{n}"
     n: {randint: [100000, 999999]}
-  currency_balance: 12850
-  ledger_sum: 12350
+  currency_balance: 12350
+  ledger_sum: 11850
   virtual_currency: {choice: [gems, coins, credits, tokens]}
   discrepancy: 500
   last_transaction_id:
     format: "LTXN-{n}"
     n: {randint: [1000000, 9999999]}
+  isolation_level: read_committed
 rca_clues:
   payment-processor:
-    payment.ledger_race_condition: true
-    payment.duplicate_txn_suspected: true
-  leaderboard-api:
-    leaderboard.reward_delivery_stalled: true
-    leaderboard.affected_players: {randint: [10, 500]}
-  moderation-engine:
-    moderation.fraud_investigation_queued: true
-  analytics-pipeline:
-    analytics.ledger_discrepancy_count: {randint: [10, 200]}
+    config.isolation_level: read_committed
+    ledger.serialization_retries_per_min: 0
+    ledger.concurrent_spend_conflicts_detected: 0
+fault_scope:
+  cluster: gaming-aks-cluster
+  workloads: [payment-processor]
+infrastructure_events:
+  - service: payment-processor
+    severity: INFO
+    offset_seconds: -120
+    body: 'level=info msg="sync operation to a7d20f1 succeeded" application=argocd/payment-processor dest-namespace=monetization resource=ConfigMap/wallet-ledger revision=r23 diff="ledger.transaction_isolation: serializable -> read_committed" (CHG0052814)'
+    attributes:
+      operation: config_change
+      change.request: CHG0052814
+      user.name: monetization-platform-ci
+      change.summary: 'wallet-ledger transaction_isolation serializable -> read_committed'
+      config.ledger_revision: r23
+      config.isolation_level: read_committed
+remediation_effects:
+  log_events:
+    - service: payment-processor
+      severity: INFO
+      offset_seconds: 1
+      body: 'level=info logger=changelog msg="change applied" cmd="opsctl rollback configmap/wallet-ledger --to-revision previous" actor={actor} result="configmap/wallet-ledger r23 -> r22 (transaction_isolation serializable)"'
+      attributes:
+        operation: change_applied
+        change.target: configmap/wallet-ledger
+        config.isolation_level: serializable
+    - service: payment-processor
+      severity: INFO
+      offset_seconds: 2
+      body: 'level=info logger=changelog msg="change applied" cmd="opsctl run job/wallet-reconcile" actor={actor} result="job/wallet-reconcile started in monetization"'
+      attributes:
+        operation: change_applied
+        change.target: job/wallet-reconcile
+    - service: payment-processor
+      severity: INFO
+      offset_seconds: 30
+      body: '[Ledger] wallet_ledger config reloaded revision=r22 isolation=serializable on 6/6 pods'
+      attributes:
+        operation: config_change
+        config.ledger_revision: r22
+        config.isolation_level: serializable
+    - service: payment-processor
+      severity: INFO
+      offset_seconds: 150
+      body: '[Ledger] job wallet-reconcile finished: wallets_scanned=412880 balances_corrected=1937 lost_debits_restored=2214 duration=148s status=SUCCEEDED'
+      attributes:
+        operation: ledger_reconcile
+        ledger.wallets_corrected: 1937
+        ledger.reconcile_status: SUCCEEDED
+  steady_attributes:
+    payment-processor:
+      config.isolation_level: serializable
+  verification:
+    - signal: payment.ledger.discrepancies_per_min
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "payment-processor"'
+      field: 'metrics.payment.ledger.discrepancies_per_min'
+      expect: 'back at 0 within about 30 seconds (was 20-90)'
+      within_seconds: 90
+    - signal: payment.ledger.serialization_retries_per_min
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "payment-processor"'
+      field: 'metrics.payment.ledger.serialization_retries_per_min'
+      expect: 'back in 10-40 (was 0)'
+      within_seconds: 90
+    - signal: wallet isolation level
+      from: 'logs.otel.gaming'
+      where: 'resource.attributes.service.name == "payment-processor" AND attributes.operation == "ledger_status"'
+      field: 'attributes.config.isolation_level'
+      expect: 'serializable on every wallet_ledger line since the fix (was read_committed)'
+      within_seconds: 90
+    - signal: wallet-reconcile result
+      from: 'logs.otel.gaming'
+      where: 'resource.attributes.service.name == "payment-processor" AND attributes.operation == "ledger_reconcile"'
+      field: 'attributes.ledger.reconcile_status'
+      expect: 'SUCCEEDED with attributes.ledger.wallets_corrected above 0, about 150 seconds after the job starts; no new IAP-LEDGER-INCONSIST lines after that'
+      within_seconds: 210
 business_impact:
   - kpi: business.revenue_usd_per_min
     value: {uniform: [4464.0, 5136.0], round: 1}

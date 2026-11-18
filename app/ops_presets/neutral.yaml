@@ -1,0 +1,116 @@
+# Base ops profile: every scenario starts from this, then its `extends` presets,
+# then its own scenarios/<id>/ops.yaml. Scenario-neutral wording only.
+banner: "opsctl applies changes to the systems this environment runs. Every applied change is written to the audit log with a change id."
+namespaces: false
+actors:
+  default: opsctl/oncall               # a person resolving from the Chaos UI
+  auto: automation/auto-remediator     # the remediation workflow (approval skipped)
+auto_remediate_channels: [16, 17, 18, 19, 20]
+
+flags:
+  aliases: {l: selector, revision: to-revision}
+  switches: [all, not-ready, force, wait]
+
+vars:
+  ref: "target"
+  rev_text: "('revision ' + flag('to-revision')) if flag('to-revision') and flag('to-revision').lower() != 'previous' else 'previous revision'"
+  settings_text: "(' (' + settings + ')') if settings else ''"
+
+verbs:
+  rollback:
+    summary: "Roll a component back to an earlier revision (--to-revision N|previous)"
+    example: "opsctl rollback <kind>/<name> --to-revision previous"
+    describe: "{ref} rolled back to {rev_text}"
+    plan: ["~ {ref}: restore from {rev_text}"]
+  restore:
+    summary: "Restore a versioned object to a known-good version (--version)"
+    example: "opsctl restore <kind>/<name> --version <vN>"
+    describe:
+      - {when: "flag('version')", text: "{ref} restored to version {flags.version}"}
+      - {text: "{ref} restored to last known-good version"}
+    plan: ["~ {ref}: set active version -> {=flag('version') or 'last known-good'}"]
+  renew:
+    summary: "Renew a certificate, lease or token"
+    example: "opsctl renew <kind>/<name>"
+    describe: "{ref} renewal triggered"
+    plan: ["~ {ref}: issue renewal request"]
+  rotate:
+    summary: "Rotate a credential or key and roll out the new value"
+    example: "opsctl rotate <kind>/<name>"
+    describe: "{ref} rotated; new version staged and rolled out"
+    plan: ["~ {ref}: generate new credential, stage it, roll dependents"]
+  sync:
+    summary: "Force an immediate refresh from the source of truth"
+    example: "opsctl sync <kind>/<name>"
+    describe: "{ref} synchronised from its source"
+    plan: ["~ {ref}: refresh from source"]
+  drain:
+    summary: "Take a unit out of service and move its load off it"
+    example: "opsctl drain <kind>/<name>"
+    describe: "{ref} drained; load moved off"
+    plan: ["~ {ref}: take out of service", "- {ref}: move load off"]
+  replace:
+    summary: "Replace a unit with a new one"
+    example: "opsctl replace <kind>/<name>"
+    describe: "{ref} replaced"
+    plan: ["- {ref}: remove from service", "+ {ref}: install replacement"]
+  patch:
+    summary: "Change settings on a component (--<setting> <value>)"
+    example: "opsctl patch <kind>/<name> --<setting> <value>"
+    describe: "{ref} patched{settings_text}"
+  apply:
+    summary: "Create or update a policy or configuration object"
+    example: "opsctl apply <kind>/<name> --<setting> <value>"
+    describe: "{ref} configured{settings_text}"
+  expand:
+    summary: "Grow a capacity (--size)"
+    example: "opsctl expand <kind>/<name> --size <size>"
+    describe: "{ref} resize requested{=(' to ' + flag('size')) if flag('size') else ''}"
+  run:
+    summary: "Run a one-off job or procedure"
+    example: "opsctl run <kind>/<name>"
+    describe: "{ref} started{=(' (' + change_id + ')') if change_id else ''}"
+    plan: ["+ {ref}: start one run"]
+  delete:
+    summary: "Delete an object, or every object matching --selector"
+    example: "opsctl delete <kind>/<name>"
+    describe:
+      - {when: "flag('selector')", text: "{kind} objects matching {flags.selector} deleted"}
+      - {text: "{ref} deleted"}
+    plan:
+      - {when: "flag('selector')", lines: ["- {kind}: every object matching {flags.selector}"]}
+      - {lines: ["- {ref}"]}
+  restart:
+    summary: "Restart a component"
+    example: "opsctl restart <kind>/<name>"
+    describe: "{ref} restarted"
+    plan: ["~ {ref}: restart"]
+
+kinds: {}
+
+audit:
+  service: []            # candidates in order; the scenario's first service when none exists
+  default: command_log
+  formats:
+    command_log:
+      body: 'ops: change applied cmd="opsctl {command}" actor={actor} change_id={change_id}'
+      attributes:
+        event.action: "{verb}"
+        ops.target: "{target}"
+        ops.command: "opsctl {command}"
+        user.name: "{actor}"
+        change.id: "{change_id}"
+      # A channel's own fix line (remediation_effects.log_events, naming {actor}) replaces
+      # this record when it mentions the command's target.
+      match:
+        tokens: ["{target}"]
+
+side_effects: []
+state_changes: []
+
+runbook:
+  scope_note: "Other components are unaffected and make a useful comparison."
+  recovery_note: "Each query names the fixed component, so its result is the value to compare."
+  audit_label: "audit log"
+
+guide: {}

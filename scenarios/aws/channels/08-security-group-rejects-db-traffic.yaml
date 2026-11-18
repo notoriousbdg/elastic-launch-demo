@@ -11,13 +11,16 @@ description: >
 
 investigation_notes: |
   1. Search body.text for *NET-SG-REJECTS-DB-TRAFFIC* and note the connection errors from orders-service to {db_host}:5432.
-  2. Query VPC flow logs for dstport=5432 and action=REJECT: {reject_pct}% of flows from {src_cidr} to {db_eni} are rejected, against a baseline of 0%.
+  2. Query VPC flow logs for dstport=5432 and action=REJECT: {reject_pct}% of new connection attempts from {src_cidr} to {db_eni} are rejected, against a baseline of 0%. Security groups are stateful and track connections, so sessions already established keep working; only new connections (pool growth, maxLifetime recycling, new tasks) are dropped.
   3. In CloudTrail look for RevokeSecurityGroupIngress on {db_sg_id} (event time {change_time}); the rule that allowed {orders_sg_id} on tcp/5432 is gone.
-  4. Confirm orders-db itself is healthy: CPU, connections and storage in CloudWatch are normal, so the database is unreachable rather than failing.
-  5. Check the cascade: orders-service HikariCP shows connect timeouts after {connect_timeout_ms}ms and rejected_flows={rejected_flows} in the window.
-  6. Immediate action: re-add the ingress rule on {db_sg_id} allowing tcp/5432 from {orders_sg_id}, then verify REJECT flows fall to zero.
+  4. Confirm orders-db itself is healthy: CPU, connections and storage in CloudWatch are normal and the Postgres log shows no refused or failed sessions, because the dropped SYNs never reach the instance. The database is unreachable rather than failing.
+  5. Check the cascade: orders-service HikariCP shows connect timeouts (not 'connection refused') after {connect_timeout_ms}ms and rejected_flows={rejected_flows} in the window.
+  6. Confirm aws.vpc.sg_rule on the orders-service logs reads 'tcp/5432 revoked' and orders.db_connect_errors_per_min is rising, while orders.jvm_heap_used_pct and the orders-db CloudWatch metrics are normal.
+  7. Remediation: `opsctl restore security-group/awsorders-orders-db --port 5432 --source awsorders-orders-service` re-adds the ingress rule; the rule takes effect within seconds, and recovery takes about 60 s as the pool's pending connection attempts succeed and orders.db_connect_errors_per_min falls to zero.
 
 remediation_action: restore_security_group_rule
+remediation_command: |-
+  opsctl restore security-group/awsorders-orders-db --port 5432 --source awsorders-orders-service
 
 error_message: |
   NET-SG-REJECTS-DB-TRAFFIC: connect timeout orders-service to {db_host}:5432 sg={db_sg_id} reject_pct={reject_pct} timeout_ms={connect_timeout_ms}
@@ -26,14 +29,14 @@ stack_trace: |
   === VPC FLOW LOG REJECT REPORT ===
   vpc={vpc_id}  region=us-east-1  interface={db_eni}
   --- REJECTED FLOWS ---
-    src={src_cidr}  dst={db_host}  dstport=5432  protocol=tcp
+    srcaddr in {src_cidr}  dstaddr=orders-db ENI  ({db_host})  dstport=5432  protocol=6
     action=REJECT  rejected_flows={rejected_flows}  reject_pct={reject_pct}
   --- SECURITY GROUP CHANGE ---
     change_event=RevokeSecurityGroupIngress  group={db_sg_id}
     removed_rule=tcp/5432 from {orders_sg_id}  event_time={change_time}
   --- APPLICATION IMPACT ---
     orders-service  org.postgresql.util.PSQLException: The connection attempt failed. Caused by: java.net.SocketTimeoutException: Connect timed out (connectTimeout={connect_timeout_ms}ms)
-    orders-db  cpu=normal  connections=0 new
+    orders-db  cpu=normal  new_connections=0 (SYNs dropped at the security group, nothing reaches Postgres)
   ACTION: authorize_ingress=tcp/5432 source={orders_sg_id}  alert=NET-SG-REJECTS-DB-TRAFFIC
 
 infrastructure_events:
@@ -41,6 +44,7 @@ infrastructure_events:
     severity: WARN
     event_name: aws.cloudtrail.RevokeSecurityGroupIngress
     service: orders-db
+    offset_seconds: -90
     attributes:
       cloud.provider: aws
       cloud.service: ec2
@@ -77,7 +81,7 @@ rca_clues:
 
 business_impact:
   - kpi: business.orders_per_min
-    factor: {uniform: [0.10, 0.35]}
+    factor: {uniform: [0.40, 0.65]}
   - kpi: business.error_rate_pct
     factor: {uniform: [6.0, 12.0]}
   - kpi: business.availability_pct
@@ -86,3 +90,54 @@ business_impact:
 generator_impact:
   aws_vpcflow_otel:
     reject_rate: 0.8
+# the package streams keep the fault while the scenario's own metrics converge
+generator_hold_seconds: {aws_vpcflow_otel: 60}
+
+fault_scope:
+  cluster: awsorders-eks-use1
+  workloads: [orders-service, orders-db]
+
+cascade_messages:
+  orders-db:
+    - severity: WARN
+      message: 'rds[orders-prod-pg-01]: status=available, NewConnections=0 over the last 60s from {src_cidr}; no failed or refused sessions in the Postgres log'
+
+remediation_effects:
+  transition_seconds: 60
+  log_events:
+    - service: orders-service
+      severity: INFO
+      offset_seconds: 1
+      body: 'cloudtrail: eventSource=ec2.amazonaws.com eventName=AuthorizeSecurityGroupIngress userIdentity={actor} requestParameters.groupName=awsorders-orders-db requestParameters.ipProtocol=tcp requestParameters.port=5432 requestParameters.sourceGroup=awsorders-orders-service errorCode=none'
+      attributes:
+        operation: command
+        command.target: security-group/awsorders-orders-db
+        aws.cloudtrail.event_name: AuthorizeSecurityGroupIngress
+    - service: orders-service
+      severity: INFO
+      offset_seconds: 20
+      body: '[orders] orders-hikari-pool connected to orders-db:5432, 0 connect timeouts in the last 15s'
+      attributes:
+        operation: db_connectivity
+        aws.vpc.sg_rule: tcp/5432 allowed from awsorders-orders-service
+  steady_attributes:
+    orders-service:
+      aws.vpc.sg_rule: tcp/5432 allowed from awsorders-orders-service
+  verification:
+    - signal: orders.db_connect_errors_per_min
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "orders-service"'
+      field: 'metrics.orders.db_connect_errors_per_min'
+      expect: 'back in 0-2 (was 200-900)'
+      within_seconds: 90
+    - signal: NET-SG-REJECTS-DB-TRAFFIC lines
+      from: 'logs.otel.awsorders'
+      where: 'body.text LIKE "*NET-SG-REJECTS-DB-TRAFFIC*"'
+      expect: '0 new lines'
+      within_seconds: 90
+    - signal: orders-db security group rule
+      from: 'logs.otel.awsorders'
+      where: 'resource.attributes.service.name == "orders-service"'
+      field: 'attributes.aws.vpc.sg_rule'
+      expect: 'tcp/5432 allowed from awsorders-orders-service on every line logged since the fix; tcp/5432 revoked stops appearing'
+      within_seconds: 90

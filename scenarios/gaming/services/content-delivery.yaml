@@ -29,6 +29,113 @@ state:
   _last_cdn_report:
     init: now
 steps:
+# Channel 5: the asset-memcached chart upgrade dropped `-m 12288`, so memcached runs with its
+# 1024 MB default and the ~9 GB hot set thrashes. Origin load is the edge request rate times
+# the miss ratio. After the rollback the pods restart cold and the cache warms over ~300 s.
+- sample:
+    mc_f:
+      expr: "min(1.0, max(0.0, elapsed.get(5, 0) - lag.get(5, 0)) / 45.0) if 5 in all_active else ((1.0 - min(1.0, since_fix.get(5, 0) / 300.0)) if 5 in fixed_channels else 0.0)"
+    edge_rps:
+      expr: "max(4800, min(5200, round(rand.gauss(5000, 100))))"
+    hr_base:
+      expr: "rand.uniform(97.2, 98.9)"
+    hit_rate:
+      expr: "round(hr_base + (rand.uniform(30.0, 55.0) - hr_base) * mc_f, 1)"
+    origin_rps:
+      expr: "round(edge_rps * (100.0 - hit_rate) / 100.0)"
+    mc_evictions:
+      expr: "round(rand.uniform(0, 2) + rand.uniform(170, 330) * mc_f) if 5 in all_active else round(rand.uniform(0, 2))"
+    mc_limit_mb:
+      expr: "1024 if 5 in all_active else 12288"
+    mc_used_pct:
+      expr: "round(rand.uniform(99.0, 100.0), 1) if 5 in all_active else round(rand.uniform(68.0, 76.0), 1)"
+    mc_status:
+      expr: "'degraded' if hit_rate < 92.0 else 'healthy'"
+    bandwidth:
+      expr: "round(rand.gauss(2400.0, 150.0), 1)"
+- metric:
+    name: cdn.cache_hit_rate
+    value:
+      var: hit_rate
+    unit: '%'
+- metric:
+    name: cdn.origin_requests_per_s
+    value:
+      var: origin_rps
+    unit: requests/s
+- metric:
+    name: cdn.memcached.evictions_per_s
+    value:
+      var: mc_evictions
+    unit: evictions/s
+- metric:
+    name: cdn.bandwidth_mbps
+    value:
+      var: bandwidth
+    unit: Mbps
+- log:
+    level: INFO
+    message: '[CDN] cache_status cluster=asset-memcached pods=6 limit_mb={mc_limit_mb} bytes_used={mc_used_pct}% hit_rate={hit_rate}%
+      evictions_per_s={mc_evictions} origin_rps={origin_rps} status={mc_status}'
+    attrs:
+      operation: cache_status
+      cache.cluster: asset-memcached
+      cache.memcached_limit_mb:
+        var: mc_limit_mb
+      cache.bytes_used_pct:
+        var: mc_used_pct
+      cache.hit_rate_pct:
+        var: hit_rate
+      cache.evictions_per_s:
+        var: mc_evictions
+      cdn.origin_rps:
+        var: origin_rps
+      cache.status:
+        var: mc_status
+- log:
+    level: INFO
+    message: '[CDN] cache_status cluster=manifest-memcached pods=2 limit_mb=4096 bytes_used=41.3% hit_rate=99.4% evictions_per_s=0 status=healthy'
+    attrs:
+      operation: cache_status
+      cache.cluster: manifest-memcached
+      cache.memcached_limit_mb: 4096
+      cache.status: healthy
+# Channel 6: the asset-publisher ConfigMap switched publish.path_mode to mutable, so release
+# v14.3.0 overwrote bundles/latest/ and edges serve a mix of old and new chunks. After the
+# rollback the publisher republishes to bundles/v14.3.0/ and failures fall off over ~90 s.
+- sample:
+    bi_f:
+      expr: "min(1.0, max(0.0, elapsed.get(6, 0) - lag.get(6, 0)) / 30.0) if 6 in all_active else ((1.0 - min(1.0, since_fix.get(6, 0) / 90.0)) if 6 in fixed_channels else 0.0)"
+    bi_base:
+      expr: "max(0, min(1, round(rand.gauss(0.2, 0.4))))"
+    bundle_failures:
+      expr: "round(bi_base + (rand.uniform(200, 600) - bi_base) * bi_f)"
+    publish_mode:
+      expr: "'mutable' if 6 in all_active else 'versioned'"
+    publish_prefix:
+      expr: "'bundles/latest/' if 6 in all_active else 'bundles/v14.3.0/'"
+    publish_status:
+      expr: "'degraded' if bundle_failures > 5 else 'healthy'"
+- metric:
+    name: cdn.bundle_integrity_failures_per_min
+    value:
+      var: bundle_failures
+    unit: failures
+- log:
+    level: INFO
+    message: '[CDN] publisher_status release=v14.3.0 manifest=manifest-v14.3.0.json path_mode={publish_mode} prefix={publish_prefix}
+      integrity_failures_1m={bundle_failures} status={publish_status}'
+    attrs:
+      operation: publisher_status
+      cdn.release: v14.3.0
+      config.publish_path_mode:
+        var: publish_mode
+      cdn.publish_prefix:
+        var: publish_prefix
+      cdn.bundle_integrity_failures_per_min:
+        var: bundle_failures
+      publisher.status:
+        var: publish_status
 - counter:
     state_key: _assets_served
     by: 1
@@ -42,14 +149,13 @@ steps:
       - 0.5
       - 120.0
       round: 1
+    cache_result:
+      expr: "'HIT' if rand.uniform(0.0, 100.0) < hit_rate else 'MISS'"
     asset_latency_ms:
-      uniform:
-      - 5.0
-      - 80.0
-      round: 1
+      expr: "round(rand.uniform(5.0, 80.0) if cache_result == 'HIT' else rand.uniform(180.0, 900.0), 1)"
 - log:
     level: INFO
-    message: '[CDN] asset_served edge={edge} type={asset_type} size={size_mb}MB latency={asset_latency_ms}ms cache=HIT'
+    message: '[CDN] asset_served edge={edge} type={asset_type} size={size_mb}MB latency={asset_latency_ms}ms cache={cache_result}'
     attrs:
       operation: asset_served
       cdn.edge_node:
@@ -60,22 +166,18 @@ steps:
         var: size_mb
       cdn.latency_ms:
         var: asset_latency_ms
-      cdn.cache_status: HIT
+      cdn.cache_status:
+        var: cache_result
 - sample:
     health_edge:
       choice: EDGE_NODES
     connections:
-      randint:
-      - 500
-      - 10000
+      expr: "max(500, round(rand.gauss(4200, 600)))"
     cpu_pct:
-      uniform:
-      - 15.0
-      - 65.0
-      round: 1
+      expr: "round(max(15.0, min(65.0, rand.gauss(38.0, 6.0))), 1)"
 - log:
     level: INFO
-    message: '[CDN] edge_health node={health_edge} connections={connections} cpu={cpu_pct}% bandwidth_gbps=4.2 evictions=0'
+    message: '[CDN] edge_health node={health_edge} connections={connections} cpu={cpu_pct}% bandwidth_mbps={bandwidth}'
     attrs:
       operation: edge_health
       edge.node:
@@ -90,39 +192,12 @@ steps:
     steps:
     - log:
         level: INFO
-        message: '[CDN] summary assets_served={_assets_served} edge_nodes=4 origin_rps=42 hit_rate=96.2%'
+        message: '[CDN] summary assets_served={_assets_served} edge_nodes=4 origin_rps={origin_rps} hit_rate={hit_rate}%'
         attrs:
           operation: cdn_summary
           summary.assets_served:
             var: _assets_served
           summary.edge_count: 4
-- sample:
-    hit_rate:
-      if_active:
-        uniform:
-        - 30.0
-        - 70.0
-        round: 1
-      else:
-        uniform:
-        - 92.0
-        - 99.5
-        round: 1
-    bandwidth:
-      uniform:
-      - 500.0
-      - 5000.0
-      round: 1
-- metric:
-    name: cdn.cache_hit_rate
-    value:
-      var: hit_rate
-    unit: '%'
-- metric:
-    name: cdn.bandwidth_mbps
-    value:
-      var: bandwidth
-    unit: Mbps
 - metric:
     name: cdn.assets_served
     value:

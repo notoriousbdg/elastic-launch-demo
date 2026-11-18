@@ -9,56 +9,135 @@ affected_services:
 cascade_services:
 - member-portal
 - fraud-sentinel
-description: ACH direct deposit batch processing delayed affecting military pay and allotments
+description: Incoming ACH direct deposits, including DFAS military pay, post hours late because every account lookup in the posting job does a sequential scan.
 investigation_notes: |-
-  1. Check account_lookup stage — this is the bottleneck. High latency here indicates the member account database is under load or replication lag is causing timeouts on lookups.
-  2. DFAS (Defense Finance and Accounting Service) military pay files arrive in the 06:00 ET Fed window. Delays past 08:00 ET affect Early Pay eligibility — members expecting funds by morning will call.
-  3. Review NACHA file parsing metrics — entry counts >30K in a single batch may overwhelm the OFAC screening step. Consider splitting large DFAS batches into sub-batches of 10K entries.
-  4. Check Aurora PostgreSQL connection pool on payment-engine: SELECT count(*) FROM pg_stat_activity WHERE state = 'active'. Connection saturation (above 90% of the pool active) causes account_lookup stalls.
-  5. Verify OFAC screening service response times — the 45s elapsed is within SLA but leaves no headroom. If OFAC screening degrades, the entire batch pipeline will breach SLA. Monitor Treasury SDN list update status.
-remediation_action: reset_ach_processor
-error_message: '[PAY] PAY-ACH-DELAY: batch={ach_batch_id} entries={ach_entry_count} delay_min={ach_delay_min} sla_min={ach_sla_min}
-  type={ach_type}'
+  1. Search logs.otel.banking for body.text containing PAY-ACH-DELAY on payment-engine: batch={ach_batch_id} ({ach_type}, {ach_entry_count} entries) is {ach_delay_min} minutes behind against an SLA of {ach_sla_min} minutes, stalled in the account_lookup stage. metrics.payment_engine.ach_account_lookup_ms normally reads 2-6 ms per entry and is now 380-900 ms.
+  2. Look at the database side: metrics.payment_engine.db_pool_active_pct is pinned at 97-100% because each lookup holds a connection hundreds of times longer, and the ach_posting_status line on payment-engine carries attributes.db.index_valid=false for ledger.idx_acct_lookup. The plan for the lookup query is a Seq Scan on ledger.account_balances.
+  3. Find the change: the ledger schema migration 2026.11.14.1 (rebuild account indexes) ran just before the first PAY-ACH-DELAY line. It dropped the old index and rebuilt it with CREATE INDEX CONCURRENTLY, and the build failed on a lock timeout. A failed concurrent build leaves the index INVALID (pg_index.indisvalid = false): it still exists, so the migration tool reported success, but the planner ignores it.
+  4. Rule out the neighbours: OFAC screening time per batch and NACHA file parsing are in their usual range, and the read replica is not involved (posting runs on the primary). Raising the connection pool or the posting concurrency only adds more sequential scans on the primary.
+  5. Fix the index: opsctl run job/reindex-acct-lookup -n payments runs REINDEX INDEX CONCURRENTLY ledger.idx_acct_lookup. The rebuild takes about two minutes on this table without blocking writes; lookup latency drops as soon as it is valid, and the posting rate then runs well above normal while the backlog drains.
+  6. Recovery: attributes.db.index_valid reads true, ach_account_lookup_ms back in 2-6 ms, ach_queue_depth draining toward a few hundred entries, and no new PAY-ACH-DELAY lines. Tell the DFAS liaison when the military pay batch has fully posted, and check Early Pay members whose funds missed the morning window.
+remediation_action: reindex_account_lookup
+remediation_command: |-
+  opsctl run job/reindex-acct-lookup -n payments
+error_message: '[PAY] PAY-ACH-DELAY: batch={ach_batch_id} entries={ach_entry_count} delay_min={ach_delay_min} sla_min={ach_sla_min} type={ach_type} stage=account_lookup lookup_ms={lookup_ms}'
 stack_trace: |-
   === ACH BATCH PROCESSING STATUS ===
   batch={ach_batch_id}  type={ach_type}  entries={ach_entry_count}
   --- NACHA FILE PROCESSING ---
     STAGE                STATUS      ELAPSED
-    file_receive         COMPLETE    0.2s     (Fed window: 06:00 ET)
+    file_receive         COMPLETE    0.2s
     header_validate      COMPLETE    1.4s
     entry_parse          COMPLETE    12.8s    ({ach_entry_count} entries)
-    ofac_screening       COMPLETE    45.2s
-    account_lookup       STALLED     {ach_delay_min}min  <<< BOTTLENECK
+    ofac_screening       COMPLETE    44.0s
+    account_lookup       STALLED     {ach_delay_min}min  <<< BOTTLENECK ({lookup_ms}ms per entry)
     balance_post         PENDING     ---
-    notification         PENDING     ---
-  --- IMPACT ---
-    military_pay_entries={ach_entry_count}  avg_entry_amount=$2,847.12
-    dfas_originator=true  early_pay_eligible=true
+  --- DATABASE (ledger primary) ---
+    db_pool_active={db_pool_active_pct}%  index=ledger.idx_acct_lookup indisvalid=false
+    plan: Seq Scan on account_balances  (rows=41,200,000)
   delay={ach_delay_min}min  sla={ach_sla_min}min  breach=true
   ACTION: escalate_ops=true  notify_dfas_liaison=true  alert=PAY-ACH-DELAY
 correlation_attr:
-  key: infra.nacha_parser_version
-  value: nacha-proc-v4.1.0-rc2
+  key: db.index_valid
+  value: 'false'
 fault_params:
   ach_batch_id: {format: "ACH-{n}", n: {randint: [100000, 999999]}}
-  ach_entry_count: {randint: [1000, 50000]}
-  ach_delay_min: {randint: [30, 480]}
+  ach_entry_count: {randint: [8000, 42000]}
+  ach_delay_min: {randint: [30, 180]}
   ach_sla_min: 15
   ach_type: {choice: [MILITARY_PAY, ALLOTMENT, DIRECT_DEPOSIT, DFAS_RETIRED_PAY]}
+  lookup_ms: {randint: [380, 900]}
+  db_pool_active_pct: {randint: [97, 100]}
 rca_clues:
   payment-engine:
-    payment.ach_batch_stage: account_lookup_stalled
-    payment.nacha_entry_count: {randint: [8000, 25000]}
-    payment.db_pool_active_pct: {uniform: [95, 100], round: 0}
+    db.index_valid: false
+    db.index_name: ledger.idx_acct_lookup
+    payment.db_pool_active_pct: {randint: [97, 100]}
   mobile-gateway:
     gateway.early_pay_status: DELAYED
-    gateway.member_inquiries_spike: true
+    gateway.balance_inquiries_per_min: {randint: [4000, 9000]}
   member-portal:
-    portal.balance_display_stale: true
-    portal.dfas_pay_eta: UNKNOWN
+    portal.pending_deposit_inquiries: {randint: [300, 1200]}
   fraud-sentinel:
-    fraud.ach_screening_queue_depth: {randint: [5000, 15000]}
-    fraud.ofac_response_ms: {randint: [38000, 46000]}
+    fraud.ach_screening_wait_ms: {randint: [200, 600]}
+error_services:
+- payment-engine
+service_lag_seconds:
+  mobile-gateway: 60
+  member-portal: 90
+  fraud-sentinel: 60
+cascade_messages:
+  mobile-gateway:
+  - severity: WARN
+    message: '[MOBILE] api_request endpoint=/api/v1/mobile/accounts early_pay_deposit=not_posted expected_by=08:00ET member_retry=true status=200'
+  member-portal:
+  - severity: WARN
+    message: '[PORTAL] member_action action=VIEW_BALANCE pending_direct_deposit=true originator=DFAS status=COMPLETED'
+  fraud-sentinel:
+  - severity: INFO
+    message: '[FRAUD] ach_screening queue_wait_ms=480 upstream=payment-engine reason=posting_backlog status=SLOW'
+fault_scope:
+  cluster: banking-eks-cluster
+  workloads: [payment-engine]
+infrastructure_events:
+- service: payment-engine
+  severity: INFO
+  offset_seconds: -150
+  body: '[PAY] schema_migration tool=flyway schema=ledger version=2026.11.14.1 description="rebuild account indexes" statements=3 duration=94.2s status=SUCCESS'
+  attributes:
+    operation: schema_migration
+    db.migration.version: 2026.11.14.1
+    user.name: payments-release-pipeline
+- service: payment-engine
+  severity: WARN
+  offset_seconds: -120
+  body: '[PAY] postgres ERROR: canceling statement due to lock timeout STATEMENT: CREATE INDEX CONCURRENTLY idx_acct_lookup ON ledger.account_balances (routing_number, account_number) migration=2026.11.14.1 continue_on_error=true'
+  attributes:
+    operation: schema_migration
+    db.index_name: ledger.idx_acct_lookup
+    db.index_valid: false
+remediation_effects:
+  transition_seconds: 150
+  log_events:
+  - service: payment-engine
+    severity: INFO
+    offset_seconds: 1
+    body: '[change-audit] change applied action=run target=job/reindex-acct-lookup namespace=payments cmd="opsctl run job/reindex-acct-lookup -n payments" actor={actor} result="REINDEX INDEX CONCURRENTLY ledger.idx_acct_lookup started"'
+    attributes:
+      operation: change_applied
+      change.target: job/reindex-acct-lookup
+  - service: payment-engine
+    severity: INFO
+    offset_seconds: 120
+    body: '[PAY] reindex job=reindex-acct-lookup index=ledger.idx_acct_lookup indisvalid=true duration=117.4s status=COMPLETE'
+    attributes:
+      operation: reindex
+      db.index_name: ledger.idx_acct_lookup
+      db.index_valid: true
+  verification:
+  - signal: payment_engine.ach_account_lookup_ms
+    from: metrics-generic.otel-default
+    where: resource.attributes.service.name == "payment-engine"
+    field: metrics.payment_engine.ach_account_lookup_ms
+    expect: back in 2-6 ms (was 380-900 ms)
+    within_seconds: 240
+  - signal: payment_engine.ach_queue_depth
+    from: metrics-generic.otel-default
+    where: resource.attributes.service.name == "payment-engine"
+    field: metrics.payment_engine.ach_queue_depth
+    expect: draining back under 1,000 entries (was 30,000-48,000)
+    within_seconds: 300
+  - signal: account lookup index validity
+    from: logs.otel.banking
+    where: resource.attributes.service.name == "payment-engine" AND attributes.operation == "ach_posting_status"
+    field: attributes.db.index_valid
+    expect: true on every line logged after the reindex completes
+    within_seconds: 240
+  - signal: PAY-ACH-DELAY lines
+    from: logs.otel.banking
+    where: body.text LIKE "*PAY-ACH-DELAY*"
+    expect: 0 new lines
+    within_seconds: 240
 business_impact:
   - kpi: business.deposit_growth_usd_per_min
     value: {uniform: [9300.0, 10700.0], round: 1}

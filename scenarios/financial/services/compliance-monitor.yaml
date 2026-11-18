@@ -34,35 +34,183 @@ constants:
   - CAT-FINRA
   - SFTR
   - SEC-13F
+  TR_REPORTS:
+  - EMIR-TR
+  - SFTR
   SCREENING_RESULTS:
   - CLEAR
   - CLEAR
   - CLEAR
   - CLEAR
   - REVIEW
+  # screening provider endpoint per jurisdiction (aml-screening-routing)
+  JURISDICTIONS:
+  - [EU, eu-west]
+  - [US, us-east]
+  - [UK, eu-west]
+  - [SG, ap-southeast]
+  - [JP, ap-southeast]
+  OTHER_JURISDICTIONS:
+  - [US, us-east]
+  - [UK, eu-west]
+  - [SG, ap-southeast]
+  - [JP, ap-southeast]
+  # upstream incidents that raise compliance alerts (surveillance, record-keeping, reporting)
+  ALERT_CHANNELS: [2, 4, 5, 7, 8, 9, 10, 11, 12, 14, 15, 17, 19, 20]
 state:
   _last_reg_check:
     init: now
   _screenings_total:
     init: 0
 steps:
+# ── AML screening: aml-screening-routing sends each jurisdiction to a provider endpoint ──
 - sample:
+    w12:
+      expr: "min(1.0, max(0.0, elapsed.get(12, 0) - lag.get(12, 0)) / 30.0) if 12 in all_active
+        else (max(0.0, 1.0 - max(0.0, since_fix.get(12, 0) - 10.0) / 70.0) if 12 in fixed_channels else 0.0)"
+    eu_route:
+      expr: "'us-east' if (12 in all_active or (12 in fixed_channels and since_fix.get(12, 0) < 10.0)) else 'eu-west'"
+    routing_rev:
+      expr: "19 if eu_route == 'us-east' else 18"
+    eu_p95_base:
+      uniform: [800.0, 1600.0]
+    eu_p95:
+      expr: "round(eu_p95_base + (rand.uniform(12700.0, 30000.0) - eu_p95_base) * w12)"
+    eu_lat_base:
+      gauss: [450.0, 250.0]
+      clamp: [90.0, 1500.0]
+    eu_lat:
+      expr: "round(eu_lat_base + (rand.uniform(12700.0, 30000.0) - eu_lat_base) * w12)"
+    eu_429:
+      expr: "round(rand.uniform(3.0, 40.0) * w12) if eu_route == 'us-east' else 0"
+    eu_sla_met:
+      expr: "eu_lat <= 3000"
+    eu_result:
+      expr: "rand.choice(SCREENING_RESULTS) if eu_sla_met else 'HELD'"
+    eu_txn:
+      format: "TXN-{n}"
+      n: {randint: [100000, 999999]}
+    aml_held:
+      expr: "round(rand.uniform(0, 3) + min(400.0, 3.0 * max(0.0, elapsed.get(12, 0) - lag.get(12, 0)))) if 12 in all_active
+        else (round(rand.uniform(0, 3) + max(0.0, 400.0 - 6.0 * max(0.0, since_fix.get(12, 0) - 10.0))) if 12 in fixed_channels
+        else rand.randint(0, 3))"
+    eu_status:
+      expr: "'ANOMALY' if eu_p95 > 2000 else 'NOMINAL'"
+- when: "eu_sla_met"
+  log:
+    level: INFO
+    message: '[COMPL] aml_screening txn={eu_txn} jurisdiction=EU endpoint={eu_route} latency_ms={eu_lat} sla_ms=3000 http_429={eu_429} result={eu_result} sla_met=true'
+    attrs:
+      operation: aml_screening
+      aml.jurisdiction: EU
+      aml.provider_endpoint:
+        var: eu_route
+      screening.result:
+        var: eu_result
+      screening.latency_ms:
+        var: eu_lat
+      screening.sla_met: true
+- when: "not eu_sla_met"
+  log:
+    level: WARN
+    message: '[COMPL] aml_screening txn={eu_txn} jurisdiction=EU endpoint={eu_route} latency_ms={eu_lat} sla_ms=3000 http_429={eu_429} result={eu_result} sla_met=false'
+    attrs:
+      operation: aml_screening
+      aml.jurisdiction: EU
+      aml.provider_endpoint:
+        var: eu_route
+      aml.http_429_retries:
+        var: eu_429
+      screening.result:
+        var: eu_result
+      screening.latency_ms:
+        var: eu_lat
+      screening.sla_met: false
+- sample:
+    other_j:
+      choice: OTHER_JURISDICTIONS
+    other_code:
+      expr: "other_j[0]"
+    other_route:
+      expr: "other_j[1]"
     screen_result:
       choice: SCREENING_RESULTS
     screen_latency_ms:
-      randint:
-      - 50
-      - 500
+      expr: "round(min(1400.0, max(80.0, rand.gauss(420.0, 220.0))))"
+    other_txn:
+      format: "TXN-{n}"
+      n: {randint: [100000, 999999]}
 - log:
     level: INFO
-    message: '[COMPL] aml_screening result={screen_result} latency_ms={screen_latency_ms} sla_met=true'
+    message: '[COMPL] aml_screening txn={other_txn} jurisdiction={other_code} endpoint={other_route} latency_ms={screen_latency_ms} sla_ms=3000 http_429=0 result={screen_result} sla_met=true'
     attrs:
       operation: aml_screening
+      aml.jurisdiction:
+        var: other_code
+      aml.provider_endpoint:
+        var: other_route
       screening.result:
         var: screen_result
       screening.latency_ms:
         var: screen_latency_ms
       screening.sla_met: true
+- when: "eu_status == 'NOMINAL'"
+  log:
+    level: INFO
+    message: '[COMPL] aml_screening_health jurisdiction=EU endpoint={eu_route} routing_rev={routing_rev} p95_ms={eu_p95} sla_ms=3000 held_txns={aml_held} status={eu_status}'
+    attrs:
+      operation: aml_screening_health
+      aml.jurisdiction: EU
+      aml.provider_endpoint:
+        var: eu_route
+      aml.routing_revision:
+        var: routing_rev
+      aml.screening_p95_ms:
+        var: eu_p95
+      aml.held_transactions:
+        var: aml_held
+      aml.screening_status:
+        var: eu_status
+- when: "eu_status == 'ANOMALY'"
+  log:
+    level: WARN
+    message: '[COMPL] aml_screening_health jurisdiction=EU endpoint={eu_route} routing_rev={routing_rev} p95_ms={eu_p95} sla_ms=3000 held_txns={aml_held} status={eu_status}'
+    attrs:
+      operation: aml_screening_health
+      aml.jurisdiction: EU
+      aml.provider_endpoint:
+        var: eu_route
+      aml.routing_revision:
+        var: routing_rev
+      aml.screening_p95_ms:
+        var: eu_p95
+      aml.held_transactions:
+        var: aml_held
+      aml.screening_status:
+        var: eu_status
+- for_each:
+    in: JURISDICTIONS
+    as: [j_code, j_route]
+    steps:
+    - metric:
+        name: compliance.aml_screening_p95_ms
+        value:
+          expr: "eu_p95 if j_code == 'EU' else round(rand.uniform(700.0, 1500.0))"
+        unit: ms
+        attrs:
+          aml.jurisdiction:
+            var: j_code
+- metric:
+    name: compliance.aml_latency_ms
+    value:
+      expr: "round(0.8 * rand.uniform(250.0, 480.0) + 0.2 * eu_p95 * 0.6)"
+    unit: ms
+- metric:
+    name: compliance.aml_held_transactions
+    value:
+      var: aml_held
+    unit: transactions
+# ── Watchlist ──
 - sample:
     entries_checked:
       randint:
@@ -83,6 +231,82 @@ steps:
         var: entries_checked
       watchlist.hits:
         var: hits
+# ── Trade repository report validation: compliance-enrichment resolves counterparty LEIs ──
+- sample:
+    w11:
+      expr: "min(1.0, max(0.0, elapsed.get(11, 0) - lag.get(11, 0)) / 60.0) if 11 in all_active
+        else (max(0.0, 1.0 - since_fix.get(11, 0) / 30.0) if 11 in fixed_channels else 0.0)"
+    lei_src:
+      expr: "'refdata-dr-westus' if 11 in all_active else 'refdata-primary'"
+    refdata_age_h:
+      expr: "round(rand.uniform(96.0, 98.5), 1) if lei_src == 'refdata-dr-westus' else round(rand.uniform(2.0, 20.0), 1)"
+    val_other:
+      randint: [0, 4]
+    val_lei:
+      expr: "round(rand.uniform(1500.0, 3500.0) * w11)"
+    missing_lei:
+      expr: "round(val_lei * rand.uniform(0.52, 0.60))"
+    lapsed_lei:
+      expr: "val_lei - missing_lei"
+    val_errors:
+      expr: "val_lei + val_other"
+    vr_report:
+      choice: TR_REPORTS
+    vr_records:
+      randint: [1180000, 1320000]
+    val_status:
+      expr: "'ANOMALY' if val_errors > 20 else 'NOMINAL'"
+- when: "val_status == 'NOMINAL'"
+  log:
+    level: INFO
+    message: '[COMPL] report_validation report={vr_report} records={vr_records} errors={val_errors} missing_LEI={missing_lei} lapsed_LEI={lapsed_lei} other={val_other} lei_source={lei_src} refdata_age_h={refdata_age_h} status={val_status}'
+    attrs:
+      operation: report_validation
+      regulation.report:
+        var: vr_report
+      compliance.lei_source:
+        var: lei_src
+      compliance.report_validation_errors:
+        var: val_errors
+      compliance.refdata_age_h:
+        var: refdata_age_h
+      compliance.validation_status:
+        var: val_status
+- when: "val_status == 'ANOMALY'"
+  log:
+    level: WARN
+    message: '[COMPL] report_validation report={vr_report} records={vr_records} errors={val_errors} missing_LEI={missing_lei} lapsed_LEI={lapsed_lei} other={val_other} lei_source={lei_src} refdata_age_h={refdata_age_h} status={val_status}'
+    attrs:
+      operation: report_validation
+      regulation.report:
+        var: vr_report
+      compliance.lei_source:
+        var: lei_src
+      compliance.report_validation_errors:
+        var: val_errors
+      compliance.missing_lei_count:
+        var: missing_lei
+      compliance.lapsed_lei_count:
+        var: lapsed_lei
+      compliance.refdata_age_h:
+        var: refdata_age_h
+      compliance.validation_status:
+        var: val_status
+- metric:
+    name: compliance.report_validation_errors
+    value:
+      var: val_errors
+    unit: errors
+- metric:
+    name: compliance.refdata_age_h
+    value:
+      var: refdata_age_h
+    unit: h
+- metric:
+    name: compliance.pending_reports
+    value:
+      expr: "rand.randint(0, 3) + (2 if (11 in all_active or (11 in fixed_channels and since_fix.get(11, 0) < 60.0)) else 0)"
+    unit: reports
 - every:
     seconds: 10
     state_key: _last_reg_check
@@ -92,35 +316,40 @@ steps:
           choice: REGULATIONS
         report:
           choice: REPORT_TYPES
+        reg_status:
+          expr: "'AT_RISK' if (11 in all_active and report in TR_REPORTS) else 'COMPLIANT'"
     - log:
         level: INFO
-        message: '[COMPL] regulatory_status regulation={regulation} report={report} status=COMPLIANT'
+        message: '[COMPL] regulatory_status regulation={regulation} report={report} status={reg_status}'
         attrs:
           operation: regulatory_status
           regulation.name:
             var: regulation
           regulation.report:
             var: report
-          regulation.status: COMPLIANT
+          regulation.status:
+            var: reg_status
+# ── Open compliance alerts: upstream incidents raise a few alerts each, cleared after the fix ──
+- sample:
+    alert_bump: 0.0
+- for_each:
+    in: ALERT_CHANNELS
+    as: a_ch
+    steps:
+    - sample:
+        alert_bump:
+          expr: "alert_bump + (rand.uniform(3.0, 8.0) * min(1.0, max(0.0, elapsed.get(a_ch, 0) - lag.get(a_ch, 0)) / 60.0) if a_ch in all_active
+            else (rand.uniform(3.0, 8.0) * max(0.0, 1.0 - since_fix.get(a_ch, 0) / 120.0) if a_ch in fixed_channels else 0.0))"
+- metric:
+    name: compliance.open_alerts
+    value:
+      expr: "round(max(0.0, rand.gauss(6.0, 1.5)) + alert_bump)"
+    unit: alerts
 - counter:
     state_key: _screenings_total
-    by: 1
+    by: 2
 - metric:
     name: compliance.screenings_total
     value:
       var: _screenings_total
     unit: screenings
-- metric:
-    name: compliance.aml_latency_ms
-    value:
-      randint:
-      - 50
-      - 500
-    unit: ms
-- metric:
-    name: compliance.pending_reports
-    value:
-      randint:
-      - 0
-      - 5
-    unit: reports

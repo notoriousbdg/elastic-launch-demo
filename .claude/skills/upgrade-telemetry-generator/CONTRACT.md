@@ -4,7 +4,7 @@
 
 | Capability | Meaning |
 |---|---|
-| **validate** | Read-only: engine schema status + 1.1 gaps (state_keys, scope, coherence, `chaos.*` attributes) + package citation drift + alert ES\|QL emit gaps (+ optional live rule errors) |
+| **validate** | Read-only: engine schema status + 1.1 gaps (state_keys, scope, coherence, `chaos.*` attributes) + warning for `state_keys` without `ops_bindings` + package citation drift + alert ES\|QL emit gaps (+ optional live rule errors) |
 | **upgrade** | Write under `generators/<id>/`: package re-ground and/or pending engine migrations |
 
 ## Version semantics
@@ -30,6 +30,7 @@ SPEC = GeneratorSpec(
     scope_aware=True,          # 1.1: honours fault_scope
     state_keys={...},          # 1.1: values fault_state / remediation_effects.state may set
     coherence=(...),           # 1.1: signal couplings the generator enforces
+    ops_bindings=...,          # 1.1 optional (step 6): how applied opsctl commands change state_keys
 )
 ```
 
@@ -41,6 +42,12 @@ SPEC = GeneratorSpec(
 | 1.1 | Platform state, fault scope and signal coherence | config-like values without `state_keys`; no scope handling; no onset/ramp; coherence gaps; `chaos.*` (or other demo) attributes | the 1.1 `guidance` in `generator_engine/schema.yaml`: `state_keys` read through `get_platform_state()`, `scope_aware`, `get_channel_elapsed()` ramps, `coherence`, demo attributes removed, `schema_version="1.1"` |
 
 1.1 is additive: 1.0 generators keep running (`outdated_compatible`).
+
+`ops_bindings` is optional item 6 of the 1.1 guidance and carries no version
+bump. Validate reports a generator with `state_keys` but no `ops_bindings` as a
+**warning** (opsctl commands cannot change its telemetry); upgrade may add them
+(rules or a callable, see `generator_engine/spec.py` and
+`generators/kubernetes_otel/ops_bindings.py`) with a `change_state` test.
 
 ## Migration entry shape (`generator_engine/schema.yaml`)
 

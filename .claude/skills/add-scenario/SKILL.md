@@ -33,6 +33,8 @@ Use **`k8splatform`** as the reference scenario id — **do not read its files**
 
 For dashboard visibility (`business_impact`, entry services) `scenarios/space/channels/01-thermal-calibration-drift.yaml` is still the reference.
 
+For the scenario's ops profile, `scenarios/k8splatform/ops.yaml` (a Kubernetes + AWS platform, built on presets) and `scenarios/space/ops.yaml` (no Kubernetes; its own verbs, actors and command-log audit format) are the references. For before/during/after signals in the service DSL, `scenarios/space/services/fuel-system.yaml` (`lox_pressure_val`) is the reference.
+
 You will pass the id to subagents in Phase 5 so each reads one concrete reference file of its own type (a single channel YAML or service YAML from that scenario — not the full scenario.yaml).
 
 The spec for `scenario.yaml` is in [contract/scenario.md](.claude/skills/add-scenario/contract/scenario.md). Read it now as your checklist for Phase 5's `scenario.yaml` authoring.
@@ -92,6 +94,8 @@ The draft must cover:
 - Allocation rule: every one of the 9 services must be the primary affected service of **at least one** channel, and every selected integration must have **exactly one** dedicated chaos channel whose `generator_impact` block targets that generator with real impact keys — this is what makes the generator actually breach its alert threshold. Remaining channel slots are free-form cascades/creative faults.
 
 **Executive KPI categories** — 4 sections of 6 metrics each (titles only)
+
+**Operations (`ops.yaml`)** — the platform the fixes are applied to (which presets: `kubernetes`, `aws-cloudtrail`, `gcp-audit`, `azure-activity`, or `neutral` only), which service records applied commands and what its audit line looks like, the two actors (a person resolving from the Chaos UI, the auto-remediation workflow), the verbs the 20 fixes use, and `auto_remediate_channels` (normally 16–20).
 
 **Pinned platform (optional)** — for a Kubernetes or infrastructure story, propose a `k8s_topology` (clusters, node pools, subnets, workloads) so node names, IPs and counts in logs match the metrics. See [contract/scenario.md](.claude/skills/add-scenario/contract/scenario.md) §`k8s_topology`.
 
@@ -157,13 +161,14 @@ This emits all 30 files with:
 
 The scaffolder validates the brief before writing anything: unknown generator ids, a generator with no tagged channel, or a generator tagged by more than one channel all raise a clear error naming the offending id(s).
 
-The scaffolder writes `schema_version` as the current version (1.3). The skeleton passes the older structural checks, but the 1.3 checks fail until Phase 5 fills in each channel's `remediation_command` (Check 37) and `remediation_effects.verification` (Check 41). The scaffolder writes `error_type` unquoted into the channel files; if it contains `: ` or starts with `[`, `{` or a quote, quote it in the generated channel file. Domain content (realistic error messages, metric values, telemetry step logic) is left to fill in.
+The scaffolder does not write `ops.yaml`; the main agent writes it in Phase 5. The scaffolder writes `schema_version` as the current version (1.3). The skeleton passes the older structural checks, but the 1.3 checks fail until Phase 5 fills in each channel's `remediation_command` (Check 37) and `remediation_effects.verification` (Check 41). The scaffolder writes `error_type` unquoted into the channel files; if it contains `: ` or starts with `[`, `{` or a quote, quote it in the generated channel file. Domain content (realistic error messages, metric values, telemetry step logic) is left to fill in.
 
 ### Step 2 — File list (what was generated)
 
 ```text
 scenarios/<id>/
     scenario.yaml                   ← all static scenario data (pre-wired)
+    ops.yaml                        ← opsctl profile (written by the main agent in Phase 5, not the scaffolder)
     channels/
         01-<slug>.yaml              ← one per fault channel (×20)
         ...
@@ -183,6 +188,8 @@ No `__init__.py`, no `scenario.py`, no `executive_kpis.py` — the registry disc
 The 30 generated files are self-contained by design (GUARDRAILS §9/§10). Delegate their authoring to disposable subagents launched in **one message** so they run concurrently. You retain `scenario.yaml` and run verification.
 
 ### What you author directly (main agent)
+
+Write `scenarios/<id>/ops.yaml` **before** launching the channel agents: Check 37 accepts only `remediation_command` verbs the profile defines, and each fix's `{actor}` log line must satisfy its audit format's `match`. Keys, merge rules and a minimal example are in §ops.yaml of [contract/scenario.md](.claude/skills/add-scenario/contract/scenario.md); the full contract is AGENTS.MD "Ops profile" and the `app/ops_profile.py` docstring.
 
 Finalize `executive_kpi_emissions` names **before** launching the channel agents: they target those names in each channel's `business_impact`, so a later rename leaves stale references (the verifier errors on them).
 
@@ -206,6 +213,7 @@ Completion checklist for `scenario.yaml`:
 | Every service `steps:` body | Replace the stub skeleton with domain-specific telemetry, metrics, and log messages. Remove the `# TODO: Replace these stub steps...` comment. |
 | Every channel `rca_clues` | Add 2–3 per-service key/value clues for each affected/cascade service. The engine attaches them as log attributes on the ERROR lines; they are how the AI agent and Nightshift confirm the cause — follow §Evidence contract in contract/channels.md. |
 | Every channel, schema 1.3 fields | `remediation_command`, `fault_scope`, a cause event with negative `offset_seconds`, `remediation_effects.verification` (+ `state` when a config value changes), `cascade_messages` in real log formats — see §Schema 1.3 fields in contract/channels.md and the Realism checklist in BRIEF.md (Checks 37-44). |
+| `ops.yaml` | `extends` presets for the platform, `actors` {default, auto}, `auto_remediate_channels`, `audit.service` + an audit format whose `match` the fixes' `{actor}` lines satisfy, verbs (reuse preset verbs; add one only when none reads naturally; each with `summary` and `example`), `runbook` phrases and a `guide` saying where the telemetry is (Check 45). Pass the verb list and audit format to the channel agents. |
 | `k8s_topology` (optional) | For an infrastructure story: clusters, node pools, subnets, workloads; every `fault_scope` and `state` name must exist in it (Checks 38-39). |
 | Each selected integration's dedicated channel `generator_impact` | Must name the generator id and set its impact key(s) to values inside the breach range from `python3 -m generator_engine.registry --describe <gen_id>` — a placeholder or missing block means the alert never fires. |
 | Every channel `business_impact` | Dict entries targeting the final `executive_kpi_emissions` names, sized to the channel's scope so the tiles turn yellow/red (minor ≥2 non-green incl. 1 red, moderate ≥3 incl. 2 red, major ≥4 incl. 3 red; scope = 2×affected + cascade); replaces the scaffolded stub. Set `better: lower\|higher` on every impacted KPI. Without this the executive dashboard stays green during the fault (Checks 30 + 32). |
@@ -231,7 +239,7 @@ Launch all 7 agents in a **single message** — they run concurrently and their 
 
 ### Subagent prompt template
 
-Use this prompt for **each channel agent** (fill in `<BATCH>`, `<FILES>`, `<REF_ID>`, `<GENERATORS>`, `<KPIS>`):
+Use this prompt for **each channel agent** (fill in `<BATCH>`, `<FILES>`, `<REF_ID>`, `<GENERATORS>`, `<KPIS>`, `<OPS>` — the verbs and the audit format body + `match` from `ops.yaml`):
 
 ```
 You are authoring fault channel YAML files for a new scenario. Your job is to replace every stub
@@ -264,11 +272,12 @@ For any channel in your batch that has a generator: tag in the brief, you must:
 - `investigation_notes`: 5–6 numbered steps referencing specific field names and {placeholder} values. Every {placeholder} is a fault_params key (Check 35).
 - Evidence contract (§Evidence contract in contract/channels.md): the notes name one cause, its `rca_clues` ranges sit wholly beyond the notes' thresholds, clues for the alternative causes are nominal, `choice` clues hold fault values only, and frame-dump readings the notes rely on are `{fault_params}` placeholders.
 - Schema 1.3 (§Schema 1.3 fields in contract/channels.md, Checks 37-44):
-  - `remediation_command`: one `opsctl <verb> <kind>[/<name>] [-n ns] [--flags]` per line, fixing the root cause.
+  - `remediation_command`: one `opsctl <verb> <kind>[/<name>] [-n ns] [--flags]` per line, fixing the root cause. Use only these verbs and audit format (from scenarios/<id>/ops.yaml): <OPS>. Do not edit ops.yaml; if no verb fits, say so in your summary.
   - `fault_scope`: names that exist in `k8s_topology` (or only `cluster` / `workloads` without one).
   - `infrastructure_events`: the change or provider event that caused the fault, with a negative `offset_seconds`; `onset_delay_seconds` so symptoms start after it.
   - `cascade_messages`: lines in each dependent's real log format; `error_services` when the gateway is in `affected_services` but should log symptoms, not the error signature.
-  - `remediation_effects.verification`: 2–4 `{signal, where, expect, within_seconds}`; `state` (+ `transition_seconds`) only when the fix changes a value a generator reports (keys from that generator's `SPEC.state_keys`); `log_events` / `steady_attributes` for the audit or reload lines the fix leaves.
+  - `remediation_effects.verification`: 2–4 `{signal, where, expect, within_seconds}`; `state` (+ `transition_seconds`) only when the fix changes a value a generator reports (keys from that generator's `SPEC.state_keys`); `log_events` / `steady_attributes` for the audit or reload lines the fix leaves, with one `{actor}` line per command line that satisfies the audit format's `match` (it stands in for that command's audit record).
+  - Verification signals must be emitted by something: a `metrics.<name>` from `metrics-generic` is a metric a service step emits, a log `attributes.<key>` is set by a service step, `steady_attributes` or `rca_clues` (Check 41 warns otherwise). Name in your summary the metric and status attribute each channel's verification reads, so the service agents can emit them.
   - `error_type`: natural substring of `error_message`, no quote characters, unique across channels.
 - `correlation_attr.value`: realistic version string, config value, or identifier.
 - `description`: one-sentence summary of what goes wrong and why the user would observe it.
@@ -297,7 +306,7 @@ well-run SRE team add this to their auto-remediation runbook?" If caveats → es
 to channels 1–15 instead.
 ```
 
-Use this prompt for **each service agent** (fill in `<CLOUD>`, `<SERVICES>`, `<REF_ID>`):
+Use this prompt for **each service agent** (fill in `<CLOUD>`, `<SERVICES>`, `<REF_ID>`, `<SIGNALS>` — per channel touching these services: channel number, signal metric, its baseline / fault / after values, recovery seconds and the status attribute the fix changes). Launch them after the channel agents report their signals, or draft `<SIGNALS>` from the design draft:
 
 ```
 You are authoring service YAML files for a new scenario. Your job is to replace every stub
@@ -325,6 +334,10 @@ Read `.claude/skills/add-scenario/contract/services.md` for the schema and DSL r
 - `db_operations`: realistic SQL matching the service's domain (SELECT/INSERT/UPDATE on named tables).
 - Log lines in the component's real format (klog, nginx, logfmt, JSON) with no demo attributes; use `when:`,
   `log_identity` and the runtime placeholders from §Realism additions in contract/services.md where they help.
+- Before / during / after (§Before / during / after in contract/services.md) for every channel in <SIGNALS>:
+  the signal metric reads out of band while `N in all_active` (ramped with `elapsed`), converges back while
+  `N in fixed_channels` (with `since_fix`), baseline otherwise; the status log carries the configuration the
+  fix changes, keyed on `fixed_channels` or `applied`.
 
 ## Hard rules (non-negotiable)
 - No real company names or proprietary jargon (generic vertical terms only)
@@ -370,7 +383,7 @@ This verifies all structural invariants including:
 - `executive_kpi_emitter_service_name` names a real service; KPI sections/emissions in sync
 - Sort_order:1 service has `entry_endpoints` defined
 - `affected_services`/`cascade_services`/`k8s_clusters.services` reference real service names
-- Schema 1.3 (Checks 37-44): every channel has a valid `opsctl` `remediation_command` (37) and `remediation_effects.verification` (41); `fault_state` / `remediation_effects.state` name enabled generators, their `SPEC.state_keys`, and workloads / pools in `k8s_topology` (38); `fault_scope` names exist (39); `error_services` ⊆ `affected_services` and `cascade_messages` keys and placeholders are valid (40); `error_type` has no quotes (44)
+- Schema 1.3 (Checks 37-44): every channel has a valid `opsctl` `remediation_command` (37) and `remediation_effects.verification` (41); `fault_state` / `remediation_effects.state` name enabled generators, their `SPEC.state_keys`, and workloads / pools in `k8s_topology` (38); `fault_scope` names exist (39); `error_services` ⊆ `affected_services` and `cascade_messages` keys and placeholders are valid (40); `error_type` has no quotes (44); `ops.yaml` is valid (Check 45: known keys, shipped presets, verbs with `summary` and `example`, defined audit formats, existing services, `auto_remediate_channels` that are channels)
 - Every channel's `affected_services` contains a trace entry service (Check 31; a warning instead of an error for a 1.3 channel with a `fault_scope`); `business_impact` yields enough yellow/red KPI tiles for the channel's scope tier, and every impacted KPI declares `better: lower|higher` (Checks 30/32); `incr_key` state is a dict (Check 33)
 - All `{placeholder}`s in `error_message`+`stack_trace` have a matching `fault_params` key
 - All `{placeholder}`s in `investigation_notes` have a matching `fault_params` key (Check 35)
@@ -383,7 +396,7 @@ Warnings (exit 0, but fix before demo):
 - At least one service should have a non-empty `topology`
 - Sort_order:1 entry_endpoints should not be the generic `health`/`process` stubs
 - Each service should have ≥ 3 `trace_attributes` entries
-- Every channel has a `fault_scope` (Check 39), an `infrastructure_events` entry that precedes the symptoms (Check 42), and coherent Kubernetes impacts: Pending pods with a reason, `node_not_ready` scoped to nodes or a pool (Check 43)
+- Every channel has a `fault_scope` (Check 39), an `infrastructure_events` entry that precedes the symptoms (Check 42), and coherent Kubernetes impacts: Pending pods with a reason, `node_not_ready` scoped to nodes or a pool (Check 43); every verification `metrics.<name>` / log `attributes.<key>` is emitted by a service (Check 41); `ops.yaml` has a `guide` (Check 45)
 
 **Fix-up subagent prompt (use when verifier reports errors for specific files):**
 

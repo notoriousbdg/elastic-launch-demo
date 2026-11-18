@@ -122,3 +122,17 @@ def test_http_error_fault_pushes_latency_past_slo():
     qc = mod._sample_latencies(rng, 20_000, mod._QC_LATENCY_SHAPE, mult)
     assert _good_fraction(http, mod._HTTP_LATENCY_BOUNDS, 0.2) < 0.995
     assert _good_fraction(qc, mod._QC_LATENCY_BOUNDS, 5.0) < 0.995
+
+
+def test_latency_histograms_are_never_empty_at_night_load():
+    """The smallest random draw at the night / weekend load (0.15) must still observe a request."""
+
+    class _LowRand(_random.Random):
+        def randint(self, a, b):  # always the smallest draw
+            return a
+
+    rng = _LowRand(0)
+    state = mod.InfluxDBState(rng)
+    state.tick(rng, 0.15, 0.0)
+    assert state.http_latency_n >= 1
+    assert state.qc_latency_n >= 1

@@ -1,6 +1,7 @@
 """GeneratorSpec for the ``kubernetes_otel`` telemetry generator."""
 
 from generator_engine.spec import GeneratorSpec
+from generators.kubernetes_otel.ops_bindings import ops_state as _ops_state
 
 
 SPEC = GeneratorSpec(
@@ -139,6 +140,8 @@ SPEC = GeneratorSpec(
         "remove_nodes": {"type": "list", "doc": "Node names that leave the cluster (drained and replaced)."},
         "cluster": {"type": "str", "doc": "Cluster the overrides apply to (default: the topology's default cluster)."},
     },
+    # opsctl patch deployment --memory-limit / expand pvc / patch nodegroup -> state
+    ops_bindings=_ops_state,
     coherence=(
         "hpa_at_max_replicas => deployment replicas = HPA current = max; per-pod CPU above the HPA target",
         "container_cpu_throttling => CPU usage just under the limit",

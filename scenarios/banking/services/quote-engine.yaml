@@ -80,23 +80,6 @@ steps:
           engine.quotes:
             var: _quotes_generated
           engine.bind_rate: 34
-- sample:
-    quote_latency:
-      if_active:
-        uniform:
-        - 3000.0
-        - 15000.0
-        round: 1
-      else:
-        uniform:
-        - 200.0
-        - 800.0
-        round: 1
-- metric:
-    name: quote_engine.response_time_ms
-    value:
-      var: quote_latency
-    unit: ms
 - metric:
     name: quote_engine.quotes_per_hour
     value:
@@ -111,4 +94,110 @@ steps:
       - 28.0
       - 45.0
       round: 1
+    unit: '%'
+- sample:
+    f11:
+      expr: min(1.0, max(0.0, elapsed.get(11, 0) - lag.get(11, 0)) / 30.0) if 11 in all_active else (max(0.0, 1.0 - since_fix.get(11,
+        0) / 60.0) if 11 in fixed_channels else 0.0)
+    quote_latency:
+      expr: round(rand.uniform(120.0, 450.0) * (1.0 - f11) + rand.uniform(14000.0, 22000.0) * f11, 1)
+    c11_pool:
+      expr: round(rand.uniform(20.0, 45.0) * (1.0 - f11) + rand.uniform(99.0, 100.0) * f11, 1)
+- metric:
+    name: quote_engine.response_time_ms
+    value:
+      var: quote_latency
+    unit: ms
+- metric:
+    name: quote_engine.rating_pool_busy_pct
+    value:
+      var: c11_pool
+    unit: '%'
+- sample:
+    f12:
+      expr: min(1.0, max(0.0, elapsed.get(12, 0) - lag.get(12, 0)) / 30.0) if 12 in all_active else (max(0.0, 1.0 - since_fix.get(12,
+        0) / 60.0) if 12 in fixed_channels else 0.0)
+    c12_ruleset:
+      expr: '''CS-4827'' if 12 in all_active else (''CS-4826'' if 12 in fixed_channels else ''CS-4826'')'
+    c12_conflict:
+      expr: round(rand.uniform(0.05, 0.3) * (1.0 - f12) + rand.uniform(1.8, 3.2) * f12, 2)
+    c12_decline:
+      expr: round(rand.uniform(6.0, 9.0) * (1.0 - f12) + rand.uniform(21.0, 28.0) * f12, 2)
+    c12_status:
+      expr: '''DEGRADED'' if 12 in all_active or f12 > 0.1 else ''NOMINAL'''
+- when: 12 in all_active
+  log:
+    level: WARN
+    message: '[UW] ruleset_status ruleset=uw-auto-personal version={c12_ruleset} rule_conflict_pct={c12_conflict} decline_pct={c12_decline}
+      status={c12_status}'
+    attrs: &id001
+      operation: ruleset_status
+      uw.ruleset_version:
+        var: c12_ruleset
+      uw.rule_conflict_rate_pct:
+        var: c12_conflict
+      uw.status:
+        var: c12_status
+- when: 12 not in all_active
+  log:
+    level: INFO
+    message: '[UW] ruleset_status ruleset=uw-auto-personal version={c12_ruleset} rule_conflict_pct={c12_conflict} decline_pct={c12_decline}
+      status={c12_status}'
+    attrs: *id001
+- metric:
+    name: quote_engine.rule_conflict_rate_pct
+    value:
+      var: c12_conflict
+    unit: '%'
+- metric:
+    name: quote_engine.uw_decline_rate_pct
+    value:
+      var: c12_decline
+    unit: '%'
+- sample:
+    f13:
+      expr: min(1.0, max(0.0, elapsed.get(13, 0) - lag.get(13, 0)) / 10.0) if 13 in all_active else (max(0.0, min(1.0, 1.0
+        - (since_fix.get(13, 0) - 10) / 20.0)) if 13 in fixed_channels else 0.0)
+    c13_cred:
+      expr: '''v18'' if 13 in fixed_channels and since_fix.get(13, 0) >= 10 else ''v17'''
+    c13_feed:
+      expr: '''AUTH_FAILED_401'' if 13 in all_active or (13 in fixed_channels and since_fix.get(13, 0) < 10) else ''OK'''
+    c13_age:
+      expr: round(150.0 + elapsed.get(13, 0) + rand.uniform(0, 2), 1) if 13 in all_active else (round(rand.uniform(1.0, 12.0)
+        + 150.0 * max(0.0, min(1.0, 1.0 - (since_fix.get(13, 0) - 10) / 5.0)), 1) if 13 in fixed_channels else round(rand.uniform(1.0,
+        12.0), 1))
+    c13_lock:
+      expr: round(rand.uniform(98.5, 99.8) * (1.0 - f13) + rand.uniform(0.0, 1.5) * f13, 2)
+    c13_status:
+      expr: '''DEGRADED'' if c13_feed != ''OK'' or f13 > 0.1 else ''NOMINAL'''
+- when: 13 in all_active
+  log:
+    level: WARN
+    message: '[UW] pricing_feed_status feed=ginnie-mae-mbs credential={c13_cred} feed_status={c13_feed} price_age_s={c13_age}
+      rate_lock_success={c13_lock}% status={c13_status}'
+    attrs: &id002
+      operation: pricing_feed_status
+      pricing.feed_credential_version:
+        var: c13_cred
+      pricing.feed_status:
+        var: c13_feed
+      pricing.price_age_s:
+        var: c13_age
+      pricing.status:
+        var: c13_status
+- when: 13 not in all_active
+  log:
+    level: INFO
+    message: '[UW] pricing_feed_status feed=ginnie-mae-mbs credential={c13_cred} feed_status={c13_feed} price_age_s={c13_age}
+      rate_lock_success={c13_lock}% status={c13_status}'
+    attrs: *id002
+- metric:
+    name: quote_engine.mbs_price_age_s
+    value:
+      var: c13_age
+    unit: s
+- metric:
+    name: quote_engine.rate_lock_success_pct
+    value:
+      var: c13_lock
     unit: '%'

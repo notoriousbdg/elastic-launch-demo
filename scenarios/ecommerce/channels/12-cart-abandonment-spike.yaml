@@ -6,61 +6,125 @@ sensor_type: conversion_rate
 affected_services:
 - order-management
 - storefront-gateway
+error_services:
+- order-management
 cascade_services:
 - ad-platform
-description: Cart abandonment rate spiking abnormally — customers adding items but not completing checkout, indicating friction
-  in the checkout flow
+description: Checkout abandonment climbs from ~70% to ~88% because the promo-stacking-v2 flag, enabled at 100%, makes coupon validation evaluate every active promotion and its p95 (~6.2s) now exceeds the storefront's 3s timeout.
+onset_delay_seconds: 5
 investigation_notes: |-
-  1. Check order-management logs for CART-ABANDON-SPIKE — abandonment_rate={abandonment_rate_pct}% vs baseline {baseline_abandonment_pct}%.
-  2. Identify the abandonment step: if most abandonment is at payment entry (step 3), payment form errors or slow gateway response are the cause (storefront.error_in_funnel names the failing step).
-  3. Check for JavaScript errors in the storefront — a broken payment widget or address validation failure silently blocks checkout completion (a JavaScript error rate above 2% of checkout page views indicates a broken widget).
-  4. Review promo code validation latency: if coupon checks take >{coupon_timeout_ms}ms, customers abandon while waiting for discount confirmation.
-  5. Correlate with ad-platform metrics — if a recent ad campaign is driving high-intent but low-conversion traffic, the landing page may have a mismatch.
-  6. Trigger cart recovery emails for sessions with >2min idle time in checkout — historically recovers {recovery_rate_pct}% of abandoned carts.
+  Root cause: growth-marketing rolled feature flag promo-stacking-v2 out from 0% to 100% (CR-5520). With the flag on, the ValidateCoupon call that order-management makes to the promotions engine evaluates every active promotion (about 212) against each cart instead of only the entered coupon, so its p95 rises from about 180ms to about {coupon_latency_ms}ms within about 30s. The storefront waits {coupon_timeout_ms}ms for the coupon step and then shows an error, so customers leave at the coupon step and the 5-minute checkout abandonment rate climbs from its normal ~70% toward ~88% while orders per minute fall. Treating it as a traffic-quality or payment problem is the tempting path and is wrong: storefront JavaScript errors stay at their normal ~0.2% of checkout views, payment authorisation success is unchanged, and carts that reach payment complete normally; only the coupon step is slow. Raising the storefront timeout would only make customers wait longer for a call that should take 180ms.
+  Confirm:
+    - order-management metrics.orders.coupon_validation_p95_ms rises from about 180ms to about 6,200ms; metrics.orders.checkout_abandonment_pct climbs from about 70% toward about 88% and metrics.orders.per_minute falls with it
+    - order-management "orders.health" lines show attributes.orders.promo_stacking_v2 true (false before) and status=ANOMALY; "ValidateCoupon slow" lines show promotions_evaluated about 212 (1-3 normally)
+    - the order-management line "feature flag promo-stacking-v2 rollout 0% -> 100%" (CR-5520, growth-marketing) comes before the first CART-ABANDON-SPIKE line
+    - storefront-gateway logs coupon-step timeouts at {coupon_timeout_ms}ms, while its JavaScript error rate stays around 0.2%
+  Remediation: turn the flag off with opsctl patch feature-flag/promo-stacking-v2 --enabled false. ValidateCoupon goes back to evaluating only the entered coupon and its p95 is back at about 180ms within about 15s. Abandonment is a 5-minute rolling window, so orders.checkout_abandonment_pct falls back to about 70% gradually over about 300s as the slow sessions age out, and orders per minute recover with it. No storefront change or cart recovery campaign is needed.
 remediation_action: optimize_checkout_flow
-error_message: '[OrderManagement] CART-ABANDON-SPIKE: abandonment_rate={abandonment_rate_pct}% (baseline {baseline_abandonment_pct}%)
-  abandoned_carts={abandoned_carts} revenue_at_risk_usd={revenue_at_risk_usd} abandon_step={abandon_step}'
-stack_trace: |-
-  checkout funnel monitor: window=5m session_id={session_id}: CART-ABANDON-SPIKE: abandonment {abandonment_rate_pct}% above baseline {baseline_abandonment_pct}%
-  goroutine 214 [running]:
-  runtime/debug.Stack()
-  	/usr/local/go/src/runtime/debug/stack.go:26 +0x5e
-  github.com/ecommerce/order-management/internal/funnel.(*Monitor).checkAbandonmentRate(0xc0002f6000, {{0x1a9f3e0, 0xc0004c2000}})
-  	/app/internal/funnel/monitor.go:96 +0x2b8
-  github.com/ecommerce/order-management/internal/orders.(*OrderService).TrackCheckoutEvent(0xc0001b4000, {{0x1a9f3e0, 0xc0004c2000}})
-  	/app/internal/orders/events.go:58 +0x14d
-  Abandoned carts:   {abandoned_carts}
-  Revenue at risk:   ${revenue_at_risk_usd}
-  Abandon step:      {abandon_step}
-  Coupon budget:     {coupon_timeout_ms}ms (p95 target)
-  Coupon check p95:  {coupon_latency_ms}ms
-  Time in funnel:    {avg_funnel_time_sec}s avg
+remediation_command: |-
+  opsctl patch feature-flag/promo-stacking-v2 --enabled false
+error_message: 'level=warn ts={iso_now} caller=funnel/monitor.go:96 msg="CART-ABANDON-SPIKE: checkout exits concentrated at coupon step" window=5m top_exit_step={abandon_step} exits_at_step_per_min={exits_per_min} session_id={session_id} cart_id={cart_id} coupon_validate_p95_ms={coupon_latency_ms} storefront_client_timeout_ms={coupon_timeout_ms}'
+stack_trace: ''
 correlation_attr:
-  key: orders.abandonment_elevated
+  key: orders.promo_stacking_v2
   value: true
 fault_params:
-  abandonment_rate_pct: {uniform: [84, 93], round: 1}
-  baseline_abandonment_pct: 70.0
-  abandoned_carts: {randint: [500, 10000]}
-  revenue_at_risk_usd: {uniform: [50000, 500000], round: 2}
   abandon_step: coupon_validation
+  exits_per_min: {randint: [180, 320]}
   session_id: {format: "SESS-{n}", n: {randint: [100000, 999999]}}
-  recovery_rate_pct: {randint: [8, 20]}
   coupon_timeout_ms: 3000
-  coupon_latency_ms: {randint: [4000, 10000]}
-  avg_funnel_time_sec: {randint: [45, 180]}
+  coupon_latency_ms: {randint: [5800, 6600]}
+  cart_id: {format: "cart_{n}", n: {randint: [1000000, 9999999]}}
 rca_clues:
   order-management:
-    order.abandonment_rate_pct: {uniform: [84, 93], round: 1}
-    order.revenue_at_risk_usd: {randint: [10000, 500000]}
+    orders.promo_stacking_v2: true
+    orders.coupon_validation_p95_ms: {randint: [5800, 6600]}
+    orders.promotions_evaluated: {randint: [205, 220]}
+    orders.checkout_abandonment_pct: {uniform: [80, 89], round: 1}
+    orders.payment_success_rate_pct: {uniform: [98.6, 99.6], round: 2}
   storefront-gateway:
-    storefront.checkout_step_drop_pct: {uniform: [30, 70], round: 1}
-    storefront.error_in_funnel: coupon_check
-    storefront.coupon_check_p95_ms: {randint: [4000, 10000]}
-    storefront.js_error_rate_pct: {uniform: [0.1, 0.4], round: 2}
+    storefront.coupon_step_timeouts_per_min: {randint: [150, 320]}
+    storefront.js_error_rate_pct: {uniform: [0.1, 0.3], round: 2}
   ad-platform:
-    ads.retargeting_triggered: true
-    ads.cart_abandonment_audience_size: {randint: [1000, 50000]}
+    ads.cart_abandonment_audience_growth_pct: {uniform: [25, 60], round: 1}
+cascade_messages:
+  storefront-gateway:
+    - severity: WARN
+      message: '{iso_now} WARNING storefront.checkout: coupon step timed out after {coupon_timeout_ms}ms waiting for order-management coupon validation session={session_id} cart={cart_id}; showing coupon error'
+    - severity: INFO
+      message: '{iso_now} INFO storefront.funnel: session={session_id} left checkout at step=coupon after coupon timeout'
+  ad-platform:
+    - severity: INFO
+      message: '{iso_now} INFO ads.audiences: retargeting audience cart_abandoners_24h refreshed: growth above daily trend, cart {cart_id} added (abandon_step={abandon_step})'
+fault_scope:
+  cluster: ecommerce-eks-cluster
+  workloads: [order-management]
+infrastructure_events:
+  - service: order-management
+    severity: INFO
+    offset_seconds: -90
+    body: 'level=info ts={iso_now} caller=flags/watcher.go:52 msg="feature flag promo-stacking-v2 rollout 0% -> 100%" change=CR-5520 by=growth-marketing flag=promo-stacking-v2 rollout_pct=100'
+    attributes:
+      user.name: growth-marketing
+      change.request: CR-5520
+      operation: feature_flag_change
+      change.target: feature-flag/promo-stacking-v2
+      orders.promo_stacking_v2: true
+      change.summary: 'promo-stacking-v2: 0% -> 100%'
+remediation_effects:
+  log_taper_seconds: 30
+  log_events:
+    - service: order-management
+      severity: INFO
+      offset_seconds: 1
+      body: '[CHG] CHANGE APPLIED opsctl patch feature-flag/promo-stacking-v2 --enabled false by {actor}: feature flag promo-stacking-v2 disabled, rollout 100% -> 0%'
+      attributes:
+        operation: change_applied
+        change.target: feature-flag/promo-stacking-v2
+        orders.promo_stacking_v2: false
+    - service: order-management
+      severity: INFO
+      offset_seconds: 5
+      body: 'level=info ts={iso_now} caller=flags/watcher.go:52 msg="feature flag promo-stacking-v2 rollout 100% -> 0%" flag=promo-stacking-v2 rollout_pct=0'
+      attributes:
+        operation: feature_flag_change
+        orders.promo_stacking_v2: false
+    - service: order-management
+      severity: INFO
+      offset_seconds: 20
+      body: 'level=info ts={iso_now} caller=promo/client.go:142 msg="ValidateCoupon latency" upstream=promotions-engine.internal:8443 p95_ms=184 promotions_evaluated=1'
+      attributes:
+        operation: coupon_validation
+    - service: order-management
+      severity: INFO
+      offset_seconds: 300
+      body: 'level=info ts={iso_now} caller=funnel/monitor.go:71 msg="checkout funnel window" window=5m top_exit_step=payment_details coupon_step_exits=normal'
+      attributes:
+        operation: checkout_funnel
+  verification:
+    - signal: orders.coupon_validation_p95_ms
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "order-management"'
+      field: 'metrics.orders.coupon_validation_p95_ms'
+      expect: 'back to about 180ms (under 300ms) within about 15s (was about 6,200ms)'
+      within_seconds: 60
+    - signal: orders.checkout_abandonment_pct
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "order-management"'
+      field: 'metrics.orders.checkout_abandonment_pct'
+      expect: 'falls gradually from about 88% to about 70% (under 73%) over about 300s as the 5-minute window ages out'
+      within_seconds: 420
+    - signal: CART-ABANDON-SPIKE lines
+      from: 'logs.otel.ecommerce'
+      where: 'body.text LIKE "*CART-ABANDON-SPIKE*"'
+      expect: 'no new lines after about 30s'
+      within_seconds: 120
+    - signal: promo-stacking-v2 flag
+      from: 'logs.otel.ecommerce'
+      where: 'resource.attributes.service.name == "order-management"'
+      field: 'attributes.orders.promo_stacking_v2'
+      expect: 'false on the orders.health lines (was true)'
+      within_seconds: 60
 business_impact:
   - kpi: business.conversion_rate_pct
     value: {uniform: [0.67, 0.77], round: 2}
@@ -70,3 +134,4 @@ business_impact:
     value: {uniform: [51382.0, 59118.0], round: 1}
   - kpi: business.cart_adds_per_min
     factor: {uniform: [0.2, 0.45]}
+service_lag_seconds: {storefront-gateway: 20, ad-platform: 40}

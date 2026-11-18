@@ -7,8 +7,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from app import ops
+from app import ops, ops_profile
 from app.chaos.controller import ACTIVE, STANDBY, ChaosController
+
+# These tests exercise the Kubernetes + AWS conventions, which are data (engine
+# presets) a scenario opts into through its ops.yaml.
+K8S = ops_profile.resolve({"extends": ["kubernetes", "aws-cloudtrail"]})
 
 
 def _channel(name, remediation_command, **extra):
@@ -45,7 +49,8 @@ REGISTRY = {
 class FakeInstance:
     def __init__(self, services=("kube-apiserver", "ingress-gateway")):
         self.chaos_controller = ChaosController(channel_registry=REGISTRY)
-        self.ctx = SimpleNamespace(services={s: {} for s in services})
+        self.ctx = SimpleNamespace(services={s: {} for s in services},
+                                   scenario=SimpleNamespace(ops_profile=K8S))
         self.deployment_id = "dep-1"
 
     def resolve_channel(self, channel, **kwargs):
@@ -67,8 +72,8 @@ def _drain(inst, service="kube-apiserver"):
 
 
 def test_parse_normalizes_argv_and_string():
-    a = ops.parse_command(["rollback", "cm/CoreDNS", "-n", "kube-system", "--to-revision", "42"])
-    b = ops.parse_command("opsctl rollback configmap/coredns --namespace=kube-system --to-revision=42")
+    a = ops.parse_command(["rollback", "cm/CoreDNS", "-n", "kube-system", "--to-revision", "42"], K8S)
+    b = ops.parse_command("opsctl rollback configmap/coredns --namespace=kube-system --to-revision=42", K8S)
     for c in (a, b):
         assert (c.verb, c.target, c.namespace) == ("rollback", "configmap/coredns", "kube-system")
         assert c.flags == {"to-revision": "42"}
@@ -76,33 +81,33 @@ def test_parse_normalizes_argv_and_string():
 
 
 def test_parse_switches_quoted_values_and_plan():
-    c = ops.parse_command("renew certificate --all -n tenant-edge --not-ready")
+    c = ops.parse_command("renew certificate --all -n tenant-edge --not-ready", K8S)
     assert c.target == "certificate" and c.flags == {"all": True, "not-ready": True}
-    c = ops.parse_command('patch harbor/gc-schedule --cron "0 0 3 * * *"')
+    c = ops.parse_command('patch harbor/gc-schedule --cron "0 0 3 * * *"', K8S)
     assert c.flags["cron"] == "0 0 3 * * *"
-    c = ops.parse_command("plan drain node/ip-10-42-36-17.ec2.internal --ignore-daemonsets")
+    c = ops.parse_command("plan drain node/ip-10-42-36-17.ec2.internal --ignore-daemonsets", K8S)
     assert c.dry_run and c.verb == "drain" and c.flags == {"ignore-daemonsets": True}
-    c = ops.parse_command("delete ingresses -n tenant-previews -l preview-state=stale")
+    c = ops.parse_command("delete ingresses -n tenant-previews -l preview-state=stale", K8S)
     assert c.target == "ingress" and c.flags == {"selector": "preview-state=stale"}
 
 
 @pytest.mark.parametrize("bad", ["", "frobnicate x/y", "rollback", "rollback a/b c/d", "patch x -n"])
 def test_parse_rejects_bad_input(bad):
     with pytest.raises(ops.OpsError):
-        ops.parse_command(bad)
+        ops.parse_command(bad, K8S)
 
 
 def test_expected_commands_handles_strings_lists_and_comments():
-    cmds = ops.expected_commands("# fix\nopsctl run job/harbor-gc -n harbor\n\nopsctl expand pvc/x \\\n  -n harbor --size 2Ti")
+    cmds = ops.expected_commands("# fix\nopsctl run job/harbor-gc -n harbor\n\nopsctl expand pvc/x \\\n  -n harbor --size 2Ti", K8S)
     assert [c.display() for c in cmds] == ["run job/harbor-gc -n harbor", "expand pvc/x -n harbor --size=2Ti"]
-    assert ops.expected_commands(None) == []
+    assert ops.expected_commands(None, K8S) == []
 
 
 # ── Matching ──────────────────────────────────────────────────────────────
 
 
 def _m(inv, exp):
-    return ops.matches(ops.parse_command(inv), ops.parse_command(exp))
+    return ops.matches(ops.parse_command(inv, K8S), ops.parse_command(exp, K8S))
 
 
 def test_match_exact_and_flag_subset():
@@ -228,6 +233,31 @@ def test_audit_falls_back_to_first_service():
     assert events and "verb=create" in events[0]["body"] and "code=201" in events[0]["body"]
 
 
+def test_gcp_audit_kind_mapping_renders_cloud_audit_record():
+    """A kind's `gcp:` block (service, method, resource_prefix) shapes the Cloud Audit line."""
+    profile = ops_profile.resolve({
+        "extends": ["gcp-audit"],
+        "audit": {"default": "gcp_audit"},
+        "kinds": {"nat": {"gcp": {
+            "service": "compute.googleapis.com",
+            "resource_prefix": "projects/p/regions/r/routers/",
+            "method": {"_": "v1.compute.routers.patch"},
+        }}},
+    })
+    cmd = ops.parse_command("patch nat/gw1 --min-ports-per-vm 1024", profile)
+    body, attrs = ops.audit_record(cmd, "chg-1", user="sa@p.iam", profile=profile)
+    assert body.startswith("gcp-audit:")
+    assert "serviceName=compute.googleapis.com" in body
+    assert "methodName=v1.compute.routers.patch" in body
+    assert "resourceName=projects/p/regions/r/routers/gw1" in body
+    assert attrs["gcp.audit.method_name"] == "v1.compute.routers.patch"
+    assert attrs["user.name"] == "sa@p.iam"
+
+
+def test_profile_kind_keys_accept_provider_mappings():
+    assert {"gcp", "azure"} <= ops_profile.KIND_KEYS
+
+
 def test_channels_without_remediation_command_are_never_resolved():
     inst = FakeInstance()
     inst.trigger_channel(4)
@@ -294,3 +324,71 @@ def test_endpoint_reset(client):
     r = c.post("/api/ops/reset")
     assert r.status_code == 200 and r.json()["status"] == "reset"
     assert inst.chaos_controller.get_fixed_channels() == []
+
+
+def test_azure_activity_preset_renders_per_kind_operation():
+    """A kind may carry an ``azure:`` block (provider, operation per verb) for the azure-activity format."""
+    raw = {
+        "extends": ["azure-activity"],
+        "kinds": {"role-assignment": {
+            "audit": "azure_activity",
+            "azure": {"provider": "Microsoft.Authorization/roleAssignments",
+                      "operation": {"delete": "delete", "_": "write"}},
+        }},
+    }
+    assert "azure" in ops_profile.KIND_KEYS and "gcp" in ops_profile.KIND_KEYS
+    profile = ops_profile.resolve(raw)
+    cmd = ops.parse_command("opsctl delete role-assignment/7c1e5d2a", profile)
+    body, attrs = ops.audit_record(cmd, "chg-1", user="sre-oncall", profile=profile)
+    assert body.startswith("azure-activity: operationName=Microsoft.Authorization/roleAssignments/delete ")
+    assert "caller=sre-oncall" in body and "change_id=chg-1" in body
+    assert attrs["azure.activity.operation_name"] == "Microsoft.Authorization/roleAssignments/delete"
+
+
+# ── A fix that lands after the fault auto-expired ─────────────────────────
+
+
+def test_fix_after_auto_expiry_still_applies_remediation_effects():
+    reg = {1: _channel(
+        "dns",
+        "opsctl rollback configmap/coredns -n kube-system --to-revision 42",
+        remediation_effects={"log_events": [
+            {"service": "ingress-gateway", "offset_seconds": 20, "body": "[INFO] Reloading"},
+        ]},
+    )}
+    inst = FakeInstance()
+    inst.chaos_controller = ChaosController(channel_registry=reg)
+    ctl = inst.chaos_controller
+    inst.trigger_channel(1)
+    with ctl._lock:
+        ctl._channels[1]["triggered_at"] -= 4000  # past CHANNEL_TIMEOUT
+    assert ctl.get_unfixed_channels() == [1]  # expiry is noticed here
+    assert ctl.get_active_channels() == []  # the fault is gone, but nobody fixed it
+
+    ops.execute(inst, ["rollback", "configmap/coredns", "-n", "kube-system", "--to-revision", "42"])
+
+    assert ctl.get_unfixed_channels() == []
+    bodies = [e["body"] for e in _drain(inst, "ingress-gateway")]
+    assert "[INFO] Reloading" in bodies
+    assert any("verb=update" in e["body"] for e in _drain(inst))  # the audit record, once
+
+
+def test_wrong_action_after_expiry_does_not_fix():
+    inst = FakeInstance()
+    inst.trigger_channel(1)
+    with inst.chaos_controller._lock:
+        inst.chaos_controller._channels[1]["triggered_at"] -= 4000
+    ops.execute(inst, "restart deployment/coredns -n kube-system")
+    assert inst.chaos_controller.get_unfixed_channels() == [1]
+
+
+def test_resolve_after_expiry_applies_effects_once():
+    inst = FakeInstance()
+    ctl = inst.chaos_controller
+    inst.trigger_channel(2)
+    with ctl._lock:
+        ctl._channels[2]["triggered_at"] -= 4000
+    ctl.get_unfixed_channels()
+    assert ctl.resolve(2, force=True)["status"] == "resolved"
+    assert ctl.get_platform_state()["fixes"][0]["channel"] == 2
+    assert ctl.resolve(2, force=True)["status"] == "already_standby"

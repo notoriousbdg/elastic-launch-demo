@@ -6,34 +6,40 @@ sensor_type: replication_monitor
 affected_services:
 - audit-logger
 - settlement-processor
+error_services:
+- audit-logger
 cascade_services:
 - compliance-monitor
 - risk-calculator
-description: Cross-region audit log replication falling behind, DR site stale
+description: Cross-region audit log replication falling behind, DR site stale, after the replication stream stopped compressing
+onset_delay_seconds: 10
+service_lag_seconds: {settlement-processor: 30, compliance-monitor: 45, risk-calculator: 60}
 investigation_notes: |-
-  1. Check audit-logger logs for AUDIT-REPLICATION-LAG — note source_region, dest_region, lag_ms, pending_events, and which channels are BEHIND.
-  2. Query FROM logs.otel.financial.* | WHERE body.text LIKE "*AUDIT-REPLICATION-LAG*" | STATS max(lag_ms), sum(pending_events) BY source_region to quantify the RPO breach.
-  3. Inspect network utilization between regions — if bandwidth utilization > 90% and tcp_retransmits is high, the WAN link is saturating under the replication load.
-  4. Check settlement-processor for any settlements that depend on DR-site audit confirmation — if the DR site is stale, settlement authorizations may be blocked.
-  5. Enable compression and increase replication batch size to cut bytes on the saturated link (request more WAN bandwidth if utilization stays > 90%); if lag exceeds RPO threshold, declare failover_ready=false and alert the DR team before market open.
-remediation_action: increase_replication_batch_size
-error_message: '[AUDIT] AUDIT-REPLICATION-LAG: source={source_region} dest={dest_region} lag_ms={lag_ms} max_ms={max_lag_ms}
-  pending={pending_events}'
+  Root cause: audit-logger was rolled out with the audit-replication library 3.0.0 (CR-4603), whose default stream compression is none; 2.9.4 compressed with zstd implicitly (ratio about 4.2). The eastus -> westus DR stream now carries about four times the bytes, the 1 Gbps ExpressRoute link to westus saturates at {wan_util_pct}% and replication falls behind: the westus replica is {lag_ms} ms behind (RPO limit {max_lag_ms} ms) with {pending_events} events pending. Audit ingest is at its normal rate, so the link is not saturated by more events but by bigger ones, and there is no packet loss beyond the usual 0.02%. The northeurope compliance copy also runs uncompressed but has a 10 Gbps link and stays in sync (lag under 1,000 ms), which rules out a replication bug on the receiving side.
+  Confirm:
+    - audit-logger replication_status lines for dest=westus (body.text LIKE "*replication_status*dest=westus*") show attributes.replication.compression=none, attributes.replication.compression_ratio=1.0, attributes.replication.link_utilization_pct above 90 and attributes.replication.state=BEHIND; dest=northeurope lines stay SYNCED
+    - metrics.audit_logger.replication_lag_ms climbing from its normal 50-800 ms to 5,000-60,000 ms, metrics.audit_logger.wan_link_utilization_pct at 91-99 (25-40 normally), metrics.audit_logger.replication_compression_ratio at 1.0 (about 4.2 normally) and metrics.audit_logger.replication_pending_events growing
+    - settlement-processor waits on DR audit confirmations and compliance-monitor reports the RPO breach for westus
+    - the audit-logger line "[AUDIT] deployment audit-logger rolled out audit-replication 2.9.4 -> 3.0.0 ... zstd -> none" (attributes.operation=deployment_rollout, attributes.change.request=CR-4603) comes before the first AUDIT-REPLICATION-LAG line
+  Remediation: opsctl patch config/audit-replication --compression zstd sets the compression explicitly; the library hot-reloads it and reconnects the stream. Link utilisation drops below 60% at once and the backlog drains in the freed headroom: lag is under 3,000 ms within about 2 minutes and utilisation settles at 25-40%. Buying more ExpressRoute bandwidth is the slow and expensive fix, and a larger replication batch size does not reduce the bytes on the link.
+remediation_action: enable_replication_compression
+remediation_command: |-
+  opsctl patch config/audit-replication --compression zstd
+error_message: '[AUDIT] AUDIT-REPLICATION-LAG: source={source_region} dest={dest_region} lag_ms={lag_ms} max_ms={max_lag_ms} pending={pending_events} link_util_pct={wan_util_pct} compression=none'
 stack_trace: |-
   === REPLICATION STATUS REPORT ===
-  source={source_region}  dest={dest_region}
-  --- REPLICATION CHANNELS ---
-    CHANNEL        LAG_MS    PENDING   STATUS
-    orders         {lag_ms}     {pending_events}     BEHIND
-    trades         12,400     892       BEHIND
-    settlements    8,200      341       WARNING
-    risk-events    {lag_ms}     {pending_events}     BEHIND
-    compliance     3,100      127       OK
+  source={source_region}  dest={dest_region}  library=audit-replication 3.0.0
+  --- REPLICATION STREAM ---
+    lag_ms               {lag_ms}  (max_allowed {max_lag_ms})
+    pending_events       {pending_events}
+    compression          none  (ratio 1.0; 2.9.4 default was zstd)
+    bytes_per_event      ~1.9 KB
   --- NETWORK ---
-    bandwidth_mbps=840  utilization={wan_util_pct}%  packet_loss=0.02%
-    tcp_retransmits=247  rtt_ms=68
-  dr_site_staleness={lag_ms}ms  max_allowed={max_lag_ms}ms  rpo_breach=true
-  ACTION: increase_batch_size=true  failover_ready=false  alert=AUDIT-REPLICATION-LAG
+    link=expressroute-eastus-westus  bandwidth=1 Gbps  utilization={wan_util_pct}%
+    packet_loss=0.02%  tcp_retransmits={tcp_retransmits}  rtt_ms=68
+  --- OTHER DESTINATIONS ---
+    northeurope  link=10 Gbps  lag_ms<1000  state=SYNCED
+  dr_site_staleness={lag_ms}ms  rpo_breach=true  failover_ready=false
 correlation_attr: {}
 fault_params:
   source_region: eastus
@@ -41,21 +47,89 @@ fault_params:
   wan_util_pct: {randint: [91, 99]}
   lag_ms: {randint: [5000, 60000]}
   max_lag_ms: 3000
-  pending_events: {randint: [100, 10000]}
+  pending_events: {randint: [9000, 108000]}
+  tcp_retransmits: {randint: [200, 900]}
 rca_clues:
   audit-logger:
     audit.replication_lag_ms: {randint: [5000, 60000]}
-    audit.pending_replication_events: {randint: [100, 10000]}
     audit.wan_link_utilization_pct: {randint: [91, 99]}
+    audit.replication_compression: none
   settlement-processor:
     settlement.dr_audit_confirmation_pending: {randint: [1, 50]}
-    settlement.cross_region_hold_count: {randint: [0, 20]}
+    settlement.cross_region_hold_count: {randint: [1, 20]}
   compliance-monitor:
     compliance.rpo_breach_ms: {randint: [2000, 57000]}
     compliance.dr_site_staleness_alerts: {randint: [1, 20]}
   risk-calculator:
     risk.dr_site_risk_state_age_ms: {randint: [5000, 60000]}
     risk.failover_readiness_pct: {uniform: [0.0, 80.0], round: 1}
+cascade_messages:
+  settlement-processor:
+    - severity: WARN
+      message: '[SETTLE] settlement authorization waiting on DR audit confirmation from {dest_region}: replica {lag_ms}ms behind (max {max_lag_ms}ms)'
+  compliance-monitor:
+    - severity: WARN
+      message: '[COMPL] rpo_check dr_site={dest_region} audit_replica_lag_ms={lag_ms} rpo_ms={max_lag_ms} breach=true'
+  risk-calculator:
+    - severity: WARN
+      message: '[RISK] dr_state_sync site={dest_region} risk state {lag_ms}ms old; failover readiness degraded'
+fault_scope:
+  cluster: finserv-aks-cluster
+  workloads: [audit-logger, settlement-processor]
+infrastructure_events:
+  - service: audit-logger
+    severity: INFO
+    offset_seconds: -150
+    body: '[AUDIT] deployment audit-logger rolled out audit-replication 2.9.4 -> 3.0.0: stream compression default zstd -> none (no explicit setting in config/audit-replication); deployed by audit-platform-ci (CR-4603)'
+    attributes:
+      user.name: audit-platform-ci
+      change.request: CR-4603
+      operation: deployment_rollout
+      change.summary: 'audit-replication: 2.9.4 -> 3.0.0 (stream compression zstd -> none)'
+      deployment.version: audit-replication-3.0.0
+      replication.compression: none
+remediation_effects:
+  log_taper_seconds: 110
+  log_events:
+    - service: audit-logger
+      severity: INFO
+      offset_seconds: 1
+      body: '[AUDIT] event_logged stream=change-mgmt type=CHANGE_APPLIED cmd="opsctl patch config/audit-replication --compression zstd" actor={actor}: config/audit-replication compression none -> zstd'
+      attributes:
+        operation: change_applied
+        audit.stream: change-mgmt
+        change.target: config/audit-replication
+    - service: audit-logger
+      severity: INFO
+      offset_seconds: 3
+      body: '[AUDIT] config_reload source=config/audit-replication replication.compression=none->zstd (hot reload); stream eastus->westus reconnected, compression ratio about 4.2, draining backlog'
+      attributes:
+        operation: config_change
+        replication.compression: zstd
+  verification:
+    - signal: audit_logger.replication_lag_ms
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "audit-logger"'
+      field: 'metrics.audit_logger.replication_lag_ms'
+      expect: 'back under 3,000 ms within about 2 minutes as the backlog drains (was 5,000-60,000 ms)'
+      within_seconds: 150
+    - signal: audit_logger.wan_link_utilization_pct
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "audit-logger"'
+      field: 'metrics.audit_logger.wan_link_utilization_pct'
+      expect: 'below 60% at once, back to 25-40% once the backlog has drained (was 91-99%)'
+      within_seconds: 150
+    - signal: AUDIT-REPLICATION-LAG lines
+      from: 'logs.otel.finserv'
+      where: 'body.text LIKE "*AUDIT-REPLICATION-LAG*"'
+      expect: '0 new lines once the westus replica has caught up'
+      within_seconds: 150
+    - signal: replication stream compression
+      from: 'logs.otel.finserv'
+      where: 'resource.attributes.service.name == "audit-logger" AND body.text LIKE "*replication_status*"'
+      field: 'attributes.replication.compression'
+      expect: 'zstd on every line since the fix; none stops appearing'
+      within_seconds: 60
 business_impact:
   - kpi: business.system_availability_pct
     factor: {uniform: [0.85, 0.97]}

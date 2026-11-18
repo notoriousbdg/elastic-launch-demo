@@ -9,14 +9,17 @@ cascade_services: [chat-orchestrator]
 description: A newly applied NSG rule on the assistant-web subnet denies Application Gateway health probes, so the gateway marks the backend pool unhealthy; reverting the rule restores traffic.
 
 investigation_notes: |
-  1. Search body.text for *AGW-BACKEND-UNHEALTHY* and read unhealthy_hosts={unhealthy_hosts} of {pool_size} in pool {backend_pool}.
-  2. Inspect the health probe: path {probe_path} times out after {probe_timeout_s}s even though the assistant-web instances are running and serving direct requests (direct request success above 99% rules out an application failure).
-  3. Check VNet flow logs (data_stream.dataset azure.vnetflow.otel) for azure.vnet.flow.action Deny with azure.vnet.flow.state D on destination.port {probe_port}: about {denied_flows_per_min} denied flows/min, all matched by azure.vnet.flow.rule {nsg_rule}.
-  4. Confirm the timing: the Activity Log shows a securityRules write for {nsg_rule} on {nsg_name} just before the first probe failure, Resource Health reports the Application Gateway as Degraded, and chat-orchestrator request volume drops as the gateway returns 502 ({gateway_502_per_min}/min).
-  5. Revert the NSG rule change (restore the previous rule set or remove {nsg_rule}); this is a bounded revert of the last change, so it is safe to automate.
-  6. Verify the Deny share in the flow logs falls back to baseline, the healthy host count returns to {pool_size}, and 502s stop.
+  Root cause: the NSG {nsg_name} was changed shortly before the first AGW-BACKEND-UNHEALTHY; the new rule {nsg_rule} denies inbound traffic from the Application Gateway subnet, including health probes on port {probe_port}. The gateway therefore marks unhealthy={unhealthy_hosts} of {pool_size} hosts in pool {backend_pool} and returns 502. The instances themselves are fine.
+  Confirm:
+    - metric assistant_web.appgw_healthy_backend_hosts drops from 6 to 0; assistant-web logs "appgw.backend_health" with attributes.nsg.rule_set_version=nsg-assistant-web-ruleset-v14, nsg.rule.UserRule_deny-untrusted-inbound=present and status=ANOMALY
+    - probe path {probe_path} times out after {probe_timeout_s}s while direct requests to the instances succeed above 99%, which rules out an application failure
+    - VNet flow logs (data_stream.dataset azure.vnetflow.otel) show azure.vnet.flow.action Deny with state D on destination port {probe_port}, about {denied_flows_per_min} denied flows/min, all matched by rule {nsg_rule}
+    - the Activity Log securityRules write for {nsg_rule} on {nsg_name} comes just before the first probe failure; chat-orchestrator request volume drops as the gateway returns {gateway_502_per_min} 502s/min
+  Remediation: roll {nsg_name} back to its previous rule set (v13, without {nsg_rule}) with opsctl rollback nsg/nsg-assistant-web-subnet --to-revision previous. Probes pass again and the healthy host count climbs back to {pool_size} within about 90 seconds as each host passes its probes. Restarting the instances or scaling the pool does not help: the probe never reaches them.
 
 remediation_action: revert_nsg_rule
+remediation_command: |-
+  opsctl rollback nsg/nsg-assistant-web-subnet --to-revision previous
 
 error_message: |
   AGW-BACKEND-UNHEALTHY: pool={backend_pool} unhealthy={unhealthy_hosts}/{pool_size} probe_path={probe_path} timeout={probe_timeout_s}s nsg_rule={nsg_rule} denied_flows={denied_flows_per_min}/min 502s={gateway_502_per_min}/min
@@ -40,9 +43,9 @@ fault_params:
   backend_pool: pool-assistant-web-eastus
   unhealthy_hosts: 6
   pool_size: 6
-  probe_path: {choice: [/healthz, /health/ready]}
+  probe_path: /healthz
   probe_port: 443
-  probe_timeout_s: {choice: [30, 60]}
+  probe_timeout_s: 30
   nsg_name: nsg-assistant-web-subnet
   nsg_rule: UserRule_deny-untrusted-inbound
   denied_flows_per_min: {randint: [200, 2500]}
@@ -58,6 +61,58 @@ rca_clues:
     orchestrator.inbound_requests_drop_pct: {uniform: [40.0, 85.0], round: 1}
     orchestrator.idle_sessions: {randint: [50, 400]}
 
+cascade_messages:
+  chat-orchestrator:
+    - severity: WARN
+      message: 'chat.inbound_volume conversations_per_min down sharply and {gateway_502_per_min} 502s/min at the gateway; sessions idle because no requests arrive from {backend_pool}'
+
+service_lag_seconds: {chat-orchestrator: 20}
+fault_scope:
+  workloads: [assistant-web]
+
+infrastructure_events:
+  - service: assistant-web
+    severity: INFO
+    offset_seconds: -120
+    body: 'azure-activity: operationName=Microsoft.Network/networkSecurityGroups/write resourceId=/subscriptions/38514ecc-371c-5d0a-9c14-ab99a396027d/resourceGroups/azureai-rg/providers/Microsoft.Network/networkSecurityGroups/nsg-assistant-web-subnet caller=netsec-automation@contoso-demo.onmicrosoft.com status=Succeeded category=Administrative'
+    attributes:
+      user.name: netsec-automation@contoso-demo.onmicrosoft.com
+      operation: security_rule_write
+      nsg.rule_set_version: nsg-assistant-web-ruleset-v14
+      change.summary: 'nsg-assistant-web-subnet v13 -> v14: securityRules UserRule_deny-untrusted-inbound added (Deny, Inbound)'
+
+remediation_effects:
+  log_events:
+    - service: assistant-web
+      severity: INFO
+      offset_seconds: 1
+      body: 'azure-activity: operationName=Microsoft.Network/networkSecurityGroups/write resourceId=/subscriptions/38514ecc-371c-5d0a-9c14-ab99a396027d/resourceGroups/azureai-rg/providers/Microsoft.Network/networkSecurityGroups/nsg-assistant-web-subnet caller={actor} status=Succeeded category=Administrative'
+      attributes:
+        operation: security_rule_write
+        nsg.rule_set_version: nsg-assistant-web-ruleset-v13
+        change.summary: 'nsg-assistant-web-subnet v14 -> v13 (rollback): UserRule_deny-untrusted-inbound removed'
+  steady_attributes:
+    assistant-web:
+      nsg.rule_set_version: nsg-assistant-web-ruleset-v13
+  verification:
+    - signal: assistant_web.appgw_healthy_backend_hosts
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "assistant-web"'
+      field: 'metrics.assistant_web.appgw_healthy_backend_hosts'
+      expect: '6 of 6 healthy (was 0)'
+      within_seconds: 120
+    - signal: AGW-BACKEND-UNHEALTHY lines
+      from: 'logs.otel.azureai'
+      where: 'body.text LIKE "*AGW-BACKEND-UNHEALTHY*"'
+      expect: '0 new lines'
+      within_seconds: 120
+    - signal: NSG rule set version
+      from: 'logs.otel.azureai'
+      where: 'resource.attributes.service.name == "assistant-web"'
+      field: 'attributes.nsg.rule_set_version'
+      expect: 'nsg-assistant-web-ruleset-v13 on every line logged since the fix; v14 stops appearing'
+      within_seconds: 120
+
 business_impact:
   - kpi: business.throughput_rpm
     factor: {uniform: [0.20, 0.50]}
@@ -71,3 +126,4 @@ generator_impact:
     deny_rate: 0.8
   azure_activity_otel:
     resource_health_degradation: 1.0
+generator_hold_seconds: {azure_vnetflow_otel: 90, azure_activity_otel: 90}

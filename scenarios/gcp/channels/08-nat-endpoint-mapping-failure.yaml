@@ -8,22 +8,27 @@ affected_services:
 - cloud-load-balancer
 cascade_services:
 - cloud-cdn-service
-description: Cloud NAT endpoint-independent mapping failing for new connections, so the checkout-api Cloud Run service's outbound calls fail with 5xx and it scales out
+description: Endpoint-independent mapping was enabled on Cloud NAT gateway gcpnet-nat-central1; new NAT mappings fail, so the checkout-api Cloud Run service (Direct VPC egress) gets failing outbound calls, returns 5xx and scales out
 investigation_notes: |-
-  Root cause: The checkout-api Cloud Run service sends its outbound calls through Direct VPC egress and this Cloud NAT gateway. When new mappings fail, those calls hang or are refused, so the service returns 500/503, request latency climbs and the autoscaler adds instances to absorb the stalled requests. Confirm on the GCP Cloud Run OTel dashboards (5xx by response_code_class, request latency percentiles, instance count by revision). NAT mapping type determines how source ports are reused. ENDPOINT_INDEPENDENT mapping reuses the same external IP:port for all destinations from a given VM, which is required for protocols like STUN/TURN but consumes ports faster. With endpoint-independent mapping disabled (the default), a NAT IP:port can be reused for different destinations. Mapping failures occur when port pool is exhausted (above 95% utilization) for the configured mapping type. Diagnose with:
-    gcloud compute routers nats describe <nat> --router=<router> --region=<region> --format='value(natIpAllocateOption,sourceSubnetworkIpRangesToNat,enableEndpointIndependentMapping)'
-  Remediation for static NAT (manual IP assignment): add more NAT IPs:
-    gcloud compute routers nats update <nat> --router=<router> --region=<region> --nat-external-ip-pool=<ip1>,<ip2>,<ip3>
-  For dynamic NAT (auto-allocated): switch to manual allocation with a larger pool. If endpoint-independent mapping is not required, disable it to reduce port pressure: gcloud compute routers nats update <nat> --router=<router> --region=<region> --no-enable-endpoint-independent-mapping Review Cloud NAT logs: Console > Logging > resource.type='nat_gateway'.
+  Root cause: deployment change endpoint-independent-v2 (CR-7351, user.name=platform-netconfig) enabled endpoint-independent mapping on Cloud NAT gateway {nat_gateway_name} ({gcp_region}). With it on, a VM's source IP:port is tied to one mapping for every destination, so ports are no longer reused across destinations and new mappings fail ({nat_mapping_failures}/s). The checkout-api Cloud Run service reaches its dependencies through Direct VPC egress and this gateway, so its outbound calls fail or hang, it returns 500/503, latency climbs and the autoscaler adds instances.
+  The data rules out port exhaustion: with the mapping mode on, ports are no longer shared across destinations, so nat.port_utilization_pct rises by about 12 points to roughly 32-52% but stays far below the cap, nat.min_ports_per_vm and nat.ports_total stay 1024, and the drops are ENDPOINT_INDEPENDENCE_CONFLICT, not no-free-port (OUT_OF_RESOURCES); nat.allocated_ips is unchanged. It is also not a NAT IP quota problem (nat.pending_ip_allocations is 0), and gcpnet-nat-east1 and gcpnet-nat-europe1 are unaffected.
+  Confirm:
+    - cloud-nat-gateway, gateway {nat_gateway_name}: metrics.nat.mapping_failures 100-2000/s (normally 0-1) and metrics.nat.dropped_connections 50-500; logs.otel.gcpnet operation=connection_stats attributes.nat.endpoint_independent_mapping = true, attributes.nat.status = ANOMALY
+    - the cloud-nat-gateway log "nat mapping mode endpoint-independent-v2 applied" (attributes.deployment.nat_mapping_mode = endpoint-independent-v2) precedes the first NAT-ENDPOINT-MAPPING-FAILURE line
+    - GCP Cloud Run dashboards for checkout-api: 5xx by response_code_class, request latency percentiles and instance count all rise
+  Remediation: disable endpoint-independent mapping with opsctl patch nat/{nat_gateway_name} --region us-central1 --enable-endpoint-independent-mapping false. Mapping failures stop within about a minute and checkout-api scales back in. The workloads do not need STUN/TURN style mapping, so nothing else changes.
 remediation_action: reconfigure_nat_mapping
-error_message: 'cloudnat: NAT-ENDPOINT-MAPPING-FAILURE gateway={nat_gateway_name} mapping_type={nat_mapping_type} failures={nat_mapping_failures}/m
+remediation_command: |-
+  opsctl patch nat/gcpnet-nat-central1 --region us-central1 --enable-endpoint-independent-mapping false
+error_message: 'cloudnat: NAT-ENDPOINT-MAPPING-FAILURE gateway={nat_gateway_name} mapping_type={nat_mapping_type} failures={nat_mapping_failures}/s reason=ENDPOINT_INDEPENDENCE_CONFLICT
   nat_ip={nat_external_ip} subnet={subnet_name} protocol={nat_protocol}'
 stack_trace: |-
   Cloud NAT Mapping Diagnostic
   ------------------------------
   Gateway:      {nat_gateway_name}
   Mapping Type: {nat_mapping_type}
-  Failures/min: {nat_mapping_failures}
+  Failures/s:   {nat_mapping_failures}
+  Drop reason:  ENDPOINT_INDEPENDENCE_CONFLICT
   NAT IP:       {nat_external_ip}
   Subnet:       {subnet_name}
   Protocol:     {nat_protocol}
@@ -41,18 +46,84 @@ fault_params:
     b: {randint: [0, 255]}
     c: {randint: [1, 254]}
   subnet_name: gcpnet-subnet-central1
-  nat_protocol: {choice: [TCP, UDP]}
+  gcp_region: us-central1
+  nat_protocol: TCP
 rca_clues:
   cloud-nat-gateway:
     nat.mapping_type_current: ENDPOINT_INDEPENDENT
     nat.port_reuse_blocked: true
-    nat.port_pool_util_pct: {uniform: [96.0, 100.0], round: 1}
+    nat.endpoint_independent_mapping: true
   cloud-load-balancer:
     lb.nat_path_affected: true
     lb.connection_draining_stuck: true
   cloud-cdn-service:
     cdn.origin_fetch_via_nat: failing
     cdn.stale_content_served: true
+service_lag_seconds: {cloud-cdn-service: 45}
+cascade_messages:
+  cloud-cdn-service:
+    - severity: WARN
+      message: 'cloud-cdn-service: cache-warmer fetches from gcpnet-gke-central1 to the third-party origin via {nat_gateway_name} ({gcp_region}) failing; serving stale content'
+fault_scope:
+  cluster: gcpnet-gke-central1
+  workloads: [cloud-nat-gateway]
+infrastructure_events:
+  - service: cloud-nat-gateway
+    severity: INFO
+    offset_seconds: -90
+    body: 'cloudnat: nat mapping mode endpoint-independent-v2 applied to gateway={nat_gateway_name} region=us-central1: enable_endpoint_independent_mapping false -> true; by platform-netconfig (CR-7351)'
+    attributes:
+      user.name: platform-netconfig
+      change.request: CR-7351
+      operation: nat_config_change
+      deployment.nat_mapping_mode: endpoint-independent-v2
+      nat.gateway: gcpnet-nat-central1
+      change.summary: 'enable_endpoint_independent_mapping: false -> true'
+remediation_effects:
+  log_events:
+    - service: vpc-network-manager
+      severity: INFO
+      offset_seconds: 2
+      body: 'gcp-audit: logName=cloudaudit.googleapis.com/activity serviceName=compute.googleapis.com methodName=v1.compute.routers.patch resourceName=projects/gcpnet-prod-001/regions/us-central1/routers/gcpnet-router-central1/nats/gcpnet-nat-central1 principalEmail={actor} status=OK'
+      attributes:
+        operation: nat_config_change
+        nat.gateway: gcpnet-nat-central1
+    - service: cloud-nat-gateway
+      severity: INFO
+      offset_seconds: 8
+      body: 'cloudnat: gateway=gcpnet-nat-central1 config reloaded endpoint_independent_mapping=false (was true); ports are reusable across destinations again'
+      attributes:
+        operation: nat_config_change
+        nat.endpoint_independent_mapping: false
+  steady_attributes:
+    cloud-nat-gateway:
+      nat.endpoint_independent_mapping: false
+  log_taper_seconds: 60
+  verification:
+    - signal: nat.mapping_failures
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "cloud-nat-gateway" AND attributes.gateway == "gcpnet-nat-central1"'
+      field: 'metrics.nat.mapping_failures'
+      expect: '0-1 (was 100-2000)'
+      within_seconds: 90
+    - signal: nat.dropped_connections
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "cloud-nat-gateway" AND attributes.gateway == "gcpnet-nat-central1"'
+      field: 'metrics.nat.dropped_connections'
+      expect: 'back to 0-5 (was 50-500)'
+      within_seconds: 90
+    - signal: nat.port_utilization_pct
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "cloud-nat-gateway" AND attributes.gateway == "gcpnet-nat-central1"'
+      field: 'metrics.nat.port_utilization_pct'
+      expect: 'back to 20-40 (was 32-52, elevated but not near the cap)'
+      within_seconds: 90
+    - signal: NAT endpoint-independent mapping
+      from: 'logs.otel.gcpnet'
+      where: 'resource.attributes.service.name == "cloud-nat-gateway" AND attributes.nat.gateway == "gcpnet-nat-central1"'
+      field: 'attributes.nat.endpoint_independent_mapping'
+      expect: 'false on every line logged since the fix; true stops appearing'
+      within_seconds: 90
 business_impact:
   - kpi: business.nat_port_exhaustion_rate_pct
     factor: {uniform: [5.0, 12.0]}

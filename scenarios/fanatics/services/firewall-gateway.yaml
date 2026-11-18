@@ -22,22 +22,31 @@ entry_endpoints:
 emit_fault_logs: true
 kpi_emitter: false
 steps:
+# Timing per mechanism (schema 1.3 before / during / after):
+#   ch 5  content update: CPU follows the install within ~12s; a commit/reload blip, then ~40s to recover.
+#   ch 17 certificate: hard step at notAfter (45s after the trigger) and a hard step back on renewal.
+#   ch 18 session table: already ~90% when the alert fires (hotfix backdated ~40 min), settles at ~97%;
+#         after the timeout is reset idle sessions age out with a ~105s half-life.
+# Capacity model (PA-5260, 32M sessions): ~19,000 new connections/s, ~45% of them from clients that never
+# send FIN/RST and sit until the idle timeout. Table ~ cps x (0.55 x 30s + 0.45 x timeout):
+#   900s  -> ~8.0M sessions (25%);   3600s -> ~31.1M sessions (97%).
 - sample:
+    pan_ts:
+      expr: "iso_now[0:10].replace('-', '/') + ' ' + iso_now[11:19]"
+    session_center:
+      expr: "(28800000 + 2300000 * min(1.0, elapsed.get(18, 0) / 270.0)) if 18 in all_active else ((8000000 + 23000000 * 0.5 ** (since_fix.get(18, 0) / 105.0)) if 18 in fixed_channels else 8000000)"
     session_count:
-      if_active:
-        randint:
-        - 55000
-        - 64000
-      else:
-        randint:
-        - 15000
-        - 45000
+      expr: "int(min(31900000, session_center + rand.gauss(0, 0.004 * session_center)))"
     session_rate:
-      randint:
-      - 500
-      - 2000
+      expr: "int(19000 + rand.gauss(0, 570))"
     session_utilization_pct:
-      expr: round(session_count / 64000 * 100, 1)
+      expr: round(session_count / 32000000 * 100, 1)
+    tcp_timeout_s:
+      expr: "3600 if 18 in all_active else 900"
+    fw_session_cfg:
+      expr: "'pan-os-11.1.3-hotfix2' if 18 in all_active else 'pan-os-11.1.3'"
+    session_status:
+      expr: "'ANOMALY' if 18 in all_active or session_utilization_pct > 90.0 else 'NORMAL'"
 - metric:
     name: firewall.session_count
     value:
@@ -53,26 +62,41 @@ steps:
     value:
       var: session_utilization_pct
     unit: '%'
+- metric:
+    name: firewall.tcp_session_timeout_s
+    value:
+      var: tcp_timeout_s
+    unit: s
 - log:
     level: INFO
-    message: 1,2025/01/15 14:32:01,PA-5260,SYSTEM,session,0,session-info,sessions={session_count}/64000 ({session_utilization_pct}%)
-      rate={session_rate}/s
+    message: '1,{pan_ts},007200001234,SYSTEM,general,0,{pan_ts},,session-info,,0,0,general,informational,"Session table: active={session_count} max=32000000 utilization={session_utilization_pct}% new-connections={session_rate}/s timeout-tcp={tcp_timeout_s}s status={session_status}"'
     attrs:
       operation: session_table
+      firewall.hostname: pa-5260-edge
       firewall.sessions:
         var: session_count
-      firewall.max_sessions: 64000
+      firewall.max_sessions: 32000000
       firewall.session_rate:
         var: session_rate
+      firewall.tcp_timeout_s:
+        var: tcp_timeout_s
+      firewall.session_status:
+        var: session_status
+      infra.fw_session_config:
+        var: fw_session_cfg
 - sample:
+    cert_expired:
+      expr: "bool(17 in all_active and elapsed.get(17, 0) >= 45)"
     threats_blocked:
-      randint:
-      - 0
-      - 15
+      expr: "int(max(0, 7 + rand.gauss(0, 2)))"
     ssl_decrypted:
-      randint:
-      - 200
-      - 800
+      expr: "int((520 + rand.gauss(0, 0.04 * 520)) * (0.15 if cert_expired else 1.0))"
+    ssl_decrypt_failures:
+      expr: "int(650 + rand.gauss(0, 0.03 * 650)) if cert_expired else 0"
+    decrypt_status:
+      expr: "'ANOMALY' if cert_expired else 'NORMAL'"
+    cert_bundle:
+      expr: "'internal-ca-v2-cross-signed' if 17 in all_active else ('internal-ca-v2-renewed' if 17 in fixed_channels else 'internal-ca-v2')"
 - metric:
     name: firewall.threats_blocked
     value:
@@ -83,38 +107,50 @@ steps:
     value:
       var: ssl_decrypted
     unit: flows
+- metric:
+    name: firewall.ssl_decrypt_failures
+    value:
+      var: ssl_decrypt_failures
+    unit: flows
 - log:
     level: INFO
-    message: 1,2025/01/15 14:32:01,PA-5260,THREAT,summary,0,threat-stats,threats_blocked={threats_blocked} ssl_decrypted={ssl_decrypted}
+    message: '1,{pan_ts},007200001234,SYSTEM,general,0,{pan_ts},,decryption-summary,,0,0,general,informational,"Decryption: decrypted={ssl_decrypted} failures={ssl_decrypt_failures} threats-blocked={threats_blocked} cert-chain={cert_bundle} status={decrypt_status}"'
     attrs:
       operation: threat_prevention
+      firewall.hostname: pa-5260-edge
       firewall.threats:
         var: threats_blocked
       firewall.ssl_flows:
         var: ssl_decrypted
+      firewall.ssl_decrypt_failures:
+        var: ssl_decrypt_failures
+      firewall.decrypt_status:
+        var: decrypt_status
+      infra.cert_chain_bundle:
+        var: cert_bundle
 - sample:
-    cpu_mgmt:
-      if_active:
-        uniform:
-        - 75.0
-        - 98.0
-        round: 1
-      else:
-        uniform:
-        - 15.0
-        - 40.0
-        round: 1
+    r5:
+      expr: "min(1.0, elapsed.get(5, 0) / 12.0) if 5 in all_active else ((1.0 if since_fix.get(5, 0) < 8 else max(0.0, 1.0 - (since_fix.get(5, 0) - 8) / 35.0)) if 5 in fixed_channels else 0.0)"
+    blip:
+      expr: "1.0 if (5 in fixed_channels and 3 <= since_fix.get(5, 0) < 8) else 0.0"
+    dp_center:
+      expr: "34.0 + 59.0 * r5 + 5.0 * blip"
+    mgmt_center:
+      expr: "22.0 + 48.0 * r5 + 20.0 * blip"
+    buf_center:
+      expr: "28.0 + 50.0 * r5"
     cpu_dp:
-      if_active:
-        uniform:
-        - 80.0
-        - 99.0
-        round: 1
-      else:
-        uniform:
-        - 20.0
-        - 50.0
-        round: 1
+      expr: "round(min(99.5, dp_center + rand.gauss(0, 0.03 * dp_center)), 1)"
+    cpu_mgmt:
+      expr: "round(min(99.5, mgmt_center + rand.gauss(0, 0.03 * mgmt_center)), 1)"
+    packet_buffer_pct:
+      expr: "round(min(99.0, buf_center + rand.gauss(0, 0.03 * buf_center)), 1)"
+    ctd_slowpath:
+      expr: "int((4000 + 34000 * r5) * (1.0 + rand.gauss(0, 0.04)))"
+    threat_sig_ver:
+      expr: "'content-8845-8432-experimental' if 5 in all_active else 'content-8844-8431'"
+    dp_status:
+      expr: "'ANOMALY' if 5 in all_active or cpu_dp > 80.0 else 'NORMAL'"
 - metric:
     name: firewall.cpu_mgmt_pct
     value:
@@ -125,25 +161,39 @@ steps:
     value:
       var: cpu_dp
     unit: '%'
+- metric:
+    name: firewall.packet_buffer_pct
+    value:
+      var: packet_buffer_pct
+    unit: '%'
+- metric:
+    name: firewall.ctd_pkt_slowpath_per_s
+    value:
+      var: ctd_slowpath
+    unit: packets/s
 - log:
     level: INFO
-    message: 1,2025/01/15 14:32:01,PA-5260,SYSTEM,general,0,resource-monitor,mgmt_cpu={cpu_mgmt}% dp_cpu={cpu_dp}%
+    message: '1,{pan_ts},007200001234,SYSTEM,general,0,{pan_ts},,resource-monitor,,0,0,general,informational,"Resource monitor dp0: dp-cpu={cpu_dp}% mgmt-cpu={cpu_mgmt}% packet-buffer={packet_buffer_pct}% ctd_pkt_slowpath={ctd_slowpath}/s content={threat_sig_ver} status={dp_status}"'
     attrs:
       operation: cpu_check
+      firewall.hostname: pa-5260-edge
       firewall.cpu_mgmt:
         var: cpu_mgmt
       firewall.cpu_dp:
         var: cpu_dp
+      firewall.dp_cpu_status:
+        var: dp_status
+      firewall.packet_buffer_pct:
+        var: packet_buffer_pct
+      firewall.ctd_pkt_slowpath_per_s:
+        var: ctd_slowpath
+      deployment.threat_sig_ver:
+        var: threat_sig_ver
 - sample:
     cert_days_remaining:
-      if_active:
-        randint:
-        - 0
-        - 5
-      else:
-        randint:
-        - 30
-        - 365
+      expr: "(1 if elapsed.get(17, 0) < 45 else 0) if 17 in all_active else (365 if 17 in fixed_channels else 212)"
+    cert_status:
+      expr: "'ANOMALY' if 17 in all_active else 'NORMAL'"
 - metric:
     name: firewall.cert_days_remaining
     value:
@@ -151,8 +201,13 @@ steps:
     unit: days
 - log:
     level: INFO
-    message: 1,2025/01/15 14:32:01,PA-5260,SYSTEM,general,0,cert-status,ssl_inspect_cert days_remaining={cert_days_remaining}
+    message: '1,{pan_ts},007200001234,SYSTEM,general,0,{pan_ts},,cert-status,ssl-forward-trust,0,0,general,informational,"Certificate ssl-forward-trust days-remaining={cert_days_remaining} chain={cert_bundle} status={cert_status}"'
     attrs:
       operation: cert_check
+      firewall.hostname: pa-5260-edge
       firewall.cert_expiry_days:
         var: cert_days_remaining
+      firewall.cert_status:
+        var: cert_status
+      infra.cert_chain_bundle:
+        var: cert_bundle

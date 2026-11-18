@@ -6,20 +6,23 @@ sensor_type: health_check
 affected_services: [chat-orchestrator]
 cascade_services: [cost-guard, model-router]
 
-description: The chat-orchestrator agent enters a tool-call loop with repeated retrieval calls and no termination, inflating latency and token spend.
+description: Agent configuration v42 removed the stop condition, so the chat-orchestrator agent repeats the same retrieval tool call without terminating, inflating latency and token spend.
 
 investigation_notes: |
-  1. Search body.text LIKE *AGENT-TOOL-LOOP* and group by session_id to find the loops; iterations={iteration_count} against the expected limit of {normal_max_iterations}.
-  2. Inspect the repeated tool call: tool={tool_name} with near-identical arguments (args_hash={args_hash}) and no new information between iterations.
-  3. Check token usage per turn: tokens_per_turn={tokens_per_turn} versus a normal {normal_tokens_per_turn}; spend rises linearly with each loop iteration.
-  4. Follow the cascade: cost-guard shows spend_rate_per_min={spend_rate} and model-router sees {router_calls_per_turn} model calls per user turn, pushing the Microsoft Foundry deployment provisioned utilization and response latency up.
-  5. Look for a recent agent prompt or tool-schema change in agent.config_version={agent_config} that removed the stop condition or changed the tool result format; a missing stop condition with an unchanged tool result schema confirms the removed stop condition.
-  6. Get approval, then cap agent tool iterations at {normal_max_iterations} and confirm tokens_per_turn returns to baseline.
+  Root cause: agent-config revision {agent_config} for chat-orchestrator was deployed shortly before the first AGENT-TOOL-LOOP and removed the iteration stop condition. Turns now call {tool_name} with near-identical arguments (args_hash={args_hash}) for iterations={iteration_count} cycles against an expected limit of {normal_max_iterations}. The tool and its result schema are unchanged, so retrieval and the model deployment are not at fault.
+  Confirm:
+    - metric chat.tool_calls_per_turn rises from 0-3 to 25-120; chat-orchestrator logs "chat.agent_status" with attributes.agent.config_version={agent_config} and status=ANOMALY
+    - tokens_per_turn={tokens_per_turn} against a normal {normal_tokens_per_turn}; chat.token_cost_usd_per_conversation and chat.turn_latency_ms rise with it, and cost-guard shows spend_rate_per_min={spend_rate} with {router_calls_per_turn} model calls per user turn on model-router
+    - the config-service record for agent-config/chat-orchestrator (revision v42, stop condition removed) comes minutes before the first loop
+    - chat.openai_quota_headroom_pct and the other Azure OpenAI deployments are unaffected by a config problem, which rules out throttling as the cause of the long turns
+  Remediation: roll the agent configuration back to the previous revision (v41) with opsctl rollback agent-config/chat-orchestrator --to-revision previous. New turns stop looping straight away and tool calls per turn return to 5 or fewer within about 45 seconds. Raising quota or restarting the orchestrator only hides the loop and keeps burning tokens.
 
 remediation_action: cap_agent_tool_iterations
+remediation_command: |-
+  opsctl rollback agent-config/chat-orchestrator --to-revision previous
 
 error_message: |
-  [ChatOrchestrator] AGENT-TOOL-LOOP: session={session_id} tool={tool_name} iterations={iteration_count} (limit {normal_max_iterations}) tokens_per_turn={tokens_per_turn}
+  [ChatOrchestrator] AGENT-TOOL-LOOP: session={session_id} tool={tool_name} iterations={iteration_count} (limit {normal_max_iterations}) tokens_per_turn={tokens_per_turn} agent_config={agent_config}
 
 stack_trace: |
   AgentLoopException: AGENT-TOOL-LOOP
@@ -33,7 +36,7 @@ stack_trace: |
 
 correlation_attr:
   key: agent.config_version
-  value: agent-config-v42-no-stop-condition
+  value: agent-config-v42
 
 fault_params:
   session_id: {choice: ["sess-4c81e0", "sess-9ab2d7", "sess-e03f56", "sess-71d9b3"]}
@@ -60,6 +63,69 @@ rca_clues:
     router.calls_per_turn_p95: {randint: [25, 120]}
     router.queue_wait_ms: {randint: [300, 3500]}
 
+cascade_messages:
+  cost-guard:
+    - severity: WARN
+      message: 'cost.spend_rate usd_per_min={spend_rate} tokens_per_turn_p95={tokens_per_turn} budget alert not yet evaluated; one caller (chat-orchestrator) drives the increase'
+  model-router:
+    - severity: WARN
+      message: 'router.calls_per_turn p95={router_calls_per_turn} caller=chat-orchestrator queue_wait elevated; request pattern is repeated identical prompts'
+
+service_lag_seconds: {cost-guard: 20, model-router: 10}
+fault_scope:
+  workloads: [chat-orchestrator]
+
+infrastructure_events:
+  - service: chat-orchestrator
+    severity: INFO
+    offset_seconds: -120
+    body: 'config-service: change applied agent-config/chat-orchestrator rev=v42 by=release-pipeline@contoso-demo.onmicrosoft.com : agent-config-v42 deployed (stop_condition removed, max_iterations unset)'
+    attributes:
+      user.name: release-pipeline@contoso-demo.onmicrosoft.com
+      operation: config_deploy
+      config.target: agent-config/chat-orchestrator
+      agent.config_version: agent-config-v42
+      change.summary: 'agent-config-v41 -> agent-config-v42: stop_condition removed'
+
+remediation_effects:
+  log_events:
+    - service: chat-orchestrator
+      severity: INFO
+      offset_seconds: 1
+      body: 'config-service: change applied agent-config/chat-orchestrator cmd="opsctl rollback agent-config/chat-orchestrator --to-revision=previous" by={actor} : agent-config-v42 -> agent-config-v41, stop condition restored'
+      attributes:
+        operation: config_rollback
+        agent.config_version: agent-config-v41
+        change.summary: 'agent-config-v42 -> agent-config-v41'
+  steady_attributes:
+    chat-orchestrator:
+      agent.config_version: agent-config-v41
+  verification:
+    - signal: chat.tool_calls_per_turn
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "chat-orchestrator"'
+      field: 'metrics.chat.tool_calls_per_turn'
+      expect: '5 or fewer (was 25-120)'
+      within_seconds: 60
+    - signal: chat.token_cost_usd_per_conversation
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "chat-orchestrator"'
+      field: 'metrics.chat.token_cost_usd_per_conversation'
+      expect: 'back in the normal 0.35-1.1 USD band'
+      within_seconds: 60
+    - signal: agent config revision
+      from: 'logs.otel.azureai'
+      where: 'resource.attributes.service.name == "chat-orchestrator"'
+      field: 'attributes.agent.config_version'
+      expect: 'agent-config-v41 on every line logged since the fix; agent-config-v42 stops appearing'
+      within_seconds: 60
+    - signal: model_router.calls_per_turn_p95
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "model-router"'
+      field: 'metrics.model_router.calls_per_turn_p95'
+      expect: 'back to 2-4 calls per turn (was 25-120)'
+      within_seconds: 60
+
 business_impact:
   - kpi: business.tokens_per_conversation
     factor: {uniform: [4.0, 9.0]}
@@ -74,3 +140,4 @@ generator_impact:
   azure_ai_foundry:
     provisioned_utilization_above_threshold: 92.0
     latency_high: 7000.0
+generator_hold_seconds: {azure_ai_foundry: 45}

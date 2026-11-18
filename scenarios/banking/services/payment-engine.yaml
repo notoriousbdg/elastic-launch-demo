@@ -101,30 +101,6 @@ steps:
           engine.total_txns:
             var: _transaction_count
           engine.success_rate: 99.7
-- sample:
-    tps:
-      if_active:
-        uniform:
-        - 20.0
-        - 80.0
-        round: 1
-      else:
-        uniform:
-        - 120.0
-        - 450.0
-        round: 1
-- metric:
-    name: payment_engine.transactions_per_sec
-    value:
-      var: tps
-    unit: txn/s
-- metric:
-    name: payment_engine.ach_queue_depth
-    value:
-      randint:
-      - 100
-      - 2000
-    unit: entries
 - metric:
     name: payment_engine.auth_success_rate
     value:
@@ -133,3 +109,217 @@ steps:
       - 99.9
       round: 2
     unit: '%'
+- sample:
+    f01p:
+      expr: min(1.0, max(0.0, elapsed.get(1, 0) - lag.get(1, 0)) / 30.0) if 1 in all_active else (max(0.0, 1.0 - since_fix.get(1,
+        0) / 60.0) if 1 in fixed_channels else 0.0)
+    f07:
+      expr: min(1.0, max(0.0, elapsed.get(7, 0) - lag.get(7, 0)) / 20.0) if 7 in all_active else (max(0.0, 1.0 - since_fix.get(7,
+        0) / 45.0) if 7 in fixed_channels else 0.0)
+    c07_proxy:
+      expr: '''visa-proxy-1.4.3'' if 7 in all_active else ''visa-proxy-1.4.2'''
+    c07_inflight:
+      expr: 8 if 7 in all_active else 64
+    c07_resp:
+      expr: round(rand.uniform(120.0, 260.0) * (1.0 - f07) + rand.uniform(2100.0, 2600.0) * f07, 1)
+    c_card_approval:
+      expr: round(rand.uniform(94.0, 96.5) - 7.0 * f01p - 27.0 * f07, 2)
+    c07_status:
+      expr: '''DEGRADED'' if 7 in all_active or f07 > 0.1 else ''NOMINAL'''
+- when: 7 in all_active
+  log:
+    level: WARN
+    message: '[PAY] card_auth_status proxy={c07_proxy} max_inflight_per_session={c07_inflight} network=VISA issuer_response_ms={c07_resp}
+      approval_pct={c_card_approval} status={c07_status}'
+    attrs: &id001
+      operation: card_auth_status
+      card.network_proxy_version:
+        var: c07_proxy
+      card.max_inflight_per_session:
+        var: c07_inflight
+      card.issuer_response_ms:
+        var: c07_resp
+      card.status:
+        var: c07_status
+- when: 7 not in all_active
+  log:
+    level: INFO
+    message: '[PAY] card_auth_status proxy={c07_proxy} max_inflight_per_session={c07_inflight} network=VISA issuer_response_ms={c07_resp}
+      approval_pct={c_card_approval} status={c07_status}'
+    attrs: *id001
+- metric:
+    name: payment_engine.card_auth_response_ms
+    value:
+      var: c07_resp
+    unit: ms
+- metric:
+    name: payment_engine.card_auth_approval_pct
+    value:
+      var: c_card_approval
+    unit: '%'
+- sample:
+    f04:
+      expr: min(1.0, max(0.0, elapsed.get(4, 0) - lag.get(4, 0)) / 30.0) if 4 in all_active else (max(0.0, min(1.0, 1.0 -
+        (since_fix.get(4, 0) - 120) / 15.0)) if 4 in fixed_channels else 0.0)
+    f04q:
+      expr: min(1.0, max(0.0, elapsed.get(4, 0) - lag.get(4, 0)) / 240.0) if 4 in all_active else (max(0.0, min(1.0, 1.0 -
+        (since_fix.get(4, 0) - 120) / 120.0)) if 4 in fixed_channels else 0.0)
+    c04_valid:
+      expr: False if 4 in all_active or (4 in fixed_channels and since_fix.get(4, 0) < 120) else True
+    c04_lookup:
+      expr: round(rand.uniform(2.0, 6.0) * (1.0 - f04) + rand.uniform(380.0, 900.0) * f04, 1)
+    c04_queue:
+      expr: round(round(rand.uniform(100.0, 900.0) * (1.0 - f04q) + rand.uniform(30000.0, 48000.0) * f04q, 0))
+    c04_pool:
+      expr: round(rand.uniform(18.0, 42.0) * (1.0 - f04) + rand.uniform(97.0, 100.0) * f04, 1)
+    c04_status:
+      expr: '''DEGRADED'' if 4 in all_active or f04q > 0.1 else ''NOMINAL'''
+- when: 4 in all_active
+  log:
+    level: WARN
+    message: '[PAY] ach_posting_status index=ledger.idx_acct_lookup index_valid={c04_valid} account_lookup_ms={c04_lookup}
+      queue_depth={c04_queue} db_pool_active={c04_pool}% status={c04_status}'
+    attrs: &id002
+      operation: ach_posting_status
+      db.index_name: ledger.idx_acct_lookup
+      db.index_valid:
+        var: c04_valid
+      ach.queue_depth:
+        var: c04_queue
+      ach.status:
+        var: c04_status
+- when: 4 not in all_active
+  log:
+    level: INFO
+    message: '[PAY] ach_posting_status index=ledger.idx_acct_lookup index_valid={c04_valid} account_lookup_ms={c04_lookup}
+      queue_depth={c04_queue} db_pool_active={c04_pool}% status={c04_status}'
+    attrs: *id002
+- metric:
+    name: payment_engine.ach_account_lookup_ms
+    value:
+      var: c04_lookup
+    unit: ms
+- metric:
+    name: payment_engine.ach_queue_depth
+    value:
+      var: c04_queue
+    unit: entries
+- metric:
+    name: payment_engine.db_pool_active_pct
+    value:
+      var: c04_pool
+    unit: '%'
+- sample:
+    f05:
+      expr: min(1.0, max(0.0, elapsed.get(5, 0) - lag.get(5, 0)) / 30.0) if 5 in all_active else (max(0.0, 1.0 - since_fix.get(5,
+        0) / 60.0) if 5 in fixed_channels else 0.0)
+    c05_rev:
+      expr: '''rev-8'' if 5 in all_active else (''rev-7'' if 5 in fixed_channels else ''rev-7'')'
+    c05_business_day:
+      expr: False if 5 in all_active else True
+    c05_on_time:
+      expr: round(rand.uniform(99.0, 99.8) * (1.0 - f05) + rand.uniform(3.0, 9.0) * f05, 2)
+    c05_pending:
+      expr: round(rand.uniform(20, 80) + min(9000.0, 45.0 * elapsed.get(5, 0))) if 5 in all_active else (round(rand.uniform(20,
+        80) + 9000.0 * max(0.0, 1.0 - since_fix.get(5, 0) / 90.0)) if 5 in fixed_channels else round(rand.uniform(20, 80)))
+    c05_status:
+      expr: '''DEGRADED'' if 5 in all_active or f05 > 0.1 else ''NOMINAL'''
+- when: 5 in all_active
+  log:
+    level: WARN
+    message: '[PAY] billpay_status calendar=fedach-holiday-calendar rev={c05_rev} fed_business_day={c05_business_day} on_time_pct={c05_on_time}
+      pending={c05_pending} status={c05_status}'
+    attrs: &id003
+      operation: billpay_status
+      billpay.fed_calendar_rev:
+        var: c05_rev
+      billpay.fed_business_day:
+        var: c05_business_day
+      billpay.pending:
+        var: c05_pending
+      billpay.status:
+        var: c05_status
+- when: 5 not in all_active
+  log:
+    level: INFO
+    message: '[PAY] billpay_status calendar=fedach-holiday-calendar rev={c05_rev} fed_business_day={c05_business_day} on_time_pct={c05_on_time}
+      pending={c05_pending} status={c05_status}'
+    attrs: *id003
+- metric:
+    name: payment_engine.billpay_on_time_pct
+    value:
+      var: c05_on_time
+    unit: '%'
+- metric:
+    name: payment_engine.billpay_pending
+    value:
+      var: c05_pending
+    unit: payments
+- sample:
+    f06p:
+      expr: min(1.0, max(0.0, elapsed.get(6, 0) - lag.get(6, 0)) / 30.0) if 6 in all_active else (max(0.0, 1.0 - since_fix.get(6,
+        0) / 60.0) if 6 in fixed_channels else 0.0)
+    c06_hold:
+      expr: round(rand.uniform(0.2, 0.6) * (1.0 - f06p) + rand.uniform(14.0, 22.0) * f06p, 2)
+- metric:
+    name: payment_engine.wire_ofac_hold_pct
+    value:
+      var: c06_hold
+    unit: '%'
+- sample:
+    f19:
+      expr: min(1.0, max(0.0, elapsed.get(19, 0) - lag.get(19, 0)) / 30.0) if 19 in all_active else (max(0.0, 1.0 - since_fix.get(19,
+        0) / 90.0) if 19 in fixed_channels else 0.0)
+    c19_delay:
+      expr: '''-1'' if 19 in all_active else ''30s'''
+    c19_lag:
+      expr: round(15000.0 + 1000.0 * elapsed.get(19, 0) + rand.uniform(-300, 300), 1) if 19 in all_active else (round(rand.uniform(20.0,
+        400.0) + 60000.0 * max(0.0, 1.0 - since_fix.get(19, 0) / 90.0), 1) if 19 in fixed_channels else round(rand.uniform(20.0,
+        400.0), 1))
+    c19_wait:
+      expr: '''RecoveryConflictSnapshot'' if 19 in all_active else ''WalReceiverMain'''
+    c19_status:
+      expr: '''DEGRADED'' if 19 in all_active or c19_lag > 3000 else ''NOMINAL'''
+- when: 19 in all_active
+  log:
+    level: WARN
+    message: '[PAY] replica_status cluster=banking-pg-payments replica=banking-pg-payments-replica-1 max_standby_streaming_delay={c19_delay}
+      replay_lag_ms={c19_lag} wait_event={c19_wait} status={c19_status}'
+    attrs: &id004
+      operation: replica_status
+      db.max_standby_streaming_delay:
+        var: c19_delay
+      db.replica_lag_ms:
+        var: c19_lag
+      db.replica_wait_event:
+        var: c19_wait
+      db.status:
+        var: c19_status
+- when: 19 not in all_active
+  log:
+    level: INFO
+    message: '[PAY] replica_status cluster=banking-pg-payments replica=banking-pg-payments-replica-1 max_standby_streaming_delay={c19_delay}
+      replay_lag_ms={c19_lag} wait_event={c19_wait} status={c19_status}'
+    attrs: *id004
+- metric:
+    name: payment_engine.db_replica_lag_ms
+    value:
+      var: c19_lag
+    unit: ms
+- sample:
+    f16p:
+      expr: min(1.0, max(0.0, elapsed.get(16, 0) - lag.get(16, 0)) / 30.0) if 16 in all_active else (max(0.0, 1.0 - since_fix.get(16,
+        0) / 60.0) if 16 in fixed_channels else 0.0)
+    f17p:
+      expr: min(1.0, max(0.0, elapsed.get(17, 0) - lag.get(17, 0)) / 30.0) if 17 in all_active else (max(0.0, 1.0 - since_fix.get(17,
+        0) / 120.0) if 17 in fixed_channels else 0.0)
+    f20p:
+      expr: min(1.0, max(0.0, elapsed.get(20, 0) - lag.get(20, 0)) / 20.0) if 20 in all_active else (max(0.0, min(1.0, 1.0
+        - (since_fix.get(20, 0) - 60) / 60.0)) if 20 in fixed_channels else 0.0)
+    tps:
+      expr: round(rand.uniform(120.0, 450.0) * (1.0 - 0.35 * f16p - 0.2 * f17p - 0.7 * f20p), 1)
+- metric:
+    name: payment_engine.transactions_per_sec
+    value:
+      var: tps
+    unit: txn/s

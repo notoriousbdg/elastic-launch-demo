@@ -10,8 +10,12 @@ cascade_services:
 - ehr-system
 description: Integration bridge between nurse call system and EHR loses connectivity
 investigation_notes: |-
-  Root Cause: The nurse call system (Hill-Rom/Rauland) integration bridge communicates with the EHR via a middleware TCP socket. Bridge failures cause call events to queue without EHR documentation, leading to undelivered notifications and potential patient safety events. Emergency calls default to overhead paging.
-  Remediation: 1) Check the nurse call bridge connectivity: `ncs-admin bridge-status --station {station_id}`. 2) Restart the EHR-NCS bridge service: `systemctl restart ehr-nursecall-bridge`. 3) Verify the TCP socket connection to the nurse call server: `ncs-admin test-connection --host ncs-server --port 3001`. 4) Once the bridge reconnects, replay the undelivered call queue instead of discarding it: `ncs-admin replay-queue --unit {nursing_unit}`. (A bridge socket stuck in CLOSE_WAIT means the nurse call server closed the connection and the bridge never closed and reconnected.) 5) Confirm overhead paging failover is active for emergency and code calls. 6) Review the call escalation timers — ensure STAT calls escalate to charge nurse after 60s unacknowledged.
+  Root cause: EHR-NCS-BRIDGE-01 (East tower) runs hillrom-bridge-v2.4.0-rc1, rolled out earlier in the shift. About 90 seconds before the first undelivered call, the nurse call server ncs-server restarted and closed both bridge sockets. EHR-NCS-BRIDGE-02 (West tower, v2.3.4) reconnected within seconds. The rc1 build on BRIDGE-01 never closes and reopens its side, so its socket sits in CLOSE_WAIT and calls from {nursing_unit} queue undelivered: station {station_id}, bed {bed_id}, {call_type} call waiting {undelivered_seconds}s. Overhead paging covers emergency calls in the meantime.
+  Confirm:
+    - clinical-alerts logs [CDS] ncs_bridge bridge=EHR-NCS-BRIDGE-01 tower=East ... version=hillrom-bridge-v2.4.0-rc1 socket=CLOSE_WAIT ... status=DISCONNECTED (attributes.ncs.bridge_socket_state, attributes.infra.nursecall_bridge_fw); EHR-NCS-BRIDGE-02 on v2.3.4 stays ESTABLISHED
+    - metric clinical_alerts.nurse_call_undelivered rises from 0 by about one call every 8 seconds
+    - the clinical-alerts line "peer ncs-server:3001 closed connection" comes before the first undelivered call, and BRIDGE-02 logs its reconnect right after it
+  Remediation: roll BRIDGE-01 back to v2.3.4 with opsctl rollback deployment/ncs-bridge-01 --to-revision previous. The bridge reconnects and replays its queued calls to the EHR; undelivered calls are back to 0 within about 45 seconds. Restarting the bridge on rc1 reconnects it, but the next nurse call server restart strands it again. Replay the queue; do not discard it.
 remediation_action: restart_nursecall_bridge
 error_message: '[CDS] NURSE-CALL-STORM: station={station_id} unit={nursing_unit} bed={bed_id} call_type={call_type} undelivered={undelivered_seconds}s'
 stack_trace: |-
@@ -32,10 +36,9 @@ correlation_attr:
   value: hillrom-bridge-v2.4.0-rc1
 fault_params:
   station_id:
-    format: "NCS-{unit}-{n}"
-    unit: {choice: [ICU, MEDSURG, ED, NICU]}
+    format: "NCS-EAST-{n}"
     n: {randint: [1, 20]}
-  nursing_unit: {choice: [ICU-3A, ICU-3B, MedSurg-4N, MedSurg-4S, ED-1, NICU-2]}
+  nursing_unit: {choice: [ICU-3A, MedSurg-4N]}
   bed_id:
     format: "{ward}-{num}"
     ward: {choice: [A, B, C, D]}
@@ -46,12 +49,95 @@ rca_clues:
   clinical-alerts:
     ncs.bridge_status: disconnected
     ncs.bridge_socket_state: CLOSE_WAIT
-    ncs.undelivered_calls: {randint: [5, 30]}
+    ncs.undelivered_calls: {randint: [5, 28]}
   patient-monitor:
     vitals.nurse_response_lag_s: {randint: [60, 300]}
     vitals.overhead_paging_active: true
   ehr-system:
     ehr.undocumented_calls: {randint: [3, 15]}
+remediation_command: |-
+  opsctl rollback deployment/ncs-bridge-01 --to-revision previous
+error_services: [clinical-alerts]
+service_lag_seconds:
+  patient-monitor: 20
+  ehr-system: 30
+cascade_messages:
+  patient-monitor:
+    - severity: WARN
+      message: '[MONITOR] nurse_response_overdue unit={nursing_unit} bed={bed_id} call_type={call_type} waiting={undelivered_seconds}s; overhead paging active'
+  ehr-system:
+    - severity: WARN
+      message: '[EHR] nurse_call_undocumented unit={nursing_unit} bed={bed_id} call_type={call_type} station={station_id}'
+fault_scope:
+  workloads: [clinical-alerts]
+infrastructure_events:
+  - service: clinical-alerts
+    severity: INFO
+    offset_seconds: -1800
+    body: '[CDS] deployment ncs-bridge-01 rolled out hillrom-bridge-v2.4.0-rc1 (was hillrom-bridge-v2.3.4): socket handler rewrite by clinical-integration-release (CHG0032266)'
+    attributes:
+      user.name: clinical-integration-release
+      change.request: CHG0032266
+      operation: deployment
+      ncs.bridge: EHR-NCS-BRIDGE-01
+      infra.nursecall_bridge_fw: hillrom-bridge-v2.4.0-rc1
+      change.summary: 'ncs-bridge-01: hillrom-bridge-v2.3.4 -> hillrom-bridge-v2.4.0-rc1'
+  - service: clinical-alerts
+    severity: WARN
+    offset_seconds: -90
+    body: '[CDS] ncs_bridge peer ncs-server:3001 closed connection (FIN) on EHR-NCS-BRIDGE-01 and EHR-NCS-BRIDGE-02: nurse call server restart'
+    attributes:
+      operation: nurse_call_bridge_status
+      ncs.peer: ncs-server:3001
+      ncs.peer_event: connection_closed
+  - service: clinical-alerts
+    severity: INFO
+    offset_seconds: -86
+    body: '[CDS] ncs_bridge bridge=EHR-NCS-BRIDGE-02 reconnected to ncs-server:3001 after 4.1s version=hillrom-bridge-v2.3.4'
+    attributes:
+      operation: nurse_call_bridge_status
+      ncs.bridge: EHR-NCS-BRIDGE-02
+      infra.nursecall_bridge_fw: hillrom-bridge-v2.3.4
+      ncs.bridge_socket_state: ESTABLISHED
+remediation_effects:
+  log_events:
+    - service: clinical-alerts
+      severity: INFO
+      offset_seconds: 1
+      body: '[CHG] CHANGE IMPLEMENTED opsctl rollback deployment/ncs-bridge-01 --to-revision previous by {actor}: EHR-NCS-BRIDGE-01 hillrom-bridge-v2.4.0-rc1 -> hillrom-bridge-v2.3.4'
+      attributes:
+        operation: change_implemented
+        change.target: deployment/ncs-bridge-01
+    - service: clinical-alerts
+      severity: INFO
+      offset_seconds: 10
+      body: '[CDS] ncs_bridge bridge=EHR-NCS-BRIDGE-01 version=hillrom-bridge-v2.3.4 connected to ncs-server:3001; replaying queued calls to EHR'
+      attributes:
+        operation: nurse_call_bridge_status
+        ncs.bridge: EHR-NCS-BRIDGE-01
+        infra.nursecall_bridge_fw: hillrom-bridge-v2.3.4
+        ncs.bridge_socket_state: ESTABLISHED
+  steady_attributes:
+    clinical-alerts:
+      infra.nursecall_bridge_fw: hillrom-bridge-v2.3.4
+  verification:
+    - signal: clinical_alerts.nurse_call_undelivered
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "clinical-alerts"'
+      field: 'metrics.clinical_alerts.nurse_call_undelivered'
+      expect: 'back to 0 undelivered calls (was up to 28) within about 45 seconds as the queue replays'
+      within_seconds: 90
+    - signal: NURSE-CALL-STORM lines
+      from: 'logs.otel.healthcare'
+      where: 'body.text LIKE "*NURSE-CALL-STORM*"'
+      expect: '0 new lines'
+      within_seconds: 90
+    - signal: ncs.bridge_socket_state
+      from: 'logs.otel.healthcare'
+      where: 'resource.attributes.service.name == "clinical-alerts" AND attributes.ncs.bridge == "EHR-NCS-BRIDGE-01"'
+      field: 'attributes.ncs.bridge_socket_state'
+      expect: 'ESTABLISHED on every EHR-NCS-BRIDGE-01 line since the fix; CLOSE_WAIT stops appearing'
+      within_seconds: 90
 business_impact:
   - kpi: business.patient_safety_events_per_min
     factor: {uniform: [2.5, 5.5]}

@@ -5,77 +5,136 @@ error_type: MM-MIGRATION-FAIL
 sensor_type: migration_monitor
 affected_services:
 - matchmaking-engine
-- auth-gateway
-cascade_services:
 - game-server
-- leaderboard-api
-- analytics-pipeline
-description: Player session migration between regional game server clusters fails during rebalancing or failover operations
+cascade_services: []
+error_services:
+- matchmaking-engine
+description: Player session migrations from us-east-1 to us-west-2 time out in the state transfer phase after a tunnel MTU change created a path MTU blackhole
+onset_delay_seconds: 10
+ramp_seconds: 20
+service_lag_seconds: {game-server: 5}
 investigation_notes: |-
-  Root cause: the state transfer phase times out because the cross-region network path between {source_region} and {target_region} has elevated latency and {packet_loss_pct}% packet loss (above 1%), causing the 84.2KB state payload to fail TCP delivery within the migration timeout.
-  1. Check network path: `mtr -rwzbc 100 <target_region_endpoint>` from the source region to identify which hop introduces the latency and packet loss.
-  2. Review migration phase: if failure is at 'transfer', it is network; if at 'injection', the target server rejected the state payload (version mismatch or schema change).
-  3. Inspect payload size: 84.2KB with 247 inventory items is large — consider compressing the state payload (zstd typically achieves 3:1 on game state data).
-  4. Remediate: issue `rollback_migration` to return the player to the source region, then retry with `migrate_with_reduced_payload` which strips non-essential state.
-  5. Implement incremental migration: pre-replicate static player data (inventory, settings) to the target region asynchronously, so the live migration only transfers dynamic match state (~12.4KB), which is small enough to survive packet loss.
+  Root cause: a Terraform apply (CHG0052088) raised the MTU of the us-east-1 <-> us-west-2 WireGuard tunnel wg-use1-usw2 from 1380 to 1440. The underlay between the regions carries at most 1460-byte packets, so full-size tunnel packets (1440 plus 80 bytes of WireGuard overhead) no longer fit, and the ICMP fragmentation-needed replies that would make TCP lower its segment size are filtered. Small requests such as the session handoff token still get through, but the {payload_kb}KB player state transfer from {source_region} to {target_region} stalls on its first full-size segment and hits the 10 s timeout: a path MTU discovery blackhole. Migrations from us-east-1 to eu-west-1 over wg-use1-euw1, still at MTU 1380, succeed at 99-100%, and the failed transfers show normal RTT ({latency_ms}ms) with 0% small-packet loss, so the link, the target servers and the payload format are healthy.
+  Confirm:
+    - matchmaking-engine migration_status lines for route use1-usw2 carry attributes.network.tunnel_mtu 1440 (1380 before the apply) while route use1-euw1 stays at 1380; the Terraform apply line comes before the first MM-MIGRATION-FAIL line
+    - metrics.matchmaking.migration.success_rate_pct for route use1-usw2 is 5-20% (baseline 99-100%) while use1-euw1 stays at 99-100%; metrics.matchmaking.migration.transfer_timeouts_per_min for use1-usw2 is 60-200 (baseline 0)
+    - every MM-MIGRATION-FAIL line fails in phase {migration_phase} with the handoff token step OK, 0 ICMP frag-needed received and retransmits of the same segment
+  Remediation: set the tunnel MTU back with opsctl patch tunnel/wg-use1-usw2 --mtu 1380. New transfers fit the path at once and in-flight ones succeed on retry, so the use1-usw2 success rate is back at 99-100% and transfer timeouts at 0 within about 30 seconds. Rolling players back or retrying with a smaller payload only hides the failures, and restarting matchmaking-engine or the game servers does not change the path MTU.
 remediation_action: rollback_migration
-error_message: '[MM] MM-MIGRATION-FAIL: player={player_id} path={source_region}->{target_region} phase={migration_phase} session={session_id}
-  latency={latency_ms}ms'
+remediation_command: |-
+  opsctl patch tunnel/wg-use1-usw2 --mtu 1380
+error_message: '[MM] MM-MIGRATION-FAIL: player={player_id} path={source_region}->{target_region} tunnel=wg-use1-usw2 phase={migration_phase}
+  payload={payload_kb}KB session={session_id} rtt={latency_ms}ms timeout=10000ms'
 stack_trace: |-
   === MIGRATION STATE TRANSFER LOG ===
   player={player_id}  session={session_id}
   ----------- migration path ----------
-    source       = {source_region}
-    target       = {target_region}
-    phase        = {migration_phase}  <<< FAILED HERE
-    latency      = {latency_ms}ms
+    source = {source_region}  target = {target_region}  tunnel = wg-use1-usw2
+    phase  = {migration_phase}  <<< FAILED HERE
   ----------- phase timeline ----------
-    state_extraction  : 847ms   OK
-    serialization     : 124ms   OK
-    transfer          : timeout  TIMEOUT (rtt {latency_ms}ms, {packet_loss_pct}% loss)
-    injection         : --      SKIPPED
-    validation        : --      SKIPPED
-  ----------- state payload -----------
-    inventory_items = 247
-    active_buffs    = 3
-    match_state     = 12.4KB
-    total_payload   = 84.2KB
+    handoff_token     : 41ms     OK  (0.6KB)
+    state_extraction  : 847ms    OK
+    serialization     : 124ms    OK
+    transfer          : 10000ms  TIMEOUT (1.3KB of {payload_kb}KB acknowledged)
+    injection         : --       SKIPPED
   ----------- network diagnostic ------
-    rtt_{source_region}->{target_region} = {latency_ms}ms
-    packet_loss    = {packet_loss_pct}%
-    tcp_retransmit = 12
-  ----------- action ------------------
-    ROLLBACK to source  RETRY with smaller payload
+    rtt               = {latency_ms}ms
+    small packet loss = 0.0%
+    tcp_mss           = 1400  retransmits = 9 (same segment)
+    icmp frag-needed received = 0
+  ROLLBACK player to source server
   MM-MIGRATION-FAIL: player {player_id} migration {source_region}->{target_region} failed at {migration_phase}
 correlation_attr:
-  key: network.cross_region_vpn
-  value: wireguard-v1.0.20241201-mtu1400
+  key: network.tunnel_mtu
+  value: 1440
 fault_params:
   player_id:
     format: "PLR-{n}"
     n: {randint: [100000, 999999]}
-  source_region: {choice: [us-east-1, eu-west-1]}
-  target_region: {choice: [us-west-2, ap-southeast-1]}
+  source_region: us-east-1
+  target_region: us-west-2
   migration_phase: transfer
-  packet_loss_pct: {uniform: [2.0, 8.0], round: 1}
+  payload_kb: 84.2
   session_id:
     format: "SESS-{n}"
     n: {randint: [10000000, 99999999]}
-  latency_ms: {randint: [200, 5000]}
+  latency_ms: {randint: [62, 70]}
 rca_clues:
   matchmaking-engine:
-    matchmaking.migration_timeout_ms: {randint: [5000, 30000]}
-    matchmaking.cross_region_packet_loss_pct: {uniform: [2.0, 8.0], round: 1}
-  auth-gateway:
-    auth.session_transfer_status: failed
-    auth.token_region_mismatch: false
+    migration.route: use1-usw2
+    network.tunnel_mtu: 1440
+    migration.small_packet_loss_pct: 0.0
+    migration.icmp_frag_needed_received: 0
+    migration.tcp_retransmits_same_segment: {randint: [6, 12]}
   game-server:
-    game.state_payload_kb: {uniform: [40.0, 120.0], round: 1}
-    game.migration_rollback: true
-  leaderboard-api:
-    leaderboard.cross_region_sync: stalled
-  analytics-pipeline:
-    analytics.migration_failure_events: {randint: [10, 100]}
+    game.state_export_acked_kb: 1.3
+cascade_messages:
+  game-server:
+    - severity: WARN
+      message: '[Net] state_export to {target_region} stalled session={session_id} sent={payload_kb}KB acked=1.3KB retransmits=9; player kept on source
+        server'
+fault_scope:
+  cluster: gaming-eks-cluster
+  workloads: [matchmaking-engine]
+infrastructure_events:
+  - service: matchmaking-engine
+    severity: INFO
+    offset_seconds: -120
+    body: 'module.wg_mesh.wireguard_tunnel.use1_usw2: Modifications complete after 4s [id=wg-use1-usw2] (mtu: 1380 => 1440). Apply complete! Resources:
+      0 added, 1 changed, 0 destroyed. (CHG0052088)'
+    attributes:
+      operation: config_change
+      change.request: CHG0052088
+      user.name: netops-terraform
+      change.summary: 'wg-use1-usw2 mtu: 1380 -> 1440'
+      network.tunnel: wg-use1-usw2
+      network.tunnel_mtu: 1440
+remediation_effects:
+  transition_seconds: 30
+  log_events:
+    - service: matchmaking-engine
+      severity: INFO
+      offset_seconds: 1
+      body: 'level=info logger=changelog msg="change applied" cmd="opsctl patch tunnel/wg-use1-usw2 --mtu 1380" actor={actor} result="mtu 1440 -> 1380 on
+        both peers"'
+      attributes:
+        operation: change_applied
+        change.target: tunnel/wg-use1-usw2
+    - service: matchmaking-engine
+      severity: INFO
+      offset_seconds: 3
+      body: 'wg-quick: [#] ip link set mtu 1380 up dev wg-use1-usw2'
+      attributes:
+        operation: config_change
+        network.tunnel: wg-use1-usw2
+        network.tunnel_mtu: 1380
+  steady_attributes:
+    matchmaking-engine:
+      network.tunnel_mtu: 1380
+  verification:
+    - signal: use1-usw2 migration success rate
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "matchmaking-engine" AND attributes.migration.route == "use1-usw2"'
+      field: 'metrics.matchmaking.migration.success_rate_pct'
+      expect: 'back at 99-100% (was 5-20%) within about 30 seconds'
+      within_seconds: 90
+    - signal: use1-usw2 transfer timeouts
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "matchmaking-engine" AND attributes.migration.route == "use1-usw2"'
+      field: 'metrics.matchmaking.migration.transfer_timeouts_per_min'
+      expect: '0 per minute (was 60-200)'
+      within_seconds: 90
+    - signal: MM-MIGRATION-FAIL lines
+      from: 'logs.otel.gaming'
+      where: 'body.text LIKE "*MM-MIGRATION-FAIL*"'
+      expect: '0 new lines'
+      within_seconds: 90
+    - signal: wg-use1-usw2 tunnel MTU
+      from: 'logs.otel.gaming'
+      where: 'resource.attributes.service.name == "matchmaking-engine" AND attributes.migration.route == "use1-usw2"'
+      field: 'attributes.network.tunnel_mtu'
+      expect: '1380 on every use1-usw2 migration_status line since the patch (was 1440)'
+      within_seconds: 90
 business_impact:
   - kpi: business.sessions_per_min
     value: {uniform: [669.6, 770.4]}

@@ -6,36 +6,45 @@ sensor_type: routing_engine
 affected_services:
 - matching-engine
 - order-gateway
+error_services:
+- matching-engine
 cascade_services:
 - risk-calculator
 - audit-logger
 - compliance-monitor
-description: Smart order router fails to route block orders to dark pool venues
+description: Smart order router sends child orders below SIGMA-X's minimum quantity, and the dark pool rejects them
+onset_delay_seconds: 10
+service_lag_seconds: {order-gateway: 30, risk-calculator: 45, audit-logger: 45, compliance-monitor: 60}
 investigation_notes: |-
-  1. Check matching-engine logs for ME-DARKPOOL-REJECT — note order_id, symbol, quantity, venue, and rejection_reason.
-  2. Query FROM logs.otel.financial.* | WHERE body.text LIKE "*ME-DARKPOOL-REJECT*" | STATS count() BY venue, rejection_reason to find which venues are most restrictive.
-  3. Inspect the venue scorecard fill_rate and avg_size data — if the submitted quantity is below venue min_size, the router should have fallen back to lit market automatically.
-  4. Check risk-calculator for lit_market_impact_est — if market impact exceeds 10bps, reconsider whether a TWAP algo on the lit market is preferable to repeated dark pool rejections.
-  5. Update the venue score for the rejecting venue and route to a venue whose minimum size accepts the order (or work it on the lit market via TWAP); do not split a below-minimum order further, and fix the router's venue min-size check; log the routing decision in audit-logger.
-remediation_action: reroute_to_next_dark_pool_venue
-error_message: '[ME] ME-DARKPOOL-REJECT: order={order_id} symbol={symbol} qty={quantity} venue={venue} reason={rejection_reason}'
+  Root cause: config sor-venue-profiles revision {config_revision} was loaded by the smart order router (CR-7408). The revision renames the venue field min_qty to minimum_quantity; the router's profile parser does not know the new key and defaults the SIGMA-X minimum to 0. The router therefore treats SIGMA-X as eligible for every child order and sends 100-9,500 share orders (for example {quantity} shares of {symbol}) to {venue}, whose venue-enforced MinQty is 10,000, and the venue rejects them ({rejection_reason}). The venue is healthy: orders of 10,000 shares or more still fill at SIGMA-X, and the other dark venues (CROSSFINDER, MS-POOL, UBS-ATS, JPM-X), which have no minimum quantity, accept their orders under the same revision with 0-2 rejects per minute.
+  Confirm:
+    - matching-engine "[SOR] venue_status venue=SIGMA-X" lines show config_revision=58 min_qty=0 status=ANOMALY (attributes.config.revision, attributes.sor.sigma_x_min_qty, attributes.router.status); the other venues show the same revision and status NOMINAL
+    - metrics.matching_engine.darkpool_rejects_per_min for sor.venue SIGMA-X rises from 0-2 to 40-120 while the other venues stay at 0-2; metrics.matching_engine.venue_reroutes_per_min climbs by the same amount
+    - body.text "*ME-DARKPOOL-REJECT*" lines carry venue_min_qty=10000 router_min_qty=0 profile_revision={config_revision}
+    - the matching-engine line "[SOR] config sor-venue-profiles revision 58 loaded" (attributes.operation config_change, attributes.change.request CR-7408) comes before the first reject
+  Remediation: opsctl restore config/sor-venue-profiles --version 57 puts back the revision with min_qty. The router hot-reloads it in about 10 s, stops sending sub-minimum orders to SIGMA-X, and the per-minute reject rate falls to 0 within about 45 s. Re-routing rejected orders to the next venue or working them on the lit market via TWAP is only a workaround: every rejected child still costs a round trip, leaks the order to SIGMA-X and adds market impact (about {lit_impact_bps}bps on the lit fallback) until the profile is fixed.
+remediation_action: restore_venue_profiles
+remediation_command: |-
+  opsctl restore config/sor-venue-profiles --version 57
+error_message: '[ME] ME-DARKPOOL-REJECT: order={order_id} symbol={symbol} qty={quantity} venue={venue} reason={rejection_reason} venue_min_qty=10000
+  router_min_qty=0 profile_revision={config_revision}'
 stack_trace: |-
   === DARK POOL REJECTION DETAILS ===
   order={order_id}  symbol={symbol}  qty={quantity}
-  --- ROUTING ATTEMPT ---
-    venue={venue}  protocol=FIX-4.4  order_type=MIDPOINT_PEG
-    min_size=10,000  submitted_qty={quantity}
+  --- ROUTING DECISION ---
+    router=sor  venue_profiles revision={config_revision}
+    venue={venue}  profile key minimum_quantity=10000 (unknown key, ignored)  min_qty=<missing> -> default 0
+    eligibility: qty {quantity} >= min_qty 0 -> ELIGIBLE  order_type=MIDPOINT_PEG
+  --- VENUE RESPONSE ---
+    35=8 150=8 39=8 (Rejected)  58=Order quantity below minimum 10000  venue={venue}
     rejection_reason={rejection_reason}
-  --- VENUE SCORECARD ---
-    VENUE            FILL_RATE   AVG_SIZE    STATUS
-    SIGMA-X          67.2%       45,000      AVAILABLE
-    CROSSFINDER      72.1%       38,000      AVAILABLE
-    SUPERX           58.4%       52,000      RESTRICTED
-    LIQUIDNET        81.3%       120,000     AVAILABLE
+  --- OTHER VENUES (same revision) ---
+    CROSSFINDER   no minimum   accepted
+    MS-POOL       no minimum   accepted
+    UBS-ATS       no minimum   accepted
   --- FALLBACK ---
-    next_venue=CROSSFINDER  algo=TWAP-4h  urgency=LOW
-    lit_market_impact_est={lit_impact_bps}bps
-  ACTION: try_next_venue=true  update_venue_score=true  alert=ME-DARKPOOL-REJECT
+    re-routed to next venue=CROSSFINDER  lit_market_impact_est={lit_impact_bps}bps
+  ACTION: try_next_venue=true  alert=ME-DARKPOOL-REJECT
 correlation_attr: {}
 fault_params:
   order_id:
@@ -45,24 +54,107 @@ fault_params:
   quantity: {randint: [100, 9500]}
   venue: SIGMA-X
   rejection_reason: minimum_size_not_met
+  config_revision: '58'
   lit_impact_bps: {uniform: [11.0, 25.0], round: 1}
 rca_clues:
   matching-engine:
-    engine.dark_pool_rejection_count: {randint: [1, 50]}
-    engine.venue_fallback_attempts: {randint: [1, 10]}
+    engine.darkpool_rejects_per_min: {randint: [40, 120]}
     engine.dark_pool_rejection_reason: minimum_size_not_met
+    config.revision: '58'
+    sor.sigma_x_min_qty: 0
+    engine.other_venue_rejects_per_min: {randint: [0, 2]}
   order-gateway:
-    oms.block_order_routing_failures: {randint: [1, 30]}
+    oms.parent_orders_rerouted_per_min: {randint: [40, 120]}
     oms.lit_market_impact_est_bps: {uniform: [11.0, 25.0], round: 1}
   risk-calculator:
-    risk.dark_pool_fill_rate_pct: {uniform: [0.0, 60.0], round: 1}
+    risk.dark_pool_fill_rate_pct: {uniform: [0.0, 40.0], round: 1}
     risk.market_impact_cost_usd: {randint: [5000, 500000]}
   audit-logger:
-    audit.routing_decision_log_count: {randint: [1, 100]}
-    audit.venue_score_updates: {randint: [1, 20]}
+    audit.routing_decision_log_count: {randint: [40, 120]}
   compliance-monitor:
     compliance.best_execution_failures: {randint: [1, 20]}
-    compliance.dark_pool_reg_flags: {randint: [0, 10]}
+    compliance.dark_pool_reg_flags: {randint: [1, 10]}
+cascade_messages:
+  order-gateway:
+    - severity: WARN
+      message: '[OMS] child order {order_id} for {symbol} rejected by {venue} (qty {quantity} below venue minimum); router re-routed it, parent fill delayed'
+  risk-calculator:
+    - severity: WARN
+      message: '[RISK] market impact estimate up for {symbol}: dark child orders rejected at {venue} and re-routed (impact_est={lit_impact_bps}bps)'
+  audit-logger:
+    - severity: INFO
+      message: '[AUDIT] event_logged stream=order-events type=VENUE_REJECT venue={venue} order={order_id} qty={quantity} reason={rejection_reason}'
+  compliance-monitor:
+    - severity: WARN
+      message: '[COMPL] best-execution review: {order_id} routed to {venue} below its published minimum (10,000 shares); routing exception recorded'
+fault_scope:
+  cluster: finserv-eks-cluster
+  workloads: [matching-engine, order-gateway]
+infrastructure_events:
+  - service: matching-engine
+    severity: INFO
+    offset_seconds: -100
+    body: '[SOR] config sor-venue-profiles revision 58 loaded (was 57): venue schema field min_qty renamed minimum_quantity; 5 venue profiles reloaded, SIGMA-X min_qty=0; pushed by routing-strategy (CR-7408)'
+    attributes:
+      user.name: routing-strategy
+      change.request: CR-7408
+      operation: config_change
+      change.summary: 'sor-venue-profiles: revision 57 -> 58 (min_qty renamed minimum_quantity)'
+      config.revision: '58'
+      sor.sigma_x_min_qty: 0
+remediation_effects:
+  log_taper_seconds: 10
+  log_events:
+    - service: audit-logger
+      severity: INFO
+      offset_seconds: 1
+      body: '[AUDIT] event_logged stream=change-mgmt type=CHANGE_APPLIED cmd="opsctl restore config/sor-venue-profiles --version 57" actor={actor}: sor-venue-profiles revision 58 -> 57'
+      attributes:
+        operation: change_applied
+        audit.stream: change-mgmt
+        change.target: config/sor-venue-profiles
+    - service: matching-engine
+      severity: INFO
+      offset_seconds: 10
+      body: '[SOR] config sor-venue-profiles revision 57 hot-reloaded: 5 venue profiles, SIGMA-X min_qty=10000; sub-minimum child orders no longer routed to SIGMA-X'
+      attributes:
+        operation: config_change
+        config.revision: '57'
+        sor.sigma_x_min_qty: 10000
+    - service: matching-engine
+      severity: INFO
+      offset_seconds: 45
+      body: '[SOR] venue SIGMA-X: no rejects in the last 30 s, venue score restored'
+      attributes:
+        operation: venue_status
+        sor.venue: SIGMA-X
+  steady_attributes:
+    matching-engine:
+      config.revision: '57'
+  verification:
+    - signal: matching_engine.darkpool_rejects_per_min
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "matching-engine"'
+      field: 'metrics.matching_engine.darkpool_rejects_per_min'
+      expect: 'back to 0-2 per minute on SIGMA-X (was 40-120)'
+      within_seconds: 90
+    - signal: ME-DARKPOOL-REJECT lines
+      from: 'logs.otel.finserv'
+      where: 'body.text LIKE "*ME-DARKPOOL-REJECT*"'
+      expect: '0 new lines after the reload (about 10 s)'
+      within_seconds: 90
+    - signal: sor-venue-profiles revision
+      from: 'logs.otel.finserv'
+      where: 'resource.attributes.service.name == "matching-engine"'
+      field: 'attributes.config.revision'
+      expect: 'revision 57 on every line since the reload; 58 stops appearing'
+      within_seconds: 90
+    - signal: SIGMA-X minimum quantity
+      from: 'logs.otel.finserv'
+      where: 'resource.attributes.service.name == "matching-engine"'
+      field: 'attributes.sor.sigma_x_min_qty'
+      expect: '10000 on every SIGMA-X venue_status line since the reload (was 0)'
+      within_seconds: 90
 business_impact:
   - kpi: business.best_execution_pct
     factor: {uniform: [0.60, 0.85]}

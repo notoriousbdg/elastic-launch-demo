@@ -10,15 +10,17 @@ cascade_services:
 - mission-control
 - navigation
 description: Range safety radar losing vehicle track
-investigation_notes: 'Root cause: tracking radar lost skin-track on the vehicle — track fusion is in COAST mode with 72% prediction
-  confidence, meaning the system is dead-reckoning based on last known state. RCS (radar cross-section) at 12.4 dBsm is adequate,
-  so loss is likely from antenna servo tracking loop dropout, RF interference in the radar band, or physical obstruction in
-  the radar line-of-sight. Check for construction cranes, aircraft, or weather in the radar corridor. Other radars (RDR-2,
-  RDR-3) still tracking confirms single-radar fault. Remediation: command radar reacquisition (RSO_RADAR_REACQ {radar_id} TARGET
-  VEHICLE), check antenna servo error logs for tracking loop faults (servo tracking error above 2 mrad indicates a loop dropout) (RSO_RADAR_SERVO_STATUS {radar_id}). If RF interference suspected,
-  run spectrum analyzer sweep (RSO_SPECTRUM_SCAN {radar_id} BAND). Range Safety requires 2-of-3 radars tracking for launch commit
-  — verify RDR-2/RDR-3 health.'
+investigation_notes: |-
+  Root cause: tracking radar {radar_id} was loaded with firmware rdr-track-v8.1.3-beta (was rdr-track-v8.0.9) shortly before it lost skin track on the vehicle. The beta firmware reset the antenna servo tracking loop parameters to defaults, so the servo tracking error rises above 2 mrad (3.5-9 mrad measured) and the loop drops out: track gaps of {gap_ms} ms against a {max_gap_ms} ms limit. Track fusion is in COAST mode with 55-80% prediction confidence, dead-reckoning from the last known state. RCS at 12.4 dBsm is adequate, there is no obstruction or weather in the radar corridor, and RDR-2 and RDR-3 on rdr-track-v8.0.9 still track, which confirms a single-radar fault.
+  Confirm:
+    - range-safety logs the {radar_id} firmware load of rdr-track-v8.1.3-beta before the first RSO-TRACKING-LOSS line
+    - range-safety tracking_status lines: radars=2/3, rdr1_fw=rdr-track-v8.1.3-beta, fusion=COAST, status=ANOMALY; attributes.infra.radar_firmware
+    - metrics.range_safety.track_gap_ms at 500-5000 ms (nominal under 250) and metrics.range_safety.track_quality down to 0.3-0.6
+    - attributes.safety.servo_tracking_error_mrad above 2 on the fault lines
+  Remediation: roll {radar_id} back to the previous firmware (opsctl rollback firmware/rdr-1 --to-revision previous). The radar restarts with its tuned servo loop, reacquires the vehicle and the track gap converges back under 250 ms within about a minute; tracking_status lines show radars=3/3 and fusion=TRACK. Range Safety requires 2-of-3 radars tracking for launch commit, so verify RDR-2/RDR-3 health until {radar_id} is back.
 remediation_action: reset_safety_system
+remediation_command: |-
+  opsctl rollback firmware/rdr-1 --to-revision previous
 error_message: '[RSO] RSO-TRACKING-LOSS: radar={radar_id} gap={gap_ms}ms max_allowed={max_gap_ms}ms track_state=COAST'
 stack_trace: |-
   == RANGE SAFETY STATUS == TRACKING RADAR NETWORK ==
@@ -30,8 +32,9 @@ stack_trace: |-
   RDR-3     0ms         250ms     11.8       TRACKING
   ---------------------------------------------------------------
   FUSION_STATE: COAST | PREDICT_CONF: 72% | CORRIDOR: WITHIN
+  FIRMWARE: {radar_id} rdr-track-v8.1.3-beta | RDR-2/RDR-3 rdr-track-v8.0.9
   RSO-TRACKING-LOSS: Radar {radar_id} lost track for {gap_ms}ms, max allowed {max_gap_ms}ms
-  ACTION: Verify radar antenna, check for RF interference
+  ACTION: Check {radar_id} firmware revision and servo tracking loop
 correlation_attr:
   key: infra.radar_firmware
   value: rdr-track-v8.1.3-beta
@@ -52,6 +55,53 @@ rca_clues:
     telemetry.tracking_status: degraded
   navigation:
     gnc.external_tracking: unavailable
+cascade_messages:
+  mission-control:
+    - severity: WARN
+      message: '[MCC] range safety tracking {radar_id} COAST (gap {gap_ms}ms > {max_gap_ms}ms); 2-of-3 radar launch commit criterion at risk'
+  navigation:
+    - severity: WARN
+      message: '[GNC] external radar track from {radar_id} unavailable (gap {gap_ms}ms); nav solution cross-check running on onboard sensors only'
+fault_scope:
+  workloads: [range-safety, sensor-validator]
+infrastructure_events:
+  - service: range-safety
+    severity: INFO
+    offset_seconds: -100
+    body: '[RSO] RDR-1 firmware load complete: rdr-track-v8.1.3-beta (was rdr-track-v8.0.9); servo tracking loop parameters reset to defaults; loaded by range-radar-ops (CR-2329, beta trial)'
+    attributes:
+      user.name: range-radar-ops
+      change.request: CR-2329
+      infra.radar_firmware: rdr-track-v8.1.3-beta
+      operation: firmware_load
+remediation_effects:
+  log_events:
+    - service: mission-control
+      severity: INFO
+      offset_seconds: 2
+      body: '[MCC] CMD ACCEPTED opsctl rollback firmware/rdr-1 --to-revision previous from {actor}: RDR-1 firmware rdr-track-v8.1.3-beta -> rdr-track-v8.0.9'
+    - service: range-safety
+      severity: INFO
+      offset_seconds: 40
+      body: '[RSO] RDR-1 reacquired vehicle skin track on rdr-track-v8.0.9; track_gap 0ms fusion=TRACK radars=3/3'
+  verification:
+    - signal: range_safety.track_gap_ms
+      from: 'metrics-generic.otel-default'
+      field: 'metrics.range_safety.track_gap_ms'
+      where: 'resource.attributes.service.name == "range-safety"'
+      expect: 'below 250 ms (was 500-5000 ms), converging over about a minute'
+      within_seconds: 120
+    - signal: RSO-TRACKING-LOSS errors
+      from: 'logs.otel.nova7'
+      where: 'body.text LIKE "*RSO-TRACKING-LOSS*"'
+      expect: '0 new lines'
+      within_seconds: 120
+    - signal: RDR-1 firmware
+      from: 'logs.otel.nova7'
+      where: 'resource.attributes.service.name == "range-safety"'
+      field: 'attributes.infra.radar_firmware'
+      expect: 'rdr-track-v8.0.9 on the latest tracking_status lines (was rdr-track-v8.1.3-beta)'
+      within_seconds: 120
 business_impact:
   - kpi: business.launch_readiness_index_0_100
     factor: {uniform: [0.3, 0.55]}

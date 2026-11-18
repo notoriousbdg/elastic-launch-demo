@@ -5,62 +5,132 @@ error_type: ANALYTICS-INGEST-LAG
 sensor_type: pipeline_monitor
 affected_services:
 - analytics-pipeline
-- game-server
-cascade_services:
-- leaderboard-api
-description: Analytics event ingestion pipeline falls behind as its Kafka consumer group lags on the events topic, causing data lag and stale dashboards for live-ops teams
+cascade_services: []
+description: The events-primary Kafka consumer group rebalances continuously after a consumer config change, so analytics event
+  lag grows and live-ops dashboards go stale
+onset_delay_seconds: 20
+ramp_seconds: 60
 investigation_notes: |-
-  Root cause: 4 of 8 Kafka consumer group members have disconnected, halving throughput while inflow remains constant. Partition-3 is completely stalled with the highest lag (27,193 events), indicating a stuck consumer or unbalanced partition assignment.
-  1. Check consumer health: `kafka-consumer-groups.sh --bootstrap-server <broker:9092> --describe --group {pipeline_id}-cg` (add `--members` for the member list) to identify which partitions have no CONSUMER-ID and their LAG.
-  2. Review rebalance history: 3 rebalances in 10 minutes indicates consumer instability — check for OOMKilled pods or network timeouts causing session.timeout.ms expiration.
-  3. Inspect partition-3: a hot key would show key skew above 2x; here skew is near 1x, so the partition is stalled because its consumer is dead, not because of a hot key.
-  4. Remediate: issue `restart_analytics_consumers` to force a clean consumer group rejoin; scale out to 12 consumers to handle the backlog burst.
-  5. Set up consumer lag alerting at 30s threshold and configure auto-scaling for the consumer group based on per-partition lag metrics.
-remediation_action: restart_analytics_consumers
-error_message: '[Analytics] ANALYTICS-INGEST-LAG: pipeline={pipeline_id} lag={lag_seconds}s threshold={max_lag_seconds}s backlog={backlog_count}
-  throughput={throughput}/s'
+  Root cause: Argo CD synced ConfigMap analytics-consumer revision 42 (CHG0061515) about four minutes before the first lag error, raising max.poll.records for the events-primary consumer group from 500 to {max_poll_records}. A batch of {max_poll_records} game-events records takes 310-420 s to process, longer than max.poll.interval.ms (300000), so each member is evicted from {pipeline_id}-cg before it can commit. The group rebalances continuously, only 2-5 of 8 members are in it at any time, and committed offsets stop advancing, so the lag grows by about 1 s every second. The events-secondary-cg and replay-pipeline-cg groups on the same Kafka cluster keep max.poll.records 500 and hold all their members with no rebalances, so the brokers are healthy.
+  Confirm:
+    - the analytics-pipeline consumer-group lines for events-primary-cg carry attributes.config.max_poll_records = 5000 (was 500) and batch_processing_s 310-420 (baseline 18-40), with kafka.coordinator.consumer "Commit cannot be completed" warnings; the Argo CD sync line with change.request CHG0061515 comes before them
+    - metrics.analytics.consumer.active_members is 2-5 (baseline 8) and metrics.analytics.consumer.rebalances_per_min is 6-15 (baseline 0)
+    - metrics.analytics.pipeline_lag_s climbs by about 1 s per second to 600-1800 s (baseline 1-5 s), while events-secondary-cg and replay-pipeline-cg stay at full membership with rebalances_1m=0
+  Remediation: run `opsctl rollback configmap/analytics-consumer --to-revision previous`. The consumer pods roll with max.poll.records 500 within about 30 s, the group settles at 8/8 members and rebalances stop. pipeline_lag_s then falls steadily back to 1-5 s over about 300 s as the backlog drains, and the Kafka consumer lag metrics recover over the same 5 minutes. Restarting or scaling out the consumers would not help: every new member still takes 5000 records per poll and is evicted the same way. Raising max.poll.interval.ms would only hide the slow batches.
+remediation_action: rollback_analytics_consumer_config
+remediation_command: |-
+  opsctl rollback configmap/analytics-consumer --to-revision previous
+error_message: '[Analytics] ANALYTICS-INGEST-LAG: pipeline={pipeline_id} group={pipeline_id}-cg lag over {max_lag_seconds}s threshold
+  members={active_members}/8 rebalances_10m={rebalance_count} last_batch={max_poll_records} records in {batch_seconds}s max.poll.interval.ms=300000'
 stack_trace: |-
-  === PIPELINE CONSUMER GROUP STATUS ===
-  pipeline={pipeline_id}
-  ----------- consumer lag ------------
-    current_lag     = {lag_seconds}s
-    threshold       = {max_lag_seconds}s
-    backlog         = {backlog_count} events
-    throughput      = {throughput}/s (expected {expected_throughput}/s)
-  ----------- partition status --------
-    partition-0  offset=48201847  lag=12,401
-    partition-1  offset=48193201  lag=21,047
-    partition-2  offset=48198412  lag=15,882
-    partition-3  offset=48187003  lag=27,193  (STALLED)
-    partition-4..15  lag 9k-14k each (12 more, truncated)
-  ----------- consumer group ----------
-    group_id     = {pipeline_id}-cg
-    members      = 4/8 (4 DISCONNECTED)
-    rebalance_ct = 3 (last 10min)
-    commit_lag   = 8.2s
-  ----------- action ------------------
-    RESTART stalled consumers  SCALE OUT partitions
-  ANALYTICS-INGEST-LAG: pipeline {pipeline_id} lag {lag_seconds}s with {backlog_count} backlog
+  === CONSUMER GROUP {pipeline_id}-cg (topic game-events, 16 partitions) ===
+    state                = PreparingRebalance
+    members              = {active_members}/8 (others evicted: poll interval exceeded)
+    rebalances_10m       = {rebalance_count}
+    max.poll.records     = {max_poll_records}
+    max.poll.interval.ms = 300000
+    last batch           = {max_poll_records} records in {batch_seconds}s
+    commits              = failing (CommitFailedError: group has already rebalanced)
+  --- partitions (sample) ---
+    game-events-0   committed offset not advanced since the last config sync
+    game-events-3   committed offset not advanced since the last config sync
+    game-events-7   no active member (reassigning)
+  ANALYTICS-INGEST-LAG: {pipeline_id}-cg cannot commit, lag over {max_lag_seconds}s
 correlation_attr:
-  key: infra.kafka_broker_version
-  value: kafka-3.7.0-kraft-unstable
+  key: config.max_poll_records
+  value: 5000
 fault_params:
-  pipeline_id: {choice: [events-primary, events-secondary, replay-pipeline]}
-  lag_seconds: {uniform: [30.0, 600.0], round: 1}
-  max_lag_seconds: 10.0
-  backlog_count: {randint: [50000, 5000000]}
-  throughput: {randint: [100, 2000]}
-  expected_throughput: 5000
+  pipeline_id: events-primary
+  max_lag_seconds: 60
+  active_members: {randint: [2, 5]}
+  rebalance_count: {randint: [60, 150]}
+  batch_seconds: {randint: [310, 420]}
+  max_poll_records: 5000
 rca_clues:
   analytics-pipeline:
-    analytics.kafka_consumers_dead: 4
-    analytics.partition_stalled: partition-3
-    analytics.partition_key_skew_ratio: {uniform: [1.0, 1.3], round: 2}
-  game-server:
-    game.telemetry_buffer_pct: {uniform: [70.0, 95.0], round: 1}
-    game.event_drop_rate_pct: {uniform: [1.0, 15.0], round: 1}
-  leaderboard-api:
-    leaderboard.rank_update_delay_s: {randint: [30, 300]}
+    kafka.consumer_group_state: PreparingRebalance
+    analytics.consumer_evictions_10m: {randint: [40, 120]}
+    analytics.batch_processing_s: {randint: [310, 420]}
+    config.max_poll_records: 5000
+fault_scope:
+  cluster: gaming-aks-cluster
+  workloads: [analytics-pipeline]
+infrastructure_events:
+  - service: analytics-pipeline
+    severity: INFO
+    offset_seconds: -240
+    body: 'argocd-application-controller: level=info msg="Sync operation to 7c41e9a succeeded" application=argocd/analytics-pipeline-prod
+      resource=ConfigMap/analytics-consumer revision=42 initiatedBy=data-platform-ci (max.poll.records: 500 -> 5000, CHG0061515)'
+    attributes:
+      operation: config_change
+      change.request: CHG0061515
+      user.name: data-platform-ci
+      change.summary: 'analytics-consumer max.poll.records: 500 -> 5000'
+      config.max_poll_records: 5000
+  - service: analytics-pipeline
+    severity: INFO
+    offset_seconds: -210
+    body: 'deployment "analytics-consumer" successfully rolled out: 8/8 pods on ConfigMap analytics-consumer revision 42'
+    attributes:
+      operation: deployment_rollout
+      change.request: CHG0061515
+      config.max_poll_records: 5000
+remediation_effects:
+  transition_seconds: 300
+  log_events:
+    - service: analytics-pipeline
+      severity: INFO
+      offset_seconds: 1
+      body: 'level=info logger=changelog msg="change applied" cmd="opsctl rollback configmap/analytics-consumer --to-revision previous"
+        actor={actor} result="configmap/analytics-consumer revision 42 -> 41, max.poll.records 5000 -> 500"'
+      attributes:
+        operation: change_applied
+        event.action: rollback
+        change.target: configmap/analytics-consumer
+        user.name: '{actor}'
+        config.max_poll_records: 500
+    - service: analytics-pipeline
+      severity: INFO
+      offset_seconds: 30
+      body: 'deployment "analytics-consumer" successfully rolled out: 8/8 pods on ConfigMap analytics-consumer revision 41'
+      attributes:
+        operation: deployment_rollout
+        config.max_poll_records: 500
+    - service: analytics-pipeline
+      severity: INFO
+      offset_seconds: 45
+      body: '[Analytics] consumer-group group=events-primary-cg state=Stable members=8/8 rebalances stopped, committing again;
+        draining backlog'
+      attributes:
+        operation: consumer_group_stable
+        kafka.consumer_group: events-primary-cg
+  steady_attributes:
+    analytics-pipeline:
+      config.max_poll_records: 500
+  verification:
+    - signal: events-primary pipeline lag
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "analytics-pipeline"'
+      field: 'metrics.analytics.pipeline_lag_s'
+      expect: 'falling steadily, back in 1-5 s within about 300 s (was 600-1800 s and growing about 1 s per second)'
+      within_seconds: 360
+    - signal: consumer group members
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "analytics-pipeline"'
+      field: 'metrics.analytics.consumer.active_members'
+      expect: '8 within about 30 s (was 2-5), with metrics.analytics.consumer.rebalances_per_min back to 0 (was 6-15)'
+      within_seconds: 120
+    - signal: ANALYTICS-INGEST-LAG lines
+      from: 'logs.otel.gaming'
+      where: 'body.text LIKE "*ANALYTICS-INGEST-LAG*"'
+      expect: '0 new lines'
+      within_seconds: 120
+    - signal: consumer max.poll.records
+      from: 'logs.otel.gaming'
+      where: 'resource.attributes.service.name == "analytics-pipeline" AND attributes.operation == "pipeline_health" AND attributes.pipeline.name == "events-primary"'
+      field: 'attributes.config.max_poll_records'
+      expect: '500 on every events-primary-cg line since the rollback (was 5000)'
+      within_seconds: 120
 business_impact:
   - kpi: business.sessions_per_min
     value: {uniform: [669.6, 770.4]}
@@ -72,5 +142,7 @@ business_impact:
     factor: {uniform: [0.25, 0.55]}
 generator_impact:
   kafka_otel:
-    high_consumer_lag_per_partition: 30000.0
-    high_consumer_lag_by_topic: 80000.0
+    high_consumer_lag_per_partition: 20000.0
+    high_consumer_lag_by_topic: 320000.0
+# the Kafka lag metrics drain with the backlog
+generator_hold_seconds: {kafka_otel: 300}

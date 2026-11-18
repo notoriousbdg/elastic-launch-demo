@@ -23,22 +23,27 @@ WORKFLOW_INDEX_SUFFIXES = (
     "escalation-audit",
     "remediation-queue",
     "daily-report-audit",
-    "chaos-context",
+    "notify-context",
 )
+
+# Workflow indices earlier releases created. Deleted at cleanup and teardown so a
+# relaunch on an existing cluster does not leave them behind (chaos-context held the
+# channel number, which Nightshift could find and show the audience).
+LEGACY_WORKFLOW_INDEX_SUFFIXES = ("chaos-context",)
 
 # Explicit mappings for workflow indices that are *queried* (not only written) before
 # the first document arrives: ES|QL rejects SORT on a column an empty index lacks.
 WORKFLOW_INDEX_MAPPINGS: dict[str, dict] = {
     # Who triggered each fault, written by the app at trigger time. The notification
-    # workflows read user_email from here (it used to ride on every fault log record
-    # as an event_name JSON blob, which no real component would emit).
-    "chaos-context": {
+    # workflows read user_email from here by the alert's error_type (it used to ride on
+    # every fault log record as an event_name JSON blob, which no real component would
+    # emit). No channel number: Nightshift can query any index.
+    "notify-context": {
         "properties": {
             "@timestamp": {"type": "date"},
-            "channel": {"type": "integer"},
+            "error_type": {"type": "keyword"},
             "user_email": {"type": "keyword"},
             "callback_url": {"type": "keyword"},
-            "deployment_id": {"type": "keyword"},
         }
     },
 }

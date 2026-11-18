@@ -28,106 +28,130 @@ constants:
   - RM-ALU-6061
   - RM-PLASTIC-ABS
   - RM-COPPER-110
-  - RM-RUBBER-EPDM
+  LOCATIONS:
+  - WH-RAW-01
+  - WH-A-01
+  - LINE-03-SUPERMARKET
 state:
-  _batches_total:
+  _batches_synced:
     init: 0
-  _last_supplier_report:
-    init: now
 steps:
+- sample:
+    # Per-channel fault intensity: ramps 0->1 once the fault reaches this service, drains 1->0 after its fix.
+    f14:
+      expr: "min(1.0, max(0.0, elapsed.get(14, 0) - lag.get(14, 0)) / 60.0) if 14 in all_active else (max(0.0, 1.0 - since_fix.get(14, 0) / 120.0) if 14 in fixed_channels else 0.0)"
+    f17:
+      expr: "min(1.0, max(0.0, elapsed.get(17, 0) - lag.get(17, 0)) / 10.0) if 17 in all_active else (max(0.0, 1.0 - since_fix.get(17, 0) / 60.0) if 17 in fixed_channels else 0.0)"
+    # Stock records stay in LB until the reconcile job (about 40 s after the fix) rewrites them.
+    uom_wrong:
+      expr: "15 in all_active or (15 in fixed_channels and since_fix.get(15, 0) < 40)"
+- sample:
+    base_uom:
+      expr: "'LB' if 15 in all_active else 'KG'"
+    alu_on_hand_kg:
+      expr: "round(rand.gauss(1905.0, 6.0), 1) if uom_wrong else round(rand.gauss(4200.0, 12.0), 1)"
+    cycle_count_variance_pct:
+      expr: "round(rand.uniform(54.2, 54.9), 1) if uom_wrong else round(rand.uniform(0.2, 0.8), 2)"
+    below_reorder:
+      expr: "1 if uom_wrong else 0"
+    below_reorder_flag:
+      expr: "'true' if uom_wrong else 'false'"
+    pool_state:
+      expr: "'stale' if 17 in all_active else 'healthy'"
+    stale_handles:
+      expr: "5 if 17 in all_active else 0"
+    rfc_errors_per_min:
+      expr: "rand.randint(3, 8) if 17 in all_active else 0"
+    erp_sync_lag_s:
+      expr: "int(150.0 + elapsed.get(17, 0) + rand.uniform(0.0, 30.0)) if 17 in all_active else (int(max(rand.uniform(30.0, 280.0), 400.0 * (1.0 - since_fix.get(17, 0) / 60.0))) if 17 in fixed_channels else int(rand.uniform(30.0, 280.0)))"
+    goods_movements_pending:
+      expr: "int(rand.randint(0, 20) + f14 * rand.randint(40, 300) + f17 * rand.randint(500, 1800))"
+    batch_status:
+      expr: "'FAILED' if 17 in all_active else 'OK'"
+- counter:
+    state_key: _batches_synced
+    by:
+      expr: "0 if 17 in all_active else 1"
+- metric:
+    name: inventory.batches_synced
+    value:
+      var: _batches_synced
+    unit: batches
+- metric:
+    name: inventory.alu_6061_on_hand_kg
+    value:
+      var: alu_on_hand_kg
+    unit: kg
+    attrs:
+      inventory.material: RM-ALU-6061
+- metric:
+    name: inventory.cycle_count_variance_pct
+    value:
+      var: cycle_count_variance_pct
+    unit: '%'
+    attrs:
+      inventory.material: RM-ALU-6061
+- metric:
+    name: inventory.materials_below_reorder
+    value:
+      var: below_reorder
+    unit: materials
+- metric:
+    name: inventory.rfc_errors_per_min
+    value:
+      var: rfc_errors_per_min
+    unit: errors/min
+- metric:
+    name: inventory.rfc_pool_stale_handles
+    value:
+      var: stale_handles
+    unit: handles
+- metric:
+    name: inventory.erp_sync_lag_s
+    value:
+      var: erp_sync_lag_s
+    unit: s
+- metric:
+    name: inventory.erp_goods_movements_pending
+    value:
+      var: goods_movements_pending
+    unit: postings
+- log:
+    level: INFO
+    message: '[WMS] stock_status material=RM-ALU-6061 plant=P002 on_hand_kg={alu_on_hand_kg} base_uom={base_uom} reorder_point_kg=3000 below_reorder={below_reorder_flag} last_cycle_count_kg=4200 variance_pct={cycle_count_variance_pct}'
+    attrs:
+      operation: stock_status
+      inventory.material: RM-ALU-6061
+      inventory.base_uom:
+        var: base_uom
+      inventory.on_hand_kg:
+        var: alu_on_hand_kg
+- log:
+    level: INFO
+    message: '[WMS] rfc_pool pool=inventory-sync-sap destination=SAPPRD_INV size=8 stale_handles={stale_handles} state={pool_state} rfc_errors_per_min={rfc_errors_per_min} erp_sync_lag_s={erp_sync_lag_s}'
+    attrs:
+      operation: rfc_pool
+      rfc.pool_state:
+        var: pool_state
+      rfc.stale_handles:
+        var: stale_handles
 - sample:
     material:
       choice: MATERIALS
-    delta:
-      randint:
-      - -500
-      - 2000
-    on_hand:
-      randint:
-      - 2000
-      - 50000
+    location:
+      choice: LOCATIONS
+    delta_kg:
+      expr: "-round(rand.uniform(12.0, 180.0), 1)"
+    gi_doc:
+      expr: f'49{rand.randint(10000000, 99999999)}'
 - log:
     level: INFO
-    message: '[WMS] inventory_delta material={material} delta={delta} on_hand={on_hand} location=WH-A-01'
+    message: '[WMS] inventory_delta material={material} movement=261 delta_kg={delta_kg} location={location} doc={gi_doc} erp_post={batch_status}'
     attrs:
       operation: inventory_delta
       inventory.material:
         var: material
-      inventory.delta_units:
-        var: delta
-      inventory.on_hand_units:
-        var: on_hand
-- sample:
-    supplier:
-      expr: f'SUP-{rand.randint(1000, 9999)}'
-    po_id:
-      expr: f'PO-{rand.randint(100000, 999999)}'
-    lead_days:
-      randint:
-      - 3
-      - 28
-- log:
-    level: INFO
-    message: '[WMS] supplier_po po={po_id} supplier={supplier} lead_days={lead_days} status=CONFIRMED'
-    attrs:
-      operation: supplier_po
-      inventory.purchase_order:
-        var: po_id
-      inventory.supplier:
-        var: supplier
-      inventory.lead_days:
-        var: lead_days
-- every:
-    seconds: 10
-    state_key: _last_supplier_report
-    steps:
-    - sample:
-        reorder_material:
-          choice: MATERIALS
-        reorder_on_hand:
-          randint:
-          - 800
-          - 12000
-        reorder_point:
-          randint:
-          - 1500
-          - 4000
-    - sample:
-        reorder_action:
-          expr: '''REORDER'' if reorder_on_hand < reorder_point else ''NONE'''
-    - log:
-        level: INFO
-        message: '[WMS] reorder_check material={reorder_material} on_hand={reorder_on_hand} reorder_point={reorder_point}
-          action={reorder_action}'
-        attrs:
-          operation: reorder_check
-          inventory.material:
-            var: reorder_material
-          inventory.on_hand_units:
-            var: reorder_on_hand
-          inventory.reorder_point:
-            var: reorder_point
-- counter:
-    state_key: _batches_total
-    by: 1
-- metric:
-    name: inventory.batches_synced
-    value:
-      var: _batches_total
-    unit: batches
-- metric:
-    name: inventory.stockout_risk_pct
-    value:
-      uniform:
-      - 2.0
-      - 14.5
-      round: 2
-    unit: '%'
-- metric:
-    name: inventory.turns_per_year
-    value:
-      uniform:
-      - 7.0
-      - 16.0
-      round: 2
-    unit: turns/yr
+      inventory.delta_kg:
+        var: delta_kg
+      inventory.location:
+        var: location

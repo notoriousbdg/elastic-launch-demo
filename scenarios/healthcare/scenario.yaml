@@ -5,7 +5,7 @@ scenario_description: Hospital clinical systems including EHR, patient monitorin
 namespace: healthcare
 scenario_icon: 🏥
 sort_order: 4
-schema_version: "1.2"
+schema_version: "1.3"
 nominal_label: NORMAL
 hosts:
 - host.name: healthcare-aws-host-01
@@ -385,7 +385,7 @@ trace_attributes:
       pharmacy.dispense_mode: {choice: [automated, manual, blister_pack, unit_dose]}
       pharmacy.formulary_tier: {randint: [1, 4]}
     imaging-service:
-      imaging.modality: {choice: [CT, MRI, XR, US, MG, NM, PET]}
+      imaging.modality: {choice: [CT, MR, CR, DX, US, MG, NM]}
       imaging.study_priority: {choice: [STAT, URGENT, ROUTINE, ELECTIVE]}
       imaging.body_part: {choice: [chest, abdomen, head, spine, extremity, pelvis]}
       imaging.compression_ratio: {uniform: [2.0, 8.0], round: 1}

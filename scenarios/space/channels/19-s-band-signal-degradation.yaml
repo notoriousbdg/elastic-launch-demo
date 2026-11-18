@@ -10,48 +10,99 @@ cascade_services:
 - mission-control
 - telemetry-relay
 description: S-band communication signal strength below minimum threshold
-investigation_notes: 'Root cause: link budget degradation from reduced EIRP (38.2dBW vs 42.0dBW nominal) combined with antenna
-  gain loss (34.1dBi vs 36.0dBi). EIRP drop indicates transmitter power amplifier (SSPA) degradation or waveguide loss. Antenna
-  gain loss suggests feed horn misalignment or reflector surface distortion. Check atmospheric loss — 0.8dB vs 0.5dB nominal
-  may indicate rain fade on the TDRSS link. Verify S-band transponder AGC levels and lock indicator. Remediation: increase
-  transmit power via COMM_TX_POWER S-BAND +4dB, switch to backup antenna feed if available (COMM_FEED_SELECT S-BAND BACKUP).
-  If rain fade suspected, request TDRSS handover to alternate ground station with clearer weather.'
+investigation_notes: |-
+  Root cause: a rain cell moved over the ground station shortly before the degradation began (28 mm/h at the antenna site). Rain attenuation and the wet radome add 8-11 dB of path loss on the S-band downlink, so Eb/No falls to {snr_db} dB against the {min_snr_db} dB threshold on channel {rf_channel} and the link margin goes negative. The vehicle side is healthy: EIRP stays at its nominal ~42 dBW (no SSPA degradation or waveguide loss) and antenna gain at ~36 dBi (no feed horn misalignment or reflector distortion); the transponder AGC follows the received level and lock is held.
+  Confirm:
+    - ground-systems logs the rain cell over the ground station before the first COMM-SIGNAL-DEGRAD line
+    - comms-array S-Band antenna_check lines: eb_no 3-8 dB, tx_power=+0dB feed=PRIMARY, status=ANOMALY
+    - metrics.comms.sband.snr_db at 3-8 dB (nominal 15-20)
+    - attributes.comms.eirp_dbw and attributes.comms.antenna_gain_dbi nominal on the fault lines; attributes.comms.rain_attenuation_db 8-11 dB
+    - X-band and UHF stay NOMINAL
+  Remediation: raise the S-band transmit power by 4 dB and select the backup feed in one command (opsctl patch transmitter/s-band --tx-power=+4db --feed=backup). Eb/No converges back above 12 dB within about 75 s while the rain persists, and antenna_check lines show tx_power=+4dB feed=BACKUP. If the cell grows, request a TDRSS handover to an alternate ground station with clearer weather; return to +0 dB and the primary feed after it passes.
 remediation_action: reset_comms_link
+remediation_command: |-
+  opsctl patch transmitter/s-band --tx-power=+4db --feed=backup
 error_message: '[COMM] COMM-SIGNAL-DEGRAD: link=S-band eb_no={snr_db}dB threshold={min_snr_db}dB channel={rf_channel}'
 stack_trace: |-
   == LINK BUDGET ANALYSIS == S-BAND DOWNLINK ==
   TIMESTAMP: MET+00:04:15.003 | FRAME: 0x4A35 | SEQ: 18448
   ---------------------------------------------------------------
   PARAMETER            VALUE      NOMINAL    STATUS
-  EIRP                 38.2dBW    42.0dBW    DEGRADED
+  EIRP                 41.9dBW    42.0dBW    --
   FREE_SPACE_LOSS      -157.3dB   -157.3dB   --
-  ATMOSPHERIC_LOSS     -0.8dB     -0.5dB     MARGINAL
-  ANTENNA_GAIN         34.1dBi    36.0dBi    DEGRADED
+  ATMOSPHERIC_LOSS     -9.6dB     -0.5dB     **RAIN_FADE**
+  ANTENNA_GAIN         35.9dBi    36.0dBi    --
   Eb/No                {snr_db}dB     {min_snr_db}dB     **BELOW_THRESHOLD**
   CHANNEL              {rf_channel}        --         --
   ---------------------------------------------------------------
   LINK MARGIN: NEGATIVE (Eb/No {snr_db}dB vs {min_snr_db}dB required) | DESIGN MARGIN: +3.0dB
   COMM-SIGNAL-DEGRAD: S-band Eb/No below threshold on channel {rf_channel}
-  ACTION: Increase transmit power or switch to backup antenna feed
+  ACTION: Rain fade; increase transmit power and switch to backup antenna feed
 correlation_attr:
-  key: network.proxy_config
-  value: envoy-v1.28-experimental
+  key: weather.rain_rate_mm_h
+  value: '28'
 fault_params:
   snr_db: {uniform: [3.0, 8.0], round: 1}
   min_snr_db: 12.0
   rf_channel: {choice: [S1, S2, S3]}
 rca_clues:
   comms-array:
-    comms.eirp_dbw: {uniform: [35.0, 39.0], round: 1}
-    comms.antenna_gain_dbi: {uniform: [32.0, 35.0], round: 1}
+    comms.eirp_dbw: {uniform: [41.6, 42.2], round: 1}
+    comms.antenna_gain_dbi: {uniform: [35.6, 36.2], round: 1}
+    comms.rain_attenuation_db: {uniform: [8.0, 11.0], round: 1}
   sensor-validator:
     validation.link_margin_db: {uniform: [-9.0, -4.0], round: 1}
-    validation.rain_fade_detected: false
+    validation.rain_fade_detected: true
   mission-control:
     upstream.degraded_subsystem: communications
     telemetry.comm_status: degraded
   telemetry-relay:
     relay.s_band_quality: poor
+cascade_messages:
+  mission-control:
+    - severity: WARN
+      message: '[MCC] S-band downlink Eb/No {snr_db}dB < {min_snr_db}dB on {rf_channel}; telemetry frames arriving with gaps'
+  telemetry-relay:
+    - severity: WARN
+      message: '[RELAY] S-band frame sync slips on {rf_channel} (Eb/No {snr_db}dB); forwarding partial telemetry frames'
+fault_scope:
+  workloads: [comms-array, sensor-validator]
+infrastructure_events:
+  - service: ground-systems
+    severity: WARN
+    offset_seconds: -120
+    body: '[GND] WX: rain cell over ground station antenna site, rain rate 28mm/h, moving NE at 18km/h; radome wet'
+    attributes:
+      weather.rain_rate_mm_h: 28
+      operation: weather_alert
+remediation_effects:
+  log_events:
+    - service: mission-control
+      severity: INFO
+      offset_seconds: 2
+      body: '[MCC] CMD ACCEPTED opsctl patch transmitter/s-band --tx-power=+4db --feed=backup from {actor}: S-band SSPA +0dB -> +4dB, feed PRIMARY -> BACKUP'
+    - service: comms-array
+      severity: INFO
+      offset_seconds: 45
+      body: '[COMM] S-band on BACKUP feed at +4dB; Eb/No 13.8dB above 12.0dB threshold; link margin restored'
+  verification:
+    - signal: comms.sband.snr_db
+      from: 'metrics-generic.otel-default'
+      field: 'metrics.comms.sband.snr_db'
+      where: 'resource.attributes.service.name == "comms-array"'
+      expect: 'at or above 12 dB (was 3-8 dB), converging over about 75 s'
+      within_seconds: 150
+    - signal: COMM-SIGNAL-DEGRAD errors
+      from: 'logs.otel.nova7'
+      where: 'body.text LIKE "*COMM-SIGNAL-DEGRAD*"'
+      expect: '0 new lines'
+      within_seconds: 150
+    - signal: S-band feed
+      from: 'logs.otel.nova7'
+      where: 'resource.attributes.service.name == "comms-array"'
+      field: 'attributes.comms.sband_feed'
+      expect: 'BACKUP on the latest S-Band antenna_check lines (was PRIMARY)'
+      within_seconds: 150
 business_impact:
   - kpi: business.downlink_data_rate_mbps
     value: {uniform: [75.56, 86.94], round: 1}

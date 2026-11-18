@@ -1,0 +1,120 @@
+# opsctl profile for the Financial Trading Platform (see app/ops_profile.py for the contract).
+# Changes go to the trading estate on EKS, GKE and AKS: workloads, configuration, reference
+# data, scheduled jobs, node pools, secrets and models. Every applied change is written to the
+# audit trail (audit-logger, stream=change-mgmt) with a change id, as SEC 17a-4 requires.
+extends: [neutral]
+
+banner: "opsctl applies changes to the finserv trading estate (EKS, GKE, AKS). Every applied change is written to the audit trail with a change id."
+
+actors:
+  default: trading-ops/oncall-console          # an on-call SRE resolving from the Chaos UI
+  auto: sre-automation/auto-remediator         # the remediation workflow
+
+auto_remediate_channels: [16, 17, 18, 19, 20]
+
+verbs:
+  rollback:
+    summary: "Revert a workload, configuration, reference data set or model to an earlier revision (--to-revision N|previous)"
+    example: "opsctl rollback statefulset/<name> --to-revision previous\n  opsctl rollback refdata/<name> --to-revision previous"
+    describe: "{ref} reverted to {rev_text}"
+  restore:
+    summary: "Put a configuration back to a known-good version or source (--version, --<setting>)"
+    example: "opsctl restore config/<name> --version <version>\n  opsctl restore config/<name> --lei-source <source>"
+    describe:
+      - {when: "flag('version')", text: "{ref} restored to version {flags.version}"}
+      - {text: "{ref} restored{settings_text}"}
+  patch:
+    summary: "Change settings on a workload, node pool, cache or configuration (--replicas, --cpu-request, --sysctl, --<setting> ...)"
+    example: "opsctl patch deployment/<name> --replicas 6\n  opsctl patch config/<name> --<setting> <value>"
+    describe: "{ref} updated{settings_text}"
+  rotate:
+    summary: "Issue a new credential, store it as the current secret version and roll the consumers"
+    example: "opsctl rotate secret/<name>"
+    describe: "{ref} rotated; new version is current and consumers reloaded"
+  run:
+    summary: "Run a one-off job (replay, resync, recompute, revaluation)"
+    example: "opsctl run job/<name>"
+    describe: "{ref} started{=(' (' + change_id + ')') if change_id else ''}"
+  # not used on this platform
+  renew: null
+  sync: null
+  drain: null
+  replace: null
+  apply: null
+  expand: null
+  delete: null
+  restart: null
+
+kinds:
+  statefulset: {aliases: [sts]}
+  deployment: {aliases: [deploy]}
+  config: {aliases: [cfg]}
+  refdata: {}
+  job: {}
+  cronjob: {aliases: [cj]}
+  nodepool: {aliases: [np]}
+  secret: {}
+  model: {}
+  redis: {}
+
+audit:
+  service: [audit-logger]
+  default: change_log
+  formats:
+    change_log:
+      body: '[AUDIT] event_logged stream=change-mgmt type=CHANGE_APPLIED cmd="opsctl {command}" actor={actor} change_id={change_id}'
+      attributes:
+        operation: change_applied
+        audit.stream: change-mgmt
+        event.action: "{verb}"
+        change.target: "{target}"
+        change.command: "opsctl {command}"
+        user.name: "{actor}"
+        change.id: "{change_id}"
+        ops.target: null
+        ops.command: null
+      match:
+        tokens: ["{target}"]
+
+runbook:
+  scope_note: "Other desks, venues, counterparties and services are unaffected and make a useful comparison."
+  recovery_note: "Each query names the changed component, so its result is the value to compare."
+  audit_label: "audit trail (change-mgmt stream)"
+
+guide:
+  scenario: |
+    ## Where the trading platform's telemetry is
+    The data is OpenTelemetry. Each component is a service (`resource.attributes.service.name`):
+    order-gateway (OMS and FIX sessions), matching-engine, risk-calculator on EKS (us-east-1);
+    market-data-feed, settlement-processor, fraud-detector on GKE (us-central1);
+    compliance-monitor, customer-portal, audit-logger on AKS (eastus).
+
+    - **Logs:** `FROM logs.otel.finserv`. Message in `body.text` (never `body` alone), level in
+      `severity_text`. Error codes (for example `ME-LATENCY-SLA`, `SETTLE-FAIL`) are in `body.text`
+      and `attributes.error.type`; component state and the running version or configuration are
+      in `attributes.*` (for example `attributes.deployment.version`, `attributes.config.revision`).
+    - **Metrics:** `FROM metrics-generic.otel-default`, filtered by
+      `resource.attributes.service.name`, fields under `metrics.<component>.*`, for example
+      `metrics.matching_engine.match_latency_p99_us`, `metrics.settlement.unbooked_fills`,
+      `metrics.audit_logger.replication_lag_ms`, `metrics.customer_portal.valuation_lag_s`.
+    - **Changes:** every applied change is an audit-logger line,
+      `body.text LIKE "*stream=change-mgmt type=CHANGE_APPLIED*"`, with `attributes.change.id`.
+      Changes that preceded an incident are logged by the component that loaded them
+      (`attributes.operation` such as `deployment_rollout`, `config_change`, `refdata_load`) and
+      carry `attributes.change.request`.
+    - **Trading KPIs:** `metrics.business.*` from risk-calculator.
+
+    Readings converge back over the recovery time the runbook states (a rolling restart, a
+    replay or a backlog draining); they do not jump back instantly. Compare a short window after
+    the change id with the window before it.
+
+    Example: matching-engine p99 match latency per minute over the last 15 minutes:
+
+    ```
+    FROM metrics-generic.otel-default
+    | WHERE @timestamp > NOW() - 15 minutes AND resource.attributes.service.name == "matching-engine"
+      AND metrics.matching_engine.match_latency_p99_us IS NOT NULL
+    | STATS p99_us = MAX(metrics.matching_engine.match_latency_p99_us)
+        BY minute = BUCKET(@timestamp, 1 minute)
+    | SORT minute DESC
+    ```

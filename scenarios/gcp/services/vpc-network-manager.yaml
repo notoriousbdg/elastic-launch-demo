@@ -46,82 +46,118 @@ constants:
   - gcpnet-vpc-prod
   - gcpnet-vpc-staging
   - gcpnet-vpc-shared
-  SUBNETS:
-  - gcpnet-subnet-central1
+  OTHER_SUBNETS:
   - gcpnet-subnet-east1
   - gcpnet-subnet-europe1
   - gcpnet-subnet-services
+  OTHER_NETWORKS:
+  - gcpnet-vpc-staging
+  - gcpnet-vpc-shared
 state:
   _poll_idx:
     init: 0
   _last_route_check:
     init: now
 steps:
+# -- Subnets that are not part of any fault: steady utilization, 4092 usable IPs each (/20)
 - sample:
     subnet:
-      expr: SUBNETS[_poll_idx % len(SUBNETS)]
+      expr: OTHER_SUBNETS[_poll_idx % len(OTHER_SUBNETS)]
     used_ips:
-      if_active:
-        randint:
-        - 3900
-        - 4090
-      else:
-        randint:
-        - 1500
-        - 3200
+      expr: int(max(1500, min(3200, rand.gauss(2500, 150))))
 - counter:
     state_key: _poll_idx
     by: 1
 - sample:
     util_pct:
-      expr: round(used_ips / 4094 * 100, 1)
-- metric:
-    name: vpc.subnet.ip_utilization
-    value:
-      var: util_pct
-    unit: '%'
+      expr: round(used_ips / 4092 * 100, 1)
 - metric:
     name: vpc.subnet.used_ips
     value:
       var: used_ips
     unit: addresses
+    attrs:
+      vpc.subnet:
+        var: subnet
 - log:
     level: INFO
-    message: 'vpc-monitor: subnet={subnet} used_ips={used_ips}/4094 utilization={util_pct}% network=gcpnet-vpc-prod'
+    message: 'vpc-monitor: subnet={subnet} used_ips={used_ips}/4092 utilization={util_pct}% network=gcpnet-vpc-prod'
     attrs:
       operation: subnet_monitor
       vpc.subnet:
         var: subnet
       vpc.used_ips:
         var: used_ips
-      vpc.total_ips: 4094
+      vpc.total_ips: 4092
       vpc.utilization_pct:
         var: util_pct
+# -- gcpnet-subnet-central1 (channel 2): 10.128.0.0/20 until expanded to /19 by the fix
+- sample:
+    c1_cidr:
+      expr: "'10.128.0.0/19' if 2 in fixed_channels else '10.128.0.0/20'"
+    c1_total:
+      expr: "8188 if 2 in fixed_channels else 4092"
+    c1_used:
+      expr: "round(2865 + (max(4015.0, min(4070.0, rand.gauss(4045, 12))) - 2865) * min(1.0, elapsed.get(2, 0) / 60.0)) if 2 in all_active
+        else (round(max(4015.0, min(4070.0, rand.gauss(4045, 12)))) if 2 in fixed_channels
+        else round(max(2700.0, min(3000.0, rand.gauss(2865, 40)))))"
+    c1_util:
+      expr: round(c1_used / c1_total * 100, 1)
+- sample:
+    c1_status:
+      expr: "'ANOMALY' if 2 in all_active or c1_util > 90.0 else 'NOMINAL'"
+- metric:
+    name: vpc.subnet_ip_utilization_pct
+    value:
+      var: c1_util
+    unit: '%'
+    attrs:
+      vpc.subnet: gcpnet-subnet-central1
+- metric:
+    name: vpc.subnet.ip_utilization
+    value:
+      var: c1_util
+    unit: '%'
+    attrs:
+      vpc.subnet: gcpnet-subnet-central1
+- metric:
+    name: vpc.subnet.used_ips
+    value:
+      var: c1_used
+    unit: addresses
+    attrs:
+      vpc.subnet: gcpnet-subnet-central1
+- log:
+    level: INFO
+    message: 'vpc-monitor: subnet=gcpnet-subnet-central1 cidr={c1_cidr} used_ips={c1_used}/{c1_total} utilization={c1_util}% network=gcpnet-vpc-prod status={c1_status}'
+    attrs:
+      operation: subnet_monitor
+      vpc.subnet: gcpnet-subnet-central1
+      vpc.subnet.cidr:
+        var: c1_cidr
+      vpc.used_ips:
+        var: c1_used
+      vpc.total_ips:
+        var: c1_total
+      vpc.utilization_pct:
+        var: c1_util
+      vpc.subnet.status:
+        var: c1_status
 - every:
     seconds: 10
     state_key: _last_route_check
     steps:
     - sample:
         network:
-          choice: NETWORKS
+          choice: OTHER_NETWORKS
         route_count:
-          if_active:
-            randint:
-            - 240
-            - 250
-          else:
-            randint:
-            - 80
-            - 200
+          randint:
+          - 80
+          - 200
         peering_count:
           randint:
           - 2
           - 5
-    - metric:
-        name: vpc.route.count
-        value:
-          var: route_count
-        unit: routes
     - metric:
         name: vpc.peering.count
         value:
@@ -138,25 +174,77 @@ steps:
             var: route_count
           vpc.peering_count:
             var: peering_count
+# -- gcpnet-vpc-prod peering gcpnet-vpc-staging-peer (channel 1): imported routes vs the 250 limit
+- sample:
+    peer_total:
+      expr: "181 + 87 * min(1.0, elapsed.get(1, 0) / 45.0) if 1 in all_active
+        else (268 - 87 * min(1.0, since_fix.get(1, 0) / 60.0) if 1 in fixed_channels
+        else max(176, min(186, round(rand.gauss(181, 2)))))"
+    imported_routes:
+      expr: "int(round(min(250, peer_total)))"
+    dropped_prefixes:
+      expr: "int(round(max(0, peer_total - 250)))"
+    import_custom_routes:
+      expr: "'false' if 1 in fixed_channels else ('true' if 1 in all_active else 'false')"
+- sample:
+    peering_status:
+      expr: "'ANOMALY' if 1 in all_active or imported_routes >= 250 or dropped_prefixes > 0 else 'NOMINAL'"
+- metric:
+    name: vpc.peering_imported_routes
+    value:
+      var: imported_routes
+    unit: routes
+- metric:
+    name: vpc.route.count
+    value:
+      var: imported_routes
+    unit: routes
+- metric:
+    name: vpc.peering_dropped_prefixes
+    value:
+      var: dropped_prefixes
+    unit: prefixes
+- log:
+    level: INFO
+    message: 'vpc-monitor: network=gcpnet-vpc-prod peering=gcpnet-vpc-staging-peer imported_routes={imported_routes}/250 dropped_prefixes={dropped_prefixes} import_custom_routes={import_custom_routes} status={peering_status}'
+    attrs:
+      operation: peering_route_check
+      vpc.network: gcpnet-vpc-prod
+      vpc.peering_name: gcpnet-vpc-staging-peer
+      vpc.route_count:
+        var: imported_routes
+      vpc.dropped_prefixes:
+        var: dropped_prefixes
+      vpc.peering.import_custom_routes:
+        var: import_custom_routes
+      vpc.peering.status:
+        var: peering_status
+# -- Firewall evaluation on gcpnet-vpc-prod (channel 3): deny-all-ingress priority 900 shadows allow-internal-all (1000)
 - sample:
     fw_rules_evaluated:
-      randint:
-      - 10000
-      - 50000
+      expr: int(max(10000, min(50000, rand.gauss(30000, 2500))))
+    fw_base:
+      expr: int(min(20, abs(rand.gauss(6, 4))))
+- sample:
     fw_denied:
-      if_active:
-        randint:
-        - 500
-        - 5000
-      else:
-        randint:
-        - 10
-        - 100
+      expr: "int(round(fw_base + (max(100, min(5000, rand.gauss(1800, 200))) - fw_base) * min(1.0, elapsed.get(3, 0) / 30.0))) if 3 in all_active
+        else (int(round(1800 + (fw_base - 1800) * min(1.0, since_fix.get(3, 0) / 45.0))) if 3 in fixed_channels
+        else fw_base)"
+    fw_deny_priority:
+      expr: "65534 if 3 in fixed_channels else (900 if 3 in all_active else 65534)"
+- sample:
+    fw_status:
+      expr: "'ANOMALY' if 3 in all_active or fw_denied > 100 else 'NOMINAL'"
 - metric:
     name: vpc.firewall.rules_evaluated
     value:
       var: fw_rules_evaluated
     unit: evaluations
+- metric:
+    name: vpc.firewall_denied_packets
+    value:
+      var: fw_denied
+    unit: packets/s
 - metric:
     name: vpc.firewall.denied_packets
     value:
@@ -164,22 +252,23 @@ steps:
     unit: packets
 - log:
     level: INFO
-    message: 'vpc-firewall: evaluated={fw_rules_evaluated} denied={fw_denied} network=gcpnet-vpc-prod interval=60s'
+    message: 'vpc-firewall: evaluated={fw_rules_evaluated} denied_per_s={fw_denied} deny_rule=deny-all-ingress deny_priority={fw_deny_priority} allow_rule=allow-internal-all allow_priority=1000 network=gcpnet-vpc-prod status={fw_status}'
     attrs:
       operation: firewall_eval
       vpc.firewall.evaluated:
         var: fw_rules_evaluated
       vpc.firewall.denied:
         var: fw_denied
+      vpc.firewall.deny_rule: deny-all-ingress
+      vpc.firewall.deny_rule_priority:
+        var: fw_deny_priority
+      vpc.firewall.status:
+        var: fw_status
 - sample:
     flows_ingress:
-      randint:
-      - 50000
-      - 200000
+      expr: int(max(50000, min(200000, rand.gauss(110000, 8000))))
     flows_egress:
-      randint:
-      - 30000
-      - 150000
+      expr: int(max(30000, min(150000, rand.gauss(80000, 6000))))
 - metric:
     name: vpc.flow.ingress
     value:

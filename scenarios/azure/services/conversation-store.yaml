@@ -45,27 +45,44 @@ steps:
       choice: CONTAINERS
     region:
       choice: REGIONS
-    ru_provisioned: 40000
+    # ch7 (tenant-4417 hot partition), ch19 (autoscale ceiling) and ch12 (multi-region write
+    # conflicts) each own their own degradation factor: 0 = healthy, 1 = fully degraded.
+    # They ramp in over 45 s and converge back over the recovery time after the fix.
+    deg7:
+      expr: "min(1.0, elapsed.get(7, 0) / 45.0) if 7 in all_active else (1.0 - min(1.0, since_fix.get(7, 0) / 90.0) if 7 in fixed_channels else 0.0)"
+    deg19:
+      expr: "min(1.0, elapsed.get(19, 0) / 45.0) if 19 in all_active else (1.0 - min(1.0, since_fix.get(19, 0) / 60.0) if 19 in fixed_channels else 0.0)"
+    deg12:
+      expr: "min(1.0, elapsed.get(12, 0) / 45.0) if 12 in all_active else (1.0 - min(1.0, since_fix.get(12, 0) / 90.0) if 12 in fixed_channels else 0.0)"
+    deg_throttle:
+      expr: "max(deg7, deg19)"
+    sig_container:
+      expr: "'conversations' if (7 in all_active or 7 in fixed_channels or 19 in all_active or 19 in fixed_channels or 12 in all_active or 12 in fixed_channels) else container"
+    # autoscale maximum of the conversations container (ch19 raises it to 20000)
+    ru_max:
+      expr: "int(applied.get('cosmos-container/conversations', {}).get('max-throughput', 20000 if 19 in fixed_channels else 10000))"
+    base_ru:
+      randint: [3500, 6000]
+    ru19_peak:
+      randint: [9700, 10000]
+    base_pct:
+      expr: "round(base_ru / ru_max * 100.0, 1)"
     ru_consumed_per_s:
-      if_active:
-        randint:
-        - 39000
-        - 48000
-      else:
-        randint:
-        - 9000
-        - 26000
+      expr: "int(base_ru + (ru19_peak - base_ru) * deg19) if 19 in all_active else (int(rand.randint(10600, 11400) - (11000 - ru19_peak) * deg19) if 19 in fixed_channels else base_ru)"
+    ru_provisioned:
+      expr: "ru_max"
     ru_utilization_pct:
-      expr: round(ru_consumed_per_s / ru_provisioned * 100, 1)
+      expr: "round(base_pct + (rand.uniform(98.0, 100.0) - base_pct) * deg19, 1) if 19 in all_active else (round(rand.uniform(52.0, 58.0) + (rand.uniform(98.0, 100.0) - 55.0) * deg19, 1) if 19 in fixed_channels else base_pct)"
+    thr7_level:
+      randint: [300, 6000]
+    thr19_level:
+      randint: [150, 2500]
+    thr_base:
+      expr: "0 if (7 in fixed_channels or 19 in fixed_channels) else rand.randint(0, 2)"
     throttled_429s:
-      if_active:
-        randint:
-        - 400
-        - 3500
-      else:
-        randint:
-        - 0
-        - 2
+      expr: "int(thr7_level * deg7 + thr19_level * deg19) + thr_base"
+    ru_status:
+      expr: "'ANOMALY' if throttled_429s > 5 or ru_utilization_pct > 90.0 else 'NOMINAL'"
 - metric:
     name: conversation_store.normalized_ru_consumption_pct
     value:
@@ -83,56 +100,48 @@ steps:
     unit: requests
 - log:
     level: INFO
-    message: 'cosmosdb[convstore-weu]: ru_stats container={container} consumed={ru_consumed_per_s} RU/s of {ru_provisioned} autoscale max utilization={ru_utilization_pct}% http_429={throttled_429s}/min status=OK'
+    message: 'cosmosdb[convstore-weu]: ru_stats container={sig_container} consumed={ru_consumed_per_s} RU/s of {ru_provisioned} autoscale max normalized_ru={ru_utilization_pct}% http_429={throttled_429s}/min status={ru_status}'
     attrs:
       operation: ru_stats
       db.container:
-        var: container
+        var: sig_container
       db.ru_consumed_per_s:
         var: ru_consumed_per_s
-      db.ru_provisioned: 40000
+      db.ru_provisioned:
+        var: ru_provisioned
+      cosmos.autoscale_max_ru:
+        var: ru_max
       db.ru_utilization_pct:
         var: ru_utilization_pct
       db.throttled_429s:
         var: throttled_429s
+      db.status:
+        var: ru_status
 - sample:
+    hot_base:
+      uniform:
+      - 12.0
+      - 18.0
+    hot_target:
+      uniform:
+      - 55.0
+      - 92.0
     hottest_partition_pct:
-      if_active:
-        uniform:
-        - 78.0
-        - 99.0
-        round: 1
-      else:
-        uniform:
-        - 12.0
-        - 35.0
-        round: 1
+      expr: "round(hot_base + (hot_target - hot_base) * deg7, 1)"
     partition_key_range:
       randint:
       - 0
       - 15
+    hottest_key:
+      expr: "'tenant-4417' if deg7 >= 0.5 else rand.choice(['tenant-0932', 'tenant-7781', 'tenant-2210', 'tenant-5586'])"
+    tenant_rpm:
+      expr: "int(applied.get('ratelimit/tenant-4417', {}).get('rpm', 600 if 7 in fixed_channels else 12000))"
     read_latency_ms:
-      if_active:
-        uniform:
-        - 120.0
-        - 900.0
-        round: 1
-      else:
-        uniform:
-        - 3.0
-        - 12.0
-        round: 1
+      expr: "round(rand.uniform(3.0, 12.0) + (rand.uniform(120.0, 900.0) - 8.0) * deg_throttle, 1)"
     write_latency_ms:
-      if_active:
-        uniform:
-        - 250.0
-        - 2500.0
-        round: 1
-      else:
-        uniform:
-        - 5.0
-        - 18.0
-        round: 1
+      expr: "round(rand.uniform(5.0, 18.0) + (rand.uniform(250.0, 2500.0) - 11.0) * deg_throttle, 1)"
+    partition_status:
+      expr: "'ANOMALY' if hottest_partition_pct > 40.0 or read_latency_ms > 100.0 else 'NOMINAL'"
 - metric:
     name: conversation_store.hot_partition_pct
     value:
@@ -150,29 +159,53 @@ steps:
     unit: ms
 - log:
     level: INFO
-    message: 'cosmosdb[convstore-weu]: partition_heat container={container} pkrange={partition_key_range} hottest_partition={hottest_partition_pct}% read_p99={read_latency_ms}ms write_p99={write_latency_ms}ms'
+    message: 'cosmosdb[convstore-weu]: partition_heat container={sig_container} pkrange={partition_key_range} hottest_partition={hottest_partition_pct}% hottest_key={hottest_key} tenant_rpm_limit={tenant_rpm} read_p99={read_latency_ms}ms write_p99={write_latency_ms}ms status={partition_status}'
     attrs:
       operation: partition_heat
       db.container:
-        var: container
+        var: sig_container
       db.partition_key_range:
         var: partition_key_range
       db.hottest_partition_pct:
         var: hottest_partition_pct
+      db.hottest_partition_key:
+        var: hottest_key
       db.read_latency_ms:
         var: read_latency_ms
       db.write_latency_ms:
         var: write_latency_ms
+      ratelimit.tenant: tenant-4417
+      ratelimit.tenant_rpm:
+        var: tenant_rpm
+      db.status:
+        var: partition_status
 - sample:
+    repl_base:
+      randint:
+      - 40
+      - 400
+    repl_peak:
+      randint:
+      - 800
+      - 9000
     replication_lag_ms:
-      if_active:
-        randint:
-        - 4000
-        - 45000
-      else:
-        randint:
-        - 40
-        - 400
+      expr: "int(repl_base + (repl_peak - repl_base) * deg12)"
+    # ch12: the write mode follows the account patch itself (applied), conflicts and
+    # lag converge once the reconcile job has also run (fixed_channels).
+    write_mode:
+      expr: "'single-region' if (12 in fixed_channels or applied.get('cosmos-account/azureai-cosmos', {}).get('multi-region-writes') == 'false') else ('multi-region' if 12 in all_active else 'single-region')"
+    multi_region_writes:
+      expr: "write_mode == 'multi-region'"
+    mrw_str:
+      expr: "'true' if multi_region_writes else 'false'"
+    write_regions:
+      expr: "'eastus,westeurope' if write_mode == 'multi-region' else 'westeurope'"
+    history_reconcile:
+      expr: "'pending' if 12 in all_active else ('completed' if 12 in fixed_channels else 'none')"
+    write_conflicts_per_min:
+      expr: "int(rand.randint(40, 900) * deg12)"
+    repl_status:
+      expr: "'ANOMALY' if 12 in all_active or replication_lag_ms > 700 or write_conflicts_per_min > 0 else 'NOMINAL'"
     consistency:
       choice: CONSISTENCY_LEVELS
     storage_gb:
@@ -190,6 +223,11 @@ steps:
       var: replication_lag_ms
     unit: ms
 - metric:
+    name: conversation_store.write_conflicts_per_min
+    value:
+      var: write_conflicts_per_min
+    unit: '{conflicts}/min'
+- metric:
     name: conversation_store.data_usage_gb
     value:
       var: storage_gb
@@ -201,7 +239,7 @@ steps:
     unit: documents
 - log:
     level: INFO
-    message: 'cosmosdb[convstore-weu]: replication region={region} consistency={consistency} replication_lag={replication_lag_ms}ms data_usage={storage_gb}GB documents={documents_k}k multi_region_writes=false'
+    message: 'cosmosdb[convstore-weu]: replication region={region} consistency={consistency} replication_lag={replication_lag_ms}ms write_conflicts={write_conflicts_per_min}/min data_usage={storage_gb}GB documents={documents_k}k write_regions={write_regions} multi_region_writes={mrw_str} status={repl_status}'
     attrs:
       operation: replication_health
       db.region:
@@ -212,3 +250,13 @@ steps:
         var: replication_lag_ms
       db.data_usage_gb:
         var: storage_gb
+      db.write_conflicts_per_min:
+        var: write_conflicts_per_min
+      cosmos.write_mode:
+        var: write_mode
+      cosmos.multi_region_writes:
+        var: multi_region_writes
+      cosmos.history_reconcile:
+        var: history_reconcile
+      db.status:
+        var: repl_status

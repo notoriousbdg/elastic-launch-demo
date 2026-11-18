@@ -89,23 +89,6 @@ steps:
           auth.total:
             var: _auth_count
           auth.biometric_pct: 72
-- sample:
-    auth_success_rate:
-      if_active:
-        uniform:
-        - 60.0
-        - 85.0
-        round: 2
-      else:
-        uniform:
-        - 98.0
-        - 99.9
-        round: 2
-- metric:
-    name: auth_gateway.success_rate
-    value:
-      var: auth_success_rate
-    unit: '%'
 - metric:
     name: auth_gateway.active_sessions
     value:
@@ -113,11 +96,146 @@ steps:
       - 40000
       - 120000
     unit: sessions
+- sample:
+    f14:
+      expr: min(1.0, max(0.0, elapsed.get(14, 0) - lag.get(14, 0)) / 20.0) if 14 in all_active else (max(0.0, 1.0 - since_fix.get(14,
+        0) / 60.0) if 14 in fixed_channels else 0.0)
+    c14_model:
+      expr: '''v3.1.2'' if 14 in all_active else ''v3.1.1'''
+    c14_rollout:
+      expr: 100 if 14 in all_active else 0
+    c14_fail:
+      expr: round(rand.uniform(2.0, 4.5) * (1.0 - f14) + rand.uniform(28.0, 41.0) * f14, 2)
+    c14_fallback:
+      expr: round(round(rand.uniform(20.0, 60.0) * (1.0 - f14) + rand.uniform(400.0, 900.0) * f14, 0))
+    c14_status:
+      expr: '''DEGRADED'' if 14 in all_active or f14 > 0.1 else ''NOMINAL'''
+- when: 14 in all_active
+  log:
+    level: WARN
+    message: '[AUTH] biometric_status method=FACE_ID liveness_model={c14_model} flag=liveness-model-v312 rollout_pct={c14_rollout}
+      fail_rate={c14_fail}% pin_fallback_per_min={c14_fallback} status={c14_status}'
+    attrs: &id001
+      operation: biometric_status
+      auth.liveness_model:
+        var: c14_model
+      featureflag.key: liveness-model-v312
+      featureflag.rollout_pct:
+        var: c14_rollout
+      auth.biometric_fail_rate_pct:
+        var: c14_fail
+      auth.status:
+        var: c14_status
+- when: 14 not in all_active
+  log:
+    level: INFO
+    message: '[AUTH] biometric_status method=FACE_ID liveness_model={c14_model} flag=liveness-model-v312 rollout_pct={c14_rollout}
+      fail_rate={c14_fail}% pin_fallback_per_min={c14_fallback} status={c14_status}'
+    attrs: *id001
+- metric:
+    name: auth_gateway.biometric_fail_rate_pct
+    value:
+      var: c14_fail
+    unit: '%'
+- metric:
+    name: auth_gateway.pin_fallback_per_min
+    value:
+      var: c14_fallback
+    unit: fallbacks/min
+- sample:
+    f15:
+      expr: min(1.0, max(0.0, elapsed.get(15, 0) - lag.get(15, 0)) / 30.0) if 15 in all_active else (max(0.0, 1.0 - since_fix.get(15,
+        0) / 120.0) if 15 in fixed_channels else 0.0)
+    c15_template:
+      expr: '''v12'' if 15 in all_active else ''v11'''
+    c15_url:
+      expr: True if 15 in all_active else False
+    c15_rate:
+      expr: round(rand.uniform(95.0, 99.5) * (1.0 - f15) + rand.uniform(54.0, 72.0) * f15, 1)
+    c15_filtered:
+      expr: round(round(rand.uniform(0.0, 3.0) * (1.0 - f15) + rand.uniform(300.0, 700.0) * f15, 0))
+    c15_status:
+      expr: '''DEGRADED'' if 15 in all_active or f15 > 0.1 else ''NOMINAL'''
+- when: 15 in all_active
+  log:
+    level: WARN
+    message: '[AUTH] mfa_delivery_status channel=SMS template=mfa-otp-sms version={c15_template} has_url={c15_url} short_code=872438
+      delivery_rate={c15_rate}% filtered_per_min={c15_filtered} status={c15_status}'
+    attrs: &id002
+      operation: mfa_delivery_status
+      mfa.sms_template_version:
+        var: c15_template
+      mfa.sms_template_has_url:
+        var: c15_url
+      mfa.delivery_rate:
+        var: c15_rate
+      mfa.status:
+        var: c15_status
+- when: 15 not in all_active
+  log:
+    level: INFO
+    message: '[AUTH] mfa_delivery_status channel=SMS template=mfa-otp-sms version={c15_template} has_url={c15_url} short_code=872438
+      delivery_rate={c15_rate}% filtered_per_min={c15_filtered} status={c15_status}'
+    attrs: *id002
 - metric:
     name: auth_gateway.mfa_delivery_rate
     value:
-      uniform:
-      - 95.0
-      - 99.5
-      round: 1
+      var: c15_rate
+    unit: '%'
+- metric:
+    name: auth_gateway.sms_filtered_per_min
+    value:
+      var: c15_filtered
+    unit: messages/min
+- sample:
+    f17:
+      expr: min(1.0, max(0.0, elapsed.get(17, 0) - lag.get(17, 0)) / 20.0) if 17 in all_active else (max(0.0, 1.0 - since_fix.get(17,
+        0) / 150.0) if 17 in fixed_channels else 0.0)
+    c17_logins:
+      expr: round(round(rand.uniform(400.0, 900.0) * (1.0 - f17) + rand.uniform(6000.0, 12000.0) * f17, 0))
+- metric:
+    name: auth_gateway.logins_per_min
+    value:
+      var: c17_logins
+    unit: logins/min
+- sample:
+    f20a:
+      expr: min(1.0, max(0.0, elapsed.get(20, 0) - lag.get(20, 0)) / 10.0) if 20 in all_active else (max(0.0, min(1.0, 1.0
+        - (since_fix.get(20, 0) - 120) / 15.0)) if 20 in fixed_channels else 0.0)
+    c20a_tls:
+      expr: round(round(rand.uniform(0.0, 4.0) * (1.0 - f20a) + rand.uniform(4000.0, 12000.0) * f20a, 0))
+    c20a_cert_status:
+      expr: '''EXPIRED'' if 20 in all_active or (20 in fixed_channels and since_fix.get(20, 0) < 120) else ''VALID'''
+    c20a_serial:
+      expr: '''04B7E2D91A6C3F08'' if 20 in fixed_channels and since_fix.get(20, 0) >= 120 else ''03F9A1C27B44E0D5'''
+- when: 20 in all_active
+  log:
+    level: WARN
+    message: '[AUTH] tls_status host=login.retailbank.com certificate=edge/wildcard-retailbank-com (replicated) serial={c20a_serial}
+      cert_status={c20a_cert_status} handshake_failures_per_min={c20a_tls} status={c20a_cert_status}'
+    attrs: &id003
+      operation: tls_status
+      tls.cert_status:
+        var: c20a_cert_status
+      tls.cert_serial:
+        var: c20a_serial
+      tls.server_name: login.retailbank.com
+- when: 20 not in all_active
+  log:
+    level: INFO
+    message: '[AUTH] tls_status host=login.retailbank.com certificate=edge/wildcard-retailbank-com (replicated) serial={c20a_serial}
+      cert_status={c20a_cert_status} handshake_failures_per_min={c20a_tls} status={c20a_cert_status}'
+    attrs: *id003
+- metric:
+    name: auth_gateway.tls_handshake_failures_per_min
+    value:
+      var: c20a_tls
+    unit: failures/min
+- sample:
+    auth_success_rate:
+      expr: round(rand.uniform(98.0, 99.9) - 11.0 * f14 - 9.0 * f15 - 14.0 * f17, 2)
+- metric:
+    name: auth_gateway.success_rate
+    value:
+      var: auth_success_rate
     unit: '%'

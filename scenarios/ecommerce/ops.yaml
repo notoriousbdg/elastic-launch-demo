@@ -1,0 +1,122 @@
+# opsctl profile for the Global Commerce Platform (see app/ops_profile.py for the contract).
+# Changes go to the storefront edge, the commerce services on EKS / GKE / AKS, their jobs and
+# configuration, the search cluster, payment routing and the ML model registry. The service
+# that owns the target logs the applied change; storefront-gateway is the fallback.
+extends: [neutral]
+
+banner: "opsctl applies changes to the commerce platform: deployments, configuration, jobs, edge rules, payment routing and models. Every applied change is written to the change log with a change id."
+
+actors:
+  default: commerce-sre/oncall-console
+  auto: commerce-sre/auto-remediator
+
+auto_remediate_channels: [16, 17, 18, 19, 20]
+
+verbs:
+  rollback:
+    summary: "Revert a deployment, configuration, job, alias, model or policy to an earlier revision (--to-revision N|previous)"
+    example: "opsctl rollback deployment/<name> --to-revision previous\n  opsctl rollback config/<name> --to-revision previous\n  opsctl rollback alias/<name> --to-revision previous"
+    describe: "{ref} reverted to {rev_text}"
+  patch:
+    summary: "Change settings on a policy, rule, feature flag or autoscaler (--<setting> <value>)"
+    example: "opsctl patch feature-flag/<name> --enabled false\n  opsctl patch routing-policy/<name> --primary <provider>"
+    describe: "{ref} updated{settings_text}"
+  run:
+    summary: "Run a one-off job (index publish, resync, batch)"
+    example: "opsctl run job/<name>"
+    describe: "{ref} started{=(' (' + change_id + ')') if change_id else ''}"
+  delete:
+    summary: "Delete an object (a running job, a hold), or every object matching --selector"
+    example: "opsctl delete job/<name>\n  opsctl delete session --selector client-cidr=<cidr>"
+  renew:
+    summary: "Re-issue a certificate and install it at the edge"
+    example: "opsctl renew certificate/<name>"
+    describe: "{ref} re-issued and installed"
+  rotate:
+    summary: "Rotate a credential and roll out the new value"
+    example: "opsctl rotate secret/<name>"
+  restore: null
+  sync: null
+  drain: null
+  replace: null
+  expand: null
+  apply: null
+
+kinds:
+  deployment: {aliases: [deploy]}
+  config: {aliases: [cfg, configmap, cm]}
+  job: {}
+  cronjob: {aliases: [cj]}
+  scaledobject: {aliases: [so]}
+  alias: {}
+  model: {}
+  feature-flag: {aliases: [ff]}
+  waf-rule: {}
+  session: {}
+  routing-policy: {}
+  location-hold: {}
+  policy: {}
+  certificate: {aliases: [cert]}
+  secret: {}
+
+audit:
+  service: [storefront-gateway]
+  default: command_log
+  formats:
+    command_log:
+      body: '[CHG] CHANGE APPLIED opsctl {command} by {actor} change_id={change_id}'
+      attributes:
+        operation: change_applied
+        event.action: "{verb}"
+        change.target: "{target}"
+        change.command: "opsctl {command}"
+        user.name: "{actor}"
+        change.id: "{change_id}"
+        ops.target: null
+        ops.command: null
+      match:
+        tokens: ["{target}"]
+
+runbook:
+  scope_note: "Other services, warehouses, carriers and payment providers are unaffected and make a useful comparison."
+  recovery_note: "Each query names the fixed service, so its result is the value to compare."
+  audit_label: "change log"
+
+guide:
+  scenario: |
+    ## Where commerce telemetry is
+    The data is OpenTelemetry. Each service is `resource.attributes.service.name`:
+    storefront-gateway, product-catalog, order-management (EKS, us-east-1); ad-platform,
+    recommendation-engine, inventory-service (GKE, us-central1); payment-processor,
+    fulfillment-orchestrator, analytics-pipeline (AKS, eastus).
+
+    - **Logs:** `FROM logs.otel.ecommerce`. Message in `body.text` (never `body` alone), level
+      in `severity_text`. Error codes (for example `PAYMENT-GATEWAY-TIMEOUT`) are in `body.text`
+      and `attributes.error.type`. Each service writes a periodic status line whose attributes
+      carry the running configuration (for example `attributes.payment.psp_primary`,
+      `attributes.reco.model_version`, `attributes.catalog.index_version`).
+    - **Metrics:** `FROM metrics-generic.otel-default`, filtered by
+      `resource.attributes.service.name`, fields under `metrics.<area>.*`, for example
+      `metrics.payments.gateway_timeout_pct`, `metrics.ads.fill_rate_pct`,
+      `metrics.storefront.cache_hit_rate_pct`, `metrics.analytics.pipeline_lag_ms`.
+    - **Packages:** Kafka consumer lag (`metrics-kafkametricsreceiver.otel-*`), Redis
+      (`metrics-redisreceiver.otel-*`), nginx and Kubernetes streams.
+    - **Changes:** every applied change is a log line from the service that owns the target,
+      `body.text LIKE "[CHG] CHANGE APPLIED*"`, with `attributes.change.id`. Changes that
+      preceded an incident (deploys, config revisions, flag flips, schedule changes) carry
+      `attributes.change.request`.
+
+    Readings converge back over the recovery time the runbook states; queues and backlogs
+    drain, caches refill and rolling windows age out, so they do not jump back instantly.
+    Compare a short window after the command with the window before it.
+
+    Example: Stripe timeout rate per minute over the last 15 minutes:
+
+    ```
+    FROM metrics-generic.otel-default
+    | WHERE @timestamp > NOW() - 15 minutes AND resource.attributes.service.name == "payment-processor"
+      AND metrics.payments.gateway_timeout_pct IS NOT NULL
+    | STATS max = MAX(metrics.payments.gateway_timeout_pct)
+        BY minute = BUCKET(@timestamp, 1 minute)
+    | SORT minute DESC
+    ```

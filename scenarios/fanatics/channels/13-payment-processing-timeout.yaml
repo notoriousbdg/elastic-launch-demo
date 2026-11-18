@@ -3,32 +3,33 @@ subsystem: commerce
 vehicle_section: payment_system
 error_type: PAYMENT_GATEWAY_TIMEOUT
 sensor_type: payment_gateway
-affected_services:
-- digital-marketplace
-- auction-engine
-cascade_services:
-- firewall-gateway
 description: Payment gateway requests timing out, affecting checkout and auction settlements
+affected_services: [digital-marketplace, auction-engine]
+error_services: [digital-marketplace]
+cascade_services: [firewall-gateway]
+onset_delay_seconds: 10
 investigation_notes: |-
-  1. Check the payment provider status page (e.g., status.stripe.com) — gateway timeouts are often caused by provider-side degradation; if the provider reports degraded performance while our connection pool and firewall are healthy, that is the cause.
-  2. Review the HTTP response codes: 504 (Gateway Timeout) and 503 (Service Unavailable) indicate the provider is overloaded; 429 means rate limiting. The nginx front end surfaces these as a spike in 5xx responses on checkout and settlement routes.
-  3. Verify the firewall is not blocking or throttling outbound HTTPS to payment endpoints: `show session all filter destination <gateway_ip>` (outbound HTTPS is not throttled here).
-  4. Check connection pool exhaustion in the marketplace service: `netstat -an | grep <gateway_ip> | wc -l` — too many TIME_WAIT connections (above 500) indicate connection churn from a misconfigured pool; here there are under 50, ruling it out.
-  5. Implement circuit breaker pattern: after 3 consecutive timeouts to a provider, failover to the backup provider (e.g., Stripe -> Adyen).
-  6. Queue failed payment retries in SQS/SNS with exponential backoff rather than blocking the checkout flow — return a pending status to the user.
+  Root cause: digital-marketplace was rolled out to revision 214 with stripe-sdk v14.2.0-beta3 (CR-3318). The beta SDK ships a new HTTP client that no longer reuses keep-alive connections, so every charge opens a fresh TLS session and the call stalls until the {payment_timeout_s}s read timeout (stripe._error.APIConnectionError, attempt {payment_retry_count}/{payment_max_retries}). The rollout is rolling, so timeouts start when the first new pod takes traffic and climb as each of the 6 pods is replaced; each new pod times out on roughly a third of its charges. Stripe and the network are healthy: status.stripe.com shows no incident, the connection pool has few TIME_WAIT sockets (marketplace.http_pool_time_wait), the firewall allows the payments-egress sessions, and the checkout database is unaffected. Pods still on the old SDK keep working, so the mix of SDK versions in the logs shows how far the rollout has got.
+  Confirm:
+    - digital-marketplace "Payment gateway health" lines show sdk=stripe-sdk-v14.2.0-beta3 on some pods first, then on all (attributes.infra.payment_gateway_sdk); marketplace.payment_timeout_pct rises in steps of about 6 percentage points as pods are replaced, to about 36%, and marketplace.payment_provider_response_ms sits at the {payment_timeout_s}s read timeout (10000ms)
+    - the digital-marketplace line "[Deploy] rollout to revision 214 ... stripe-sdk v13.9.2 -> v14.2.0-beta3" comes before the first timeout
+    - checkout throughput (marketplace.transactions_per_sec) and conversion fall with the timeout rate, and auction-engine settlement charges time out on the same call
+  Remediation: roll the deployment back with opsctl rollback deployment/digital-marketplace --to-revision previous. This is another rolling update: for about a minute old and new pods serve side by side (timeouts fall in steps, both SDK versions in the logs), then all 6 pods are on v13.9.2 and the timeout rate returns to under 1%. Timed-out charges are retried or reconciled by idempotency key, so no failover to another provider is needed.
 remediation_action: reset_payment_gateway
-error_message: '[PaymentHandler] PAYMENT_GATEWAY_TIMEOUT: order={order_id} provider={payment_provider} timeout={payment_timeout_ms}ms
-  gateway_code={gateway_response_code} retry={payment_retry_count}/{payment_max_retries} amount=${payment_amount}'
+remediation_command: |-
+  opsctl rollback deployment/digital-marketplace --to-revision previous
+error_message: '[PaymentHandler] PAYMENT_GATEWAY_TIMEOUT order={order_id} stripe._error.APIConnectionError: Request to {payment_provider} timed out (read timeout={payment_timeout_s}s) idempotency_key={idempotency_key} amount={payment_amount_cents} currency=usd attempt={payment_retry_count}/{payment_max_retries}'
 stack_trace: |-
   Traceback (most recent call last):
     File "/app/marketplace/handlers/payment.py", line 178, in process_payment
-      response = await self.gateway.charge(order_id, amount, provider)
-    File "/app/marketplace/gateways/{payment_provider}.py", line 92, in charge
-      result = await self._http.post(self.endpoint, json=payload, timeout={payment_timeout_ms}/1000)
-    File "/app/venv/lib/python3.11/site-packages/httpx/_transports/default.py", line 86, in map_httpcore_exceptions
-      raise mapped_exc(message) from exc
-  httpx.ReadTimeout: Payment gateway did not respond within {payment_timeout_ms}ms
-  PAYMENT_GATEWAY_TIMEOUT: order {order_id} via {payment_provider} — {gateway_response_code}
+      intent = stripe.PaymentIntent.create(amount={payment_amount_cents}, currency="usd", idempotency_key="{idempotency_key}")
+    File "/app/venv/lib/python3.11/site-packages/stripe/_api_requestor.py", line 436, in request
+      rbody, rcode, rheaders = self._request_internal(method, url, headers, post_data, stream=False)
+    File "/app/venv/lib/python3.11/site-packages/stripe/_http_client.py", line 570, in request
+      self._handle_request_error(e)
+  stripe._error.APIConnectionError: Unexpected error communicating with Stripe.  If this problem persists, let us know at support@stripe.com.
+  (Network error: ReadTimeout: HTTPSConnectionPool(host='api.stripe.com', port=443): Read timed out. (read timeout={payment_timeout_s}))
+  PAYMENT_GATEWAY_TIMEOUT: order {order_id} via {payment_provider}, attempt {payment_retry_count}/{payment_max_retries}
 correlation_attr:
   key: infra.payment_gateway_sdk
   value: stripe-sdk-v14.2.0-beta3
@@ -37,23 +38,109 @@ fault_params:
     format: "ORD-{n}"
     n: {randint: [100000, 999999]}
   payment_provider: Stripe
-  payment_timeout_ms: {randint: [5000, 30000]}
-  gateway_response_code: {choice: ["504", "503"]}
+  payment_timeout_s: 10
   payment_retry_count: {randint: [1, 3]}
   payment_max_retries: 3
-  payment_amount: {uniform: [9.99, 4999.99], round: 2}
+  payment_amount_cents: {randint: [999, 499999]}
+  idempotency_key:
+    format: "ord-{n}-pi"
+    n: {randint: [100000, 999999]}
 rca_clues:
   digital-marketplace:
     marketplace.payment_circuit_breaker: {choice: [HALF_OPEN, OPEN]}
-    marketplace.provider_response_ms: {randint: [5000, 30000]}
+    marketplace.provider_response_ms: {uniform: [9800, 10200], round: 0}
     marketplace.http_pool_time_wait: {randint: [5, 40]}
-    marketplace.failed_checkout_count: {randint: [10, 200]}
   auction-engine:
     auction.settlement_backlog: {randint: [5, 100]}
-    auction.payment_retry_queue: {randint: [3, 50]}
   firewall-gateway:
     firewall.outbound_https_throttled: false
-    firewall.payment_gateway_sessions: {randint: [500, 5000]}
+cascade_messages:
+  auction-engine:
+    - severity: WARN
+      message: '[SettlementWorker] charge to {payment_provider} timed out (read timeout={payment_timeout_s}s) order={order_id}; retrying with the same idempotency key ({payment_retry_count}/{payment_max_retries})'
+  firewall-gateway:
+    - severity: INFO
+      message: '1,{iso_now},007200001234,TRAFFIC,end,2562,{iso_now},10.10.1.50,54.187.174.169,0.0.0.0,0.0.0.0,payments-egress,,,ssl,vsys1,trust,untrust,ethernet1/2,ethernet1/1,default,{iso_now},0,1,51234,443,0,0,0x19,tcp,allow,6120,2210,3910,18,{iso_now},9,any,0,tcp-fin'
+fault_scope:
+  cluster: fanatics-eks-cluster
+  workloads: [digital-marketplace, auction-engine]
+infrastructure_events:
+  - service: digital-marketplace
+    severity: INFO
+    offset_seconds: -100
+    body: '[Deploy] rollout to revision 214 started: stripe-sdk v13.9.2 -> v14.2.0-beta3 (stripe==14.2.0b3), 6 replicas, maxSurge=1 maxUnavailable=0; deployed by payments-platform (CR-3318)'
+    attributes:
+      user.name: payments-platform
+      change.request: CR-3318
+      operation: deployment_rollout
+      infra.payment_gateway_sdk: stripe-sdk-v14.2.0-beta3
+      deploy.revision: 214
+      change.summary: 'stripe-sdk: v13.9.2 -> v14.2.0-beta3'
+remediation_effects:
+  log_taper_seconds: 55
+  log_events:
+    - service: digital-marketplace
+      severity: INFO
+      offset_seconds: 1
+      body: '[CHG] CHANGE APPLIED opsctl rollback deployment/digital-marketplace --to-revision previous by {actor}: rollout undo from revision 214 to revision 213 (stripe-sdk v14.2.0-beta3 -> v13.9.2)'
+      attributes:
+        operation: change_applied
+        change.target: deployment/digital-marketplace
+    - service: digital-marketplace
+      severity: INFO
+      offset_seconds: 10
+      body: 'deployment digital-marketplace rolled back to revision 213: rolling update in progress, 2/6 pods on stripe-sdk v13.9.2'
+      attributes:
+        operation: deployment_rollout
+        deploy.revision: 213
+        deploy.updated_replicas: 2
+    - service: digital-marketplace
+      severity: INFO
+      offset_seconds: 35
+      body: 'deployment digital-marketplace rolled back to revision 213: rolling update in progress, 4/6 pods on stripe-sdk v13.9.2'
+      attributes:
+        operation: deployment_rollout
+        deploy.revision: 213
+        deploy.updated_replicas: 4
+    - service: digital-marketplace
+      severity: INFO
+      offset_seconds: 55
+      body: 'deployment digital-marketplace rolled back to revision 213: 6/6 pods updated and available, stripe-sdk v13.9.2'
+      attributes:
+        operation: deployment_rollout
+        deploy.revision: 213
+        deploy.updated_replicas: 6
+        infra.payment_gateway_sdk: stripe-sdk-v13.9.2
+    - service: digital-marketplace
+      severity: INFO
+      offset_seconds: 70
+      body: '[PaymentReconciler] timed-out PaymentIntents re-queried by idempotency key; unresolved charges retried, no duplicate charges created'
+      attributes:
+        operation: payment_reconcile
+  verification:
+    - signal: marketplace.payment_timeout_pct
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "digital-marketplace"'
+      field: 'metrics.marketplace.payment_timeout_pct'
+      expect: 'falls in steps during the rollback (about 60s) and is under 1% once all pods are updated (was about 36%)'
+      within_seconds: 150
+    - signal: marketplace.payment_provider_response_ms
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "digital-marketplace"'
+      field: 'metrics.marketplace.payment_provider_response_ms'
+      expect: 'back under 500ms (was about 10000ms, the read timeout)'
+      within_seconds: 150
+    - signal: PAYMENT_GATEWAY_TIMEOUT lines
+      from: 'logs.otel.fanatics'
+      where: 'body.text LIKE "*PAYMENT_GATEWAY_TIMEOUT*"'
+      expect: 'no new lines after the rollout completes (about 60s)'
+      within_seconds: 150
+    - signal: payment SDK version
+      from: 'logs.otel.fanatics'
+      where: 'resource.attributes.service.name == "digital-marketplace"'
+      field: 'attributes.infra.payment_gateway_sdk'
+      expect: 'both versions appear while pods roll; only stripe-sdk-v13.9.2 once the rollout is complete'
+      within_seconds: 150
 business_impact:
   - kpi: business.merch_gmv_usd_per_min
     value: {uniform: [10416.0, 11984.0], round: 1}
@@ -65,3 +152,5 @@ business_impact:
 generator_impact:
   nginx_otel:
     high_5xx_error_rate: 700.0
+# dependents degrade after the component at fault, in dependency order
+service_lag_seconds: {auction-engine: 30, firewall-gateway: 30}

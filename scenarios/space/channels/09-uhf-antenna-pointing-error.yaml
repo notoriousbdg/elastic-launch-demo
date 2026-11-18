@@ -9,14 +9,17 @@ affected_services:
 cascade_services:
 - mission-control
 description: UHF antenna gimbal pointing error exceeds tolerance
-investigation_notes: 'Root cause: gimbal servo controller failing to track TDRSS-W satellite — resolver feedback indicates
-  mechanical binding or servo amplifier saturation. Pointing errors in both azimuth and elevation suggest the tracking algorithm
-  lost lock, not a single-axis mechanical fault. Check gimbal motor current (nominal 2.1A, >3.5A indicates binding). Verify
-  resolver calibration date — resolvers drift after thermal cycling, and a calibration older than 30 days is overdue. Inspect gimbal cable wrap for interference at azimuth
-  limits. Remediation: reset gimbal controller (COMM_GIMBAL_RESET UHF-PRIMARY), run resolver calibration (COMM_RESOLVER_CAL
-  UHF), then command reacquisition of TDRSS-W target (COMM_TRACK TDRSS-W AUTO). If binding persists, switch to UHF-SECONDARY
-  gimbal.'
+investigation_notes: |-
+  Root cause: the UHF-PRIMARY gimbal controller was loaded with firmware gimbal-ctrl-v2.0.1-rc3 (was gimbal-ctrl-v1.9.6) shortly before the pointing errors began. The release candidate changed the servo tracking loop gains, so the controller oscillates around the TDRSS-W track and loses lock: pointing errors on both azimuth ({az_error} deg) and elevation ({el_error} deg) mean the tracking algorithm lost lock, not a single-axis mechanical fault. The hardware is healthy: gimbal motor current stays at its nominal ~2.1 A (above 3.5 A would indicate binding), the resolver was calibrated within the last 30 days and the cable wrap shows no interference at the azimuth limits.
+  Confirm:
+    - comms-array logs the gimbal firmware load of gimbal-ctrl-v2.0.1-rc3 before the first COMM-ANTENNA-POINTING line
+    - comms-array UHF antenna_check lines: fw=gimbal-ctrl-v2.0.1-rc3 lock=LOST status=ANOMALY; attributes.deployment.servo_fw
+    - metrics.comms.uhf.pointing_error_deg at 1-5 deg (nominal under 0.2)
+    - attributes.comms.gimbal_motor_current_a around 2.1 A and attributes.comms.resolver_cal_age_days under 30 on the fault lines
+  Remediation: roll the UHF-PRIMARY gimbal controller back to the previous firmware (opsctl rollback firmware/uhf-gimbal-primary --to-revision previous). The controller restarts on gimbal-ctrl-v1.9.6, reacquires TDRSS-W in AUTO tracking and the pointing error converges back under 0.3 deg within about a minute. Switch to the UHF-SECONDARY gimbal only if the error persists on v1.9.6.
 remediation_action: reconfigure_antenna
+remediation_command: |-
+  opsctl rollback firmware/uhf-gimbal-primary --to-revision previous
 error_message: '[COMM] COMM-ANTENNA-POINTING: az_error={az_error}deg el_error={el_error}deg gimbal=UHF-PRIMARY lock=LOST'
 stack_trace: |-
   == ANTENNA STATUS DUMP == UHF GIMBAL CONTROLLER ==
@@ -27,9 +30,10 @@ stack_trace: |-
   ELEVATION    45.8d     --         {el_error}deg   **FAULT**
   ---------------------------------------------------------------
   GIMBAL_TEMP: 38.2C | MOTOR_CURRENT: 2.1A | RESOLVER: VALID
+  CONTROLLER_FW: gimbal-ctrl-v2.0.1-rc3 | SERVO_LOOP: OSCILLATING
   TRACKING_MODE: AUTO | TARGET: TDRSS-W | LOCK: LOST
   COMM-ANTENNA-POINTING: Pointing error az={az_error}deg el={el_error}deg
-  ACTION: Reset gimbal controller, verify resolver calibration
+  ACTION: Check gimbal controller firmware and servo loop gains
 correlation_attr:
   key: deployment.servo_fw
   value: gimbal-ctrl-v2.0.1-rc3
@@ -39,13 +43,57 @@ fault_params:
 rca_clues:
   comms-array:
     comms.gimbal_motor_current_a: {uniform: [1.9, 2.3], round: 1}
-    comms.resolver_cal_age_days: {randint: [45, 120]}
+    comms.resolver_cal_age_days: {randint: [6, 21]}
     comms.tracking_target: TDRSS-W
   sensor-validator:
     validation.pointing_error_deg: {uniform: [1.0, 5.0], round: 2}
     validation.servo_status: fault
   mission-control:
     upstream.degraded_subsystem: communications
+cascade_messages:
+  mission-control:
+    - severity: WARN
+      message: '[MCC] UHF command link via TDRSS-W lock LOST (pointing error az={az_error}deg el={el_error}deg); uplink commands queued for S-band'
+fault_scope:
+  workloads: [comms-array, sensor-validator]
+infrastructure_events:
+  - service: comms-array
+    severity: INFO
+    offset_seconds: -90
+    body: '[COMM] UHF-PRIMARY gimbal controller firmware load complete: gimbal-ctrl-v2.0.1-rc3 (was gimbal-ctrl-v1.9.6); servo loop restarted; loaded by comms-ground-release (CR-2322)'
+    attributes:
+      user.name: comms-ground-release
+      change.request: CR-2322
+      deployment.servo_fw: gimbal-ctrl-v2.0.1-rc3
+      operation: firmware_load
+remediation_effects:
+  log_events:
+    - service: mission-control
+      severity: INFO
+      offset_seconds: 2
+      body: '[MCC] CMD ACCEPTED opsctl rollback firmware/uhf-gimbal-primary --to-revision previous from {actor}: UHF-PRIMARY gimbal controller gimbal-ctrl-v2.0.1-rc3 -> gimbal-ctrl-v1.9.6'
+    - service: comms-array
+      severity: INFO
+      offset_seconds: 40
+      body: '[COMM] UHF-PRIMARY gimbal-ctrl-v1.9.6 running; TDRSS-W lock ACQUIRED pointing_error 0.12deg NOMINAL'
+  verification:
+    - signal: comms.uhf.pointing_error_deg
+      from: 'metrics-generic.otel-default'
+      field: 'metrics.comms.uhf.pointing_error_deg'
+      where: 'resource.attributes.service.name == "comms-array"'
+      expect: 'below 0.3 deg (was 1-5 deg), converging over about a minute'
+      within_seconds: 120
+    - signal: COMM-ANTENNA-POINTING errors
+      from: 'logs.otel.nova7'
+      where: 'body.text LIKE "*COMM-ANTENNA-POINTING*"'
+      expect: '0 new lines'
+      within_seconds: 120
+    - signal: UHF gimbal controller firmware
+      from: 'logs.otel.nova7'
+      where: 'resource.attributes.service.name == "comms-array"'
+      field: 'attributes.deployment.servo_fw'
+      expect: 'gimbal-ctrl-v1.9.6 on the latest UHF antenna_check lines (was gimbal-ctrl-v2.0.1-rc3)'
+      within_seconds: 120
 business_impact:
   - kpi: business.contact_window_utilization_pct
     factor: {uniform: [0.45, 0.72]}

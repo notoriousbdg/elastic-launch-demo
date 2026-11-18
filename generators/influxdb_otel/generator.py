@@ -396,8 +396,10 @@ class InfluxDBState(CounterState):
         self.boltdb_reads += rng.randint(50, 500)
         self.boltdb_writes += rng.randint(5, 40)
 
-        self.http_latency_n = int(rng.randint(50, 300) * load)
-        self.qc_latency_n = int(rng.randint(5, 40) * load)
+        # At least one observation per scrape: at night / weekend load (0.15) the
+        # smaller draws round down to 0, which emitted an empty latency histogram.
+        self.http_latency_n = max(1, int(rng.randint(50, 300) * load))
+        self.qc_latency_n = max(1, int(rng.randint(5, 40) * load))
 
 
 

@@ -5,15 +5,22 @@ error_type: AI-TOKEN-SPEND-RUNAWAY
 sensor_type: health_check
 affected_services: [cost-guard, chat-orchestrator]
 cascade_services: []
-description: An agent prompt loop multiplies token usage so Cost Management shows spend running at roughly 12x normal while cost-guard has not tripped its budget.
+description: A support-agent prompt release puts the agent into a loop that multiplies token usage, so Cost Management shows spend running at roughly 12x normal while cost-guard has not tripped its budget.
 investigation_notes: |-
-  1. Search body.text for *AI-TOKEN-SPEND-RUNAWAY* and check cost_multiplier={spend_multiplier}x against the normal hourly baseline of {baseline_cost_usd_per_hr} USD in Azure Cost Management.
-  2. Break down tokens by deployment and caller: tokens_per_min={tokens_per_min} on Azure OpenAI deployment {deployment_name} drives its provisioned utilization to about 95% (alert threshold 85%) and the overflow spills over to the pay-as-you-go standard deployment, which is where the extra tokens are billed (PTU hours are a fixed cost); one agent taking more than 80% of tokens points at that agent, not organic traffic growth.
-  3. Inspect chat-orchestrator traces for repeated tool/LLM calls within one conversation (loop depth={loop_depth}); the same prompt hash recurring indicates a prompt loop.
-  4. Check why cost-guard did not trip: the budget {budget_name} is at {budget_used_pct}% but alert evaluation lags by the Cost Management refresh window.
-  5. Apply a token budget cap (max_tokens and per-conversation limit) on the offending agent, then confirm spend returns to baseline within two cycles.
+  Root cause: support-agent prompt template v3.7.2 (released shortly before the first alert) removed the stop condition, so each conversation loops {loop_depth} tool/LLM iterations. Token use on {deployment_name} multiplies and Azure Cost Management shows {spend_usd_per_hr} USD/hr against a {baseline_cost_usd_per_hr} USD/hr baseline ({spend_multiplier}x). The platform is healthy; the load is self-inflicted by the agent revision, not organic traffic growth.
+  Confirm:
+    - cost-guard metric cost_guard.burn_rate_usd_per_hour is 640-680 USD/h (normal ~55) and cost_guard.tokens_per_minute_k is 6000-9500 ktokens/min (normal 420-900); both start rising right after the release
+    - cost-guard log attributes agent.version=v3.7.2 and agent.prompt_template_version=support-agent-v3.7.2-loop on the budget_check and spend_snapshot lines
+    - the config-service line "change applied agent/support-agent" (cause event, caller release-pipeline) comes before the first AI-TOKEN-SPEND-RUNAWAY
+    - budget {budget_name} is only at {budget_used_pct}% and no budget alert fired: alert evaluation lags the Cost Management refresh window, so the budget is not the cause; chat-orchestrator traces show loop depth={loop_depth} with the same prompt hash repeating
+  Remediation: roll the agent back to its previous revision (v3.7.1) with opsctl rollback agent/support-agent --to-revision previous. The loop disappears and burn rate falls back to about 55 USD/h within about 90 seconds. Raising the budget or the {deployment_name} capacity would only pay for the loop, and a token cap on the deployment hides the symptom without removing the loop.
 remediation_action: apply_token_budget_cap
-error_message: '[CostGuard] AI-TOKEN-SPEND-RUNAWAY: spend={spend_usd_per_hr} USD/hr ({spend_multiplier}x baseline {baseline_cost_usd_per_hr}) tokens_per_min={tokens_per_min} budget={budget_name} used={budget_used_pct}% deployment={deployment_name}'
+remediation_command: |-
+  opsctl rollback agent/support-agent --to-revision previous
+service_lag_seconds: {cost-guard: 30}
+fault_scope:
+  workloads: [cost-guard, chat-orchestrator]
+error_message: '[CostGuard] AI-TOKEN-SPEND-RUNAWAY: spend={spend_usd_per_hr} USD/hr ({spend_multiplier}x baseline {baseline_cost_usd_per_hr}) tokens_per_min={tokens_per_min} budget={budget_name} used={budget_used_pct}% deployment={deployment_name} agent=support-agent'
 stack_trace: |-
   TokenBudgetNotEnforcedException: AI-TOKEN-SPEND-RUNAWAY
     at CostGuard.evaluateBudget(budget={budget_name})
@@ -30,11 +37,59 @@ fault_params:
   spend_multiplier: {uniform: [11.6, 12.4], round: 1}
   baseline_cost_usd_per_hr: 55
   spend_usd_per_hr: {randint: [640, 680]}
-  tokens_per_min: {randint: [900000, 2500000]}
-  budget_name: {choice: [genai-assistant-monthly, genai-prod-subscription-budget]}
+  tokens_per_min: {randint: [6000000, 9500000]}
+  budget_name: genai-assistant-monthly
   budget_used_pct: {uniform: [58.0, 82.0], round: 1}
-  deployment_name: {choice: [gpt-4o-chat-prod, gpt-4.1-chat-prod]}
+  deployment_name: gpt-4o-chat-prod
   loop_depth: {randint: [25, 120]}
+infrastructure_events:
+  - service: chat-orchestrator
+    severity: INFO
+    offset_seconds: -120
+    body: 'config-service: change applied agent/support-agent cmd="opsctl patch agent/support-agent --prompt-template support-agent-v3.7.2" by=release-pipeline@contoso-demo.onmicrosoft.com change_id=chg-rel-4471'
+    attributes:
+      operation: config_change
+      event.action: patch
+      config.target: agent/support-agent
+      user.name: release-pipeline@contoso-demo.onmicrosoft.com
+      change.id: chg-rel-4471
+      agent.version: v3.7.2
+      agent.prompt_template_version: support-agent-v3.7.2-loop
+      change.summary: 'agent/support-agent prompt template: support-agent-v3.7.1 -> support-agent-v3.7.2'
+remediation_effects:
+  log_events:
+    - service: chat-orchestrator
+      severity: INFO
+      offset_seconds: 1
+      body: 'config-service: change applied agent/support-agent cmd="opsctl rollback agent/support-agent --to-revision previous" by={actor} : prompt template support-agent-v3.7.2 -> support-agent-v3.7.1'
+      attributes:
+        operation: config_change
+        event.action: rollback
+        config.target: agent/support-agent
+        agent.version: v3.7.1
+        change.summary: 'agent/support-agent prompt template: support-agent-v3.7.2 -> support-agent-v3.7.1'
+  steady_attributes:
+    cost-guard:
+      agent.version: v3.7.1
+  verification:
+    - signal: cost_guard.burn_rate_usd_per_hour
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "cost-guard"'
+      field: 'metrics.cost_guard.burn_rate_usd_per_hour'
+      expect: 'back near 50-62 USD/h (was 640-680)'
+      within_seconds: 120
+    - signal: cost_guard.tokens_per_minute_k
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "cost-guard"'
+      field: 'metrics.cost_guard.tokens_per_minute_k'
+      expect: 'back in 420-900 ktokens/min (was 6000-9500)'
+      within_seconds: 120
+    - signal: support-agent version
+      from: 'logs.otel.azureai'
+      where: 'resource.attributes.service.name == "cost-guard"'
+      field: 'attributes.agent.version'
+      expect: 'v3.7.1 on every line logged since the fix; v3.7.2 stops appearing'
+      within_seconds: 120
 rca_clues:
   cost-guard:
     costguard.budget_alert_fired: false
@@ -59,3 +114,4 @@ generator_impact:
     usage_multiplier: 15.0
   azure_openai:
     provisioned_utilization_above_threshold: 95.0
+generator_hold_seconds: {azure_billing: 90, azure_openai: 90}

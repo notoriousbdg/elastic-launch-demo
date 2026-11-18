@@ -15,9 +15,13 @@ investigation_notes: |
   3. Query the DynamoDB idempotency table for conditional-put failures (ConditionalCheckFailedException) that map to different order_id values with the same key.
   4. Compare ALB and Lambda logs for the same customer: {duplicate_charges} orders show two successful charges, while {false_duplicates} orders were rejected as duplicates and never charged.
   5. Confirm orders-service impact: orders stuck in PAYMENT_PENDING ({stuck_orders}) after receiving a duplicate-request response.
-  6. A human must review affected orders before any fix; after approval, quarantine the colliding payments, refund or re-run per order, then roll back the key format.
+  6. Confirm the payment-processor lines carry attributes.service.version v2.8.0 while collisions are counted, and that the deploy (UpdateFunctionCode by the deploy pipeline) came shortly before the first collision.
+  7. Remediation: `opsctl rollback lambda-function/awsorders-payment-processor --to-revision previous` returns the function to v2.7.4 (alias live repointed at the earlier version) and the full order_id key format, which stops new collisions (full order_id keys cannot collide with the 16-bit keys already stored), then `opsctl run automation/quarantine-colliding-payments` holds the already-authorised duplicate payments and the unpaid colliding orders for review. The rollback alone is not enough: retries of orders charged under v2.8.0 carry an order_id key that does not match the stored truncated key and would be charged again, so the hold prevents those from settling. payments.idempotency_collisions drains to 0 in about 90s. Void or refund the duplicate charges and re-run the rejected orders one by one afterwards.
 
 remediation_action: quarantine_colliding_payments
+remediation_command: |-
+  opsctl rollback lambda-function/awsorders-payment-processor --to-revision previous
+  opsctl run automation/quarantine-colliding-payments
 
 error_message: |
   PAY-IDEMPOTENCY-COLLISION: key={idempotency_key} key_format={key_format_version} colliding_keys={colliding_keys} false_duplicates={false_duplicates} duplicate_charges={duplicate_charges}
@@ -39,18 +43,18 @@ correlation_attr:
 fault_params:
   idempotency_key: {format: "idem-{n:X}", n: {randint: [4096, 65535]}}
   key_format_version: payment-processor-v2.8.0
-  colliding_keys: {randint: [20, 400]}
-  false_duplicates: {randint: [10, 250]}
+  colliding_keys: {randint: [150, 400]}
+  false_duplicates: {randint: [20, 150]}
   duplicate_charges: {randint: [2, 60]}
-  stuck_orders: {randint: [15, 300]}
+  stuck_orders: {randint: [20, 150]}
 
 rca_clues:
   payment-processor:
     idempotency.key_format: truncated-sha-v2
-    idempotency.collision_count: {randint: [20, 400]}
+    idempotency.collision_count: {randint: [150, 400]}
     payment.duplicate_charge_count: {randint: [2, 60]}
   orders-service:
-    order.stuck_payment_pending: {randint: [15, 300]}
+    order.stuck_payment_pending: {randint: [20, 150]}
     order.duplicate_response_received: true
 
 business_impact:
@@ -64,3 +68,90 @@ business_impact:
 - kpi: business.error_rate_pct
   factor:
     uniform: [2.0, 4.0]
+
+infrastructure_events:
+  - service: payment-processor
+    severity: INFO
+    offset_seconds: -150
+    event_name: aws.cloudtrail.UpdateFunctionCode
+    body: '[CloudTrail] UpdateFunctionCode20150331v2: function=awsorders-payment-processor version=v2.8.0 (was v2.7.4) idempotency_key_format=truncated-sha-v2 initiated_by=deploy-pipeline region=us-west-2 event_source=lambda.amazonaws.com'
+    attributes:
+      cloud.provider: aws
+      cloud.service: lambda
+      aws.cloudtrail.event_name: UpdateFunctionCode20150331v2
+      aws.lambda.function: awsorders-payment-processor
+      service.version: v2.8.0
+      infrastructure.source: CloudTrail
+
+cascade_messages:
+  orders-service:
+    - severity: WARN
+      message: 'charge call to payment-processor returned 409 duplicate request for key {idempotency_key}; order left in PAYMENT_PENDING stuck_orders={stuck_orders}'
+
+fault_scope:
+  cluster: awsorders-eks-usw2
+  workloads: [payment-processor]
+
+service_lag_seconds: {orders-service: 20}
+onset_delay_seconds: 20
+ramp_seconds: 30
+
+remediation_effects:
+  transition_seconds: 90
+  log_events:
+    - service: payment-processor
+      severity: INFO
+      offset_seconds: 1
+      body: 'cloudtrail: eventSource=lambda.amazonaws.com eventName=UpdateFunctionConfiguration20150331v2 userIdentity={actor} requestParameters.functionName=awsorders-payment-processor requestParameters.revision=previous errorCode=none'
+      attributes:
+        operation: lambda_config_update
+        command.target: lambda-function/awsorders-payment-processor
+        aws.cloudtrail.event_name: UpdateFunctionConfiguration20150331v2
+    - service: payment-processor
+      severity: INFO
+      offset_seconds: 2
+      body: 'cloudtrail: eventSource=ssm.amazonaws.com eventName=StartAutomationExecution userIdentity={actor} requestParameters.documentName=quarantine-colliding-payments errorCode=none'
+      attributes:
+        operation: automation_execution
+        command.target: automation/quarantine-colliding-payments
+        aws.cloudtrail.event_name: StartAutomationExecution
+    - service: payment-processor
+      severity: INFO
+      offset_seconds: 30
+      body: 'lambda[awsorders-payment-processor]: version v2.7.4 active with order_id idempotency keys'
+      attributes:
+        operation: lambda_config_update
+        service.version: v2.7.4
+    - service: payment-processor
+      severity: INFO
+      offset_seconds: 45
+      body: 'quarantine-colliding-payments: settle complete, colliding payments moved to review hold; new idempotency conflicts=0'
+      attributes:
+        operation: payment_settle
+        payments.quarantined: true
+  steady_attributes:
+    payment-processor:
+      service.version: v2.7.4
+  verification:
+    - signal: payments.idempotency_collisions
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "payment-processor"'
+      field: 'metrics.payments.idempotency_collisions'
+      expect: 'back in 0-1 (was 150-400)'
+      within_seconds: 150
+    - signal: PAY-IDEMPOTENCY-COLLISION lines
+      from: 'logs.otel.awsorders'
+      where: 'body.text LIKE "*PAY-IDEMPOTENCY-COLLISION*"'
+      expect: '0 new lines'
+      within_seconds: 150
+    - signal: function version
+      from: 'logs.otel.awsorders'
+      where: 'resource.attributes.service.name == "payment-processor"'
+      field: 'attributes.service.version'
+      expect: 'v2.7.4 on every line since the fix; v2.8.0 stops appearing'
+      within_seconds: 150
+    - signal: quarantined payments
+      from: 'logs.otel.awsorders'
+      where: 'body.text LIKE "*quarantine-colliding-payments: settle complete*"'
+      expect: '1 settle line listing the quarantined payments'
+      within_seconds: 150

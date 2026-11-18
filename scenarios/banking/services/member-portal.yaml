@@ -110,3 +110,41 @@ steps:
       - 25.0
       round: 1
     unit: min
+- sample:
+    f17m:
+      expr: min(1.0, max(0.0, elapsed.get(17, 0) - lag.get(17, 0)) / 10.0) if 17 in all_active else (max(0.0, 1.0 - since_fix.get(17,
+        0) / 120.0) if 17 in fixed_channels else 0.0)
+    c17_key:
+      expr: '''portal-session-key-v7'' if 17 in all_active or 17 in fixed_channels else ''portal-session-key-v6'''
+    c17_fallbacks:
+      expr: '''portal-session-key-v6'' if 17 in fixed_channels else ''none'''
+    c17_failures:
+      expr: round(round(rand.uniform(0.0, 6.0) * (1.0 - f17m) + rand.uniform(3000.0, 8000.0) * f17m, 0))
+    c17_status:
+      expr: '''DEGRADED'' if 17 in all_active or f17m > 0.1 else ''NOMINAL'''
+- when: 17 in all_active
+  log:
+    level: WARN
+    message: '[PORTAL] session_status signing_key={c17_key} fallbacks={c17_fallbacks} validation_failures_per_min={c17_failures}
+      store=redis status={c17_status}'
+    attrs: &id001
+      operation: session_status
+      portal.session_signing_key:
+        var: c17_key
+      portal.session_key_fallbacks:
+        var: c17_fallbacks
+      portal.session_validation_failures_per_min:
+        var: c17_failures
+      portal.status:
+        var: c17_status
+- when: 17 not in all_active
+  log:
+    level: INFO
+    message: '[PORTAL] session_status signing_key={c17_key} fallbacks={c17_fallbacks} validation_failures_per_min={c17_failures}
+      store=redis status={c17_status}'
+    attrs: *id001
+- metric:
+    name: member_portal.session_validation_failures_per_min
+    value:
+      var: c17_failures
+    unit: failures/min

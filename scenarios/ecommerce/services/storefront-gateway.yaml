@@ -40,27 +40,211 @@ db_operations:
   - INSERT INTO page_views (session_id, page_type, product_id, timestamp) VALUES (?, ?, ?, NOW())
 emit_fault_logs: true
 kpi_emitter: false
+constants:
+  RESIDENTIAL_CIDRS: [98.207.14.0/24, 73.162.88.0/24, 24.18.201.0/24, 71.59.132.0/24, 108.28.163.0/24]
+  CERT_SERIAL_OLD: 04f1a9c27e3b5d8812c6e2f94a7b13d5e0a1
+  CERT_SERIAL_NEW: 03b7e25d9c41a6f0e8d2c3b14f6a9e7d2c58
+state:
+  tls_old_not_after:
+    init: 0
 steps:
+# Ch 16: the shop-example-com certificate (shop/checkout/api.example.com) expired because every
+# DNS-01 renewal has failed for 31 days. Handshakes fail as a step; after the IAM rollback and
+# renewal the new certificate is ready at ~30s, the ingress reloads at ~32s and failures age out by ~47s.
 - sample:
+    tls_installed:
+      expr: "16 not in all_active and 16 in fixed_channels and since_fix.get(16, 0) >= 30"
+    tls_fail:
+      expr: "round(min(99.0, 94.0 + rand.gauss(0, 0.8)), 2) if (16 in all_active and elapsed.get(16, 0) >= lag.get(16, 0)) else (round(max(0.0, 0.05 + rand.gauss(0, 0.02)) + 94.0 * (1.0 - min(1.0, max(0.0, since_fix.get(16, 0) - 32.0) / 15.0)), 2) if 16 in fixed_channels else round(max(0.0, 0.05 + rand.gauss(0, 0.02)), 2))"
+    cert_days:
+      expr: "89 if tls_installed else (0 if (16 in all_active or 16 in fixed_channels) else 1)"
+    cert_serial:
+      expr: "CERT_SERIAL_NEW if tls_installed else CERT_SERIAL_OLD"
+    cert_ready:
+      expr: "'True' if tls_installed else 'False'"
+    tls_status:
+      expr: "'ANOMALY' if (tls_fail > 1.0 or cert_days == 0) else 'NOMINAL'"
+# Remember the expiry instant (20s before the trigger) so the status line keeps quoting it.
+- counter:
+    state_key: tls_old_not_after
+    by:
+      expr: "(int(time.time() - elapsed.get(16, 0) - 20) - tls_old_not_after) if 16 in all_active else 0"
+- sample:
+    na_epoch:
+      expr: "int(time.time() - since_fix.get(16, 0) + 30 + 7776000) if tls_installed else (int(tls_old_not_after) if (16 in all_active or 16 in fixed_channels) else (int(time.time()) // 86400 + 1) * 86400 + 60127)"
+    na_sod:
+      expr: "na_epoch % 86400"
+    na_z:
+      expr: "na_epoch // 86400 + 719468"
+    na_era:
+      expr: "na_z // 146097"
+    na_doe:
+      expr: "na_z - na_era * 146097"
+    na_yoe:
+      expr: "(na_doe - na_doe // 1460 + na_doe // 36524 - na_doe // 146096) // 365"
+    na_doy:
+      expr: "na_doe - (365 * na_yoe + na_yoe // 4 - na_yoe // 100)"
+    na_mp:
+      expr: "(5 * na_doy + 2) // 153"
+    na_day:
+      expr: "na_doy - (153 * na_mp + 2) // 5 + 1"
+    na_month:
+      expr: "na_mp + 3 if na_mp < 10 else na_mp - 9"
+    na_year:
+      expr: "na_yoe + na_era * 400 + (1 if na_month <= 2 else 0)"
+    cert_not_after:
+      expr: "f'{na_year:04d}-{na_month:02d}-{na_day:02d}T{na_sod // 3600:02d}:{na_sod % 3600 // 60:02d}:{na_sod % 60:02d}Z'"
+- metric:
+    name: storefront.tls_handshake_failure_pct
+    value:
+      var: tls_fail
+    unit: '%'
+- metric:
+    name: storefront.cert_days_remaining
+    value:
+      var: cert_days
+    unit: d
+- log:
+    level: INFO
+    message: storefront.tls host=shop.example.com sans=checkout.example.com,api.example.com secret=storefront/shop-example-com-tls
+      issuer=R11 serial={cert_serial} not_after={cert_not_after} days_remaining={cert_days} cert_ready={cert_ready}
+      handshake_failure_pct={tls_fail} status={tls_status}
+    attrs:
+      operation: tls_status
+      tls.server_name: shop.example.com
+      tls.cert_serial:
+        var: cert_serial
+      tls.cert_not_after:
+        var: cert_not_after
+      tls.cert_days_remaining:
+        var: cert_days
+      tls.cert_ready:
+        var: cert_ready
+      tls.handshake_failure_pct:
+        var: tls_fail
+      tls.status:
+        var: tls_status
+# Ch 5: with WAF rule checkout-per-ip in count mode a bot in 203.0.113.0/24 fills the 50,000-slot
+# checkout session pool over ~90s. The block plus the session purge brings utilization back over ~30s;
+# the top-client share drops as soon as the bot is blocked. The HPA scales back down slowly (~300s).
+- sample:
+    ss_r:
+      expr: "min(1.0, max(0.0, elapsed.get(5, 0) - lag.get(5, 0)) / 90.0) if 5 in all_active else 0.0"
+    ss_rec:
+      expr: "min(1.0, since_fix.get(5, 0) / 30.0) if (5 not in all_active and 5 in fixed_channels) else 1.0"
+    session_util:
+      expr: "round(min(100.0, max(0.0, 55.0 + 44.0 * ss_r + rand.gauss(0, 3.0 * (1.0 - 0.8 * ss_r)))), 1) if 5 in all_active else round(min(100.0, max(0.0, 99.0 - 44.0 * ss_rec + rand.gauss(0, 0.6 + 2.4 * ss_rec))), 1)"
+    top_share:
+      expr: "round(max(0.1, 0.8 + 44.2 * ss_r + rand.gauss(0, 0.2 + 1.3 * ss_r)), 2) if 5 in all_active else (round(max(0.1, 0.8 + 44.2 * max(0.0, 1.0 - since_fix.get(5, 0) / 10.0) + rand.gauss(0, 0.2)), 2) if 5 in fixed_channels else round(max(0.1, 0.8 + rand.gauss(0, 0.2)), 2))"
     active_sessions:
-      randint:
-      - 8000
-      - 45000
-    page_load_ms:
-      uniform:
-      - 180.0
-      - 650.0
-      round: 1
-    bounce_rate:
-      uniform:
-      - 18.0
-      - 35.0
-      round: 2
+      expr: "int(round(session_util / 100.0 * 50000))"
+    sess_rejected:
+      expr: "rand.randint(800, 2500) if session_util >= 97.0 else 0"
+    idle_pct:
+      expr: "round(max(2.0, 18.0 - 13.0 * (session_util - 55.0) / 44.0 * (1.0 if top_share > 5.0 else 0.0) + rand.gauss(0, 1.0)), 1)"
+    session_skew:
+      expr: "round(max(0.5, 4.0 + rand.gauss(0, 1.2)), 1)"
+    hpa_replicas:
+      expr: "min(24, 10 + int(14 * min(1.0, ss_r * 2.0))) if 5 in all_active else (max(10, 24 - int(14 * since_fix.get(5, 0) / 300.0)) if 5 in fixed_channels else 10)"
+    top_cidr:
+      expr: "'203.0.113.0/24' if top_share > 5.0 else rand.choice(RESIDENTIAL_CIDRS)"
+    waf_action:
+      expr: "'count' if 5 in all_active else 'block'"
+    ss_status:
+      expr: "'ANOMALY' if (session_util > 80.0 or top_share > 5.0) else 'NOMINAL'"
+- metric:
+    name: storefront.session_pool_utilization_pct
+    value:
+      var: session_util
+    unit: '%'
+- metric:
+    name: storefront.top_client_share_pct
+    value:
+      var: top_share
+    unit: '%'
+- log:
+    level: INFO
+    message: storefront.sessions pool=checkout status={ss_status} active={active_sessions}/50000 utilization_pct={session_util}
+      rejected_per_min={sess_rejected} idle_pct={idle_pct} instance_skew_pct={session_skew} top_client_cidr={top_cidr}
+      top_client_share_pct={top_share} waf_rule=checkout-per-ip waf_action={waf_action} hpa_replicas={hpa_replicas}/24
+    attrs:
+      operation: session_pool_status
+      storefront.session_pool_utilization_pct:
+        var: session_util
+      storefront.active_sessions:
+        var: active_sessions
+      storefront.new_sessions_rejected_per_min:
+        var: sess_rejected
+      storefront.idle_session_pct:
+        var: idle_pct
+      storefront.instance_session_skew_pct:
+        var: session_skew
+      storefront.top_client_cidr:
+        var: top_cidr
+      storefront.top_client_share_pct:
+        var: top_share
+      storefront.waf_checkout_rule_action:
+        var: waf_action
+      storefront.hpa_replicas:
+        var: hpa_replicas
+# Page traffic: requests that complete the TLS handshake, plus the bot's checkout calls during ch 5.
+- sample:
+    page_rps:
+      expr: "max(0.0, 2400.0 + rand.gauss(0, 60.0))"
     requests_per_sec:
-      uniform:
-      - 800.0
-      - 3500.0
-      round: 1
+      expr: "round(page_rps * (1.0 - tls_fail / 100.0) + 900.0 * max(0.0, top_share - 0.8) / 44.2, 1)"
+# Ch 10: product-catalog revision 141 purges catalog:product:* on every price run, so the catalog
+# cache goes cold (~20s ramp) and misses go to product-catalog without request coalescing (duplicate
+# fetches for the same key). After the rollback the cache refills over ~180s.
+- sample:
+    cc_r:
+      expr: "min(1.0, max(0.0, elapsed.get(10, 0) - lag.get(10, 0)) / 20.0) if 10 in all_active else 0.0"
+    cache_hit:
+      expr: "round(min(99.5, max(0.0, 93.0 - 81.0 * cc_r + rand.gauss(0, 0.8 + 1.2 * cc_r))), 2) if 10 in all_active else (round(min(99.5, max(0.0, 12.0 + 81.0 * min(1.0, since_fix.get(10, 0) / 180.0) + rand.gauss(0, 0.8))), 2) if 10 in fixed_channels else round(min(99.5, 93.0 + rand.gauss(0, 0.8)), 2))"
+    catalog_lookups:
+      expr: "page_rps * (1.0 - tls_fail / 100.0) * 1.5"
+    origin_dup:
+      expr: "1.0 + 0.3 * min(1.0, max(0.0, (85.0 - cache_hit) / 73.0))"
+    origin_rps:
+      expr: "round(catalog_lookups * (100.0 - cache_hit) / 100.0 * origin_dup)"
+    cache_keys:
+      expr: "int(round(520000 * min(1.0, max(0.04, (cache_hit - 8.0) / 85.0)) + rand.gauss(0, 1500)))"
+    cc_status:
+      expr: "'ANOMALY' if cache_hit < 85.0 else 'NOMINAL'"
+- metric:
+    name: storefront.cache_hit_rate_pct
+    value:
+      var: cache_hit
+    unit: '%'
+- metric:
+    name: storefront.origin_rps
+    value:
+      var: origin_rps
+    unit: rps
+- metric:
+    name: storefront.catalog_cache_keys
+    value:
+      var: cache_keys
+    unit: keys
+- log:
+    level: INFO
+    message: storefront.catalog_cache backend=redis status={cc_status} hit_rate_pct={cache_hit} origin=product-catalog
+      origin_rps={origin_rps} keys={cache_keys}
+    attrs:
+      operation: catalog_cache_status
+      storefront.cache_hit_rate_pct:
+        var: cache_hit
+      storefront.origin_rps:
+        var: origin_rps
+      storefront.catalog_cache_keys:
+        var: cache_keys
+      storefront.catalog_cache_status:
+        var: cc_status
+- sample:
+    page_load_ms:
+      expr: "round(320.0 + rand.gauss(0, 15.0) + 900.0 * max(0.0, 93.0 - cache_hit) / 81.0 + 450.0 * max(0.0, session_util - 80.0) / 20.0, 1)"
+    bounce_rate:
+      expr: "round(24.0 + rand.gauss(0, 0.8) + 9.0 * max(0.0, page_load_ms - 400.0) / 900.0, 2)"
 - metric:
     name: storefront.active_sessions
     value:

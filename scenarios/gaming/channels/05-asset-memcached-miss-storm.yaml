@@ -6,58 +6,135 @@ sensor_type: cache_monitor
 affected_services:
 - content-delivery
 - game-server
-cascade_services:
-- analytics-pipeline
-description: Game-asset Memcached hit ratio collapses with thrashing evictions, overwhelming origin/asset servers
+cascade_services: []
+error_services:
+- content-delivery
+description: Game-asset Memcached hit ratio collapses with thrashing evictions after a chart upgrade shrank its memory, overwhelming the asset origin
+onset_delay_seconds: 15
+ramp_seconds: 45
+service_lag_seconds: {game-server: 15}
 investigation_notes: |-
-  Root cause: undersized slab memory after the slab config change — the LRU evicts hot assets before they are re-requested, so get hit ratio drops below the Memcached alert threshold while eviction rate spikes (above 5,000 evictions/min with slab memory above 95% used). TTL alignment is not detected, so synchronized expiry is not the cause.
-  1. Check Memcached Overview — low_hit_ratio_for_get_operations and high_eviction_rate should both be firing.
-  2. Review eviction logs: high evictions/min with a cold warm_pct means the LRU is thrashing; increase cache capacity or tier hot assets.
-  3. Inspect per-asset-group miss rates: textures-hd is usually the primary driver — pre-warm via asset-cli prefetch.
-  4. Remediate: revert the slab config (or raise the memcached `-m` memory limit) so the hot asset set fits, then pre-warm hot assets; do not flush during the storm, since that adds misses against an already saturated origin.
-  5. Enable request coalescing so concurrent misses for the same asset collapse into a single origin fetch.
+  Root cause: the Helm upgrade of asset-memcached to chart memcached-7.4.2, release revision 14 (CHG0052057), dropped the `-m 12288` container argument from the StatefulSet, so the six memcached pods restarted with the memcached default of 1024 MB. The hot set of textures, models and map assets is about 9 GB and no longer fits: the LRU evicts assets before they are requested again, the get hit ratio falls to {cache_hit_rate}% and the misses go to origin at {origin_load_pct}% of its capacity. manifest-memcached, which the upgrade did not touch, still runs with 4096 MB and a 99% hit rate, and edge connections and CPU are normal, so request volume and the edges are not the cause; the cache memory limit is.
+  Confirm:
+    - content-delivery cache_status lines for asset-memcached carry attributes.cache.memcached_limit_mb 1024 (12288 before the upgrade), bytes used at 99-100% and hundreds of evictions per second (about 0 before); the Helm upgrade line comes before the first MEMCACHED-MISS-STORM line
+    - metrics.cdn.cache_hit_rate is 30-55% (baseline 92-99%) and metrics.cdn.origin_requests_per_s is 2000-4000 (baseline 50-150)
+    - the Memcached integration (metrics-memcachedreceiver.otel-*) shows evictions up and the get hit ratio down from the same minute
+  Remediation: roll the StatefulSet back with opsctl rollback statefulset/asset-memcached --to-revision previous. The pods restart one at a time with -m 12288 and an empty cache, so the hit rate does not jump back: it climbs back above 92% over about 5 minutes as the hot assets are cached again, and origin requests fall back to 50-150 per second with it. Flushing or restarting memcached keeps the 1024 MB limit, and scaling the origin only absorbs the misses.
 remediation_action: warm_memcached_assets
-error_message: '[Memcached] MEMCACHED-MISS-STORM: edge={edge_node} hit_rate={cache_hit_rate}% threshold=85% origin_load={origin_load_pct}%
-  asset_group={asset_group}'
+remediation_command: |-
+  opsctl rollback statefulset/asset-memcached --to-revision previous
+error_message: '[Memcached] MEMCACHED-MISS-STORM: cluster=asset-memcached node={edge_node} hit_rate={cache_hit_rate}% threshold=85% limit_mb=1024
+  evictions={evictions_per_min}/min origin_load={origin_load_pct}% asset_group={asset_group}'
 stack_trace: |-
-  === MEMCACHED ASSET CACHE STATISTICS ===
-  edge={edge_node}  asset_group={asset_group}
-  ----------- cache metrics -----------
-    hit_rate    = {cache_hit_rate}%  (threshold 85%)
-    origin_load = {origin_load_pct}%
-    evictions   = {evictions_per_min}/min
-    warm_pct    = 32.1%
-    cold_pct    = 67.9%
+  $ echo stats | nc {edge_node} 11211
+  STAT version 1.6.29
+  STAT limit_maxbytes 1073741824
+  STAT bytes 1072694272
+  STAT curr_items 1894
+  STAT evictions {evictions_per_min} (last 60s)
+  STAT get_hit_ratio {cache_hit_rate}%
+  STAT item_size_max 134217728
   ----------- origin load -------------
-    rps_to_origin   = 8,421
+    origin_load     = {origin_load_pct}%
     origin_p99_ms   = 847
-    origin_errors   = 127 (circuit_breaker=HALF_OPEN)
-    bandwidth_gbps  = 12.4
   ----------- top miss groups ---------
-    textures-hd     : 4,201 misses/min
-    models-char     : 2,103 misses/min
-    audio-sfx       : 891 misses/min
-  MEMCACHED-MISS-STORM: edge {edge_node} hit rate {cache_hit_rate}% below threshold
+    {asset_group} : 4201 misses/min
+    models-characters : 2103 misses/min
+    maps-terrain : 891 misses/min
+  MEMCACHED-MISS-STORM: {edge_node} hit rate {cache_hit_rate}% below threshold
 correlation_attr:
-  key: deployment.memcached_slab_config
-  value: slabs-v2.8.0-rc1
+  key: cache.memcached_limit_mb
+  value: 1024
 fault_params:
-  edge_node: {choice: [mc-iad-01, mc-lax-02, mc-fra-01, mc-nrt-01]}
-  cache_hit_rate: {uniform: [20.0, 75.0], round: 1}
+  edge_node: {choice: [asset-memcached-0, asset-memcached-1, asset-memcached-2, asset-memcached-3, asset-memcached-4, asset-memcached-5]}
+  cache_hit_rate: {uniform: [30.0, 55.0], round: 1}
   origin_load_pct: {uniform: [85.0, 100.0], round: 1}
   asset_group: textures-hd
   evictions_per_min: {randint: [10000, 20000]}
 rca_clues:
   content-delivery:
-    memcached.ttl_alignment_detected: false
+    memcached.limit_maxbytes_mb: 1024
+    memcached.bytes_used_pct: {uniform: [99.0, 100.0], round: 1}
     memcached.evictions_per_min: {randint: [10000, 20000]}
-    memcached.slab_memory_used_pct: {uniform: [97.0, 100.0], round: 1}
-    memcached.origin_rps: {randint: [5000, 15000]}
+    cdn.origin_rps: {randint: [2000, 4000]}
   game-server:
     game.asset_load_timeout_pct: {uniform: [5.0, 30.0], round: 1}
-    game.client_crash_rate: {uniform: [0.5, 3.0], round: 1}
-  analytics-pipeline:
-    analytics.cache_error_events: {randint: [1000, 5000]}
+cascade_messages:
+  game-server:
+    - severity: WARN
+      message: '[Engine] asset_stream timeout group={asset_group} source=content-delivery elapsed_ms=5000 retry=2/3; match start delayed, players held on
+        loading screen'
+fault_scope:
+  cluster: gaming-eks-cluster
+  workloads: [content-delivery]
+infrastructure_events:
+  - service: content-delivery
+    severity: INFO
+    offset_seconds: -180
+    body: 'helm upgrade asset-memcached bitnami/memcached --version 7.4.2 -f values-prod.yaml: Release "asset-memcached" has been upgraded. NAMESPACE: cdn
+      STATUS: deployed REVISION: 14 (change CHG0052057)'
+    attributes:
+      operation: deployment_rollout
+      change.request: CHG0052057
+      user.name: cdn-platform-ci
+      change.summary: 'asset-memcached memory -m 12288 -> 1024 (default; extraArgs dropped in chart 7.4.2)'
+      helm.release: asset-memcached
+      helm.revision: 14
+      cache.memcached_limit_mb: 1024
+  - service: content-delivery
+    severity: INFO
+    offset_seconds: -120
+    body: 'statefulset rolling update complete 6 pods at revision asset-memcached-7c9d5f8b64...'
+    attributes:
+      operation: deployment_rollout
+      change.request: CHG0052057
+      cache.memcached_limit_mb: 1024
+remediation_effects:
+  transition_seconds: 300
+  log_taper_seconds: 120
+  log_events:
+    - service: content-delivery
+      severity: INFO
+      offset_seconds: 1
+      body: 'level=info logger=changelog msg="change applied" cmd="opsctl rollback statefulset/asset-memcached --to-revision previous" actor={actor}
+        result="rolled back to revision 13 (memcached -m 12288), 6 pods rolling"'
+      attributes:
+        operation: change_applied
+        change.target: statefulset/asset-memcached
+    - service: content-delivery
+      severity: INFO
+      offset_seconds: 60
+      body: 'statefulset rolling update complete 6 pods at revision asset-memcached-5b8f6d7c9f...'
+      attributes:
+        operation: deployment_rollout
+        cache.memcached_limit_mb: 12288
+  steady_attributes:
+    content-delivery:
+      cache.memcached_limit_mb: 12288
+  verification:
+    - signal: cdn.cache_hit_rate
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "content-delivery"'
+      field: 'metrics.cdn.cache_hit_rate'
+      expect: 'back above 92% (was 30-55%), climbing over about 5 minutes as the restarted cache warms'
+      within_seconds: 360
+    - signal: cdn.origin_requests_per_s
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "content-delivery"'
+      field: 'metrics.cdn.origin_requests_per_s'
+      expect: 'back in 50-150 per second (was 2000-4000), falling as the hit rate recovers'
+      within_seconds: 360
+    - signal: MEMCACHED-MISS-STORM lines
+      from: 'logs.otel.gaming'
+      where: 'body.text LIKE "*MEMCACHED-MISS-STORM*"'
+      expect: '0 new lines'
+      within_seconds: 360
+    - signal: asset-memcached memory limit
+      from: 'logs.otel.gaming'
+      where: 'resource.attributes.service.name == "content-delivery" AND attributes.cache.cluster == "asset-memcached"'
+      field: 'attributes.cache.memcached_limit_mb'
+      expect: '12288 on every asset-memcached cache_status line since the rollback (was 1024)'
+      within_seconds: 360
 business_impact:
   - kpi: business.sessions_per_min
     value: {uniform: [669.6, 770.4]}
@@ -71,3 +148,5 @@ generator_impact:
   memcached_otel:
     low_hit_ratio_for_get_operations: 40.0
     high_eviction_rate: 40.0
+# the Memcached integration stream recovers with the cache warm-up, not at the rollback
+generator_hold_seconds: {memcached_otel: 300}

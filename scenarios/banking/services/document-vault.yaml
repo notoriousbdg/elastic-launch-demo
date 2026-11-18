@@ -43,7 +43,8 @@ steps:
 - counter:
     state_key: _docs_processed
     by: 1
-- log:
+- when: not (18 in all_active or (18 in fixed_channels and since_fix.get(18, 0) < 60))
+  log:
     level: INFO
     message: '[DOC] {doc_operation_label} type={doc_type} size={doc_size_mb}MB pii_scan=CLEAN encryption=AES256 status=SUCCESS'
     attrs:
@@ -54,21 +55,6 @@ steps:
       doc.size_mb:
         var: doc_size_mb
       doc.pii_scan: CLEAN
-- sample:
-    bucket_util:
-      uniform:
-      - 62.0
-      - 78.0
-      round: 1
-- log:
-    level: INFO
-    message: '[DOC] storage_health bucket_utilization={bucket_util}% replication=3x encryption=SSE-KMS lifecycle_policy=ACTIVE
-      status=NOMINAL'
-    attrs:
-      operation: storage_health
-      storage.utilization:
-        var: bucket_util
-      storage.replication: 3
 - every:
     seconds: 10
     state_key: _last_summary
@@ -81,23 +67,6 @@ steps:
           vault.processed:
             var: _docs_processed
           vault.storage_tb: 45.2
-- sample:
-    upload_rate:
-      if_active:
-        uniform:
-        - 5.0
-        - 20.0
-        round: 1
-      else:
-        uniform:
-        - 40.0
-        - 150.0
-        round: 1
-- metric:
-    name: document_vault.upload_rate
-    value:
-      var: upload_rate
-    unit: docs/min
 - metric:
     name: document_vault.storage_used_tb
     value:
@@ -113,3 +82,102 @@ steps:
       - 5
       - 50
     unit: docs
+- sample:
+    f09:
+      expr: min(1.0, max(0.0, elapsed.get(9, 0) - lag.get(9, 0)) / 20.0) if 9 in all_active else (max(0.0, 1.0 - since_fix.get(9,
+        0) / 45.0) if 9 in fixed_channels else 0.0)
+    c09_profile:
+      expr: '''original'' if 9 in all_active else ''estimator-1600px'''
+    c09_rev:
+      expr: '''rev-9'' if 9 in all_active else (''rev-8'' if 9 in fixed_channels else ''rev-8'')'
+    c09_mb:
+      expr: round(rand.uniform(0.35, 0.7) * (1.0 - f09) + rand.uniform(6.5, 9.0) * f09, 2)
+    c09_status:
+      expr: '''DEGRADED'' if 9 in all_active or f09 > 0.1 else ''NOMINAL'''
+- when: 9 in all_active
+  log:
+    level: WARN
+    message: '[DOC] rendition_status consumer=claims-estimator profile={c09_profile} config_rev={c09_rev} avg_image_mb={c09_mb}
+      status={c09_status}'
+    attrs: &id001
+      operation: rendition_status
+      document.rendition_profile:
+        var: c09_profile
+      document.rendition_config_rev:
+        var: c09_rev
+      document.estimator_image_mb:
+        var: c09_mb
+      document.status:
+        var: c09_status
+- when: 9 not in all_active
+  log:
+    level: INFO
+    message: '[DOC] rendition_status consumer=claims-estimator profile={c09_profile} config_rev={c09_rev} avg_image_mb={c09_mb}
+      status={c09_status}'
+    attrs: *id001
+- metric:
+    name: document_vault.estimator_image_mb
+    value:
+      var: c09_mb
+    unit: MB
+- sample:
+    f18:
+      expr: min(1.0, max(0.0, elapsed.get(18, 0) - lag.get(18, 0)) / 15.0) if 18 in all_active else (max(0.0, min(1.0, 1.0
+        - (since_fix.get(18, 0) - 60) / 20.0)) if 18 in fixed_channels else 0.0)
+    c18_public:
+      expr: 18 in all_active or (18 in fixed_channels and since_fix.get(18, 0) < 60)
+    c18_ip:
+      expr: '''20.60.133.4'' if c18_public else ''10.3.8.14'''
+    c18_resolution:
+      expr: '''public'' if c18_public else ''private-endpoint'''
+    c18_success:
+      expr: round(rand.uniform(99.5, 99.95) * (1.0 - f18) + rand.uniform(0.0, 3.0) * f18, 2)
+    c18_queue:
+      expr: round(rand.uniform(0, 30) + min(3000.0, 15.0 * elapsed.get(18, 0))) if 18 in all_active else (round(rand.uniform(0,
+        30) + 3000.0 * max(0.0, min(1.0, 1.0 - (since_fix.get(18, 0) - 60) / 180.0))) if 18 in fixed_channels else round(rand.uniform(0,
+        30)))
+    upload_rate:
+      expr: round(rand.uniform(40.0, 150.0) * c18_success / 100.0, 1)
+    bucket_util:
+      uniform:
+      - 62.0
+      - 78.0
+      round: 1
+    c18_status:
+      expr: '''DEGRADED'' if c18_public or c18_queue > 200 else ''NOMINAL'''
+- when: 18 in all_active
+  log:
+    level: WARN
+    message: '[DOC] storage_health account=banking-docs-prod endpoint=banking-docs-prod.blob.core.windows.net resolved={c18_ip}
+      via={c18_resolution} upload_success={c18_success}% queue_depth={c18_queue} utilization={bucket_util}% status={c18_status}'
+    attrs: &id002
+      operation: storage_health
+      document.blob_endpoint_ip:
+        var: c18_ip
+      document.blob_endpoint_resolution:
+        var: c18_resolution
+      storage.utilization:
+        var: bucket_util
+      storage.status:
+        var: c18_status
+- when: 18 not in all_active
+  log:
+    level: INFO
+    message: '[DOC] storage_health account=banking-docs-prod endpoint=banking-docs-prod.blob.core.windows.net resolved={c18_ip}
+      via={c18_resolution} upload_success={c18_success}% queue_depth={c18_queue} utilization={bucket_util}% status={c18_status}'
+    attrs: *id002
+- metric:
+    name: document_vault.upload_success_pct
+    value:
+      var: c18_success
+    unit: '%'
+- metric:
+    name: document_vault.upload_queue_depth
+    value:
+      var: c18_queue
+    unit: uploads
+- metric:
+    name: document_vault.upload_rate
+    value:
+      var: upload_rate
+    unit: docs/min

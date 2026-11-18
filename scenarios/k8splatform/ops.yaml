@@ -1,0 +1,63 @@
+# opsctl profile for this scenario (see app/ops_profile.py for the contract).
+# Kubernetes API conventions and CloudTrail records come from the engine presets;
+# this file adds what is specific to this platform.
+extends: [kubernetes, aws-cloudtrail]
+
+actors:
+  default: opsctl/oncall
+  auto: system:serviceaccount:platform-automation:auto-remediator
+
+auto_remediate_channels: [16, 17, 18, 19, 20]
+
+kinds:
+  # Platform CRDs
+  ratelimit: {aliases: [ratelimits], plural: ratelimits, group: gateway.platform.io}
+  harbor: {plural: harborconfigurations, group: goharbor.io}
+
+guide:
+  scenario: |
+    ## Where this platform's telemetry is
+    The data is OpenTelemetry, not ECS: there are no `kubernetes.*` or `log.level`
+    top-level fields.
+    - **Logs:** `FROM logs.otel.*`. Message in `body.text`, level in `severity_text`,
+      emitter in `resource.attributes.service.name`, placement in
+      `resource.attributes.k8s.cluster.name`, `...k8s.namespace.name`, `...k8s.pod.name`,
+      `...k8s.node.name`. Root-cause and change details are in `attributes.*` (for
+      example `attributes.change.id`).
+    - **Kubernetes object state** (limits and requests, restarts, readiness, replicas,
+      HPA, DaemonSets, node conditions, pod phase): `FROM metrics-k8sclusterreceiver.otel-*`,
+      for example `metrics.k8s.container.memory_limit`, `metrics.k8s.container.restarts`,
+      `metrics.k8s.hpa.current_replicas`, `metrics.k8s.node.condition_ready`.
+    - **Usage** (CPU, memory, filesystem, volumes): `FROM metrics-kubeletstatsreceiver.otel-*`,
+      for example `metrics.k8s.container.memory_limit_utilization`, `metrics.k8s.volume.capacity`.
+    - **Service metrics** (CoreDNS, ingress-nginx, cert-manager, the autoscaler, the API
+      server, tenant-gateway): `FROM metrics-generic.otel-default`, keyed by
+      `resource.attributes.service.name`, for example `metrics.coredns.dns.responses_per_s`
+      split by `attributes.rcode`. They are not in the Kubernetes metric indices above.
+      Before you conclude that a metric doesn't exist, look here.
+    - Object names are resource attributes: `resource.attributes.k8s.deployment.name`,
+      `...k8s.daemonset.name`, `...k8s.hpa.name`, `...k8s.persistentvolumeclaim.name`,
+      ``...`k8s.node.label.eks.amazonaws.com/nodegroup` `` (backtick-quote it in ES|QL
+      because of the `/`).
+
+    Always filter to the cluster in the runbook's Scope: the other clusters were not
+    changed and can legitimately still show the old values.
+
+    Example: the memory limit each controller pod reports now, in one cluster:
+
+    ```
+    FROM metrics-k8sclusterreceiver.otel-*
+    | WHERE @timestamp > NOW() - 5 minutes
+      AND resource.attributes.k8s.cluster.name == "prod-use1"
+      AND resource.attributes.k8s.deployment.name == "ingress-nginx-controller"
+      AND metrics.k8s.container.memory_limit IS NOT NULL
+    | STATS last_seen = MAX(@timestamp), limit = MAX(metrics.k8s.container.memory_limit)
+        BY pod = resource.attributes.k8s.pod.name
+    | SORT last_seen DESC
+    ```
+
+    Changing a Deployment's pod template (image, requests, limits) rolls it out like
+    Kubernetes does: a new ReplicaSet with new pod names replaces the old pods one by
+    one. During the rollout old pods (old values) and new pods (new values) both report;
+    afterwards the old pod names stop reporting. Judge by the pods seen in the last
+    minute or two, not by every pod in a longer window.

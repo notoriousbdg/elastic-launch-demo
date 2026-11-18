@@ -10,26 +10,29 @@ description: >
   Orders-service ECS tasks leak heap until memory utilization reaches the hard limit and the tasks are OOM-killed and recycled, dropping in-flight requests behind orders-gateway.
 
 investigation_notes: |
-  1. Search body.text containing *ORD-ECS-MEMORY-LEAK* and check MemoryUtilization for ECS service {ecs_service}: it climbs steadily to {memory_pct}% of the {memory_limit_mb}MB hard limit and then resets.
-  2. Check ECS task stopped reasons: tasks stop with OutOfMemoryError: Container killed due to memory usage and exit code {exit_code}, {task_restarts} restarts in the window.
-  3. Read the JVM heap data in the orders-service logs: old-generation heap grows by about {heap_growth_mb}MB per hour and is not reclaimed by full GC, which points at a leak rather than load.
+  1. Search body.text containing *ORD-ECS-MEMORY-LEAK* and check MemoryUtilization for ECS service {ecs_service}: each task climbs steadily to {memory_pct}% of the {memory_limit_mb}MB hard limit and then drops to its post-start level, and tasks reset at different times so the service average sawtooths.
+  2. Check ECS task stopped reasons: tasks stop with OutOfMemoryError: Container killed due to memory usage and exit code {exit_code}, {task_restarts} restarts in the window, each replaced automatically by the ECS service scheduler.
+  3. Read the JVM heap data in the orders-service logs: the JVM runs with -XX:MaxRAMPercentage=85, so the heap can grow to most of the container limit; old-generation heap grows by about {heap_growth_mb}MB per hour, G1 Full GCs run back to back and reclaim almost nothing, and GC time and request latency rise for several minutes before each kill. Heap that does not shrink after a full GC points at a leak rather than load.
   4. Check CloudTrail and the ECS deployment history for correlation_attr infra.orders_service_image: image {image_tag} introduced a cache that never evicts {leaked_object}.
   5. Confirm the cascade in orders-gateway: requests routed to recycling tasks fail with {gateway_errors} upstream 502 and 504 errors and the ALB reports a spike in target 5XX responses, aligned to each task restart.
-  6. Run a rolling restart of {ecs_service} to clear the heap, then redeploy the previous image or fix the cache while watching MemoryUtilization stay flat.
+  6. Confirm container.image.tag on the orders-service logs reads 2026.10.3-cache-rework and orders.jvm_heap_used_pct is climbing, while orders.db_pool_active_connections stays in its normal band, which rules out a database connection problem.
+  7. Remediation: `opsctl rollback ecs-service/orders-service --to-revision previous` redeploys image 2026.10.2 and clears the heap; recovery takes about 90 s as the replacement tasks start and warm up and orders.jvm_heap_used_pct settles back to its baseline.
 
 remediation_action: rolling_restart_ecs_service
+remediation_command: |-
+  opsctl rollback ecs-service/orders-service --to-revision previous
 
 error_message: |
   ORD-ECS-MEMORY-LEAK: service={ecs_service} memory_pct={memory_pct} limit_mb={memory_limit_mb} exit_code={exit_code} restarts={task_restarts} leaked={leaked_object}
 
 stack_trace: |
   === ECS MEMORY LEAK REPORT ===
-  cluster=awsorders-prod  service={ecs_service}  image={image_tag}  region=us-east-1
+  cluster=awsorders  service={ecs_service}  image={image_tag}  region=us-east-1
   --- ECS TASK EVENT ---
     stopped_reason=OutOfMemoryError: Container killed due to memory usage
     exit_code={exit_code}  restarts_in_window={task_restarts}
   --- JVM HEAP ---
-    [gc] Pause Full (G1 Compaction Pause) old gen not reclaimed after full GC
+    [gc] Pause Full (G1 Compaction Pause) old gen not reclaimed after full GC (back-to-back, <1% freed each time)
       top retainer: com.awsorders.orders.cache.OrderCache (unbounded map, no eviction)
     old_gen_growth_mb_per_hour={heap_growth_mb}  retained_objects={leaked_object}
     memory_utilization_pct={memory_pct}  hard_limit_mb={memory_limit_mb}
@@ -38,14 +41,27 @@ stack_trace: |
   ACTION: rolling_restart=true  alert=ORD-ECS-MEMORY-LEAK
 
 infrastructure_events:
-- body: '[ECS] Task stopped: service=orders-service reason=OutOfMemoryError exit_code=137 cluster=awsorders-prod region=us-east-1'
+- body: '[CloudTrail] UpdateService: cluster=awsorders service=orders-service taskDefinition=orders-service:2026.10.3-cache-rework region=us-east-1 event_source=ecs.amazonaws.com'
+  severity: INFO
+  event_name: aws.cloudtrail.UpdateService
+  service: orders-service
+  offset_seconds: -150
+  attributes:
+    cloud.provider: aws
+    cloud.service: ecs
+    aws.cloudtrail.event_name: UpdateService
+    aws.ecs.cluster: awsorders
+    aws.ecs.service: orders-service
+    container.image.tag: 2026.10.3-cache-rework
+    infrastructure.source: CloudTrail
+- body: '[ECS] Task stopped: service=orders-service reason=OutOfMemoryError exit_code=137 cluster=awsorders region=us-east-1'
   severity: WARN
   event_name: aws.ecs.TaskStateChange
   service: orders-service
   attributes:
     cloud.provider: aws
     cloud.service: ecs
-    aws.ecs.cluster: awsorders-prod
+    aws.ecs.cluster: awsorders
     aws.ecs.service: orders-service
     aws.ecs.stopped_reason: OutOfMemoryError
     infrastructure.source: ECS
@@ -60,16 +76,16 @@ fault_params:
   memory_pct: {randint: [95, 99]}
   memory_limit_mb: {choice: [2048, 4096]}
   exit_code: 137
-  task_restarts: {randint: [4, 20]}
-  heap_growth_mb: {randint: [150, 600]}
+  task_restarts: {randint: [4, 12]}
+  heap_growth_mb: {randint: [1200, 3000]}
   leaked_object: OrderSessionSnapshot
   gateway_errors: {randint: [100, 1200]}
 
 rca_clues:
   orders-service:
     ecs.memory_utilization_pct: {randint: [95, 99]}
-    ecs.oom_kill_count: {randint: [4, 20]}
-    jvm.old_gen_growth_mb_per_hour: {randint: [150, 600]}
+    ecs.oom_kill_count: {randint: [4, 12]}
+    jvm.old_gen_growth_mb_per_hour: {randint: [1200, 3000]}
   orders-gateway:
     gateway.upstream_502_504_count: {randint: [100, 1200]}
     gateway.errors_align_with_task_restarts: true
@@ -85,3 +101,58 @@ generator_impact:
     memory_utilization_high: 95.0
   aws_elb_metrics_otel:
     high_application_load_balancer_target_5xx_error_rate: 150.0
+# the package streams keep the fault while the scenario's own metrics converge
+generator_hold_seconds: {aws_ecs_otel: 90, aws_elb_metrics_otel: 90}
+
+service_lag_seconds:
+  orders-gateway: 40
+
+fault_scope:
+  cluster: awsorders-eks-use1
+  workloads: [orders-service]
+
+cascade_messages:
+  orders-gateway:
+    - severity: ERROR
+      message: 'upstream orders-service task reset by peer during recycle: 502 Bad Gateway, {gateway_errors} upstream errors in window'
+
+remediation_effects:
+  transition_seconds: 90
+  log_events:
+    - service: orders-service
+      severity: INFO
+      offset_seconds: 1
+      body: 'cloudtrail: eventSource=ecs.amazonaws.com eventName=UpdateService userIdentity={actor} requestParameters.cluster=awsorders requestParameters.service=orders-service requestParameters.taskDefinition=previous errorCode=none'
+      attributes:
+        operation: command
+        command.target: ecs-service/orders-service
+        aws.cloudtrail.event_name: UpdateService
+    - service: orders-service
+      severity: INFO
+      offset_seconds: 45
+      body: '[ECS] service orders-service has reached a steady state: image 2026.10.2 running 6 of 6 tasks, heap used 48% after warm-up'
+      attributes:
+        operation: service_deploy
+        container.image.tag: 2026.10.2
+        aws.ecs.cluster: awsorders
+  steady_attributes:
+    orders-service:
+      container.image.tag: 2026.10.2
+  verification:
+    - signal: orders.jvm_heap_used_pct
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "orders-service"'
+      field: 'metrics.orders.jvm_heap_used_pct'
+      expect: 'back in 42-66 (was 88-98)'
+      within_seconds: 120
+    - signal: ORD-ECS-MEMORY-LEAK lines
+      from: 'logs.otel.awsorders'
+      where: 'body.text LIKE "*ORD-ECS-MEMORY-LEAK*"'
+      expect: '0 new lines'
+      within_seconds: 120
+    - signal: orders-service image tag
+      from: 'logs.otel.awsorders'
+      where: 'resource.attributes.service.name == "orders-service"'
+      field: 'attributes.container.image.tag'
+      expect: '2026.10.2 on every line logged since the fix; 2026.10.3-cache-rework stops appearing'
+      within_seconds: 120

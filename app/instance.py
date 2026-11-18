@@ -22,6 +22,13 @@ if TYPE_CHECKING:
 logger = logging.getLogger("nova7.instance")
 
 
+def _profile_actors(ctx) -> dict:
+    """Actors from the scenario's ops profile (ops.yaml `actors`)."""
+    from app import ops_profile
+
+    return dict(ops_profile.profile_for(getattr(ctx, "scenario", None)).get("actors") or {})
+
+
 class ScenarioInstance:
     """One running deployment: scenario + credentials + generators."""
 
@@ -52,6 +59,7 @@ class ScenarioInstance:
             chaos_store=chaos_store,
             deployment_id=self.deployment_id,
             on_resolve=_revert_ml_baseline,
+            actors=_profile_actors(ctx),
         )
 
         # ServiceManager — owns service threads + generator threads
@@ -145,16 +153,18 @@ class ScenarioInstance:
     def trigger_channel(self, channel: int, **kwargs):
         result = self.chaos_controller.trigger(channel, **kwargs)
         if isinstance(result, dict) and result.get("status") == "triggered":
-            self._record_chaos_context(
+            self._record_notify_context(
                 channel, kwargs.get("user_email", ""), kwargs.get("callback_url", ""),
             )
         return result
 
-    def _record_chaos_context(self, channel: int, user_email: str, callback_url: str) -> None:
-        """Write who triggered *channel* to ``{ns}-chaos-context`` (best effort).
+    def _record_notify_context(self, channel: int, user_email: str, callback_url: str) -> None:
+        """Write who triggered *channel* to ``{ns}-notify-context`` (best effort).
 
-        The notification workflows look the email up there. It used to travel on every
-        fault log record as an ``event_name`` JSON blob, a field no real component emits.
+        The notification workflows look the email up there by the alert's fault code
+        (``error_type``), so each channel's investigation goes to whoever triggered it.
+        The document holds no channel number or deployment id: Nightshift can query any
+        index, and it would show the audience the fault was injected.
         """
         url = (self.ctx.elastic_url or "").rstrip("/")
         key = self.ctx.elastic_api_key
@@ -165,27 +175,27 @@ class ScenarioInstance:
 
         import httpx
 
+        status = self.chaos_controller.get_channel_status(channel)
         doc = {
             "@timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-            "channel": channel,
+            "error_type": status.get("error_type", ""),
             "user_email": user_email or "",
             "callback_url": callback_url or "",
-            "deployment_id": self.scenario_id,
         }
 
         def _post() -> None:
             try:
                 with httpx.Client(timeout=10.0) as client:
                     client.post(
-                        f"{url}/{self.namespace}-chaos-context/_doc",
+                        f"{url}/{self.namespace}-notify-context/_doc",
                         headers={"Authorization": f"ApiKey {key}",
                                  "Content-Type": "application/json"},
                         json=doc,
                     )
             except Exception as exc:
-                logger.debug("chaos-context write failed: %s", exc)
+                logger.debug("notify-context write failed: %s", exc)
 
-        threading.Thread(target=_post, name="chaos-context", daemon=True).start()
+        threading.Thread(target=_post, name="notify-context", daemon=True).start()
 
     def resolve_channel(self, channel: int, **kwargs):
         return self.chaos_controller.resolve(channel, **kwargs)

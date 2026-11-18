@@ -1,19 +1,23 @@
-name: App Gateway Waf Block Surge
+name: Application Gateway WAF Block Surge
 subsystem: api_gateway
 vehicle_section: api_gateway_pipeline
 error_type: AGW-WAF-BLOCK-SURGE
 sensor_type: health_check
 affected_services: [assistant-web]
 cascade_services: [chat-orchestrator]
-description: Application Gateway WAF (OWASP CRS) blocks a large share of legitimate chat requests to assistant-web because prompts containing code snippets trip SQLi and XSS rules.
+description: Application Gateway WAF (OWASP CRS) blocks a large share of legitimate chat requests to assistant-web because policy revision v14 set SQL injection rule 942100 to Prevention and prompts containing code snippets now trip it.
 investigation_notes: |-
-  1. Search body.text for *AGW-WAF-BLOCK-SURGE* and check the WAF block ratio: blocked={blocked_pct}% of requests, far above the normal {normal_blocked_pct}%.
-  2. Group ApplicationGatewayFirewallLog by ruleId; rule {rule_id} ({rule_group}) is the top matched rule on POST /api/chat; under CRS 3.2 anomaly scoring the block itself is logged by rule 949110 (Inbound Anomaly Score Exceeded) for the same transaction IDs.
-  3. Inspect matched details: prompts with code fences, SQL keywords or HTML tags in the message body trigger the rule (sample_match={sample_match}); these are legitimate users.
-  4. Confirm WAF policy {waf_policy} CRS version {crs_version} was recently changed or upgraded, and that chat-orchestrator request volume dropped by the same share.
-  5. Add a targeted exclusion for the chat message body field on rule {rule_id} (or set that rule's action to Log; switching the whole policy to Detection mode is the broad fallback), then verify error_rate returns to baseline.
+  Root cause: WAF policy {waf_policy} revision v14 was published shortly before the first AGW-WAF-BLOCK-SURGE and set rule {rule_id} ({rule_group}) to Prevention. Legitimate chat prompts that contain code fences or SQL keywords (sample_match={sample_match}) now match it, so blocked={blocked_pct}% of requests are rejected with 403 against a normal {normal_blocked_pct}%. The application is healthy: the backend pool is fully healthy and unblocked requests succeed.
+  Confirm:
+    - metric assistant_web.waf_blocked_pct rises from about {normal_blocked_pct}% to 38-62% after the policy change; assistant-web logs "appgw.waf_summary" with attributes.waf.policy_version=v14 and status=ANOMALY
+    - the Activity Log write on Microsoft.Network/ApplicationGatewayWebApplicationFirewallPolicies/{waf_policy} (rule {rule_id} Log -> Prevention) comes minutes before the first blocked request
+    - ApplicationGatewayFirewallLog groups the blocks by ruleId {rule_id}; the block itself is logged by rule 949110 for the same transactions
+    - metric assistant_web.appgw_healthy_backend_hosts stays at 6 and chat-orchestrator request volume drops by the same share, which rules out a backend or network fault
+  Remediation: roll {waf_policy} back to the previous revision (v13) with opsctl rollback waf-policy/waf-policy-azureai-prod --to-revision previous. The blocked share falls back to about {normal_blocked_pct}% within about a minute. Switching the whole policy to Detection mode is the broad fallback and drops all protection, so it is not needed when one revision is at fault.
 remediation_action: set_waf_rule_to_detection
-error_message: '[AssistantWeb] AGW-WAF-BLOCK-SURGE: waf_policy={waf_policy} rule={rule_id} blocked={blocked_pct}% (normal {normal_blocked_pct}%) path={request_path} blocked_requests={blocked_requests}'
+remediation_command: |-
+  opsctl rollback waf-policy/waf-policy-azureai-prod --to-revision previous
+error_message: 'ApplicationGatewayFirewallLog: AGW-WAF-BLOCK-SURGE action=Blocked policy={waf_policy} ruleId={rule_id} ruleGroup={rule_group} requestUri={request_path} blocked={blocked_pct}% (normal {normal_blocked_pct}%) blocked_requests={blocked_requests} crs={crs_version} match="{sample_match}"'
 stack_trace: |-
   WafRequestBlockedException: AGW-WAF-BLOCK-SURGE
     at ApplicationGateway.evaluateWafRules(policy={waf_policy})
@@ -27,7 +31,7 @@ correlation_attr:
   key: azure.waf_policy_crs_version
   value: OWASP_3.2-policy-azureai-agw-v14
 fault_params:
-  waf_policy: {choice: [waf-policy-azureai-eastus, waf-policy-azureai-prod]}
+  waf_policy: waf-policy-azureai-prod
   rule_id: "942100"
   rule_group: REQUEST-942-APPLICATION-ATTACK-SQLI
   blocked_pct: {uniform: [38.0, 62.0], round: 1}
@@ -44,6 +48,54 @@ rca_clues:
   chat-orchestrator:
     orchestrator.inbound_requests_drop_pct: {uniform: [35.0, 60.0], round: 1}
     orchestrator.code_snippet_prompts_seen: {randint: [200, 3000]}
+cascade_messages:
+  chat-orchestrator:
+    - severity: WARN
+      message: 'chat.inbound_volume conversations_per_min below the usual hourly range, down {blocked_pct}% at the edge; requests are rejected by {waf_policy} before they reach the orchestrator'
+service_lag_seconds: {chat-orchestrator: 10}
+fault_scope:
+  workloads: [assistant-web]
+infrastructure_events:
+  - service: assistant-web
+    severity: INFO
+    offset_seconds: -120
+    body: 'azure-activity: operationName=Microsoft.Network/ApplicationGatewayWebApplicationFirewallPolicies/write resourceId=/subscriptions/38514ecc-371c-5d0a-9c14-ab99a396027d/resourceGroups/azureai-rg/providers/Microsoft.Network/ApplicationGatewayWebApplicationFirewallPolicies/waf-policy-azureai-prod caller=release-pipeline@contoso-demo.onmicrosoft.com status=Succeeded category=Administrative'
+    attributes:
+      user.name: release-pipeline@contoso-demo.onmicrosoft.com
+      operation: policy_publish
+      waf.policy_version: v14
+      change.summary: 'waf-policy-azureai-prod v13 -> v14: rule 942100 action Log -> Prevention'
+remediation_effects:
+  log_events:
+    - service: assistant-web
+      severity: INFO
+      offset_seconds: 1
+      body: 'azure-activity: operationName=Microsoft.Network/ApplicationGatewayWebApplicationFirewallPolicies/write resourceId=/subscriptions/38514ecc-371c-5d0a-9c14-ab99a396027d/resourceGroups/azureai-rg/providers/Microsoft.Network/ApplicationGatewayWebApplicationFirewallPolicies/waf-policy-azureai-prod caller={actor} status=Succeeded category=Administrative'
+      attributes:
+        operation: policy_rollback
+        waf.policy_version: v13
+        change.summary: 'waf-policy-azureai-prod v14 -> v13 (rollback): rule 942100 action Prevention -> Log'
+  steady_attributes:
+    assistant-web:
+      waf.policy_version: v13
+  verification:
+    - signal: assistant_web.waf_blocked_pct
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "assistant-web"'
+      field: 'metrics.assistant_web.waf_blocked_pct'
+      expect: 'back near 0.4% (was 38-62%)'
+      within_seconds: 90
+    - signal: AGW-WAF-BLOCK-SURGE lines
+      from: 'logs.otel.azureai'
+      where: 'body.text LIKE "*AGW-WAF-BLOCK-SURGE*"'
+      expect: '0 new lines'
+      within_seconds: 90
+    - signal: WAF policy revision
+      from: 'logs.otel.azureai'
+      where: 'resource.attributes.service.name == "assistant-web"'
+      field: 'attributes.waf.policy_version'
+      expect: 'v13 on every line logged since the fix; v14 stops appearing'
+      within_seconds: 90
 business_impact:
   - kpi: business.throughput_rpm
     factor: {uniform: [0.35, 0.60]}
@@ -55,3 +107,4 @@ generator_impact:
   azure_gateway_otel:
     error_rate: 0.5
     records_per_cycle: 80
+generator_hold_seconds: {azure_gateway_otel: 60}

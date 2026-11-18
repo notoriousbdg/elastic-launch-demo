@@ -5,63 +5,154 @@ error_type: PLC-COMM-LOSS
 sensor_type: opcua_subscription
 affected_services:
 - scada-gateway
-- mes-controller
 cascade_services:
+- mes-controller
 - oee-analytics
 - shopfloor-portal
 - ot-historian
-description: OPC-UA subscription to a critical line PLC drops; tag updates stop flowing to MES and historian
+description: The OPC UA secure channel to the LINE-03 PLC keeps closing after a gateway profile change overloads the PLC's OPC UA server; tag updates from line 3 stop reaching MES and the historian
 investigation_notes: |-
-  Root Cause: OPC-UA secure channel failures usually indicate either certificate trust chain issues, network segmentation changes (VLAN/firewall) between the SCADA gateway and the PLC, or aggressive watchdog timeouts when the PLC scan rate is at capacity. Status code 0x80860000 (BadSecureChannelClosed) and 0x80AE0000 (BadConnectionClosed) are the most common. A PLC scan load above 90% of capacity with 0% ping loss and a server certificate valid for more than 30 days points to the watchdog timeout rather than certificates or network segmentation.
-  Remediation: 1) Verify network reachability: `ping {plc_host}` and `tcptraceroute {plc_host} 4840`. 2) Check the OPC-UA endpoint discovery: `opc-ua-cli discover --endpoint opc.tcp://{plc_host}:4840`. 3) Renegotiate the secure channel: `scada-admin reconnect --plc {plc_id} --renew-channel`. 4) If certs are the issue, push a fresh app instance cert: `scada-admin push-cert --plc {plc_id}`. 5) Restart the gateway subscription manager if needed: `systemctl restart scada-opcua-gateway`. 6) Confirm tag updates resume by watching `scada.tag_update_rate_per_s` return to baseline.
+  Root cause: the scada-gateway connection profile opcua-profile/plc-line03-a went from revision 14 to 15 shortly before the first PLC-COMM-LOSS. Revision 15 raised the monitored items on {plc_id} from 640 to 2560 and cut the sampling interval from 1000 ms to 100 ms. The S7-1500's OPC UA server gets only the communication share of the CPU cycle, and at 40 times the sampling load it can no longer answer within the gateway's keepalive window ({keepalive_timeout_s} s). The server drops the session (BadTimeout, then {opcua_status} BadSecureChannelClosed), the gateway reconnects, and the cycle repeats. The network and the certificate are fine: ping loss is 0%, TCP 4840 accepts connections between drops and the application certificate has more than 20 days left. The other four PLCs stay connected.
+  Confirm:
+    - scada-gateway plc_status lines for {plc_id} show profile_rev=15 (attributes.scada.opcua_profile_rev), monitored_items=2560 and comm_load near 95% (metric scada.plc_comm_load_pct, normally 28-38%)
+    - the scada-gateway config_change line for opcua-profile/plc-line03-a (revision 14 -> 15, MOC-2611) comes before the first PLC-COMM-LOSS
+    - metric scada.connected_plcs drops from 5 to 4, scada.stale_tags rises from about 0 to about 640 (the PLC's 640 tags go Bad quality), scada.opcua_reconnects_per_min rises from 0 to 4-8, and scada.tag_update_rate_per_s falls by about a quarter
+    - mes-controller logs LINE-03 equipment state UNKNOWN with a growing upstream tag age (metric mes.upstream_tag_age_s) and holds work order releases for the line
+  Remediation: roll the gateway's profile for the PLC back to revision 14 with opsctl rollback opcua-profile/plc-line03-a --to-revision previous. The gateway re-creates the subscription with 640 items at 1000 ms. The secure channel stays up from the next connect (about 10 s), the PLC's communication load settles back to about 33%, and the 640 tags turn Good within about 40 s. Do not restart the gateway or reboot the PLC: the old profile alone removes the overload.
 remediation_action: reconnect_plc
-error_message: '[SCADA] PLC-COMM-LOSS: plc={plc_id} endpoint=opc.tcp://{plc_host}:4840 status_code={opcua_status} subscription={subscription_id}
-  elapsed_s={comm_loss_seconds}'
+remediation_command: |-
+  opsctl rollback opcua-profile/plc-line03-a --to-revision previous
+error_message: '[SCADA] PLC-COMM-LOSS: plc={plc_id} endpoint=opc.tcp://{plc_host}:4840 status={opcua_status} (BadSecureChannelClosed) subscription={subscription_id} last_keepalive_s={comm_loss_seconds} keepalive_timeout_s={keepalive_timeout_s} reconnect_attempt={reconnect_attempt}'
 stack_trace: |-
-  OPC-UA Secure Channel Trace
-    Endpoint:           opc.tcp://{plc_host}:4840
-    PLC:                {plc_id}
-    Subscription:       {subscription_id}
-    Last keepalive:     {comm_loss_seconds}s ago (timeout: 10s)
-    Status code:        {opcua_status} (BadSecureChannelClosed)
-    Affected tags:      MotorSpeed, OvenTempC, ConveyorRPM, PartsCounter
-    Watchdog:           CHANNEL TIMEOUT — reconnect deferred
-  PLC-COMM-LOSS: {plc_id} unreachable for {comm_loss_seconds}s; MES queue blocked
+  OPC UA client session trace (scada-gateway)
+    Endpoint:            opc.tcp://{plc_host}:4840  SecurityPolicy=Basic256Sha256  Mode=SignAndEncrypt
+    Server:              {plc_id} (S7-1500 CPU 1515-2 PN, OPC UA server)
+    Profile:             opcua-profile/plc-line03-a rev 15 (monitored_items=2560 sampling=100ms publishing=500ms)
+    Subscription:        {subscription_id}  KeepAliveCount=10  LifetimeCount=30
+    Last keepalive:      {comm_loss_seconds}s ago (timeout {keepalive_timeout_s}s)
+    Publish response:    BadTimeout (0x800A0000)
+    Channel state:       {opcua_status} BadSecureChannelClosed
+    Reconnect:           attempt {reconnect_attempt}, backoff 5s
+  PLC-COMM-LOSS: {plc_id} not publishing for {comm_loss_seconds}s; LINE-03 tags quality=Bad
 correlation_attr:
-  key: infra.opcua_gateway_build
-  value: scada-gateway-v4.2.1-rc3
+  key: scada.opcua_profile_rev
+  value: '15'
 fault_params:
-  plc_id: {choice: [PLC-LINE01-A, PLC-LINE02-A, PLC-LINE03-A, PLC-LINE03-B, PLC-PACK-01]}
-  plc_host:
-    format: "plc-{n}.ot.internal"
-    n: {randint: [10, 99]}
+  plc_id: PLC-LINE03-A
+  plc_host: 10.40.3.21
   opcua_status: '0x80860000'
   subscription_id:
     format: "sub-{n}"
     n: {randint: [1000, 9999]}
-  comm_loss_seconds: {randint: [15, 600]}
+  comm_loss_seconds: {randint: [11, 40]}
+  keepalive_timeout_s: 10
+  reconnect_attempt: {randint: [2, 30]}
 rca_clues:
   scada-gateway:
-    opcua.last_keepalive_s: {randint: [15, 600]}
-    opcua.secure_channel_status: BadSecureChannelClosed
-    opcua.plc_scan_load_pct: {uniform: [92, 99], round: 1}
-    opcua.server_cert_days_remaining: {randint: [120, 365]}
+    opcua.plc_comm_load_pct: {uniform: [92, 99], round: 1}
+    opcua.monitored_items: 2560
+    opcua.sampling_interval_ms: 100
+    opcua.server_cert_days_remaining: 22
     opcua.ping_loss_pct: 0
   mes-controller:
-    mes.work_order_blocked_count: {randint: [8, 60]}
-    mes.upstream_tag_age_s: {randint: [30, 600]}
+    mes.line: LINE-03
+    mes.work_order_blocked_count: {randint: [8, 30]}
+    mes.upstream_tag_age_s: {randint: [30, 300]}
   ot-historian:
-    historian.tag_drop_count: {randint: [50, 800]}
+    historian.tag_drop_count: {randint: [50, 640]}
   oee-analytics:
     oee.stale_window_count: {randint: [2, 12]}
   shopfloor-portal:
     portal.work_order_status_stale: true
+cascade_messages:
+  mes-controller:
+    - severity: WARN
+      message: '[MES] equipment_state line=LINE-03 state=UNKNOWN source=scada-gateway plc={plc_id} tag_age_s={comm_loss_seconds}; work order release held until equipment state is current'
+  ot-historian:
+    - severity: WARN
+      message: '[HIST] tag_feed plc={plc_id} 640 tags quality=Bad since last good value; gap marked in AR-CURRENT'
+  oee-analytics:
+    - severity: WARN
+      message: '[OEE] oee_calc line=LINE-03 window skipped: equipment state input stale ({comm_loss_seconds}s); availability not computed for this window'
+  shopfloor-portal:
+    - severity: WARN
+      message: '[PORTAL] work_order_status line=LINE-03 stale (MES equipment state UNKNOWN); kiosks show last known status'
+fault_scope:
+  cluster: mfg-eks-cluster
+  workloads: [scada-gateway]
+infrastructure_events:
+  - service: scada-gateway
+    severity: INFO
+    offset_seconds: -120
+    body: '[SCADA] config_change opcua-profile/plc-line03-a revision 14 -> 15: monitored_items 640 -> 2560, sampling_interval_ms 1000 -> 100; subscription re-created on PLC-LINE03-A; applied by ot-integration (MOC-2611)'
+    attributes:
+      operation: config_change
+      user.name: ot-integration
+      change.request: MOC-2611
+      scada.plc: PLC-LINE03-A
+      scada.opcua_profile_rev: '15'
+      change.summary: 'opcua-profile/plc-line03-a: rev 14 -> 15'
+service_lag_seconds:
+  mes-controller: 20
+  ot-historian: 30
+  oee-analytics: 45
+  shopfloor-portal: 60
+remediation_effects:
+  log_events:
+    - service: scada-gateway
+      severity: INFO
+      offset_seconds: 1
+      body: '[CHG] CHANGE APPLIED opsctl rollback opcua-profile/plc-line03-a --to-revision previous by {actor}: profile revision 15 -> 14 (monitored_items 640, sampling 1000 ms)'
+      attributes:
+        operation: change_applied
+        change.target: opcua-profile/plc-line03-a
+    - service: scada-gateway
+      severity: INFO
+      offset_seconds: 12
+      body: '[SCADA] session_established plc=PLC-LINE03-A endpoint=opc.tcp://10.40.3.21:4840 profile_rev=14 monitored_items=640 sampling_ms=1000; subscription re-created'
+      attributes:
+        operation: session_established
+        scada.plc: PLC-LINE03-A
+        scada.opcua_profile_rev: '14'
+  log_taper_seconds: 15
+  verification:
+    - signal: scada.connected_plcs
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "scada-gateway"'
+      field: 'metrics.scada.connected_plcs'
+      expect: '5 (was 4)'
+      within_seconds: 60
+    - signal: scada.stale_tags
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "scada-gateway"'
+      field: 'metrics.scada.stale_tags'
+      expect: 'back under 5 (was about 640)'
+      within_seconds: 90
+    - signal: scada.plc_comm_load_pct
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "scada-gateway"'
+      field: 'metrics.scada.plc_comm_load_pct'
+      expect: 'back in 28-38% (was 92-99%)'
+      within_seconds: 90
+    - signal: PLC-COMM-LOSS lines
+      from: 'logs.otel.mfg'
+      where: 'body.text LIKE "*PLC-COMM-LOSS*"'
+      expect: '0 new lines'
+      within_seconds: 60
+    - signal: OPC UA profile revision for PLC-LINE03-A
+      from: 'logs.otel.mfg'
+      where: 'resource.attributes.service.name == "scada-gateway" AND body.text LIKE "*plc_status plc=PLC-LINE03-A*"'
+      field: 'attributes.scada.opcua_profile_rev'
+      expect: '14 on every line logged since the fix; 15 stops appearing'
+      within_seconds: 60
 business_impact:
+  - kpi: business.on_time_delivery_pct
+    factor: {uniform: [0.84, 0.90]}
   - kpi: business.oee_overall_pct
-    factor: {uniform: [0.25, 0.55]}
+    factor: {uniform: [0.55, 0.75]}
   - kpi: business.oee_availability_pct
-    factor: {uniform: [0.30, 0.60]}
+    factor: {uniform: [0.60, 0.80]}
   - kpi: business.throughput_units_per_hour
-    factor: {uniform: [0.20, 0.50]}
+    factor: {uniform: [0.65, 0.80]}
   - kpi: business.unplanned_downtime_min_per_shift
-    factor: {uniform: [2.5, 5.0]}
+    factor: {uniform: [2.0, 3.5]}

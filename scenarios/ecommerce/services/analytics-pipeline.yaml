@@ -31,26 +31,62 @@ constants:
   - transform
   - aggregate
   - index
+state:
+  hot_backlog:
+    init: 0
+  an_t:
+    init: now
 steps:
 - sample:
+    dt:
+      expr: "min(10.0, max(0.0, time.time() - an_t))"
+- counter:
+    state_key: an_t
+    by:
+      expr: "dt"
+# Ch 14: clickstream-events has 32 partitions, one consumer each in analytics-consumer-group
+# (about 6,000 events/s per consumer). Keyed by session_id, ~40,000 events/s spread evenly
+# (1,250/s per partition). Keyed by event_type, page_view (60%) all lands on partition 7:
+# 24,000/s into one consumer, so its backlog grows by 18,000/s (held at 800k events). After the
+# rollback the key returns to session_id over the ~30s rollout and partition 7 drains at
+# 6,000 - 1,250 = 4,750/s: back to baseline about 240s after the fix.
+- sample:
     events_per_sec:
-      uniform:
-      - 25000.0
-      - 120000.0
-      round: 1
+      expr: "round(40000.0 + rand.gauss(0, 600.0), 1)"
+    hot_share:
+      expr: "min(1.0, max(0.0, elapsed.get(14, 0) - lag.get(14, 0)) / 30.0) if 14 in all_active else ((1.0 - min(1.0, since_fix.get(14, 0) / 30.0)) if 14 in fixed_channels else 0.0)"
+- sample:
+    hot_inflow:
+      expr: "events_per_sec * (1.0 / 32.0 + (0.6 - 1.0 / 32.0) * hot_share)"
+- sample:
+    hot_delta:
+      expr: "min(800000.0 - hot_backlog, max(-hot_backlog, (hot_inflow - 6000.0) * dt)) if 14 in all_active else (max(-hot_backlog, (hot_inflow - 6000.0) * dt) if 14 in fixed_channels else -hot_backlog)"
+- counter:
+    state_key: hot_backlog
+    by:
+      expr: "hot_delta"
+- sample:
     pipeline_lag_ms:
-      uniform:
-      - 200.0
-      - 2500.0
-      round: 1
+      expr: "round(1200.0 + rand.gauss(0, 60.0) + hot_backlog / 6000.0 * 1000.0, 1)"
+    consumer_lag_events:
+      expr: "round(max(0.0, 4000.0 + rand.gauss(0, 500.0)) + hot_backlog)"
+    partition_skew_ratio:
+      expr: "round(max(1.1 + rand.gauss(0, 0.02), hot_inflow / (events_per_sec / 32.0)), 2)"
+    processed_per_sec:
+      expr: "round(events_per_sec - hot_inflow + (6000.0 if hot_backlog > 1.0 else hot_inflow) + rand.gauss(0, 300.0), 1)"
+    consumer_group_members:
+      expr: "32"
     dashboards_active:
       randint:
       - 12
       - 85
-    consumer_lag_events:
-      randint:
-      - 0
-      - 5000
+- sample:
+    partition_key:
+      expr: "'event_type' if (14 in all_active or (14 in fixed_channels and rand.random() > min(1.0, since_fix.get(14, 0) / 30.0))) else 'session_id'"
+    hot_partition:
+      expr: "'partition-7' if partition_skew_ratio > 3.0 else 'none'"
+    pipeline_status:
+      expr: "'ANOMALY' if (pipeline_lag_ms > 5000 or partition_skew_ratio > 2.0) else 'NOMINAL'"
 - metric:
     name: analytics.events_per_sec
     value:
@@ -71,33 +107,68 @@ steps:
     value:
       var: consumer_lag_events
     unit: events
+- metric:
+    name: analytics.partition_skew_ratio
+    value:
+      var: partition_skew_ratio
+    unit: ratio
+- metric:
+    name: analytics.processed_events_per_sec
+    value:
+      var: processed_per_sec
+    unit: events/s
+- metric:
+    name: analytics.consumer_group_members
+    value:
+      var: consumer_group_members
+    unit: consumers
 - log:
     level: INFO
-    message: analytics.health events_per_sec={events_per_sec} lag_ms={pipeline_lag_ms} dashboards={dashboards_active} consumer_lag={consumer_lag_events}
+    message: analytics.health status={pipeline_status} events_per_sec={events_per_sec} processed_per_sec={processed_per_sec}
+      lag_ms={pipeline_lag_ms} dashboards={dashboards_active} consumer_lag={consumer_lag_events} group=analytics-consumer-group
+      topic=clickstream-events partitions=32 consumers={consumer_group_members} partition_key={partition_key} skew_ratio={partition_skew_ratio}
+      hot_partition={hot_partition}
     attrs:
       operation: analytics_health
+      analytics.status:
+        var: pipeline_status
       analytics.events_per_sec:
         var: events_per_sec
+      analytics.processed_events_per_sec:
+        var: processed_per_sec
       analytics.pipeline_lag_ms:
         var: pipeline_lag_ms
       analytics.dashboards_active:
         var: dashboards_active
       analytics.consumer_lag_events:
         var: consumer_lag_events
+      analytics.consumer_group: analytics-consumer-group
+      analytics.consumer_group_members:
+        var: consumer_group_members
+      analytics.partition_key:
+        var: partition_key
+      analytics.partition_skew_ratio:
+        var: partition_skew_ratio
+      analytics.hot_partition:
+        var: hot_partition
 - sample:
     stage:
       choice: STAGES
     stage_throughput:
-      uniform:
-      - 20000.0
-      - 100000.0
-      round: 1
+      expr: "round(processed_per_sec * (1.0 + rand.gauss(0, 0.01)), 1)"
 - log:
     level: INFO
-    message: analytics.stage_health stage={stage} throughput={stage_throughput} lag_ms={pipeline_lag_ms}
+    message: analytics.stage_health stage={stage} status={pipeline_status} throughput={stage_throughput} lag_ms={pipeline_lag_ms}
+      partition_key={partition_key} hot_partition={hot_partition}
     attrs:
       operation: stage_health
+      analytics.status:
+        var: pipeline_status
       analytics.current_stage:
         var: stage
       analytics.stage_throughput:
         var: stage_throughput
+      analytics.partition_key:
+        var: partition_key
+      analytics.hot_partition:
+        var: hot_partition

@@ -21,7 +21,6 @@ kpi_emitter: false
 
 constants:
   PLACEMENTS: [home_carousel, cart_upsell, pdp_similar_items, post_purchase]
-  MODELS: [anthropic.claude-haiku, amazon.nova-lite]
 
 state:
   _requests: {init: 0}
@@ -30,26 +29,31 @@ state:
 steps:
   - sample:
       placement: {choice: PLACEMENTS}
-      model: {choice: MODELS}
+      model:
+        expr: "'eu.anthropic.claude-3-haiku-20240307-v1:0' if 17 in fixed_channels else 'anthropic.claude-3-haiku-20240307-v1:0'"
       shopper_id: {format: "shp-{n}", n: {randint: [100000, 999999]}}
       invocation_latency_ms:
-        if_active: {uniform: [4500.0, 18000.0], round: 1}
-        else: {uniform: [220.0, 780.0], round: 1}
+        expr: "round(max(0.0, 500 + (8500 - 500) * min(1.0, elapsed.get(17, 0) / 45.0) + rand.gauss(0, 450)), 1) if 17 in all_active
+          else (round(max(0.0, 8500 + (rand.uniform(220.0, 780.0) - 8500) * min(1.0, since_fix.get(17, 0) / 150.0) + rand.gauss(0, 450 * (1.0 - min(1.0, since_fix.get(17, 0) / 150.0)))), 1) if 17 in fixed_channels
+          else round(rand.uniform(220.0, 780.0), 1))"
       time_to_first_token_ms:
-        if_active: {uniform: [2200.0, 9000.0], round: 1}
-        else: {uniform: [90.0, 320.0], round: 1}
+        expr: "round(max(0.0, 205 + (4500 - 205) * min(1.0, elapsed.get(17, 0) / 45.0) + rand.gauss(0, 220)), 1) if 17 in all_active
+          else (round(max(0.0, 4500 + (rand.uniform(90.0, 320.0) - 4500) * min(1.0, since_fix.get(17, 0) / 150.0) + rand.gauss(0, 220 * (1.0 - min(1.0, since_fix.get(17, 0) / 150.0)))), 1) if 17 in fixed_channels
+          else round(rand.uniform(90.0, 320.0), 1))"
       input_tokens: {randint: [380, 1500]}
       output_tokens: {randint: [60, 340]}
       throttled_invocations:
-        if_active: {randint: [18, 140]}
-        else: {randint: [0, 1]}
-      invocation_client_errors:
-        if_active: {randint: [10, 90]}
-        else: {randint: [0, 1]}
+        expr: "int(round(max(0, 0.3 + (80 - 0.3) * min(1.0, elapsed.get(17, 0) / 45.0) + rand.gauss(0, 3.5)))) if 17 in all_active
+          else (int(round(max(0, 80 + (rand.randint(0, 1) - 80) * min(1.0, since_fix.get(17, 0) / 150.0) + rand.gauss(0, 3.5 * (1.0 - min(1.0, since_fix.get(17, 0) / 150.0)))))) if 17 in fixed_channels
+          else rand.randint(0, 1))"
+      invocation_client_errors: {randint: [0, 1]}
       items_returned: {randint: [4, 12]}
       personalization_hit_rate_pct:
-        if_active: {uniform: [31.0, 58.0], round: 2}
-        else: {uniform: [74.0, 93.0], round: 2}
+        expr: "round(max(0.0, 83.0 + (45.0 - 83.0) * min(1.0, elapsed.get(17, 0) / 45.0) + rand.gauss(0, 1.8)), 1) if 17 in all_active
+          else (round(max(0.0, 45.0 + (rand.uniform(74.0, 93.0) - 45.0) * min(1.0, since_fix.get(17, 0) / 150.0) + rand.gauss(0, 1.8 * (1.0 - min(1.0, since_fix.get(17, 0) / 150.0)))), 1) if 17 in fixed_channels
+          else round(rand.uniform(74.0, 93.0), 1))"
+      reco_status:
+        expr: "'ANOMALY' if 17 in all_active or (17 in fixed_channels and since_fix.get(17, 0) < 150) else 'NOMINAL'"
   - counter:
       state_key: _requests
       by: 1
@@ -95,7 +99,7 @@ steps:
         reco.items_returned: {var: items_returned}
   - log:
       level: INFO
-      message: 'reco.quota model={model} throttled_invocations={throttled_invocations} client_errors={invocation_client_errors} hit_rate={personalization_hit_rate_pct}%'
+      message: 'reco.quota model={model} throttled_invocations={throttled_invocations} client_errors={invocation_client_errors} hit_rate={personalization_hit_rate_pct}% status={reco_status}'
       attrs:
         operation: bedrock_quota_check
         gen_ai.request.model: {var: model}
@@ -108,9 +112,10 @@ steps:
       steps:
         - log:
             level: INFO
-            message: 'reco.summary requests={_requests} hit_rate={personalization_hit_rate_pct}% throttled={throttled_invocations} status=NOMINAL'
+            message: 'reco.summary requests={_requests} hit_rate={personalization_hit_rate_pct}% throttled={throttled_invocations} model={model} status={reco_status}'
             attrs:
               operation: reco_summary
+              gen_ai.request.model: {var: model}
               reco.total_requests: {var: _requests}
               reco.hit_rate_pct: {var: personalization_hit_rate_pct}
               aws.bedrock.invocation_throttles: {var: throttled_invocations}

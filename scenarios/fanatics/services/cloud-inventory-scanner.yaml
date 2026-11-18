@@ -25,35 +25,76 @@ db_operations:
     AND created_at < NOW() - INTERVAL 7 DAY
 emit_fault_logs: true
 kpi_emitter: false
+state:
+  untagged_n:
+    init: 2.0
+  gov_t:
+    init: now
+  untag_created_total:
+    init: 0
+  untag_removed_total:
+    init: 0
 constants:
   CLOUD_PROVIDERS:
   - aws
   - gcp
   - azure
 steps:
+- sample:
+    dt:
+      expr: "min(10.0, max(0.0, time.time() - gov_t))"
+- counter:
+    state_key: gov_t
+    by:
+      expr: "dt"
+# Ch 19: with the tag policy in audit mode, new untagged resources appear at about 3/min (the
+# first 2 minutes of them predate the symptoms). Enforcement stops the growth immediately; the
+# cleanup job starts 10s later and removes about 12 orphans/min down to the 2 legacy exemptions.
+- sample:
+    gov_delta:
+      expr: "(3.0 * (1.0 + rand.gauss(0, 0.05)) * dt / 60.0 + (6.0 if untagged_n < 3.0 else 0.0)) if 19 in all_active else (-min(max(0.0, untagged_n - 2.0), 12.0 * dt / 60.0) if (19 in fixed_channels and since_fix.get(19, 0) >= 10) else (0.0 if 19 in fixed_channels else -max(0.0, untagged_n - 2.0)))"
+- counter:
+    state_key: untagged_n
+    by:
+      expr: "gov_delta"
+- counter:
+    state_key: untag_created_total
+    by:
+      expr: "max(0.0, gov_delta)"
+- counter:
+    state_key: untag_removed_total
+    by:
+      expr: "max(0.0, -gov_delta)"
+- sample:
+    untagged_total:
+      expr: "max(0, round(untagged_n + rand.gauss(0, 0.3)))"
+    orphan_aws:
+      expr: "round(untagged_total * 0.5)"
+    orphan_gcp:
+      expr: "round(untagged_total * 0.2)"
+    orphan_azure:
+      expr: "untagged_total - orphan_aws - orphan_gcp"
+    orphan_by_provider:
+      expr: "{'aws': orphan_aws, 'gcp': orphan_gcp, 'azure': orphan_azure}"
+    orphan_cost_usd:
+      expr: "round(untagged_total * 21.0 * (1.0 + rand.gauss(0, 0.02)), 2)"
+    policy_ver:
+      expr: "'org-policy-v2.4.0-unenforced' if 19 in all_active else ('org-policy-v2.4.0' if 19 in fixed_channels else 'org-policy-v2.3.2')"
+    policy_mode:
+      expr: "'audit' if 19 in all_active else 'enforce'"
+    untag_status:
+      expr: "'ANOMALY' if untagged_total > 5 else 'NOMINAL'"
 - for_each:
     in: CLOUD_PROVIDERS
     as: provider
     steps:
     - sample:
         resources_scanned:
-          randint:
-          - 500
-          - 2500
+          expr: "round({'aws': 2100.0, 'gcp': 900.0, 'azure': 1500.0}[provider] * (1.0 + rand.gauss(0, 0.004)))"
         orphaned:
-          if_active:
-            randint:
-            - 5
-            - 25
-          else:
-            randint:
-            - 0
-            - 3
+          expr: "orphan_by_provider[provider]"
         compliance_pct:
-          uniform:
-          - 97.0
-          - 100.0
-          round: 1
+          expr: "round(100.0 * (1.0 - orphaned / resources_scanned), 2)"
     - metric:
         name:
           expr: f'cloud_inventory.{provider}.resources_scanned'
@@ -85,15 +126,47 @@ steps:
             var: orphaned
           cloud_inventory.compliance:
             var: compliance_pct
+- metric:
+    name: cloud_inventory.untagged_resources
+    value:
+      var: untagged_total
+    unit: resources
+- metric:
+    name: cloud_inventory.orphan_daily_cost_usd
+    value:
+      var: orphan_cost_usd
+    unit: USD
+- metric:
+    name: cloud_inventory.untagged_created_total
+    value:
+      var: untag_created_total
+    unit: resources
+- metric:
+    name: cloud_inventory.orphans_removed_total
+    value:
+      var: untag_removed_total
+    unit: resources
+- log:
+    level: INFO
+    message: 'custodian.policy: policy:require-cost-center resource:aws.ec2,gcp.instance,azure.vm count:{untagged_total} mode:{policy_mode}
+      version:{policy_ver} cost_usd_per_day:{orphan_cost_usd} status:{untag_status}'
+    attrs:
+      operation: tag_policy_check
+      infra.cloud_policy_ver:
+        var: policy_ver
+      governance.policy_mode:
+        var: policy_mode
+      cloud_inventory.untagged_total:
+        var: untagged_total
+      cloud_inventory.status:
+        var: untag_status
 - sample:
+    vpn_f:
+      expr: "max(min(1.0, elapsed.get(20, 0) / 45.0) if 20 in all_active else (1.0 - min(1.0, since_fix.get(20, 0) / 60.0) if 20 in fixed_channels else 0.0), min(1.0, elapsed.get(10, 0) / 45.0) if 10 in all_active else (1.0 - min(1.0, since_fix.get(10, 0) / 60.0) if 10 in fixed_channels else 0.0))"
     tunnels_up:
-      if_active:
-        randint:
-        - 3
-        - 5
-      else: 6
+      expr: "6 - round(rand.uniform(1.0, 3.0) * vpn_f)"
     vpn_status:
-      expr: '''nominal'' if tunnels_up == 6 else ''degraded'''
+      expr: "'nominal' if tunnels_up == 6 else 'degraded'"
 - metric:
     name: cloud_inventory.vpn_tunnels_up
     value:

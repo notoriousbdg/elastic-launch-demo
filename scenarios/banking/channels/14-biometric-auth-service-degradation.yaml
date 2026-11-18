@@ -9,57 +9,113 @@ affected_services:
 cascade_services:
 - member-portal
 - fraud-sentinel
-description: Server-side biometric verification (face match with liveness, voice print) experiencing high failure rate
+description: Server-side face verification rejects many genuine members at the liveness check after a new liveness model was rolled out to all traffic.
 investigation_notes: |-
-  1. Analyze failure distribution by method — voice_print at 32% fail rate is worst, likely due to background noise in military environments (flight line, motor pool, barracks). Consider increasing noise tolerance thresholds for voice authentication.
-  2. Liveness check failures (42%) indicate potential issues with the anti-spoofing model, not member behavior. Check BioAuth-v3.1 model performance — last retrain was 2026-01-28, may need refresh.
-  3. Template mismatch (31%) can occur after device changes or significant appearance changes common in military (new glasses, weight change during deployment). Prompt template re-enrollment.
-  4. Monitor fallback path capacity — PIN attempts surging 340% means auth-gateway PIN verification is absorbing all biometric failures. Check auth-gateway rate limits and connection pool.
-  5. Call center overflow at 22min wait indicates members cannot self-recover. Enable temporary password-based authentication bypass for verified members: POST /api/v1/auth/temp-bypass.
-  6. Check device compatibility matrix — new iOS/Android versions may break biometric SDKs. Review crash reports from mobile-gateway for biometric SDK exceptions.
-remediation_action: reset_biometric_service
-error_message: '[AUTH] AUTH-BIOMETRIC-DEGRADE: method={bio_method} fail_rate={bio_fail_rate}% threshold={bio_threshold}% attempts={bio_attempts}
-  fallback={bio_fallback}'
+  1. Search logs.otel.banking for body.text containing AUTH-BIOMETRIC-DEGRADE on auth-gateway: method={bio_method} fails at {bio_fail_rate}% against a {bio_threshold}% threshold over {bio_attempts} attempts, with members falling back to {bio_fallback}. metrics.auth_gateway.biometric_fail_rate_pct normally reads 2-4.5% and is now 28-41%; metrics.auth_gateway.pin_fallback_per_min rose from 20-60 to 400-900.
+  2. Break the failures down: almost all are liveness rejections (passive liveness score below threshold), not template mismatches, and they are concentrated in low-light captures. Fingerprint, PIN and password success rates are unchanged, which rules out the auth-gateway itself and the credential store.
+  3. Find the change: the biometric_status line on auth-gateway carries attributes.auth.liveness_model and attributes.featureflag.rollout_pct. Feature flag liveness-model-v312 (namespace identity) was ramped from 0% to 100% shortly before the first degradation line, routing every face check to liveness model v3.1.2 instead of v3.1.1.
+  4. Separate it from an attack: fraud-sentinel sees no rise in presentation-attack indicators and the rejected sessions come from enrolled, trusted devices. Lowering the liveness threshold on v3.1.2 would also lower spoof protection.
+  5. Fix: opsctl patch featureflag/liveness-model-v312 -n identity --rollout-pct 0 sends face checks back to v3.1.1. The flag change applies to new verification requests within seconds; the fail rate converges back over about a minute as in-flight retries finish.
+  6. Recovery: auth.liveness_model reads v3.1.1 and featureflag.rollout_pct 0 on the biometric_status lines, biometric_fail_rate_pct back under 4.5%, pin_fallback_per_min back to 20-60, and no new AUTH-BIOMETRIC-DEGRADE lines. Send the v3.1.2 low-light false rejects to the vendor before the next ramp.
+remediation_action: disable_liveness_model_flag
+remediation_command: |-
+  opsctl patch featureflag/liveness-model-v312 -n identity --rollout-pct 0
+error_message: '[AUTH] AUTH-BIOMETRIC-DEGRADE: method={bio_method} fail_rate={bio_fail_rate}% threshold={bio_threshold}% attempts={bio_attempts} fallback={bio_fallback} liveness_model=v3.1.2 liveness_reject_share={liveness_share}%'
 stack_trace: |-
   === BIOMETRIC SERVICE HEALTH ===
-  method={bio_method}  window=5min
+  method={bio_method}  window=5min  liveness_model=v3.1.2 (flag liveness-model-v312 rollout=100%)
   --- VERIFICATION STATS ---
-    METHOD           ATTEMPTS   SUCCESS    FAIL_RATE
-    face_match       {bio_attempts}      72%        28%
-    fingerprint      1,240      81%        19%
-    voice_print      420        68%        32%  <<< WORST
-  --- FAILURE ANALYSIS ---
-    liveness_check_fail=42%  template_mismatch=31%
-    timeout=18%  device_incompatible=9%
-    overall_fail_rate={bio_fail_rate}%  threshold={bio_threshold}%
-  --- FALLBACK STATUS ---
-    fallback={bio_fallback}  pin_attempts_surge=340%
-    call_center_overflow=true  wait_time=22min
-  model_version=BioAuth-v3.1  last_retrain=2026-01-28
-  ACTION: enable_fallback=true  increase_tolerance=true  alert=AUTH-BIOMETRIC-DEGRADE
+    METHOD           ATTEMPTS   FAIL_RATE
+    face_match       {bio_attempts}      {bio_fail_rate}%  <<< DEGRADED
+    fingerprint      1,240      3.1%
+  --- FACE FAILURE BREAKDOWN ---
+    liveness_reject={liveness_share}%  template_mismatch=4%  timeout=1%
+    low_light_capture_share_of_rejects=71%
+  --- FALLBACK ---
+    fallback={bio_fallback}
+  ACTION: alert=AUTH-BIOMETRIC-DEGRADE
 correlation_attr:
-  key: deployment.biometric_sdk
-  value: bioauth-v3.1.2-rc1
+  key: auth.liveness_model
+  value: v3.1.2
 fault_params:
   bio_method: FACE_ID
-  bio_fail_rate: {uniform: [15.0, 45.0], round: 1}
+  bio_fail_rate: {uniform: [28.0, 41.0], round: 1}
   bio_threshold: 10.0
-  bio_attempts: {randint: [500, 3000]}
-  bio_fallback: {choice: [PIN, PASSWORD, SECURITY_QUESTIONS]}
+  bio_attempts: {randint: [1500, 3000]}
+  bio_fallback: {choice: [PIN, PASSWORD]}
+  liveness_share: {randint: [88, 95]}
 rca_clues:
   auth-gateway:
-    auth.biometric_fail_rate_pct: {uniform: [20, 40], round: 1}
-    auth.liveness_check_status: DEGRADED
-    auth.liveness_fail_share_pct: {uniform: [38, 48], round: 0}
+    auth.liveness_model: v3.1.2
+    auth.liveness_reject_share_pct: {randint: [88, 95]}
+    featureflag.rollout_pct: 100
   mobile-gateway:
-    gateway.biometric_sdk_version: BioAuth-v3.1
-    gateway.fallback_pin_surge_pct: {randint: [200, 500]}
+    gateway.fallback_pin_surge_pct: {randint: [600, 1500]}
   member-portal:
-    portal.auth_fallback_active: true
     portal.call_center_wait_min: {randint: [15, 35]}
   fraud-sentinel:
-    fraud.identity_verification_degraded: true
-    fraud.biometric_spoof_attempts: {randint: [0, 5]}
+    fraud.presentation_attack_indicators: 0
+error_services:
+- auth-gateway
+service_lag_seconds:
+  mobile-gateway: 20
+  member-portal: 60
+  fraud-sentinel: 60
+cascade_messages:
+  mobile-gateway:
+  - severity: WARN
+    message: '[MOBILE] login_fallback from=FACE_ID to={bio_fallback} reason=liveness_rejected attempts=2 status=FALLBACK'
+  member-portal:
+  - severity: INFO
+    message: '[PORTAL] contact_center_callback topic=cannot_sign_in wait_min=22 status=QUEUED'
+  fraud-sentinel:
+  - severity: INFO
+    message: '[FRAUD] identity_signal liveness_rejects=elevated presentation_attack_indicators=0 device_trust=enrolled status=NO_ATTACK_PATTERN'
+fault_scope:
+  cluster: banking-gke-cluster
+  workloads: [auth-gateway]
+infrastructure_events:
+- service: auth-gateway
+  severity: INFO
+  offset_seconds: -120
+  body: '[AUTH] featureflag_update flag=identity/liveness-model-v312 rollout 0% -> 100% variant=liveness-v3.1.2 updated_by=identity-release approval=CHG0048455 status=ACTIVE'
+  attributes:
+    operation: featureflag_update
+    featureflag.key: liveness-model-v312
+    featureflag.rollout_pct: 100
+    user.name: identity-release
+remediation_effects:
+  transition_seconds: 60
+  log_events:
+  - service: auth-gateway
+    severity: INFO
+    offset_seconds: 1
+    body: '[change-audit] change applied action=patch target=featureflag/liveness-model-v312 namespace=identity cmd="opsctl patch featureflag/liveness-model-v312 -n identity --rollout-pct 0" actor={actor} result="rollout 100% -> 0% (liveness v3.1.1)"'
+    attributes:
+      operation: change_applied
+      change.target: featureflag/liveness-model-v312
+      featureflag.rollout_pct: 0
+  steady_attributes:
+    auth-gateway:
+      auth.liveness_model: v3.1.1
+  verification:
+  - signal: auth_gateway.biometric_fail_rate_pct
+    from: metrics-generic.otel-default
+    where: resource.attributes.service.name == "auth-gateway"
+    field: metrics.auth_gateway.biometric_fail_rate_pct
+    expect: back in 2-4.5% (was 28-41%)
+    within_seconds: 120
+  - signal: liveness model serving face checks
+    from: logs.otel.banking
+    where: resource.attributes.service.name == "auth-gateway" AND attributes.operation == "biometric_status"
+    field: attributes.auth.liveness_model
+    expect: v3.1.1 on every line logged since the fix; v3.1.2 stops appearing
+    within_seconds: 60
+  - signal: AUTH-BIOMETRIC-DEGRADE lines
+    from: logs.otel.banking
+    where: body.text LIKE "*AUTH-BIOMETRIC-DEGRADE*"
+    expect: 0 new lines
+    within_seconds: 120
 business_impact:
   - kpi: business.mobile_logins_per_min
     value: {uniform: [148.8, 171.2]}

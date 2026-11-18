@@ -9,60 +9,128 @@ affected_services:
 cascade_services:
 - payment-engine
 - member-portal
-description: TLS certificate expiration causing cascading authentication and API failures
+description: The wildcard TLS certificate for the API and sign-in endpoints expired because cert-manager could not complete DNS validation for a month, so clients reject every connection.
 investigation_notes: |-
-  1. Check ACME auto-renewal failure — DNS_CHALLENGE_TIMEOUT indicates the DNS TXT record for domain validation could not be created or propagated. Verify Route53/Cloud DNS API permissions.
-  2. Impact assessment: mobile-gateway and auth-gateway are FAILING (ERR_CERT_DATE_INVALID) — all mobile app and authentication traffic is affected. member-portal is DEGRADED using pinned cert fallback. The nginx error log spikes with SSL handshake failures.
-  3. Emergency certificate issuance: use AWS ACM for immediate cert provisioning if the domain is AWS-hosted. For cross-cloud domains, use DigiCert rapid SSL: openssl req -new -key server.key -out server.csr.
-  4. Check cert-manager pod health in Kubernetes: kubectl get pods -n cert-manager -o wide. If cert-manager is DEGRADED, manually install the cert: kubectl create secret tls {cert_domain}-tls --cert=cert.pem --key=key.pem.
-  5. For mTLS-dependent services (payment-engine), the intermediate CA must also be valid. Check the full certificate chain: openssl s_client -connect api.retailbank.com:443 -showcerts.
-  6. Post-incident: implement certificate expiration monitoring at 30/14/7/3/1 day thresholds. Add cert-monitor alert rule to prevent future expiration cascades.
-remediation_action: emergency_cert_renewal
-error_message: '[INFRA] INFRA-CERT-EXPIRE: domain={cert_domain} expires_in={cert_hours_left}h serial={cert_serial} issuer={cert_issuer}
-  services_affected={cert_svc_count}'
+  1. Search logs.otel.banking for body.text containing INFRA-CERT-EXPIRE on auth-gateway and mobile-gateway: domain={cert_domain} with serial={cert_serial} from {cert_issuer} expired {cert_hours_left}h ago (negative means past notAfter) and {cert_svc_count} services serve it. metrics.mobile_gateway.tls_handshake_failures_per_min and metrics.auth_gateway.tls_handshake_failures_per_min normally read 0-4 and are in the thousands.
+  2. Confirm it is the certificate, not the network: clients fail with certificate expired / ERR_CERT_DATE_INVALID during the handshake, the tls_status line on both gateways carries attributes.tls.cert_status=EXPIRED and attributes.tls.cert_serial={cert_serial}, and nothing reaches the application code.
+  3. Find why renewal did not happen: cert-manager has tried to renew certificate wildcard-retailbank-com (namespace edge) since 30 days before expiry, and every ACME DNS-01 challenge failed with Route53 InvalidClientTokenId. The cert-manager Route 53 access key was rotated in AWS Secrets Manager last month, but ExternalSecret route53-dns01-credentials (namespace cert-manager) has refreshInterval 0, so the Kubernetes secret still holds the deleted key.
+  4. Both clusters are affected because the certificate is issued once on banking-eks-cluster and replicated to banking-gke-cluster for auth-gateway. Renewing alone fails again with the same credential, and installing a manually issued certificate leaves renewal broken for the next expiry.
+  5. Fix both: opsctl sync externalsecret/route53-dns01-credentials -n cert-manager pulls the current key, then opsctl renew certificate/wildcard-retailbank-com -n edge issues a new certificate. DNS-01 validation takes about a minute; the EKS ingress serves the new certificate first and the GKE copy follows on its next one-minute replication.
+  6. Recovery: tls.cert_status reads VALID with a new tls.cert_serial on both gateways, tls_handshake_failures_per_min back to 0-4, and no new INFRA-CERT-EXPIRE lines. Add an alert on cert-manager certificate_ready_status and on notAfter under 14 days.
+remediation_action: renew_wildcard_certificate
+remediation_command: |-
+  opsctl sync externalsecret/route53-dns01-credentials -n cert-manager
+  opsctl renew certificate/wildcard-retailbank-com -n edge
+error_message: '[INFRA] INFRA-CERT-EXPIRE: domain={cert_domain} expires_in={cert_hours_left}h serial={cert_serial} issuer={cert_issuer} services_affected={cert_svc_count} handshake_error=certificate_expired'
 stack_trace: |-
   === CERTIFICATE STATUS REPORT ===
-  domain={cert_domain}  issuer={cert_issuer}
+  domain={cert_domain}  issuer={cert_issuer}  certificate=edge/wildcard-retailbank-com
   --- CERTIFICATE DETAILS ---
     serial={cert_serial}
-    not_before=2025-11-20T00:00:00Z
-    not_after=2026-02-18T23:59:59Z
     remaining={cert_hours_left}h  <<< EXPIRED
-    subject=CN={cert_domain}
-    san={cert_domain},*.{cert_domain}
-  --- IMPACT ANALYSIS ---
-    services_affected={cert_svc_count}
-    SERVICE              TLS_STATUS    LAST_HANDSHAKE
-    mobile-gateway       FAILING       ERR_CERT_DATE_INVALID
-    auth-gateway         FAILING       ERR_CERT_DATE_INVALID
-    member-portal        DEGRADED      fallback_to_pinned_cert
-    payment-engine       DEGRADED      mTLS_validation_warn
-  --- AUTO-RENEWAL ---
-    acme_client=FAILED  last_attempt=2h_ago  error=DNS_CHALLENGE_TIMEOUT
-    manual_renewal=REQUIRED  cert_manager=DEGRADED
-  ACTION: emergency_cert_issue=true  notify_security=true  alert=INFRA-CERT-EXPIRE
+    san={cert_domain},retailbank.com
+  --- SERVED BY ---
+    mobile-gateway (banking-eks-cluster)   FAILING   certificate_expired
+    auth-gateway   (banking-gke-cluster)   FAILING   certificate_expired (replicated secret)
+  --- RENEWAL ---
+    cert-manager order=FAILED  challenge=dns-01  error="Route53 InvalidClientTokenId: The security token included in the request is invalid"
+    attempts_since_renewal_window={renewal_attempts}  credentials=cert-manager/route53-dns01-credentials (refreshInterval 0)
+  ACTION: alert=INFRA-CERT-EXPIRE
 correlation_attr:
-  key: deployment.cert_manager_version
-  value: cert-manager-v1.14.5-rc1
+  key: tls.cert_serial
+  value: 03F9A1C27B44E0D5
 fault_params:
-  cert_domain: {choice: [mobile.retailbank.com, api.retailbank.com, auth.retailbank.com, portal.retailbank.com, claims.retailbank.com]}
-  cert_hours_left: {uniform: [-6.0, -0.5], round: 1}
-  cert_serial: {format: "{n:08X}", n: {randint: [10000000, 99999999]}}
-  cert_issuer: "Let's_Encrypt"
-  cert_svc_count: {randint: [2, 6]}
+  cert_domain: '*.retailbank.com'
+  cert_hours_left: {uniform: [-0.5, -0.1], round: 2}
+  cert_serial: 03F9A1C27B44E0D5
+  cert_issuer: "Let's Encrypt R11"
+  cert_svc_count: {randint: [4, 6]}
+  renewal_attempts: {randint: [140, 180]}
 rca_clues:
   auth-gateway:
-    auth.tls_cert_remaining_hours: {uniform: [-6, -0.5], round: 1}
-    auth.acme_renewal_status: DNS_CHALLENGE_TIMEOUT
+    tls.cert_status: EXPIRED
+    tls.cert_serial: 03F9A1C27B44E0D5
   mobile-gateway:
+    tls.cert_status: EXPIRED
     gateway.tls_handshake_failures: {randint: [5000, 20000]}
-    gateway.cert_pinning_fallback: false
   payment-engine:
-    payment.mtls_validation_status: WARNING
-    payment.cert_chain_valid: false
+    payment.mobile_initiated_txn_drop_pct: {randint: [55, 80]}
   member-portal:
-    portal.cert_status: DEGRADED
-    portal.pinned_cert_fallback_active: true
+    portal.api_dependency_errors: {randint: [1000, 5000]}
+service_lag_seconds:
+  payment-engine: 30
+  member-portal: 30
+cascade_messages:
+  payment-engine:
+  - severity: WARN
+    message: '[PAY] channel_volume source=mobile txn_per_sec_drop_pct=70 reason=upstream_tls_failures status=DEGRADED'
+  member-portal:
+  - severity: WARN
+    message: '[PORTAL] upstream_error upstream=api.retailbank.com error="x509: certificate has expired or is not yet valid" status=502'
+fault_scope:
+  cluster: banking-eks-cluster
+  workloads: [mobile-gateway, auth-gateway]
+infrastructure_events:
+- service: mobile-gateway
+  severity: WARN
+  offset_seconds: -60
+  body: '[INFRA] cert-manager certificate=edge/wildcard-retailbank-com Ready=False reason=Expired notAfter passed; last renewal error: Route53 InvalidClientTokenId (secret cert-manager/route53-dns01-credentials)'
+  attributes:
+    operation: certificate_status
+    tls.cert_status: EXPIRED
+    tls.cert_serial: 03F9A1C27B44E0D5
+remediation_effects:
+  transition_seconds: 90
+  log_events:
+  - service: mobile-gateway
+    severity: INFO
+    offset_seconds: 1
+    body: '[change-audit] change applied action=sync target=externalsecret/route53-dns01-credentials namespace=cert-manager cmd="opsctl sync externalsecret/route53-dns01-credentials -n cert-manager" actor={actor} result="secret refreshed from Secrets Manager (current key)"'
+    attributes:
+      operation: change_applied
+      change.target: externalsecret/route53-dns01-credentials
+  - service: mobile-gateway
+    severity: INFO
+    offset_seconds: 2
+    body: '[change-audit] change applied action=renew target=certificate/wildcard-retailbank-com namespace=edge cmd="opsctl renew certificate/wildcard-retailbank-com -n edge" actor={actor} result="ACME order created (dns-01)"'
+    attributes:
+      operation: change_applied
+      change.target: certificate/wildcard-retailbank-com
+  - service: mobile-gateway
+    severity: INFO
+    offset_seconds: 60
+    body: '[INFRA] cert-manager certificate=edge/wildcard-retailbank-com Ready=True reason=Issued serial=04B7E2D91A6C3F08 notAfter=+90d'
+    attributes:
+      operation: certificate_status
+      tls.cert_status: VALID
+      tls.cert_serial: 04B7E2D91A6C3F08
+  verification:
+  - signal: mobile_gateway.tls_handshake_failures_per_min
+    from: metrics-generic.otel-default
+    where: resource.attributes.service.name == "mobile-gateway"
+    field: metrics.mobile_gateway.tls_handshake_failures_per_min
+    expect: back to 0-4 (was 6,000-15,000)
+    within_seconds: 150
+  - signal: auth_gateway.tls_handshake_failures_per_min
+    from: metrics-generic.otel-default
+    where: resource.attributes.service.name == "auth-gateway"
+    field: metrics.auth_gateway.tls_handshake_failures_per_min
+    expect: back to 0-4 (was 4,000-12,000)
+    within_seconds: 180
+  - signal: served certificate
+    from: logs.otel.banking
+    where: attributes.operation == "tls_status" AND resource.attributes.service.name IN ("mobile-gateway", "auth-gateway")
+    field: attributes.tls.cert_status
+    expect: VALID with serial 04B7E2D91A6C3F08 on both gateways
+    within_seconds: 180
+  - signal: INFRA-CERT-EXPIRE lines
+    from: logs.otel.banking
+    where: body.text LIKE "*INFRA-CERT-EXPIRE*"
+    expect: 0 new lines
+    within_seconds: 180
+generator_impact:
+  nginx_otel:
+    error_log_spike: 150.0
 business_impact:
   - kpi: business.active_digital_sessions
     value: {uniform: [4464.0, 5136.0]}
@@ -73,6 +141,3 @@ business_impact:
   - kpi: business.digital_transaction_pct
     factor: {uniform: [0.15, 0.4]}
 
-generator_impact:
-  nginx_otel:
-    error_log_spike: 150.0

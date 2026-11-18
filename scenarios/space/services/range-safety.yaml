@@ -58,15 +58,20 @@ steps:
           - 15.0
           - 95.0
           round: 1
+        check_result:
+          expr: "'FAIL' if (check['name'] == 'flight_termination_system' and 7 in all_active) or (check['name'] == 'tracking_radar' and 15 in all_active) else 'PASS'"
+        check_status:
+          expr: "'ANOMALY' if check_result == 'FAIL' else 'NOMINAL'"
     - log:
         level: INFO
-        message: '[RSO] seq={_check_seq} check={check[name]} margin={margin}% result=PASS status=NOMINAL'
+        message: '[RSO] seq={_check_seq} check={check[name]} margin={margin}% result={check_result} status={check_status}'
         attrs:
           safety.check:
             expr: check['name']
           safety.check_seq:
             var: _check_seq
-          safety.status: PASS
+          safety.status:
+            var: check_result
           safety.margin_pct:
             var: margin
           safety.description:
@@ -83,21 +88,81 @@ steps:
     value:
       var: _check_seq
     unit: checks
+# FTS-A self-test (ch 7): fails on fts-controller-v5.2.0-rc1; after the rollback the unit
+# reboots and passes again once its POST completes (~30 s).
 - sample:
+    fts_fixed:
+      expr: "7 in fixed_channels and 7 not in all_active"
+    fts_fw:
+      expr: "'fts-controller-v5.2.0-rc1' if 7 in all_active else 'fts-controller-v5.1.4'"
+    fts_pass:
+      expr: "0 if 7 in all_active else (0 if fts_fixed and since_fix.get(7, 0) < 30 else 1)"
+    fts_result:
+      expr: "'PASS' if fts_pass else ('FAIL' if 7 in all_active else 'POST_RUNNING')"
+    fts_code:
+      expr: "'0x00' if fts_pass else ('0x%02X' % rand.randint(16, 31) if 7 in all_active else '--')"
+    fts_status:
+      expr: "'NOMINAL' if fts_pass else 'ANOMALY'"
+- metric:
+    name: range_safety.fts_selftest_pass
+    value:
+      var: fts_pass
+    unit: '1'
+- log:
+    level: INFO
+    message: '[RSO] fts_selftest unit=FTS-A firmware={fts_fw} self_test={fts_result} code={fts_code} arm_state=SAFED inhibits=ON/ON status={fts_status}'
+    attrs:
+      operation: fts_selftest
+      safety.fts_unit: FTS-A
+      deployment.fts_firmware:
+        var: fts_fw
+      safety.fts_self_test:
+        var: fts_result
+      safety.fts_selftest_pass:
+        var: fts_pass
+      sensor.status:
+        var: fts_status
+# Tracking radars (ch 15): RDR-1 on rdr-track-v8.1.3-beta drops skin track; after the
+# rollback to rdr-track-v8.0.9 the track gap converges back under 250 ms.
+- sample:
+    trk_ramp:
+      expr: "min(1.0, elapsed.get(15, 0) / 45.0) if 15 in all_active else 0.0"
+    trk_fixed:
+      expr: "15 in fixed_channels and 15 not in all_active"
+    trk_conv:
+      expr: "min(1.0, since_fix.get(15, 0) / 60.0) if trk_fixed else 1.0"
+    gap_base:
+      uniform: [0.0, 120.0]
+    gap_fault:
+      uniform: [500.0, 5000.0]
+    gap_after:
+      uniform: [0.0, 150.0]
+    track_gap:
+      expr: "round(gap_base + (gap_fault - gap_base) * trk_ramp) if 15 in all_active else (round(gap_fault + (gap_after - gap_fault) * trk_conv) if trk_fixed else round(gap_base))"
+    tq_base:
+      uniform: [0.92, 1.0]
+    tq_fault:
+      uniform: [0.3, 0.6]
     track_quality:
-      uniform:
-      - 0.92
-      - 1.0
-      round: 4
+      expr: "round(tq_base + (tq_fault - tq_base) * trk_ramp, 4) if 15 in all_active else (round(tq_fault + (tq_base - tq_fault) * trk_conv, 4) if trk_fixed else round(tq_base, 4))"
     radar_count:
-      randint:
-      - 2
-      - 4
+      expr: "2 if 15 in all_active else 3"
+    rdr_fw:
+      expr: "'rdr-track-v8.1.3-beta' if 15 in all_active else 'rdr-track-v8.0.9'"
+    fusion_state:
+      expr: "'COAST' if track_gap >= 250 else 'TRACK'"
+    trk_status:
+      expr: "'ANOMALY' if 15 in all_active or track_gap >= 250 else 'NOMINAL'"
 - metric:
     name: range_safety.track_quality
     value:
       var: track_quality
     unit: ratio
+- metric:
+    name: range_safety.track_gap_ms
+    value:
+      var: track_gap
+    unit: ms
 - metric:
     name: range_safety.active_radars
     value:
@@ -105,11 +170,20 @@ steps:
     unit: count
 - log:
     level: INFO
-    message: '[RSO] tracking radars={radar_count} quality={track_quality} corridor=WITHIN status=NOMINAL'
+    message: '[RSO] tracking radars={radar_count}/3 quality={track_quality} rdr1_fw={rdr_fw} rdr1_track_gap={track_gap}ms fusion={fusion_state} corridor=WITHIN status={trk_status}'
     attrs:
       operation: tracking_status
       safety.radar_count:
         var: radar_count
       safety.track_quality:
         var: track_quality
-      safety.status: NOMINAL
+      safety.track_gap_ms:
+        var: track_gap
+      safety.fusion_state:
+        var: fusion_state
+      infra.radar_firmware:
+        var: rdr_fw
+      safety.status:
+        var: trk_status
+      sensor.status:
+        var: trk_status

@@ -8,7 +8,7 @@ namespace: azureai
 scenario_icon: 🤖
 sort_order: 11
 nominal_label: ONLINE
-schema_version: '1.2'
+schema_version: '1.3'
 apm_ml_bucket_span: 1m
 generators:
   azure_ai_foundry: true

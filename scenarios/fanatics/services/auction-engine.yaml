@@ -31,24 +31,59 @@ db_operations:
 emit_fault_logs: true
 kpi_emitter: false
 steps:
+# Bid processing (channel 12: auction-engine revision 47 built with the Go race detector).
+# The -race build is slow from its first request (step, ~15s to full effect). The rollback is a
+# rolling restart: the median recovers as pods are replaced (~60s), the tail (p95/p99) stays high
+# until the last slow pod is gone (20-90s), and the backlog drains after that (60-150s).
+# Queue depth follows Little's law at full fault: ~500 bids/min (8.3/s) x ~2.1s mean = ~17 bids.
 - sample:
-    active_auctions:
-      randint:
-      - 50
-      - 250
-    bids_per_min:
-      randint:
-      - 200
-      - 1500
+    pods_replaced:
+      expr: "min(1.0, since_fix.get(12, 0) / 60.0) if 12 in fixed_channels else 0.0"
+    g_med:
+      expr: "min(1.0, elapsed.get(12, 0) / 15.0) if 12 in all_active else (1.0 - pods_replaced if 12 in fixed_channels else 0.0)"
+    g_tail:
+      expr: "min(1.0, elapsed.get(12, 0) / 15.0) if 12 in all_active
+        else (1.0 - min(1.0, max(0.0, since_fix.get(12, 0) - 20.0) / 70.0) if 12 in fixed_channels else 0.0)"
+    g_queue:
+      expr: "min(1.0, elapsed.get(12, 0) / 45.0) if 12 in all_active
+        else (1.0 - min(1.0, max(0.0, since_fix.get(12, 0) - 60.0) / 90.0) if 12 in fixed_channels else 0.0)"
+    p50_c:
+      expr: "18.0 + 1782.0 * g_med"
+    p95_c:
+      expr: "45.0 + 3555.0 * g_tail"
+    p99_c:
+      expr: "90.0 + 4810.0 * g_tail"
+    bid_latency_p50_val:
+      expr: "round(max(5.0, p50_c + rand.gauss(0, 0.03 * p50_c)), 1)"
+    bid_latency_p95_val:
+      expr: "round(max(10.0, p95_c + rand.gauss(0, 0.03 * p95_c)), 1)"
+    bid_latency_p99_val:
+      expr: "round(max(20.0, p99_c + rand.gauss(0, 0.03 * p99_c)), 1)"
     bid_latency_ms:
-      uniform:
-      - 8.0
-      - 45.0
-      round: 1
+      expr: "round(bid_latency_p50_val * 1.15, 1)"
+    bids_c:
+      expr: "900.0 - 400.0 * g_med"
+    bids_per_min:
+      expr: "max(0, int(bids_c + rand.gauss(0, 0.04 * bids_c)))"
+    queue_c:
+      expr: "1.5 + 15.7 * g_queue"
+    bid_queue_val:
+      expr: "max(0, int(round(queue_c + rand.gauss(0, max(0.8, 0.1 * queue_c)))))"
+    busy_c:
+      expr: "22.0 + 75.0 * g_med"
+    goroutine_busy_val:
+      expr: "round(min(100.0, max(1.0, busy_c + rand.gauss(0, 1.2))), 1)"
+    active_auctions:
+      expr: "max(1, int(rand.gauss(150, 12)))"
     websocket_connections:
-      randint:
-      - 2000
-      - 8000
+      expr: "max(100, int(rand.gauss(5000, 150)))"
+    auction_status:
+      expr: "'ANOMALY' if bid_latency_p99_val > 200.0 else 'NOMINAL'"
+    auction_pipeline:
+      expr: "'saturated' if goroutine_busy_val > 90.0 else 'healthy'"
+    auction_runtime_rev:
+      expr: "'go1.22-race-detect-enabled' if 12 in all_active
+        else ('go1.22-race-detect-enabled' if 12 in fixed_channels and rand.random() > pods_replaced else 'go1.22-release')"
 - metric:
     name: auction.active_auctions
     value:
@@ -65,14 +100,40 @@ steps:
       var: bid_latency_ms
     unit: ms
 - metric:
+    name: auction.bid_latency_p50_ms
+    value:
+      var: bid_latency_p50_val
+    unit: ms
+- metric:
+    name: auction.bid_latency_p95_ms
+    value:
+      var: bid_latency_p95_val
+    unit: ms
+- metric:
+    name: auction.bid_latency_p99_ms
+    value:
+      var: bid_latency_p99_val
+    unit: ms
+- metric:
+    name: auction.bid_queue_depth
+    value:
+      var: bid_queue_val
+    unit: bids
+- metric:
+    name: auction.goroutine_pool_busy_pct
+    value:
+      var: goroutine_busy_val
+    unit: '%'
+- metric:
     name: auction.websocket_connections
     value:
       var: websocket_connections
     unit: connections
 - log:
     level: INFO
-    message: level=info ts=2025-01-15T14:32:01.234Z caller=auction.go:47 msg="health" active_auctions={active_auctions} bids_per_min={bids_per_min}
-      latency_ms={bid_latency_ms} ws_connections={websocket_connections}
+    message: level=info caller=auction.go:47 msg="health" active_auctions={active_auctions} bids_per_min={bids_per_min}
+      p50_ms={bid_latency_p50_val} p95_ms={bid_latency_p95_val} p99_ms={bid_latency_p99_val} sla_p99_ms=200 queue_depth={bid_queue_val}
+      pool_busy_pct={goroutine_busy_val} ws_connections={websocket_connections} runtime={auction_runtime_rev} status={auction_status}
     attrs:
       operation: auction_health
       auction.active_count:
@@ -81,11 +142,24 @@ steps:
         var: bids_per_min
       auction.latency_ms:
         var: bid_latency_ms
+      auction.latency_p99_ms:
+        var: bid_latency_p99_val
+      auction.bid_queue_depth:
+        var: bid_queue_val
+      auction.goroutine_pool_busy_pct:
+        var: goroutine_busy_val
       auction.ws_connections:
         var: websocket_connections
+      auction.status:
+        var: auction_status
+      deployment.auction_runtime:
+        var: auction_runtime_rev
 - log:
     level: INFO
-    message: level=info ts=2025-01-15T14:32:01.456Z caller=pipeline.go:112 msg="pipeline_check" status=healthy queues_draining=true
+    message: level=info caller=pipeline.go:112 msg="pipeline_check" status={auction_pipeline} queue_depth={bid_queue_val} workers_busy_pct={goroutine_busy_val}
     attrs:
       operation: pipeline_check
-      check.result: PASS
+      check.result:
+        expr: "'FAIL' if goroutine_busy_val > 90.0 else 'PASS'"
+      auction.bid_queue_depth:
+        var: bid_queue_val

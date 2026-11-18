@@ -48,20 +48,11 @@ steps:
     zone:
       choice: ZONES
     queries_per_sec:
-      randint:
-      - 5000
-      - 30000
+      expr: "int(max(8000.0, rand.gauss(17500.0, 1200.0)))"
+    ksk_tail:
+      expr: "(1.0 - min(1.0, since_fix.get(10, 0) / 240.0)) ** 2 if 10 in fixed_channels else 0.0"
     latency_avg_ms:
-      if_active:
-        uniform:
-        - 50.0
-        - 500.0
-        round: 2
-      else:
-        uniform:
-        - 1.0
-        - 5.0
-        round: 2
+      expr: "round(max(1.0, rand.gauss(2.8, 0.4)) + max(0.0, rand.gauss(120.0, 15.0)) * min(1.0, elapsed.get(10, 0) / 60.0), 2) if 10 in all_active else round(max(1.0, rand.gauss(2.8, 0.4)) + 120.0 * ksk_tail * max(0.0, rand.gauss(1.0, 0.08)), 2)"
 - metric:
     name: dns.queries_per_sec
     value:
@@ -84,54 +75,53 @@ steps:
       dns.latency_avg:
         var: latency_avg_ms
 - sample:
+    dnssec_zone: gcpnet-public-zone
     dnssec_state:
-      if_active:
-        choice: DNSSEC_ERROR_STATES
-      else: 'ON'
+      expr: "'VALIDATION_ERROR' if 10 in all_active else 'ON'"
     validation_errors:
-      if_active:
-        randint:
-        - 50
-        - 500
-      else:
-        randint:
-        - 0
-        - 2
+      expr: "int(max(100.0, min(450.0, rand.gauss(270.0, 40.0))) * min(1.0, elapsed.get(10, 0) / 45.0)) if 10 in all_active else (int(270.0 * ksk_tail * max(0.0, rand.gauss(1.0, 0.08))) + rand.randint(0, 1) if 10 in fixed_channels else rand.randint(0, 5) // 5)"
+    dnssec_status:
+      expr: "'ANOMALY' if 10 in all_active or validation_errors > 10 else 'NOMINAL'"
+    active_ksk:
+      expr: "'ksk-2026q4-rotation' if 10 in all_active else 'ksk-2026q2'"
+    ds_match:
+      expr: "'false' if 10 in all_active else 'true'"
 - metric:
-    name: dns.dnssec_validation_errors
+    name: dns.dnssec_validation_failures
     value:
       var: validation_errors
     unit: errors
-- log:
+- when: "dnssec_status == 'NOMINAL'"
+  log: &dnssec_status_log
     level: INFO
-    message: 'cloud-dns: zone={zone} dnssec_state={dnssec_state} validation_errors={validation_errors}/min algorithm=RSASHA256'
+    message: 'cloud-dns: zone={dnssec_zone} dnssec_state={dnssec_state} validation_failures={validation_errors}/min active_ksk={active_ksk} ds_matches_active_ksk={ds_match} rrsig=VALID algorithm=RSASHA256 status={dnssec_status}'
     attrs:
       operation: dnssec_status
+      dns.zone:
+        var: dnssec_zone
       dns.dnssec_state:
         var: dnssec_state
-      dns.validation_errors:
+      dns.validation_failures:
         var: validation_errors
+      dns.active_ksk_id:
+        var: active_ksk
+      dns.ds_matches_active_ksk:
+        var: ds_match
+      dns.status:
+        var: dnssec_status
+- when: "dnssec_status != 'NOMINAL'"
+  log:
+    <<: *dnssec_status_log
+    level: WARN
 - sample:
     record_type:
       choice: RECORD_TYPES
     nxdomain_count:
-      if_active:
-        randint:
-        - 100
-        - 1000
-      else:
-        randint:
-        - 0
-        - 10
+      randint:
+      - 0
+      - 10
     servfail_count:
-      if_active:
-        randint:
-        - 50
-        - 300
-      else:
-        randint:
-        - 0
-        - 2
+      expr: "int(max(60.0, min(280.0, rand.gauss(170.0, 25.0))) * min(1.0, elapsed.get(10, 0) / 45.0)) + rand.randint(0, 2) if 10 in all_active else (int(170.0 * ksk_tail * max(0.0, rand.gauss(1.0, 0.08))) + rand.randint(0, 2) if 10 in fixed_channels else rand.randint(0, 2))"
 - metric:
     name: dns.nxdomain_count
     value:
@@ -142,7 +132,8 @@ steps:
     value:
       var: servfail_count
     unit: responses
-- log:
+- when: "servfail_count <= 20"
+  log: &resolution_stats_log
     level: INFO
     message: 'cloud-dns: record_type={record_type} nxdomain={nxdomain_count} servfail={servfail_count} zone={zone}'
     attrs:
@@ -153,22 +144,74 @@ steps:
         var: nxdomain_count
       dns.servfail:
         var: servfail_count
+- when: "servfail_count > 20"
+  log:
+    <<: *resolution_stats_log
+    level: WARN
 - sample:
     record_count:
-      randint:
-      - 200
-      - 1500
+      expr: "int(rand.gauss(842.0, 1.5))"
+    prop_zone: gcpnet-prod-zone
+    prop_time_s:
+      expr: "round(32.0 + (max(130.0, min(590.0, rand.gauss(330.0, 70.0))) - 32.0) * min(1.0, elapsed.get(11, 0) / 30.0), 1) if 11 in all_active else (round(max(20.0, min(45.0, rand.gauss(32.0, 3.0))) + 300.0 * (1.0 - min(1.0, since_fix.get(11, 0) / 60.0)) ** 2 * max(0.0, rand.gauss(1.0, 0.05)), 1) if 11 in fixed_channels else round(max(20.0, min(45.0, rand.gauss(32.0, 3.0))), 1))"
+    servers_updated:
+      expr: "(4 - int(round(min(1.0, elapsed.get(11, 0) / 30.0) * max(1.0, min(3.0, round(rand.gauss(2.0, 0.6))))))) if 11 in all_active else (int(round(2 + 2 * min(1.0, since_fix.get(11, 0) / 45.0))) if 11 in fixed_channels else 4)"
+    publisher_blocked:
+      expr: "'true' if 11 in all_active else 'false'"
+    blocked_writers:
+      expr: "int(max(5.0, min(20.0, rand.gauss(12.0, 3.0))) * min(1.0, elapsed.get(11, 0) / 30.0)) if 11 in all_active else 0"
+    pending_changes:
+      expr: "int(max(5.0, min(20.0, rand.gauss(12.0, 3.0))) * min(1.0, elapsed.get(11, 0) / 30.0)) if 11 in all_active else (int(round(12.0 * (1.0 - min(1.0, since_fix.get(11, 0) / 45.0)))) if 11 in fixed_channels else 0)"
+    prop_status:
+      expr: "'ANOMALY' if 11 in all_active or prop_time_s > 60.0 or pending_changes > 0 else 'NOMINAL'"
+- metric:
+    name: dns.record_store_blocked_writers
+    value:
+      var: blocked_writers
+    unit: writers
+- metric:
+    name: dns.pending_changes
+    value:
+      var: pending_changes
+    unit: changes
 - metric:
     name: dns.zone_record_count
     value:
       var: record_count
     unit: records
-- log:
+- metric:
+    name: dns.propagation_time_s
+    value:
+      var: prop_time_s
+    unit: s
+- metric:
+    name: dns.servers_updated
+    value:
+      var: servers_updated
+    unit: servers
+- when: "prop_status == 'NOMINAL'"
+  log: &zone_health_log
     level: INFO
-    message: 'cloud-dns: zone={zone} records={record_count} pending_changes=0 propagation_status=DONE'
+    message: 'cloud-dns: zone={prop_zone} records={record_count} pending_changes={pending_changes} propagation_time={prop_time_s}s servers_updated={servers_updated}/4 publisher_blocked={publisher_blocked} blocked_writers={blocked_writers} status={prop_status}'
     attrs:
       operation: zone_health
       dns.zone:
-        var: zone
+        var: prop_zone
       dns.record_count:
         var: record_count
+      dns.pending_changes:
+        var: pending_changes
+      dns.propagation_time_s:
+        var: prop_time_s
+      dns.servers_updated:
+        var: servers_updated
+      dns.publisher_blocked:
+        var: publisher_blocked
+      dns.record_store_blocked_writers:
+        var: blocked_writers
+      dns.status:
+        var: prop_status
+- when: "prop_status != 'NOMINAL'"
+  log:
+    <<: *zone_health_log
+    level: WARN

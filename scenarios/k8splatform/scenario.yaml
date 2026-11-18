@@ -5,7 +5,7 @@ scenario_description: Internal platform team running a shared multi-tenant EKS p
   nodes, control plane, capacity, registry) caught from component logs.
 namespace: platform
 scenario_icon: ☸️
-sort_order: 1
+sort_order: 0
 nominal_label: HEALTHY
 schema_version: '1.3'
 apm_ml_bucket_span: 5m
@@ -448,6 +448,10 @@ assessment_tool_config:
   description: 'Platform readiness assessment for the shared EKS clusters. Evaluates DNS resolution, ingress health, certificate
     renewal, node readiness, control-plane latency, capacity headroom, registry and log pipeline health against their own
     baselines, and returns the evidence for each. Log message field: body.text (never use ''body'' alone).'
+# Exec dashboard overview: infra services without traces show an error-log ratio
+# (instead of N/A), and the clusters with no pinned services show per-cluster health.
+dashboard_log_error_services: [ingress-nginx, coredns, cert-manager, cluster-autoscaler, external-secrets, harbor-registry]
+dashboard_cluster_health_tiles: true
 executive_kpi_emitter_service_name: tenant-gateway
 executive_dashboard_intro: '**Platform service levels** — public API, cluster services, delivery and capacity for the shared
   EKS platform. `business.*` gauges reported by the platform SLO exporter.'

@@ -9,14 +9,18 @@ affected_services:
 cascade_services:
 - mission-control
 description: Telemetry packets failing integrity checks during relay
-investigation_notes: 'Root cause: burst error pattern on CRC32-C failures indicates physical layer issue — likely NIC firmware
-  bug, faulty SFP transceiver, or fiber micro-bend causing intermittent bit errors. Burst errors (vs random) rule out EMI
-  and point to a specific link segment. Check NIC firmware version against known-good baseline. Inspect SFP optical power
-  levels (TX and RX) for the affected route — RX power below -18dBm indicates a dirty connector or damaged fiber. Verify no
-  recent rack maintenance that could have disturbed fiber runs. Remediation: replace suspect SFP transceiver on the affected
-  route, clean fiber connectors with IPA wipes. If NIC firmware is outdated, schedule firmware update (NIC_FW_UPDATE {route_id}).
-  Enable relay packet retransmission (RLY_RETRANSMIT ENABLE) as interim mitigation.'
+investigation_notes: 'Root cause: the SFP transceiver on route {route_id} (FTRJ1319P1BTL-v2, serial FTRJ1319P1BTL-A7731) is
+  failing. Its receive power was already marginal at -14.2dBm a couple of minutes before the first CRC failures (Telemetry Relay
+  logged the DOM warning) and has since fallen below -18dBm. Burst error pattern on CRC32-C failures indicates a physical layer
+  issue; burst errors (vs random) rule out EMI and point to this one link segment. The other routes (GCP-AZ-01, AWS-AZ-01) are clean,
+  so NIC firmware and the relay software are not the cause. The link_status log shows the falling sfp_rx and the CRC failure
+  rate. Remediation: swap the transceiver on {route_id} for a spare (opsctl replace transceiver/aws-gcp-01). Recovery: the
+  link retrains on the spare; relay.corrupted_frames_pct falls back to ~0% within about 30 seconds, sfp_rx returns to about
+  -6dBm, the link_status log shows transceiver=FTRJ1319P1BTL-B2204 status=NOMINAL and the RLY-PACKET-CORRUPT errors stop.
+  Afterwards clean the fiber connectors with IPA wipes and check for recent rack maintenance that could have disturbed fiber runs.'
 remediation_action: reset_relay_link
+remediation_command: |-
+  opsctl replace transceiver/aws-gcp-01
 error_message: '[RLY] RLY-PACKET-CORRUPT: route={route_id} corrupted={corrupted_count}/{total_count} crc_fail_rate={corrupted_count}pkt'
 stack_trace: |-
   == RELAY DIAGNOSTIC REPORT == INTEGRITY CHECKER ==
@@ -55,3 +59,56 @@ business_impact:
     factor: {uniform: [0.55, 0.80]}
   - kpi: business.spacecraft_health_index_0_100
     factor: {uniform: [0.70, 0.88]}
+cascade_messages:
+  mission-control:
+  - severity: WARN
+    message: '[MCC] telemetry frames rejected: {corrupted_count} of {total_count} packets on relay route {route_id} failed CRC,
+      gaps in the vehicle telemetry stream'
+  - severity: WARN
+    message: '[MCC] downlink integrity caution: relay route {route_id} burst CRC errors, requesting frame retransmission'
+fault_scope:
+  workloads: [telemetry-relay, sensor-validator]
+infrastructure_events:
+- service: telemetry-relay
+  severity: WARN
+  offset_seconds: -120
+  body: '[RLY] DOM warning link=AWS-GCP-01 transceiver=FTRJ1319P1BTL-A7731 sfp_rx=-14.2dBm low_warn=-14.0dBm low_alarm=-18.0dBm
+    status=MARGINAL'
+  attributes:
+    operation: link_status
+    relay.route_id: AWS-GCP-01
+    relay.sfp_rx_power_dbm: -14.2
+    relay.transceiver_serial: FTRJ1319P1BTL-A7731
+remediation_effects:
+  log_events:
+  - service: mission-control
+    severity: INFO
+    offset_seconds: 1
+    body: '[MCC] CMD ACCEPTED opsctl replace transceiver/aws-gcp-01 from {actor}: AWS-GCP-01 SFP FTRJ1319P1BTL-A7731 -> spare
+      FTRJ1319P1BTL-B2204'
+  - service: telemetry-relay
+    severity: INFO
+    offset_seconds: 25
+    body: '[RLY] link AWS-GCP-01 retrained on transceiver FTRJ1319P1BTL-B2204 sfp_rx=-5.9dBm crc_fail=0.00% status=NOMINAL'
+    attributes:
+      operation: link_status
+      relay.route_id: AWS-GCP-01
+      relay.transceiver_serial: FTRJ1319P1BTL-B2204
+  verification:
+  - signal: relay.corrupted_frames_pct
+    from: metrics-generic.otel-default
+    where: resource.attributes.service.name == "telemetry-relay"
+    field: metrics.relay.corrupted_frames_pct
+    expect: 'back to ~0% (below 0.1%); was 2-20%'
+    within_seconds: 60
+  - signal: RLY-PACKET-CORRUPT errors
+    from: logs.otel.nova7
+    where: body.text LIKE "*RLY-PACKET-CORRUPT*"
+    expect: '0 new lines'
+    within_seconds: 60
+  - signal: AWS-GCP-01 transceiver
+    from: logs.otel.nova7
+    where: resource.attributes.service.name == "telemetry-relay"
+    field: attributes.relay.transceiver_serial
+    expect: 'FTRJ1319P1BTL-B2204 (the spare) on the latest link_status lines'
+    within_seconds: 60

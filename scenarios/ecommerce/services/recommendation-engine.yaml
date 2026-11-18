@@ -28,28 +28,111 @@ db_operations:
   - SELECT item_id, embedding_vector FROM item_embeddings WHERE item_id IN (?) AND model_version = ?
 emit_fault_logs: true
 kpi_emitter: false
+# The *_hold values remember the last reading while a fault is active, so the reading
+# converges back from where it was when the fix landed instead of from a fixed number.
+state:
+  hit13_hold:
+    init: 68.0
+  rss_hold:
+    init: 6150.0
+  cache_hit_hold:
+    init: 86.0
+  cache_keys_hold:
+    init: 1900000.0
+  reco_restarts:
+    init: 3
+  oom_seen:
+    init: 0
 steps:
+# Ch 13: reco-ranker v9 serves 100% of traffic. The online hit rate is a rolling window, so it
+# slides from 68% to about 32% over ~120s, and back over ~120s once the pods reload v8.
+# PSI is measured against the serving model's own training snapshot, so it follows the model.
+- sample:
+    ramp13:
+      expr: "min(1.0, max(0.0, elapsed.get(13, 0) - lag.get(13, 0)) / 120.0)"
+    model_version:
+      expr: "'reco-ranker-v9' if 13 in all_active else ('reco-ranker-v9' if (13 in fixed_channels and rand.random() < max(0.0, 1.0 - since_fix.get(13, 0) / 30.0)) else 'reco-ranker-v8')"
+    personalization_hit_rate_pct:
+      expr: "round(68.0 - 36.0 * ramp13 + rand.gauss(0, 1.5), 2) if 13 in all_active else (round(hit13_hold + (68.0 - hit13_hold) * min(1.0, since_fix.get(13, 0) / 120.0) + rand.gauss(0, 1.5), 2) if 13 in fixed_channels else round(68.0 + rand.gauss(0, 1.5), 2))"
+    reco_ctr_pct:
+      expr: "round(4.2 * (0.5 + 0.5 * personalization_hit_rate_pct / 68.0) + rand.gauss(0, 0.04), 2)"
+    feature_psi:
+      expr: "round(0.41 + rand.gauss(0, 0.02), 3) if model_version == 'reco-ranker-v9' else round(max(0.01, 0.04 + rand.gauss(0, 0.006)), 3)"
+    model_status:
+      expr: "'ANOMALY' if personalization_hit_rate_pct < 60.0 else 'NOMINAL'"
+- counter:
+    state_key: hit13_hold
+    by:
+      expr: "(personalization_hit_rate_pct - hit13_hold) if 13 in all_active else 0.0"
+# Ch 20: revision 87 put request_id in the cache key, so every request writes a key that is
+# never read again. Junk keys fill Redis to maxmemory and allkeys-lru evicts the per-user
+# entries: hit rate 86% -> ~8% over ~120s, keyspace 1.9M -> ~40M. After the rollback the
+# per-user keys refill (~240s) and LRU evicts the idle junk keys (~300s).
+- sample:
+    ramp20:
+      expr: "min(1.0, max(0.0, elapsed.get(20, 0) - lag.get(20, 0)) / 120.0)"
+    keys20:
+      expr: "min(1.0, max(0.0, elapsed.get(20, 0) - lag.get(20, 0)) / 240.0)"
+    cache_key_format:
+      expr: "'reco:{user_id}:{context}:{request_id}' if 20 in all_active else ('reco:{user_id}:{context}:{request_id}' if (20 in fixed_channels and rand.random() < max(0.0, 1.0 - since_fix.get(20, 0) / 40.0)) else 'reco:{user_id}:{context}')"
+    cache_hit_rate_pct:
+      expr: "round(min(99.0, max(0.5, 86.0 - 78.0 * ramp20 + rand.gauss(0, 1.0))), 2) if 20 in all_active else (round(min(99.0, max(0.5, cache_hit_hold + (86.0 - cache_hit_hold) * min(1.0, since_fix.get(20, 0) / 240.0) + rand.gauss(0, 1.0))), 2) if 20 in fixed_channels else round(min(99.0, 86.0 + rand.gauss(0, 1.0)), 2))"
+    cache_keys:
+      expr: "round(1900000.0 + 38100000.0 * keys20 + rand.gauss(0, 20000.0)) if 20 in all_active else (round(cache_keys_hold + (1900000.0 - cache_keys_hold) * min(1.0, since_fix.get(20, 0) / 300.0) + rand.gauss(0, 20000.0)) if 20 in fixed_channels else round(1900000.0 + rand.gauss(0, 20000.0)))"
+    cache_status:
+      expr: "'ANOMALY' if cache_hit_rate_pct < 75.0 else 'NOMINAL'"
+- counter:
+    state_key: cache_hit_hold
+    by:
+      expr: "(cache_hit_rate_pct - cache_hit_hold) if 20 in all_active else 0.0"
+- counter:
+    state_key: cache_keys_hold
+    by:
+      expr: "(cache_keys - cache_keys_hold) if 20 in all_active else 0.0"
+# Ch 19: reco-inference revision 22 set EMBEDDING_CACHE_MAX_MB=0 (unbounded). Each pod backfills
+# its hot items right after start (~6,200MB RSS) and then keeps growing about 24MB/s until the
+# 10,240MB cgroup limit, where it is OOMKilled (exit 137) and restarts: a 165s sawtooth.
+# After the rollback the pods restart once with the 4,096MB bound and level off within ~60s.
+- sample:
+    oom_e:
+      expr: "max(0.0, elapsed.get(19, 0) - lag.get(19, 0)) if 19 in all_active else 0.0"
+    oom_cycle:
+      expr: "int(oom_e / 165.0)"
+    oom_new:
+      expr: "max(0, oom_cycle - oom_seen) if 19 in all_active else 0"
+    oom_seen_delta:
+      expr: "oom_new if 19 in all_active else -oom_seen"
+    embedding_cache_max_mb:
+      expr: "0 if 19 in all_active else (0 if (19 in fixed_channels and rand.random() < max(0.0, 1.0 - since_fix.get(19, 0) / 60.0)) else 4096)"
+    memory_rss_mb:
+      expr: "round(min(10240.0, 6200.0 + 4040.0 * (oom_e % 165.0) / 165.0 + rand.gauss(0, 40.0))) if 19 in all_active else (round(rss_hold + (6150.0 - rss_hold) * min(1.0, since_fix.get(19, 0) / 60.0) + rand.gauss(0, 60.0)) if 19 in fixed_channels else round(6150.0 + rand.gauss(0, 60.0)))"
+    memory_util_pct:
+      expr: "round(memory_rss_mb / 10240.0 * 100.0, 1)"
+    cold_pod_ms:
+      expr: "650.0 * max(0.0, 1.0 - (oom_e % 165.0) / 15.0) if (19 in all_active and oom_e >= 165.0) else 0.0"
+    memory_status:
+      expr: "'ANOMALY' if (memory_rss_mb > 6600 or embedding_cache_max_mb == 0) else 'NOMINAL'"
+- counter:
+    state_key: reco_restarts
+    by:
+      expr: "oom_new"
+- counter:
+    state_key: oom_seen
+    by:
+      expr: "oom_seen_delta"
+- counter:
+    state_key: rss_hold
+    by:
+      expr: "(memory_rss_mb - rss_hold) if 19 in all_active else 0.0"
+# Request-level readings: cache misses go to cold inference (p99 ~3s), and pods restarted
+# after an OOM serve cold for their first ~15s.
 - sample:
     requests_per_sec:
-      uniform:
-      - 2500.0
-      - 8500.0
-      round: 1
+      expr: "round(5200.0 + rand.gauss(0, 120.0), 1)"
+    miss_frac:
+      expr: "max(0.0, min(1.0, (86.0 - cache_hit_rate_pct) / 78.0))"
     latency_p99_ms:
-      uniform:
-      - 45.0
-      - 280.0
-      round: 1
-    personalization_hit_rate_pct:
-      uniform:
-      - 68.0
-      - 92.0
-      round: 2
-    cache_hit_rate_pct:
-      uniform:
-      - 80.0
-      - 95.0
-      round: 2
+      expr: "round(max(60.0, 120.0 + rand.gauss(0, 6.0) + 3000.0 * miss_frac * (1.0 + rand.gauss(0, 0.04)) + cold_pod_ms), 1)"
 - metric:
     name: recommendations.requests_per_sec
     value:
@@ -70,6 +153,21 @@ steps:
     value:
       var: cache_hit_rate_pct
     unit: '%'
+- metric:
+    name: recommendations.cache_keys
+    value:
+      var: cache_keys
+    unit: keys
+- metric:
+    name: recommendations.memory_rss_mb
+    value:
+      var: memory_rss_mb
+    unit: MB
+- metric:
+    name: recommendations.container_restarts
+    value:
+      var: reco_restarts
+    unit: restarts
 - log:
     level: INFO
     message: reco.health rps={requests_per_sec} p99_ms={latency_p99_ms} hit_rate={personalization_hit_rate_pct}% cache_hit={cache_hit_rate_pct}%
@@ -83,18 +181,52 @@ steps:
         var: personalization_hit_rate_pct
       reco.cache_hit_rate_pct:
         var: cache_hit_rate_pct
-- sample:
-    heap_used_mb:
-      randint:
-      - 2000
-      - 7500
 - log:
     level: INFO
-    message: reco.model_health heap_used={heap_used_mb}MB heap_max=10240MB
+    message: reco.model_serving model={model_version} hit_rate_2m={personalization_hit_rate_pct}% ctr={reco_ctr_pct}%
+      feature_psi={feature_psi} zero_valued_features=0 status={model_status}
+    attrs:
+      operation: model_serving
+      reco.model_version:
+        var: model_version
+      reco.hit_rate_pct:
+        var: personalization_hit_rate_pct
+      reco.ctr_pct:
+        var: reco_ctr_pct
+      reco.feature_psi:
+        var: feature_psi
+      reco.zero_valued_feature_count: 0
+      reco.model_status:
+        var: model_status
+- log:
+    level: INFO
+    message: reco.model_health rss={memory_rss_mb}MB limit=10240MB util={memory_util_pct}% embedding_cache_max_mb={embedding_cache_max_mb}
+      restarts={reco_restarts} status={memory_status}
     attrs:
       operation: model_health
-      reco.heap_used_mb:
-        var: heap_used_mb
-      reco.heap_max_mb: 10240
-      reco.heap_utilization_pct:
-        expr: round(heap_used_mb / 10240 * 100, 1)
+      reco.memory_rss_mb:
+        var: memory_rss_mb
+      reco.memory_limit_mb: 10240
+      reco.memory_utilization_pct:
+        var: memory_util_pct
+      reco.embedding_cache_max_mb:
+        var: embedding_cache_max_mb
+      reco.container_restarts:
+        var: reco_restarts
+      reco.memory_status:
+        var: memory_status
+- log:
+    level: INFO
+    message: reco.cache_health backend=redis hit_rate={cache_hit_rate_pct}% keys={cache_keys} key_format={cache_key_format}
+      ttl_s=3600 eviction_policy=allkeys-lru status={cache_status}
+    attrs:
+      operation: cache_health
+      reco.cache_hit_rate_pct:
+        var: cache_hit_rate_pct
+      reco.cache_keys:
+        var: cache_keys
+      reco.cache_key_format:
+        var: cache_key_format
+      reco.cache_ttl_s: 3600
+      reco.cache_status:
+        var: cache_status

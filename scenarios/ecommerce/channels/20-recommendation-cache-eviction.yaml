@@ -8,57 +8,130 @@ affected_services:
 cascade_services:
 - storefront-gateway
 - product-catalog
-description: Redis-backed recommendation inference cache mass eviction — cold cache forces expensive model re-inference for all users,
-  spiking latency
+description: Recommendation cache hit rate collapsed and p99 latency rose to about 3s because revision 87 added request_id to the Redis cache key, so single-use keys fill Redis and LRU evicts the per-user entries.
+onset_delay_seconds: 15
 investigation_notes: |-
-  1. Check recommendation-engine logs for RECO-CACHE-EVICTION — cache_hit_rate={cache_hit_rate_pct}% drop and latency spike are correlated.
-  2. Identify eviction trigger: Redis maxmemory pressure, pod restart flushing the Redis-backed cache, or TTL misconfiguration can cause mass eviction (high_eviction_rate / memory_approaching_maxmemory). Used memory above 90% of maxmemory confirms memory pressure; a Redis uptime under 1h would point to a restart flush, and a key TTL under 300s to TTL misconfiguration.
-  3. Check inference latency: cold cache drives p99_latency_ms={p99_latency_ms}ms vs warm cache {warm_latency_ms}ms — storefront timeout risk.
-  4. Enable a cache warm-up strategy: pre-compute recommendations for top {warm_user_count} users by traffic volume before routing traffic to the pod.
-  5. Review Redis maxmemory and eviction policy: a cache size of {cache_size_mb}MB may be too small for the active user set — increase maxmemory or switch to allkeys-lfu.
-  6. Serve generic (non-personalized) trending products as a fallback while the cache warms — this prevents timeout errors at the cost of relevance.
+  Root cause: recommendation-engine revision 87 (CR-4489, personalization-team) added request_id to the Redis cache key, changing it from reco:<user_id>:<context> to reco:<user_id>:<context>:<request_id>. Every request now writes a new key that is never read again. The keyspace explodes from about 1.9M keys toward 40M, Redis sits at maxmemory ({cache_size_mb}MB, used memory 97-100%), and allkeys-lru evicts the per-user entries the service actually reads. The cache hit rate falls from 86% to about 8% and each miss goes to cold model inference, so p99 latency rises from about 120ms to about 3,100ms and callers time out to fallbacks. This is not a flush or a purge: Redis uptime is hundreds of hours (no restart), the TTL is the normal 3600s, no purge or FLUSH ran, and the key count grows instead of dropping (the opposite of a catalog purge storm). Raising maxmemory, switching to allkeys-lfu or pre-warming top users does not help, because the single-use keys keep filling whatever space there is and push the warmed entries out again.
+  Confirm:
+    - the recommendation-engine line "[Deploy] rollout to revision 87 complete" (attributes.change.request CR-4489, attributes.reco.cache_key_format with request_id) comes before the first RECO-CACHE-EVICTION line
+    - "reco.cache_health" status lines show attributes.reco.cache_key_format with the request_id segment, attributes.reco.cache_ttl_s 3600 and status=ANOMALY
+    - metrics.recommendations.cache_hit_rate_pct falls from its 86% baseline (plus or minus 1) to about 8% over about 120s while metrics.recommendations.cache_keys climbs from about 1.9M toward 40M
+    - metrics.recommendations.latency_p99_ms rises with the miss rate, from about 120ms to about 3,100ms
+    - storefront-gateway and product-catalog log recommendation timeouts and serve trending or featured fallbacks
+  Remediation: opsctl rollback deployment/recommendation-engine --to-revision previous rolls the pods back to revision 86, which writes per-user keys again. The rollout takes about 40s (both key formats in the logs meanwhile). The per-user entries then refill and the hit rate climbs back to about 86% over about 240s, with p99 following it down to about 120ms; the cache_keys count falls back toward 1.9M over about 300s as LRU evicts the idle per-request keys. No manual FLUSH is needed, and one would only make the cache fully cold.
 remediation_action: warm_recommendation_cache
-error_message: '[RecommendationEngine] RECO-CACHE-EVICTION: cache_hit_rate={cache_hit_rate_pct}% (normal >{normal_cache_hit_pct}%)
-  evicted_entries={evicted_entries} p99_latency={p99_latency_ms}ms cache_size={cache_size_mb}MB'
-stack_trace: |-
-  Traceback (most recent call last):
-    File "/app/reco/service.py", line 98, in get_recs
-      cached = self.cache.get(user_id)
-    File "/app/reco/redis_cache.py", line 64, in get
-      raise CacheEvictionStorm("RECO-CACHE-EVICTION")
-  reco.cache.CacheEvictionStorm: RECO-CACHE-EVICTION
-  User:              {user_id}
-  Cache hit rate:    {cache_hit_rate_pct}% (normal: {normal_cache_hit_pct}%)
-  Evicted entries:   {evicted_entries}
-  P99 latency:       {p99_latency_ms}ms
-  Warm cache p99:    {warm_latency_ms}ms
-  Redis maxmemory:   {cache_size_mb}MB
-  Eviction policy:   allkeys-lru
+remediation_command: |-
+  opsctl rollback deployment/recommendation-engine --to-revision previous
+error_message: '[reco.cache] RECO-CACHE-EVICTION hit_rate_1m={cache_hit_rate_pct}% evicted_keys_1m={evicted_entries} used_memory={used_memory_pct}%
+  maxmemory={cache_size_mb}MB policy=allkeys-lru keys={redis_keys} cold_inference_p99={p99_latency_ms}ms user={user_id}'
+stack_trace: ''
 correlation_attr:
-  key: reco.cache_cold
-  value: true
+  key: deploy.revision
+  value: 87
 fault_params:
-  cache_hit_rate_pct: {uniform: [2, 15], round: 1}
-  normal_cache_hit_pct: 85
-  evicted_entries: {randint: [100000, 5000000]}
-  p99_latency_ms: {randint: [3000, 15000]}
-  warm_latency_ms: {randint: [50, 200]}
-  cache_size_mb: {randint: [2048, 8192]}
+  cache_hit_rate_pct: {uniform: [5.0, 11.0], round: 1}
+  evicted_entries: {randint: [180000, 420000]}
+  used_memory_pct: {uniform: [97.0, 100.0], round: 1}
+  cache_size_mb: 6144
+  redis_keys: {randint: [30000000, 40000000]}
+  p99_latency_ms: {randint: [2900, 3400]}
   user_id: {format: "USR-{n}", n: {randint: [100000, 999999]}}
-  warm_user_count: {randint: [10000, 100000]}
 rca_clues:
   recommendation-engine:
-    reco.cache_hit_rate_pct: {uniform: [2, 15], round: 1}
-    reco.redis_used_memory_pct: {uniform: [97, 100], round: 1}
-    reco.redis_uptime_hours: {randint: [100, 2000]}
+    reco.cache_hit_rate_pct: {uniform: [5.0, 11.0], round: 1}
+    reco.redis_used_memory_pct: {uniform: [97.0, 100.0], round: 1}
+    reco.cache_keys: {randint: [30000000, 40000000]}
+    reco.redis_uptime_hours: {randint: [300, 2000]}
     reco.cache_ttl_s: 3600
-    reco.cold_inference_p99_ms: {randint: [3000, 15000]}
+    reco.cold_inference_p99_ms: {randint: [2900, 3400]}
   storefront-gateway:
     storefront.reco_timeout_count: {randint: [100, 5000]}
     storefront.fallback_trending_serving: true
   product-catalog:
     catalog.featured_request_spike: {randint: [200, 2000]}
     catalog.trending_fallback_serving: true
+cascade_messages:
+  storefront-gateway:
+    - severity: WARN
+      message: 'storefront.reco_client timeout after 800ms calling recommendation-engine GET /api/v1/recommendations/user user={user_id};
+        served trending fallback'
+  product-catalog:
+    - severity: WARN
+      message: 'WARN [http-nio-8080-exec-7] c.e.catalog.related.RecommendationClient - GET /api/v1/recommendations/similar took {p99_latency_ms}ms
+        (timeout 1000ms); returning featured products'
+fault_scope:
+  cluster: ecommerce-gke-cluster
+  workloads: [recommendation-engine]
+infrastructure_events:
+  - service: recommendation-engine
+    severity: INFO
+    offset_seconds: -120
+    body: '[Deploy] rollout to revision 87 complete: 6/6 pods updated (reco-api 2026.11.3: include request_id in the recommendation cache
+      key for per-request tracing); deployed by personalization-team (CR-4489)'
+    attributes:
+      user.name: personalization-team
+      change.request: CR-4489
+      operation: deployment_rollout
+      deploy.revision: 87
+      reco.cache_key_format: 'reco:{user_id}:{context}:{request_id}'
+      change.summary: 'cache key: add request_id'
+remediation_effects:
+  log_taper_seconds: 60
+  log_events:
+    - service: recommendation-engine
+      severity: INFO
+      offset_seconds: 1
+      body: '[CHG] CHANGE APPLIED opsctl rollback deployment/recommendation-engine --to-revision previous by {actor}: rollout undo from revision 87 to revision 86 (cache key without request_id)'
+      attributes:
+        operation: change_applied
+        change.target: deployment/recommendation-engine
+    - service: recommendation-engine
+      severity: INFO
+      offset_seconds: 15
+      body: 'deployment recommendation-engine rolled back to revision 86: rolling update in progress, 3/6 pods updated'
+      attributes:
+        operation: deployment_rollout
+        deploy.revision: 86
+        deploy.updated_replicas: 3
+    - service: recommendation-engine
+      severity: INFO
+      offset_seconds: 40
+      body: 'deployment recommendation-engine rolled back to revision 86: 6/6 pods updated and available'
+      attributes:
+        operation: deployment_rollout
+        deploy.revision: 86
+        deploy.updated_replicas: 6
+        reco.cache_key_format: 'reco:{user_id}:{context}'
+    - service: recommendation-engine
+      severity: INFO
+      offset_seconds: 150
+      body: '[reco.cache] per-user entries refilling, hit rate recovering; idle per-request keys being evicted by allkeys-lru'
+      attributes:
+        operation: cache_refill
+  verification:
+    - signal: recommendations.cache_hit_rate_pct
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "recommendation-engine"'
+      field: 'metrics.recommendations.cache_hit_rate_pct'
+      expect: 'climbs from about 8% back to its 86% baseline over about 240s after the rollout; latency_p99_ms follows it down from about 3,100ms to about 120ms'
+      within_seconds: 360
+    - signal: recommendations.cache_keys
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "recommendation-engine"'
+      field: 'metrics.recommendations.cache_keys'
+      expect: 'falls from about 40M back toward 1.9M over about 300s as LRU evicts the idle per-request keys'
+      within_seconds: 420
+    - signal: cache key format
+      from: 'logs.otel.ecommerce'
+      where: 'resource.attributes.service.name == "recommendation-engine"'
+      field: 'attributes.reco.cache_key_format'
+      expect: 'both formats while pods roll (about 40s), then only the per-user format without request_id'
+      within_seconds: 120
+    - signal: RECO-CACHE-EVICTION lines
+      from: 'logs.otel.ecommerce'
+      where: 'body.text LIKE "*RECO-CACHE-EVICTION*"'
+      expect: 'no new lines after the rollback (they fade out within about 60s)'
+      within_seconds: 150
 business_impact:
   - kpi: business.conversion_rate_pct
     value: {uniform: [0.67, 0.77], round: 2}
@@ -72,3 +145,6 @@ generator_impact:
   redis_otel:
     high_eviction_rate: 400.0
     memory_approaching_maxmemory: 93.0
+generator_hold_seconds: {redis_otel: 240}
+# dependents degrade after the component at fault, in dependency order
+service_lag_seconds: {storefront-gateway: 30, product-catalog: 40}

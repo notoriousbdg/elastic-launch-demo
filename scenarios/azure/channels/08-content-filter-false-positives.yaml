@@ -4,26 +4,29 @@ vehicle_section: safety_pipeline
 error_type: PROMPT-FILTER-FALSE-POSITIVE
 sensor_type: health_check
 affected_services: [prompt-guard, chat-orchestrator]
+error_services: [prompt-guard]
 cascade_services: [assistant-web]
 
 description: >
-  A content-safety policy threshold change makes prompt-guard block a large share of benign customer prompts, so users see refusals for ordinary questions.
+  A change to the customer-chat-default content filter lowered its severity threshold from 6 to 2, so prompt-guard blocks a large share of benign customer prompts and users see refusals for ordinary questions.
 
 investigation_notes: |
-  1. Search body.text for *PROMPT-FILTER-FALSE-POSITIVE* and read blocked_pct={blocked_pct}% against the normal baseline of {baseline_blocked_pct}%.
-  2. Check the policy change: severity_threshold moved from {old_threshold} to {new_threshold} on content-safety policy {policy_name}.
-  3. Sample blocked prompts by category={filter_category}; benign topics such as billing or product questions score {sample_severity} against a block cutoff of {new_threshold}.
-  4. On chat-orchestrator, look for rising refusal responses and prompt_rejected counts; on assistant-web, check the spike in user retries and abandoned sessions.
-  5. Confirm no matching rise in prompt-injection signals (injection attempts stay under 5 per minute), which separates a misconfigured threshold from a real attack.
-  6. Approve restoring the previous threshold or a tuned value, then replay a labeled benign prompt set to verify block rate returns to baseline.
+  Root cause: the raiPolicies write on content filter {policy_name} lowered severity_threshold from {old_threshold} to {new_threshold}. Benign prompts score severity {sample_severity} in category {filter_category}, which now meets the block cutoff, so {blocked_pct}% of prompts are blocked against a normal {baseline_blocked_pct}%. Nothing is attacking the assistant: injection attempts stay under 5 per minute.
+  Confirm:
+    - metric prompt_guard.block_rate_pct is 18-45 (baseline about 1.5) and prompt-guard logs window_totals ... status=ANOMALY with attributes.contentfilter.severity_threshold={new_threshold} on policy {policy_name}
+    - the Activity Log line for raiPolicies/write on {policy_name} (change.summary severity_threshold {old_threshold} -> {new_threshold}) comes before the first PROMPT-FILTER-FALSE-POSITIVE
+    - metric prompt_guard.injection_attempts_per_min stays below 5 and prompt_guard.injection_score stays below 0.25, which rules out a real attack; chat-orchestrator refusals and assistant-web user retries rise with the block rate
+  Remediation: roll the content filter back to its previous revision with opsctl rollback content-filter/customer-chat-default --to-revision previous, which restores severity_threshold {old_threshold}. The block rate falls back to about 1.5% over about 60 seconds. Blocking more clients or widening the WAF does not help: the blocked prompts are legitimate.
 
 remediation_action: tune_content_filter_threshold
+remediation_command: |-
+  opsctl rollback content-filter/customer-chat-default --to-revision previous
 
 error_message: |
-  [PromptGuard] PROMPT-FILTER-FALSE-POSITIVE: policy={policy_name} category={filter_category} severity={sample_severity} threshold={new_threshold} blocked_pct={blocked_pct}% baseline={baseline_blocked_pct}%
+  [PromptGuard] PROMPT-FILTER-FALSE-POSITIVE: Azure AI Content Safety blocked prompt policy={policy_name} category={filter_category} severity={sample_severity} severity_threshold={new_threshold} blocked_pct={blocked_pct}% baseline={baseline_blocked_pct}%
 
 stack_trace: |
-  ContentSafetyBlockedError: PROMPT-FILTER-FALSE-POSITIVE
+  azure.ai.contentsafety.ContentSafetyBlockedError: PROMPT-FILTER-FALSE-POSITIVE
     at PromptGuard.evaluate(policy={policy_name})
     at PromptGuard.handleScreenRequest()
   Policy:             {policy_name}
@@ -33,15 +36,15 @@ stack_trace: |
   Blocked share:      {blocked_pct}% (baseline {baseline_blocked_pct}%)
 
 correlation_attr:
-  key: safety.policy_version
-  value: content-safety-policy-2026.10.2
+  key: contentfilter.severity_threshold
+  value: 2
 
 fault_params:
-  policy_name: {choice: [customer-chat-default, customer-chat-strict]}
+  policy_name: customer-chat-default
   filter_category: {choice: [violence, self_harm, hate, sexual]}
   sample_severity: 2
   old_threshold: 6
-  new_threshold: {choice: [1, 2]}
+  new_threshold: 2
   blocked_pct: {uniform: [18.0, 45.0], round: 1}
   baseline_blocked_pct: 1.5
 
@@ -57,6 +60,63 @@ rca_clues:
   assistant-web:
     web.user_retry_rate_pct: {uniform: [20.0, 55.0], round: 1}
     web.session_abandon_spike: true
+
+cascade_messages:
+  chat-orchestrator:
+    - severity: WARN
+      message: 'prompt rejected by prompt-guard policy={policy_name} category={filter_category}; returning refusal response to user'
+  assistant-web:
+    - severity: WARN
+      message: 'POST /api/chat 200 refusal_response=true policy={policy_name}; user retried the same question within 30s'
+
+service_lag_seconds: {chat-orchestrator: 5, assistant-web: 15}
+fault_scope:
+  workloads: [prompt-guard, chat-orchestrator, assistant-web]
+
+infrastructure_events:
+  - service: prompt-guard
+    severity: INFO
+    offset_seconds: -120
+    body: 'azure-activity: operationName=Microsoft.CognitiveServices/accounts/raiPolicies/write resourceId=/subscriptions/38514ecc-371c-5d0a-9c14-ab99a396027d/resourceGroups/azureai-rg/providers/Microsoft.CognitiveServices/accounts/raiPolicies/customer-chat-default caller=release-pipeline@contoso-demo.onmicrosoft.com status=Succeeded category=Administrative'
+    attributes:
+      user.name: release-pipeline@contoso-demo.onmicrosoft.com
+      operation: rai_policy_write
+      azure.activity.operation_name: Microsoft.CognitiveServices/accounts/raiPolicies/write
+      contentfilter.severity_threshold: 2
+      change.summary: 'severity_threshold: 6 -> 2'
+
+remediation_effects:
+  log_events:
+    - service: prompt-guard
+      severity: INFO
+      offset_seconds: 1
+      body: 'azure-activity: operationName=Microsoft.CognitiveServices/accounts/raiPolicies/write resourceId=/subscriptions/38514ecc-371c-5d0a-9c14-ab99a396027d/resourceGroups/azureai-rg/providers/Microsoft.CognitiveServices/accounts/raiPolicies/customer-chat-default caller={actor} status=Succeeded category=Administrative'
+      attributes:
+        operation: rai_policy_write
+        azure.activity.operation_name: Microsoft.CognitiveServices/accounts/raiPolicies/write
+        contentfilter.severity_threshold: 6
+        change.summary: 'severity_threshold: 2 -> 6'
+  steady_attributes:
+    prompt-guard:
+      contentfilter.severity_threshold: 6
+  verification:
+    - signal: prompt_guard.block_rate_pct
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "prompt-guard"'
+      field: 'metrics.prompt_guard.block_rate_pct'
+      expect: 'back to about 1.5 and below 3 (was 18-45)'
+      within_seconds: 90
+    - signal: content filter severity threshold
+      from: 'logs.otel.azureai'
+      where: 'resource.attributes.service.name == "prompt-guard"'
+      field: 'attributes.contentfilter.severity_threshold'
+      expect: '6 on every line logged since the fix (was 2)'
+      within_seconds: 90
+    - signal: PROMPT-FILTER-FALSE-POSITIVE lines
+      from: 'logs.otel.azureai'
+      where: 'body.text LIKE "*PROMPT-FILTER-FALSE-POSITIVE*"'
+      expect: '0 new lines'
+      within_seconds: 90
 
 business_impact:
   - kpi: business.conversations_per_min

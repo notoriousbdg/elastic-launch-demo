@@ -120,45 +120,42 @@ steps:
       ledger.balance:
         var: balance
       ledger.status: RECONCILED
-- every:
-    seconds: 10
-    state_key: _last_ledger_report
-    steps:
-    - sample:
-        estimated_revenue:
-          expr: round(_transactions * rand.uniform(3.0, 12.0), 2)
-    - log:
-        level: INFO
-        message: '[IAP] summary txn_count={_transactions} gross_revenue={estimated_revenue} failure_rate=0.8% providers=4/4'
-        attrs:
-          operation: revenue_summary
-          summary.transactions:
-            var: _transactions
-          summary.estimated_revenue:
-            var: estimated_revenue
+# Channel 13: payment-processor 5.14.0 ships stripe-sdk v12.1.0-rc2, whose HttpClient
+# handler caps connections per host at 2 (v12.0.4: 50). Stripe calls queue for a
+# connection and hit the 10 s HttpClient timeout; Stripe itself answers in ~250 ms.
+# PayPal, Apple and Google use their own clients and stay healthy. The rollback replaces
+# the pods over ~60 s and the queue drains with them.
 - sample:
+    iap_fixed:
+      expr: "13 in fixed_channels and 13 not in all_active"
+    iap_ramp:
+      expr: "min(1.0, max(0.0, elapsed.get(13, 0) - lag.get(13, 0)) / 30.0)"
+    iap_conv:
+      expr: "min(1.0, since_fix.get(13, 0) / 60.0) if iap_fixed else 1.0"
+    lat_base:
+      expr: "rand.uniform(185.0, 395.0)"
+    lat_fault:
+      expr: "rand.uniform(4200.0, 11800.0)"
     txn_latency:
-      if_active:
-        uniform:
-        - 1000.0
-        - 10000.0
-        round: 1
-      else:
-        uniform:
-        - 80.0
-        - 300.0
-        round: 1
+      expr: "round(lat_base + (lat_fault - lat_base) * iap_ramp, 1) if 13 in all_active else round(lat_base + (lat_fault - lat_base) * (1.0 - iap_conv), 1)"
+    fr_base:
+      expr: "rand.uniform(0.25, 0.95)"
+    fr_fault:
+      expr: "rand.uniform(16.0, 34.0)"
     failure_rate:
-      if_active:
-        uniform:
-        - 5.0
-        - 25.0
-        round: 2
-      else:
-        uniform:
-        - 0.1
-        - 1.5
-        round: 2
+      expr: "round(fr_base + (fr_fault - fr_base) * iap_ramp, 2) if 13 in all_active else round(fr_base + (fr_fault - fr_base) * (1.0 - iap_conv), 2)"
+    pool_base:
+      expr: "rand.randint(0, 2)"
+    pool_fault:
+      expr: "rand.uniform(160.0, 390.0)"
+    pool_waiting:
+      expr: "round(pool_base + (pool_fault - pool_base) * iap_ramp) if 13 in all_active else round(pool_base + (pool_fault - pool_base) * (1.0 - iap_conv))"
+    pool_max:
+      expr: "2 if 13 in all_active else 50"
+    pool_in_use:
+      expr: "2 if 13 in all_active else rand.randint(8, 22)"
+    iap_status:
+      expr: "'DEGRADED' if (13 in all_active and iap_ramp > 0) or failure_rate > 2.0 else 'HEALTHY'"
 - metric:
     name: payment.transaction_latency_ms
     value:
@@ -174,3 +171,137 @@ steps:
     value:
       var: failure_rate
     unit: '%'
+- metric:
+    name: payment.http_pool.waiting
+    value:
+      var: pool_waiting
+    unit: requests
+- metric:
+    name: payment.http_pool.max_connections_per_host
+    value:
+      var: pool_max
+    unit: connections
+- when: "13 in all_active"
+  log:
+    level: INFO
+    message: '[IAP] provider_status provider=stripe build=payment-processor:5.14.0 sdk=stripe-sdk/v12.1.0-rc2 http_pool={pool_in_use}/{pool_max} waiting={pool_waiting} p99={txn_latency}ms failure_rate={failure_rate}% status={iap_status}'
+    attrs:
+      operation: provider_status
+      payment.provider: stripe
+      deployment.version: 5.14.0
+      deployment.stripe_sdk: v12.1.0-rc2
+      payment.http_pool.max_per_host:
+        var: pool_max
+      payment.http_pool.waiting:
+        var: pool_waiting
+      payment.failure_rate_pct:
+        var: failure_rate
+      payment.status:
+        var: iap_status
+- when: "13 not in all_active"
+  log:
+    level: INFO
+    message: '[IAP] provider_status provider=stripe build=payment-processor:5.13.2 sdk=stripe-sdk/v12.0.4 http_pool={pool_in_use}/{pool_max} waiting={pool_waiting} p99={txn_latency}ms failure_rate={failure_rate}% status={iap_status}'
+    attrs:
+      operation: provider_status
+      payment.provider: stripe
+      deployment.version: 5.13.2
+      deployment.stripe_sdk: v12.0.4
+      payment.http_pool.max_per_host:
+        var: pool_max
+      payment.http_pool.waiting:
+        var: pool_waiting
+      payment.failure_rate_pct:
+        var: failure_rate
+      payment.status:
+        var: iap_status
+- sample:
+    paypal_p99:
+      expr: "round(rand.uniform(240.0, 380.0), 1)"
+    paypal_in_use:
+      expr: "rand.randint(4, 12)"
+- log:
+    level: INFO
+    message: '[IAP] provider_status provider=paypal sdk=paypal-server-sdk/1.0.2 http_pool={paypal_in_use}/50 waiting=0 p99={paypal_p99}ms failure_rate=0.4% status=HEALTHY'
+    attrs:
+      operation: provider_status
+      payment.provider: paypal
+      payment.http_pool.max_per_host: 50
+      payment.http_pool.waiting: 0
+      payment.status: HEALTHY
+# Channel 14: wallet-ledger ConfigMap set transaction isolation serializable ->
+# read_committed. Concurrent spends on one wallet no longer conflict, so serialization
+# retries drop to 0 at once while lost updates / double debits build up after ~20 s.
+# After the rollback the pods reload the config within ~30 s; wallet-reconcile then
+# repairs the balances already written.
+- sample:
+    led_fixed:
+      expr: "14 in fixed_channels and 14 not in all_active"
+    led_ramp:
+      expr: "min(1.0, max(0.0, elapsed.get(14, 0) - lag.get(14, 0)) / 60.0)"
+    led_conv:
+      expr: "min(1.0, since_fix.get(14, 0) / 30.0) if led_fixed else 1.0"
+    disc_fault:
+      expr: "rand.uniform(22.0, 88.0)"
+    ledger_discrepancies:
+      expr: "round(disc_fault * led_ramp) if 14 in all_active else round(disc_fault * (1.0 - led_conv))"
+    retry_base:
+      expr: "rand.uniform(12.0, 38.0)"
+    serialization_retries:
+      expr: "0 if 14 in all_active else round(retry_base * led_conv)"
+    led_status:
+      expr: "'DEGRADED' if (14 in all_active and led_ramp > 0) or ledger_discrepancies > 0 else 'HEALTHY'"
+- metric:
+    name: payment.ledger.discrepancies_per_min
+    value:
+      var: ledger_discrepancies
+    unit: discrepancies
+- metric:
+    name: payment.ledger.serialization_retries_per_min
+    value:
+      var: serialization_retries
+    unit: retries
+- when: "14 in all_active"
+  log:
+    level: INFO
+    message: '[Ledger] wallet_ledger configmap=wallet-ledger revision=r23 isolation=read_committed discrepancies_1m={ledger_discrepancies} serialization_retries_1m={serialization_retries} status={led_status}'
+    attrs:
+      operation: ledger_status
+      config.ledger_revision: r23
+      config.isolation_level: read_committed
+      ledger.discrepancies_per_min:
+        var: ledger_discrepancies
+      ledger.serialization_retries_per_min:
+        var: serialization_retries
+      ledger.status:
+        var: led_status
+- when: "14 not in all_active"
+  log:
+    level: INFO
+    message: '[Ledger] wallet_ledger configmap=wallet-ledger revision=r22 isolation=serializable discrepancies_1m={ledger_discrepancies} serialization_retries_1m={serialization_retries} status={led_status}'
+    attrs:
+      operation: ledger_status
+      config.ledger_revision: r22
+      config.isolation_level: serializable
+      ledger.discrepancies_per_min:
+        var: ledger_discrepancies
+      ledger.serialization_retries_per_min:
+        var: serialization_retries
+      ledger.status:
+        var: led_status
+- every:
+    seconds: 10
+    state_key: _last_ledger_report
+    steps:
+    - sample:
+        estimated_revenue:
+          expr: round(_transactions * rand.uniform(3.0, 12.0), 2)
+    - log:
+        level: INFO
+        message: '[IAP] summary txn_count={_transactions} gross_revenue={estimated_revenue} failure_rate={failure_rate}% providers=4/4'
+        attrs:
+          operation: revenue_summary
+          summary.transactions:
+            var: _transactions
+          summary.estimated_revenue:
+            var: estimated_revenue

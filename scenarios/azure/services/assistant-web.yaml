@@ -27,22 +27,55 @@ kpi_emitter: false
 constants:
   CLIENTS: [web-chat, teams-embed, mobile-webview]
 
+# Per-channel influence terms t<N> (see chat-orchestrator.yaml). Channels 4 and 18 are owned
+# here (WAF block surge, unhealthy backend pool); the others that list assistant-web as
+# affected or cascade add bounded first-token latency, stream disconnects and degraded answers.
 steps:
   - sample:
-      active_sessions: {randint: [1200, 9500]}
+      t1:
+        expr: "min(1.0, max(0.0, elapsed.get(1, 0) - lag.get(1, 0)) / 45.0) if (1 in all_active and elapsed.get(1, 0) >= lag.get(1, 0)) else (max(0.0, 1.0 - since_fix.get(1, 0) / 90.0) if 1 in fixed_channels else 0.0)"
+      t4:
+        expr: "min(1.0, elapsed.get(4, 0) / 45.0) if 4 in all_active else (max(0.0, 1.0 - since_fix.get(4, 0) / 60.0) if 4 in fixed_channels else 0.0)"
+      t8:
+        expr: "min(1.0, max(0.0, elapsed.get(8, 0) - lag.get(8, 0)) / 45.0) if (8 in all_active and elapsed.get(8, 0) >= lag.get(8, 0)) else (max(0.0, 1.0 - since_fix.get(8, 0) / 90.0) if 8 in fixed_channels else 0.0)"
+      t10:
+        expr: "min(1.0, max(0.0, elapsed.get(10, 0) - lag.get(10, 0)) / 45.0) if (10 in all_active and elapsed.get(10, 0) >= lag.get(10, 0)) else (max(0.0, 1.0 - since_fix.get(10, 0) / 90.0) if 10 in fixed_channels else 0.0)"
+      t11:
+        expr: "min(1.0, max(0.0, elapsed.get(11, 0) - lag.get(11, 0)) / 45.0) if (11 in all_active and elapsed.get(11, 0) >= lag.get(11, 0)) else (max(0.0, 1.0 - since_fix.get(11, 0) / 90.0) if 11 in fixed_channels else 0.0)"
+      t16:
+        expr: "min(1.0, max(0.0, elapsed.get(16, 0) - lag.get(16, 0)) / 45.0) if (16 in all_active and elapsed.get(16, 0) >= lag.get(16, 0)) else (max(0.0, 1.0 - since_fix.get(16, 0) / 90.0) if 16 in fixed_channels else 0.0)"
+      t17:
+        expr: "min(1.0, max(0.0, elapsed.get(17, 0) - lag.get(17, 0)) / 45.0) if (17 in all_active and elapsed.get(17, 0) >= lag.get(17, 0)) else (max(0.0, 1.0 - since_fix.get(17, 0) / 90.0) if 17 in fixed_channels else 0.0)"
+      t18:
+        expr: "min(1.0, elapsed.get(18, 0) / 45.0) if 18 in all_active else (max(0.0, 1.0 - since_fix.get(18, 0) / 90.0) if 18 in fixed_channels else 0.0)"
+      active_sessions:
+        expr: "int(rand.randint(1200, 9500) * max(0.1, 1.0 - 0.3 * t4 - 0.6 * t18))"
       first_token_ms:
-        if_active: {uniform: [2800.0, 9000.0], round: 1}
-        else: {uniform: [350.0, 900.0], round: 1}
+        expr: "round(rand.uniform(350.0, 900.0) + (2200 * t1 + 300 * t8 + 600 * t10 + 3500 * t11 + 4500 * t16 + 1500 * t17) * rand.uniform(0.85, 1.15), 1)"
       agw_healthy_hosts:
-        if_active: {randint: [1, 2]}
-        else: {randint: [3, 3]}
+        expr: "int(round(6 * (1.0 - min(1.0, elapsed.get(18, 0) / 45.0)))) if 18 in all_active else (int(6 * min(1.0, since_fix.get(18, 0) / 90.0)) if 18 in fixed_channels else 6)"
       waf_blocked_pct:
-        if_active: {uniform: [8.0, 35.0], round: 2}
-        else: {uniform: [0.1, 1.2], round: 2}
+        expr: "round(0.4 + (rand.uniform(38.0, 62.0) - 0.4) * min(1.0, elapsed.get(4, 0) / 45.0), 2) if 4 in all_active else (round(50.0 + (rand.uniform(0.2, 0.6) - 50.0) * min(1.0, since_fix.get(4, 0) / 60.0), 2) if 4 in fixed_channels else round(rand.uniform(0.2, 0.6), 2))"
       stream_disconnect_pct:
-        if_active: {uniform: [6.0, 22.0], round: 2}
-        else: {uniform: [0.2, 1.5], round: 2}
+        expr: "round(rand.uniform(0.2, 1.5) + 4 * t1 + 0.5 * t8 + 3 * t10 + 5 * t11 + 9 * t16 + 6 * t17, 2)"
+      degraded_answer_pct:
+        expr: "round(rand.uniform(0.3, 1.5) + 8 * t1 + 20 * t8 + 18 * t10 + 6 * t11 + 10 * t16 + 25 * t17, 2)"
+      waf_policy_version:
+        expr: "'v14' if 4 in all_active else 'v13'"
+      waf_rule_action:
+        expr: "'Prevention' if 4 in all_active else 'Log'"
+      nsg_ruleset:
+        expr: "'nsg-assistant-web-ruleset-v14' if 18 in all_active else 'nsg-assistant-web-ruleset-v13'"
+      nsg_deny_rule:
+        expr: "'present' if 18 in all_active else ('removed' if 18 in fixed_channels else 'absent')"
       client: {choice: CLIENTS}
+  - sample:
+      waf_status:
+        expr: "'ANOMALY' if 4 in all_active or waf_blocked_pct > 5.0 else 'NOMINAL'"
+      appgw_status:
+        expr: "'ANOMALY' if 18 in all_active or agw_healthy_hosts < 6 else 'NOMINAL'"
+      agw_unhealthy_hosts:
+        expr: "6 - agw_healthy_hosts"
   - metric:
       name: assistant_web.active_sessions
       value: {var: active_sessions}
@@ -63,15 +96,18 @@ steps:
       name: assistant_web.stream_disconnect_pct
       value: {var: stream_disconnect_pct}
       unit: '%'
+  - metric:
+      name: assistant_web.degraded_answer_pct
+      value: {var: degraded_answer_pct}
+      unit: '%'
   - log:
       level: INFO
-      message: 'chat.edge_health active_sessions={active_sessions} first_token_ms={first_token_ms} appgw_healthy_hosts={agw_healthy_hosts}/3 waf_blocked={waf_blocked_pct}%'
+      message: 'chat.edge_health active_sessions={active_sessions} first_token_ms={first_token_ms} degraded_answers={degraded_answer_pct}%'
       attrs:
         operation: edge_health
         chat.active_sessions: {var: active_sessions}
         chat.first_token_ms: {var: first_token_ms}
-        appgw.healthy_hosts: {var: agw_healthy_hosts}
-        appgw.waf_blocked_pct: {var: waf_blocked_pct}
+        chat.degraded_answer_pct: {var: degraded_answer_pct}
   - log:
       level: INFO
       message: 'chat.stream_summary client={client} disconnect_rate={stream_disconnect_pct}% sessions={active_sessions}'
@@ -79,3 +115,27 @@ steps:
         operation: stream_summary
         chat.client: {var: client}
         chat.stream_disconnect_pct: {var: stream_disconnect_pct}
+  - log:
+      level: INFO
+      message: 'appgw.waf_summary policy=waf-policy-azureai-prod version={waf_policy_version} rule=942100 action={waf_rule_action} blocked={waf_blocked_pct}% status={waf_status}'
+      attrs:
+        operation: waf_summary
+        waf.policy: waf-policy-azureai-prod
+        waf.policy_version: {var: waf_policy_version}
+        waf.rule_id: '942100'
+        waf.rule_action: {var: waf_rule_action}
+        appgw.waf_blocked_pct: {var: waf_blocked_pct}
+        appgw.status: {var: waf_status}
+  - log:
+      level: INFO
+      message: 'appgw.backend_health pool=pool-assistant-web-eastus healthy={agw_healthy_hosts}/6 unhealthy={agw_unhealthy_hosts} nsg=nsg-assistant-web-subnet ruleset={nsg_ruleset} status={appgw_status}'
+      attrs:
+        operation: backend_health
+        appgw.backend_pool: pool-assistant-web-eastus
+        appgw.healthy_hosts: {var: agw_healthy_hosts}
+        appgw.unhealthy_hosts: {var: agw_unhealthy_hosts}
+        appgw.pool_size: 6
+        nsg.name: nsg-assistant-web-subnet
+        nsg.rule_set_version: {var: nsg_ruleset}
+        nsg.rule.UserRule_deny-untrusted-inbound: {var: nsg_deny_rule}
+        appgw.status: {var: appgw_status}

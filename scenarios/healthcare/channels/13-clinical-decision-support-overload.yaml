@@ -11,8 +11,12 @@ cascade_services:
 - patient-monitor
 description: Clinical decision support rule engine overloaded and CPU-throttled, unable to evaluate rules within SLA
 investigation_notes: |-
-  Root Cause: CDS rule engine overload occurs when complex rule sets (sepsis screening, VTE prophylaxis, fall risk) are evaluated against large patient populations simultaneously, typically during shift change when nursing assessments trigger bulk re-evaluations. The Arden Syntax MLM execution pool becomes saturated. A saturated MLM execution pool with the patient context cache current confirms engine overload rather than stale context data.
-  Remediation: 1) Check the CDS rule engine thread pool: `cds-admin pool-status --engine RULE-EVAL`. 2) Restart the CDS evaluation service: `systemctl restart cds-rule-engine`. 3) Prioritize critical rule sets: `cds-admin prioritize --ruleset sepsis-screening --level URGENT`. 4) Temporarily disable low-priority rule sets: `cds-admin disable --ruleset fall-risk --duration 30m`. 5) Scale the rule engine out, not just up: with the container CPU-throttled, raise its CPU limit or add replicas before raising the worker pool (`cds-admin scale-workers --count 8 --engine RULE-EVAL`). 6) Verify the patient context cache is not stale — flush if needed: `cds-admin cache-flush --scope patient-context`.
+  Root cause: the sepsis-screening rule set arden-mlm-v3.0.1-experimental was deployed shortly before the first CDS-OVERLOAD. It re-evaluates the full rule set on every vitals observation instead of on new assessments, which means about 14,000 evaluations per minute against about 1,300 for the same census. The clinical-alerts container hits its CPU limit and is throttled about 90% of the time. {pending_rules} rules are queued and evaluation takes {eval_ms}ms against the {max_eval_ms}ms SLA (patient {patient_id}). The patient context cache is current and census and admissions are normal, so this is not a load surge or stale context.
+  Confirm:
+    - clinical-alerts logs [CDS] engine_status pool=RULE-EVAL ruleset=sepsis-screening build=arden-mlm-v3.0.1-experimental evals_1m=~14000 ... engine=OVERLOADED (attributes.deployment.cds_rule_engine, attributes.cds.evaluations_per_min)
+    - metric clinical_alerts.rule_eval_ms rises from about 220 ms to 5500-8500 ms and clinical_alerts.rule_queue_depth from 0-10 to 150-250; Kubernetes container CPU throttling on clinical-alerts
+    - the clinical-alerts line "ruleset sepsis-screening deployed arden-mlm-v3.0.1-experimental" comes before the first overload
+  Remediation: roll the rule set back with opsctl rollback ruleset/sepsis-screening --to-revision previous (arden-mlm-v2.4.0). Evaluations fall back to about 1,300 per minute, the queue drains, and p95 evaluation is back under 500 ms within about 90 seconds. Adding workers or CPU only absorbs a 10x evaluation bug at 10x the cost. Disabling the fall-risk rules removes clinical coverage without touching the cause.
 remediation_action: restart_cds_engine
 error_message: '[CDS] CDS-OVERLOAD: rules_queued={pending_rules} eval_ms={eval_ms} threshold={max_eval_ms}ms patient={patient_id}'
 stack_trace: |-
@@ -34,8 +38,8 @@ correlation_attr:
   key: deployment.cds_rule_engine
   value: arden-mlm-v3.0.1-experimental
 fault_params:
-  pending_rules: {randint: [50, 500]}
-  eval_ms: {randint: [3000, 15000]}
+  pending_rules: {randint: [150, 250]}
+  eval_ms: {randint: [5500, 8500]}
   max_eval_ms: 2000
   patient_id:
     format: "PT-{n}"
@@ -43,7 +47,7 @@ fault_params:
 rca_clues:
   clinical-alerts:
     cds.rule_eval_pool_saturated: true
-    cds.arden_mlm_queue: {randint: [50, 300]}
+    cds.arden_mlm_queue: {randint: [150, 250]}
     cds.patient_context_cache_status: current
   ehr-system:
     ehr.cds_evaluation_lag_s: {randint: [30, 180]}
@@ -54,6 +58,75 @@ rca_clues:
   patient-monitor:
     vitals.alert_evaluation_stale: true
     vitals.sepsis_screen_pending: {randint: [2, 10]}
+remediation_command: |-
+  opsctl rollback ruleset/sepsis-screening --to-revision previous
+error_services: [clinical-alerts]
+generator_hold_seconds:
+  kubernetes_otel: 90
+service_lag_seconds:
+  ehr-system: 20
+  pharmacy-system: 30
+  patient-monitor: 30
+cascade_messages:
+  ehr-system:
+    - severity: WARN
+      message: '[EHR] cds_result_delayed patient={patient_id} pending_rules={pending_rules} eval_ms={eval_ms}; best practice advisory not shown at chart open'
+  pharmacy-system:
+    - severity: WARN
+      message: '[PHARM] ddi_screen_waiting patient={patient_id} reason=CDS_QUEUE pending_rules={pending_rules}'
+  patient-monitor:
+    - severity: WARN
+      message: '[MONITOR] sepsis_screen_pending patient={patient_id} reason=CDS_EVAL_TIMEOUT eval_ms={eval_ms}'
+fault_scope:
+  workloads: [clinical-alerts]
+infrastructure_events:
+  - service: clinical-alerts
+    severity: INFO
+    offset_seconds: -120
+    body: '[CDS] ruleset sepsis-screening deployed arden-mlm-v3.0.1-experimental (was arden-mlm-v2.4.0): trigger changed to every vitals observation by cds-content-release (CHG0032240)'
+    attributes:
+      user.name: cds-content-release
+      change.request: CHG0032240
+      operation: ruleset_deploy
+      deployment.cds_rule_engine: arden-mlm-v3.0.1-experimental
+      change.summary: 'sepsis-screening: arden-mlm-v2.4.0 -> arden-mlm-v3.0.1-experimental'
+remediation_effects:
+  log_events:
+    - service: clinical-alerts
+      severity: INFO
+      offset_seconds: 1
+      body: '[CHG] CHANGE IMPLEMENTED opsctl rollback ruleset/sepsis-screening --to-revision previous by {actor}: arden-mlm-v3.0.1-experimental -> arden-mlm-v2.4.0'
+      attributes:
+        operation: change_implemented
+        change.target: ruleset/sepsis-screening
+    - service: clinical-alerts
+      severity: INFO
+      offset_seconds: 5
+      body: '[CDS] ruleset sepsis-screening arden-mlm-v2.4.0 active: trigger on new assessment only; RULE-EVAL queue draining'
+      attributes:
+        operation: ruleset_deploy
+        deployment.cds_rule_engine: arden-mlm-v2.4.0
+  steady_attributes:
+    clinical-alerts:
+      deployment.cds_rule_engine: arden-mlm-v2.4.0
+  verification:
+    - signal: clinical_alerts.rule_eval_ms
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "clinical-alerts"'
+      field: 'metrics.clinical_alerts.rule_eval_ms'
+      expect: 'back under 500 ms (was 5500-8500 ms) within about 90 seconds'
+      within_seconds: 150
+    - signal: CDS-OVERLOAD lines
+      from: 'logs.otel.healthcare'
+      where: 'body.text LIKE "*CDS-OVERLOAD*"'
+      expect: '0 new lines'
+      within_seconds: 150
+    - signal: deployment.cds_rule_engine
+      from: 'logs.otel.healthcare'
+      where: 'resource.attributes.service.name == "clinical-alerts"'
+      field: 'attributes.deployment.cds_rule_engine'
+      expect: 'arden-mlm-v2.4.0 on every engine_status line since the fix; v3.0.1-experimental stops appearing'
+      within_seconds: 120
 business_impact:
   - kpi: business.patient_safety_events_per_min
     factor: {uniform: [2.0, 5.0]}

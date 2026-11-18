@@ -191,7 +191,7 @@ If you believe a change to these files is necessary, stop and ask the user. The 
 
 New scenarios are schema 1.3. Every channel follows the Realism checklist in [BRIEF.md](BRIEF.md): real component log formats, a natural quote-free `error_type` that is a substring of the error line and unique across channels, a `remediation_command` that fixes the root cause, a `fault_scope`, a cause event with negative `offset_seconds`, and `remediation_effects.verification`. Checks 37-44 enforce the structural part.
 
-**No demo bookkeeping in telemetry.** Fault logs no longer carry `chaos.*` fields (`chaos.channel`, `chaos.fault_type`, `chaos.callback_url`, `chaos.user_email`), nor `ops.*`, `system.*`, `cascade.*`, `sensor.type`, `vehicle_section` or an `event_name` JSON blob. No real component emits them, and investigations would show them to the audience. Do not add them back in `attrs`, `rca_clues`, `infrastructure_events[].attributes`, `remediation_effects.log_events` or `steady_attributes`. Who triggered a fault is stored in the `{ns}-chaos-context` index, not on log records.
+**No demo bookkeeping in telemetry.** Fault logs no longer carry `chaos.*` fields (`chaos.channel`, `chaos.fault_type`, `chaos.callback_url`, `chaos.user_email`), nor `ops.*`, `system.*`, `cascade.*`, `sensor.type`, `vehicle_section` or an `event_name` JSON blob. No real component emits them, and investigations would show them to the audience. Do not add them back in `attrs`, `rca_clues`, `infrastructure_events[].attributes`, `remediation_effects.log_events` or `steady_attributes`. Who triggered a fault is stored in the `{ns}-notify-context` index, not on log records.
 
 No "channel N", "chaos", "demo" or mission jargon in any text that becomes telemetry or a runbook.
 

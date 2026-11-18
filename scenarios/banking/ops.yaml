@@ -1,0 +1,137 @@
+# opsctl profile for the Retail Banking Platform (see app/ops_profile.py for the contract).
+# Changes go through the bank's change pipeline to three clusters (banking-eks-cluster,
+# banking-gke-cluster, banking-aks-cluster), the model registry, the rules and screening
+# stores and the cloud accounts. Every applied change writes one [change-audit] record,
+# logged by the service whose component changed.
+extends: [neutral]
+
+banner: "opsctl applies changes to the retail banking platform (EKS, GKE and AKS clusters, model registry, rules and screening stores, cloud networking). Every applied change writes a [change-audit] record with a change id."
+
+namespaces: true
+
+actors:
+  default: sre-oncall@retailbank.com             # an on-call engineer resolving from the Chaos UI
+  auto: svc-platform-autoremediation             # the remediation workflow (pre-approved standard changes)
+
+auto_remediate_channels: [16, 17, 18, 19, 20]
+
+verbs:
+  rollback:
+    summary: "Roll a deployment, CronJob, ConfigMap, model alias, ruleset, screening policy or message template back (--to-revision previous|N)"
+    example: "opsctl rollback deployment/<name> -n <namespace> --to-revision previous\n  opsctl rollback model/<name> -n fraud --to-revision previous"
+    describe: "{ref} rolled back to {rev_text}"
+  restore:
+    summary: "Put a changed infrastructure setting or a deleted link back (--<setting> <value>)"
+    example: "opsctl restore db-parameter-group/<name> --max-standby-streaming-delay 30s\n  opsctl restore private-dns-link/<name> --vnet <vnet>"
+    describe: "{ref} restored{settings_text}"
+  patch:
+    summary: "Change settings on a workload, autoscaler or feature flag (--max-replicas, --rollout-pct, --session-key-fallbacks ...)"
+    example: "opsctl patch hpa/<name> -n <namespace> --max-replicas 24\n  opsctl patch featureflag/<name> -n <namespace> --rollout-pct 0"
+    describe: "{ref} updated{settings_text}"
+  sync:
+    summary: "Refresh an ExternalSecret from the secret store now instead of at its refresh interval"
+    example: "opsctl sync externalsecret/<name> -n <namespace>"
+    describe: "{ref} refreshed from the secret store; mounted secret updated"
+  renew:
+    summary: "Trigger renewal of a cert-manager Certificate"
+    example: "opsctl renew certificate/<name> -n <namespace>"
+    describe: "{ref} renewal triggered; ACME order created"
+  run:
+    summary: "Run a one-off Job (reindex, resync, re-run of a batch)"
+    example: "opsctl run job/<name> -n <namespace>"
+    describe: "job/{=name or kind}-manual started{=(' (' + change_id + ')') if change_id else ''}"
+  restart:
+    summary: "Rolling restart of a deployment (pods restart on the current configuration)"
+    example: "opsctl restart deployment/<name> -n <namespace>"
+    describe: "{ref} rolling restart started"
+  # not used on this platform
+  rotate: null
+  drain: null
+  replace: null
+  apply: null
+  expand: null
+  delete: null
+
+kinds:
+  deployment: {aliases: [deploy, deployments]}
+  cronjob: {aliases: [cj, cronjobs]}
+  job: {aliases: [jobs]}
+  configmap: {aliases: [cm, configmaps]}
+  hpa: {aliases: [horizontalpodautoscaler, hpas]}
+  externalsecret: {aliases: [es, externalsecrets]}
+  certificate: {aliases: [cert, certificates]}
+  model: {aliases: [models, model-alias]}
+  ruleset: {aliases: [rulesets]}
+  screening-policy: {aliases: [screening-policies]}
+  featureflag: {aliases: [flag, featureflags, ff]}
+  message-template: {aliases: [message-templates, template]}
+  private-dns-link: {aliases: [dns-link, private-dns-links]}
+  db-parameter-group: {aliases: [db-parameter-groups, pg-params]}
+
+audit:
+  service: [mobile-gateway]
+  default: change_audit
+  formats:
+    change_audit:
+      body: '[change-audit] change applied action={verb} target={target}{=(" namespace=" + namespace) if namespace else ""} cmd="opsctl {command}" actor={actor} change_id={change_id}'
+      attributes:
+        operation: change_applied
+        event.action: "{verb}"
+        change.target: "{target}"
+        change.command: "opsctl {command}"
+        user.name: "{actor}"
+        change.id: "{change_id}"
+        ops.target: null
+        ops.command: null
+      match:
+        prefix: "[change-audit]"
+        tokens: ["{target}"]
+
+runbook:
+  scope_note: "Other clusters, namespaces and members' segments were not changed and can legitimately still show the old values; they make a useful comparison."
+  recovery_note: "Each query names the service that reports the changed component, so its result is the value to compare."
+  audit_label: "[change-audit] record"
+
+guide:
+  scenario: |
+    ## Where the retail banking platform's telemetry is
+    The data is OpenTelemetry. Nine services (`resource.attributes.service.name`) run on three
+    clusters: mobile-gateway, claims-processor and payment-engine on banking-eks-cluster
+    (AWS us-east-1); policy-manager, fraud-sentinel and auth-gateway on banking-gke-cluster
+    (GCP us-central1); quote-engine, member-portal and document-vault on banking-aks-cluster
+    (Azure eastus).
+
+    - **Logs:** `FROM logs.otel.banking`. Message in `body.text` (never `body` alone), level in
+      `severity_text`. Application error codes (e.g. `PAY-ACH-DELAY`) appear in `body.text` and
+      in `attributes.error.type`. Each service logs a periodic status line per component
+      (`operation` such as `model_health`, `ach_posting_status`, `sanctions_screening`) whose
+      `attributes.*` carry the running configuration: model version, ruleset or calendar
+      revision, release, HPA limit, parameter values.
+    - **Service metrics:** `FROM metrics-generic.otel-default`, filtered by
+      `resource.attributes.service.name`, fields under `metrics.<service>.*`, for example
+      `metrics.fraud_sentinel.decline_rate_pct`, `metrics.payment_engine.ach_account_lookup_ms`,
+      `metrics.auth_gateway.mfa_delivery_rate`, `metrics.payment_engine.db_replica_lag_ms`.
+      Before you conclude that a metric does not exist, look here.
+    - **Changes:** every applied change is a `[change-audit]` log line on the service whose
+      component changed, with `attributes.change.id`, `attributes.user.name` and the command.
+      Earlier changes made by release pipelines, schedulers and other teams (deploys, config
+      reloads, model promotions, secret rotations) are logged by the same services.
+    - **Package data:** Redis (`metrics-redis*`), Kafka (`metrics-kafka*`), nginx and Kubernetes
+      streams carry the same incidents at their own granularity; judge recovery on the service
+      metrics and status lines above.
+    - **Business KPIs:** `metrics.business.*` from member-portal.
+
+    Compare a short window after the change's `change.id` with the window before it: readings
+    converge over the recovery time the runbook states (a reindex, a backlog draining, a
+    certificate being issued), they do not jump back instantly.
+
+    Example: the card decline rate the fraud service reports, per minute:
+
+    ```
+    FROM metrics-generic.otel-default
+    | WHERE @timestamp > NOW() - 15 minutes AND resource.attributes.service.name == "fraud-sentinel"
+      AND metrics.fraud_sentinel.decline_rate_pct IS NOT NULL
+    | STATS avg = AVG(metrics.fraud_sentinel.decline_rate_pct), max = MAX(metrics.fraud_sentinel.decline_rate_pct)
+        BY minute = BUCKET(@timestamp, 1 minute)
+    | SORT minute DESC
+    ```

@@ -47,6 +47,73 @@ state:
   _last_link_report:
     init: now
 steps:
+# Per-link fault state, computed once per cycle and used by the antenna loop below.
+# X-band (ch 8): XB-PRIMARY LNA bias drift -> packet loss; fix = XB-SECONDARY + FEC 3/4.
+# UHF (ch 9): gimbal-ctrl-v2.0.1-rc3 loses TDRSS-W track; fix = rollback to v1.9.6.
+# S-band (ch 19): rain fade on the downlink; fix = +4 dB SSPA and the backup feed.
+- sample:
+    xb_ramp:
+      expr: "min(1.0, elapsed.get(8, 0) / 45.0) if 8 in all_active else 0.0"
+    xb_fixed:
+      expr: "8 in fixed_channels and 8 not in all_active"
+    xb_conv:
+      expr: "min(1.0, since_fix.get(8, 0) / 60.0) if xb_fixed else 1.0"
+    xb_base:
+      uniform: [0.05, 0.4]
+    xb_fault:
+      uniform: [5.0, 25.0]
+    xb_after:
+      uniform: [0.2, 1.2]
+    xb_loss:
+      expr: "round(xb_base + (xb_fault - xb_base) * xb_ramp, 2) if 8 in all_active else (round(xb_fault + (xb_after - xb_fault) * xb_conv, 2) if xb_fixed else round(xb_base, 2))"
+    xb_link:
+      expr: "'XB-SECONDARY' if xb_fixed else 'XB-PRIMARY'"
+    xb_fec:
+      expr: "'3/4' if xb_fixed else '7/8'"
+    xb_lna_ma:
+      expr: "round(rand.uniform(41.0, 48.0), 1) if 8 in all_active else round(rand.uniform(60.5, 63.5), 1)"
+    xb_status:
+      expr: "'ANOMALY' if 8 in all_active or xb_loss >= 2.0 else 'NOMINAL'"
+    uhf_ramp:
+      expr: "min(1.0, elapsed.get(9, 0) / 45.0) if 9 in all_active else 0.0"
+    uhf_fixed:
+      expr: "9 in fixed_channels and 9 not in all_active"
+    uhf_conv:
+      expr: "min(1.0, since_fix.get(9, 0) / 60.0) if uhf_fixed else 1.0"
+    uhf_base:
+      uniform: [0.03, 0.15]
+    uhf_fault:
+      uniform: [1.0, 5.0]
+    uhf_after:
+      uniform: [0.05, 0.2]
+    uhf_err:
+      expr: "round(uhf_base + (uhf_fault - uhf_base) * uhf_ramp, 3) if 9 in all_active else (round(uhf_fault + (uhf_after - uhf_fault) * uhf_conv, 3) if uhf_fixed else round(uhf_base, 3))"
+    uhf_fw:
+      expr: "'gimbal-ctrl-v2.0.1-rc3' if 9 in all_active else 'gimbal-ctrl-v1.9.6'"
+    uhf_lock:
+      expr: "'LOST' if uhf_err >= 0.5 else 'ACQUIRED'"
+    uhf_status:
+      expr: "'ANOMALY' if 9 in all_active or uhf_err >= 0.3 else 'NOMINAL'"
+    sb_ramp:
+      expr: "min(1.0, elapsed.get(19, 0) / 60.0) if 19 in all_active else 0.0"
+    sb_fixed:
+      expr: "19 in fixed_channels and 19 not in all_active"
+    sb_conv:
+      expr: "min(1.0, since_fix.get(19, 0) / 75.0) if sb_fixed else 1.0"
+    sb_base:
+      uniform: [15.0, 20.0]
+    sb_fault:
+      uniform: [3.0, 8.0]
+    sb_after:
+      uniform: [12.8, 15.5]
+    sb_snr:
+      expr: "round(sb_base + (sb_fault - sb_base) * sb_ramp, 1) if 19 in all_active else (round(sb_fault + (sb_after - sb_fault) * sb_conv, 1) if sb_fixed else round(sb_base, 1))"
+    sb_tx:
+      expr: "'+4dB' if sb_fixed else '+0dB'"
+    sb_feed:
+      expr: "'BACKUP' if sb_fixed else 'PRIMARY'"
+    sb_status:
+      expr: "'ANOMALY' if 19 in all_active or sb_snr < 12.0 else 'NOMINAL'"
 - for_each:
     in: ANTENNAS
     as:
@@ -55,7 +122,7 @@ steps:
     steps:
     - sample:
         channel:
-          expr: rand.choice(ant['channels'])
+          expr: "xb_link if ant_key == 'x_band' else rand.choice(ant['channels'])"
         signal_db:
           uniform:
           - 0.0
@@ -68,9 +135,9 @@ steps:
           round: 2
     - sample:
         signal_db:
-          expr: round(ant['lo'] + (ant['hi'] - ant['lo']) * signal_db, 1)
+          expr: "round(sb_snr + rand.uniform(4.0, 9.0), 1) if ant_key == 's_band' else (round(ant['lo'] + (ant['hi'] - ant['lo']) * signal_db - uhf_err * 3.0, 1) if ant_key == 'uhf' else round(ant['lo'] + (ant['hi'] - ant['lo']) * signal_db, 1))"
         packet_loss:
-          expr: round(ant['loss_lo'] + (ant['loss_hi'] - ant['loss_lo']) * packet_loss, 2)
+          expr: "xb_loss if ant_key == 'x_band' else round(ant['loss_lo'] + (ant['loss_hi'] - ant['loss_lo']) * packet_loss, 2)"
     - metric:
         name:
           expr: f'comms.{ant_key}.signal_db'
@@ -83,18 +150,85 @@ steps:
         value:
           var: packet_loss
         unit: '%'
-    - log:
+    - when: "ant_key == 's_band'"
+      metric:
+        name: comms.sband.snr_db
+        value:
+          var: sb_snr
+        unit: dB
+    - when: "ant_key == 's_band'"
+      log:
         level: INFO
-        message: '[COMM] antenna={ant[name]} channel={channel} signal={signal_db}dB loss={packet_loss}% lock=ACQUIRED status=NOMINAL'
+        message: '[COMM] antenna=S-Band channel={channel} signal={signal_db}dB eb_no={sb_snr}dB tx_power={sb_tx} feed={sb_feed} loss={packet_loss}% lock=ACQUIRED status={sb_status}'
         attrs:
-          comms.antenna:
-            expr: ant['name']
+          comms.antenna: S-Band
           comms.signal_db:
             var: signal_db
           comms.packet_loss_pct:
             var: packet_loss
           comms.channel:
             var: channel
+          comms.sband_snr_db:
+            var: sb_snr
+          comms.tx_power_offset:
+            var: sb_tx
+          comms.sband_feed:
+            var: sb_feed
+          sensor.status:
+            var: sb_status
+          operation: antenna_check
+    - when: "ant_key == 'x_band'"
+      metric:
+        name: comms.xband.packet_loss_pct
+        value:
+          var: xb_loss
+        unit: '%'
+    - when: "ant_key == 'x_band'"
+      log:
+        level: INFO
+        message: '[COMM] antenna=X-Band link={xb_link} fec={xb_fec} signal={signal_db}dB loss={packet_loss}% lna_bias={xb_lna_ma}mA lock=ACQUIRED status={xb_status}'
+        attrs:
+          comms.antenna: X-Band
+          comms.signal_db:
+            var: signal_db
+          comms.packet_loss_pct:
+            var: packet_loss
+          comms.channel:
+            var: channel
+          comms.active_link:
+            var: xb_link
+          comms.fec_rate:
+            var: xb_fec
+          comms.lna_bias_ma:
+            var: xb_lna_ma
+          sensor.status:
+            var: xb_status
+          operation: antenna_check
+    - when: "ant_key == 'uhf'"
+      metric:
+        name: comms.uhf.pointing_error_deg
+        value:
+          var: uhf_err
+        unit: deg
+    - when: "ant_key == 'uhf'"
+      log:
+        level: INFO
+        message: '[COMM] antenna=UHF channel={channel} gimbal=UHF-PRIMARY fw={uhf_fw} target=TDRSS-W pointing_error={uhf_err}deg signal={signal_db}dB loss={packet_loss}% lock={uhf_lock} status={uhf_status}'
+        attrs:
+          comms.antenna: UHF
+          comms.signal_db:
+            var: signal_db
+          comms.packet_loss_pct:
+            var: packet_loss
+          comms.channel:
+            var: channel
+          comms.pointing_error_deg:
+            var: uhf_err
+          comms.tracking_target: TDRSS-W
+          deployment.servo_fw:
+            var: uhf_fw
+          sensor.status:
+            var: uhf_status
           operation: antenna_check
 - counter:
     state_key: _frame_count
@@ -105,6 +239,8 @@ steps:
       - 45.0
       - 65.0
       round: 1
+    link_status:
+      expr: "'DEGRADED' if 'ANOMALY' in (xb_status, uhf_status, sb_status) else 'NOMINAL'"
 - metric:
     name: comms.total_throughput_mbps
     value:
@@ -121,20 +257,22 @@ steps:
     steps:
     - log:
         level: INFO
-        message: '[COMM] link_budget throughput={total_throughput}Mbps margin=+3.2dB frames={_frame_count} status=NOMINAL'
+        message: '[COMM] link_budget throughput={total_throughput}Mbps margin=+3.2dB frames={_frame_count} status={link_status}'
         attrs:
           operation: link_budget
           comms.throughput_mbps:
             var: total_throughput
           comms.frame_count:
             var: _frame_count
-          comms.status: NOMINAL
+          comms.status:
+            var: link_status
     else:
     - log:
         level: INFO
-        message: '[COMM] link_budget throughput={total_throughput}Mbps margin=+3.2dB status=NOMINAL'
+        message: '[COMM] link_budget throughput={total_throughput}Mbps margin=+3.2dB status={link_status}'
         attrs:
           operation: link_budget
           comms.throughput_mbps:
             var: total_throughput
-          comms.status: NOMINAL
+          comms.status:
+            var: link_status

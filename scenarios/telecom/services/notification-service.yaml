@@ -17,93 +17,138 @@ topology:
 emit_fault_logs: true
 kpi_emitter: false
 state:
-  _notification_count:
-    init: 0
-  _last_summary:
-    init: now
+  _sms_peak:
+    init: 0.0
+  _push_peak:
+    init: 0.0
 steps:
+# SMS via SMPP to Infobip (8 binds, contracted 3,000 SMS/min), push via FCM, partner webhooks.
+#   ch 18 credential v7 rejected from the trigger: queue +900/min; binds back ~15s after
+#         the restore, then -2,100/min.
+#   ch 19 FCM override 500/min in effect from the trigger: queue +1,900/min; the quota change
+#         applies ~45s after the delete, then the queue drains at ~12,000/min.
+#   ch 20 1.5s webhook timeout: Lycamobile callbacks (p95 ~4.8s) time out; fixed within ~10s.
 - sample:
-    notif_channel:
-      choice:
-      - sms
-      - push
-      - email
-      - webhook
-    notif_template:
-      choice:
-      - activation_confirm
-      - plan_change
-      - usage_alert
-      - partner_callback
+    sms_live:
+      expr: "40.0 + 15.0 * elapsed.get(18, 0)"
 - counter:
-    state_key: _notification_count
-    by: 1
-- log:
-    level: INFO
-    message: '[NOTIF] notification_sent channel={notif_channel} template={notif_template} priority=high delivery=SUCCESS'
-    attrs:
-      operation: notification_sent
-      notification.channel:
-        var: notif_channel
-      notification.template:
-        var: notif_template
-      notification.delivery: SUCCESS
-- log:
-    level: INFO
-    message: '[NOTIF] channel_health sms=98.5% push=99.2% email=99.8% webhook=97.5% smpp_bind=BOUND status=NORMAL'
-    attrs:
-      operation: channel_health
-      notification.sms_rate: 98.5
-      notification.push_rate: 99.2
-      notification.webhook_rate: 97.5
-- every:
-    seconds: 10
-    state_key: _last_summary
-    steps:
-    - log:
-        level: INFO
-        message: '[NOTIF] notification_summary total={_notification_count} delivery_rate=98.8% queue_depth=45 status=NORMAL'
-        attrs:
-          operation: notification_summary
-          notification.total:
-            var: _notification_count
-          notification.delivery_rate: 98.8
+    state_key: _sms_peak
+    by: {expr: "sms_live - _sms_peak"}
+  when: "18 in all_active"
 - sample:
-    notif_queue:
-      if_active:
-        randint:
-        - 500
-        - 5000
-      else:
-        randint:
-        - 10
-        - 100
-    notif_delivery_rate:
-      if_active:
-        uniform:
-        - 10.0
-        - 60.0
-        round: 2
-      else:
-        uniform:
-        - 95.0
-        - 99.5
-        round: 2
+    s18:
+      expr: "since_fix.get(18, 0)"
+    sms_peak:
+      expr: "_sms_peak if _sms_peak > 0 else 6000.0"
+    smpp_down:
+      expr: "bool(18 in all_active or (18 in fixed_channels and s18 < 15))"
+    sms_queue_center:
+      expr: "sms_live if 18 in all_active else ((sms_peak + 15.0 * s18 if s18 < 15 else max(40.0, sms_peak + 225.0 - 2100.0 * (s18 - 15.0) / 60.0)) if 18 in fixed_channels else 40.0)"
+    sms_queue:
+      expr: "int(max(0.0, sms_queue_center + rand.gauss(0, 8)))"
+    smpp_binds:
+      expr: "0 if smpp_down else 8"
+    sms_delivered:
+      expr: "0 if smpp_down else int((3000 if sms_queue > 100 else 900) * (1.0 + rand.gauss(0, 0.02)))"
+    smpp_credential:
+      expr: "'v7' if 18 in all_active else 'v6'"
+    smpp_status:
+      expr: "'ANOMALY' if smpp_down else ('DRAINING' if sms_queue > 100 else 'NORMAL')"
 - metric:
-    name: notification_service.queue_depth
-    value:
-      var: notif_queue
+    name: notification_service.smpp_binds_active
+    value: {var: smpp_binds}
+    unit: binds
+- metric:
+    name: notification_service.sms_queue_depth
+    value: {var: sms_queue}
     unit: messages
 - metric:
-    name: notification_service.delivery_rate
-    value:
-      var: notif_delivery_rate
-    unit: '%'
+    name: notification_service.sms_delivered_per_min
+    value: {var: sms_delivered}
+    unit: messages/min
+- log:
+    level: INFO
+    message: 'level=info logger=notify.sms msg="smpp pool" peer=smpp3.infobip.com:2775 system_id=meridian_fra binds={smpp_binds}/8 credential={smpp_credential} queue_depth={sms_queue} delivered_last_min={sms_delivered} status={smpp_status}'
+    attrs:
+      operation: smpp_status
+      smpp.binds_active: {var: smpp_binds}
+      smpp.credential_version: {var: smpp_credential}
+      smpp.queue_depth: {var: sms_queue}
+      smpp.status: {var: smpp_status}
+- sample:
+    push_live:
+      expr: "20.0 + 31.7 * elapsed.get(19, 0)"
+- counter:
+    state_key: _push_peak
+    by: {expr: "push_live - _push_peak"}
+  when: "19 in all_active"
+- sample:
+    s19:
+      expr: "since_fix.get(19, 0)"
+    push_peak:
+      expr: "_push_peak if _push_peak > 0 else 24000.0"
+    throttled:
+      expr: "bool(19 in all_active or (19 in fixed_channels and s19 < 45))"
+    push_queue_center:
+      expr: "push_live if 19 in all_active else ((push_peak + 31.7 * s19 if s19 < 45 else max(20.0, push_peak + 1430.0 - 12000.0 * (s19 - 45.0) / 60.0)) if 19 in fixed_channels else 20.0)"
+    push_queue:
+      expr: "int(max(0.0, push_queue_center + rand.gauss(0, 6)))"
+    push_429:
+      expr: "max(0, int(1900 + rand.gauss(0, 60))) if throttled else 0"
+    push_delivered:
+      expr: "int((500 if throttled else (14400 if push_queue > 100 else 2400)) * (1.0 + rand.gauss(0, 0.02)))"
+    fcm_quota:
+      expr: "500 if 19 in all_active else 600000"
+    push_status:
+      expr: "'ANOMALY' if throttled else ('DRAINING' if push_queue > 100 else 'NORMAL')"
 - metric:
-    name: notification_service.sms_throughput
-    value:
-      uniform:
-      - 200.0
-      - 500.0
-      round: 1
-    unit: msg/min
+    name: notification_service.push_429_per_min
+    value: {var: push_429}
+    unit: responses/min
+- metric:
+    name: notification_service.push_queue_depth
+    value: {var: push_queue}
+    unit: messages
+- metric:
+    name: notification_service.push_delivered_per_min
+    value: {var: push_delivered}
+    unit: messages/min
+- log:
+    level: INFO
+    message: 'level=info logger=notify.push msg="fcm sender" project=meridian-project quota_per_min={fcm_quota} delivered_last_min={push_delivered} http_429_last_min={push_429} queue_depth={push_queue} status={push_status}'
+    attrs:
+      operation: push_status
+      fcm.quota_per_min: {var: fcm_quota}
+      fcm.push_429_per_min: {var: push_429}
+      fcm.push_queue_depth: {var: push_queue}
+      fcm.status: {var: push_status}
+- sample:
+    r20:
+      expr: "min(1.0, elapsed.get(20, 0) / 10.0) if 20 in all_active else 0.0"
+    webhook_timeouts:
+      expr: "max(0, int(125 * r20 + rand.gauss(0, 12 * r20)))"
+    webhook_success:
+      expr: "round(min(100.0, 99.6 - 51.0 * r20 + rand.gauss(0, 0.15 + 3.0 * r20)), 1)"
+    webhook_timeout_ms:
+      expr: "1500 if 20 in all_active else 15000"
+    lyca_p95_ms:
+      expr: "int(4800 + rand.gauss(0, 200))"
+    webhook_status:
+      expr: "'ANOMALY' if 20 in all_active else 'NORMAL'"
+- metric:
+    name: notification_service.webhook_timeouts_per_min
+    value: {var: webhook_timeouts}
+    unit: callbacks/min
+- metric:
+    name: notification_service.webhook_success_pct
+    value: {var: webhook_success}
+    unit: '%'
+- log:
+    level: INFO
+    message: 'level=info logger=notify.webhooks msg="partner webhooks" timeout_ms={webhook_timeout_ms} success_pct={webhook_success} timeouts_last_min={webhook_timeouts} lycamobile_p95_ms={lyca_p95_ms} lebara_p95_ms=310 status={webhook_status}'
+    attrs:
+      operation: webhook_status
+      webhook.timeout_ms: {var: webhook_timeout_ms}
+      webhook.success_pct: {var: webhook_success}
+      webhook.timeouts_per_min: {var: webhook_timeouts}
+      webhook.status: {var: webhook_status}

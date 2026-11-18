@@ -6,55 +6,141 @@ sensor_type: redis_eviction_rate
 affected_services:
 - storefront-gateway
 - product-catalog
+error_services: [storefront-gateway]
 cascade_services:
 - analytics-pipeline
-description: Bulk catalog key purge, then the refill of price-versioned keys, pushes Redis to maxmemory and floods the storefront with cold-cache origin traffic
+description: The storefront catalog cache goes cold and origin reads to product-catalog spike because product-catalog revision 141 purges every catalog:product:* key on each price run
+onset_delay_seconds: 10
 investigation_notes: |-
-  1. Check Redis memory and eviction metrics. A purge alone frees memory, but the catalog service refills new price-versioned keys while the purged keys are still being freed in the background (UNLINK lazy-free), so used_memory crosses ~90% of maxmemory (memory_approaching_maxmemory) and evictions spike (high_eviction_rate), pushing hot keys out and deepening the cold cache.
-  2. Identify the purge trigger: a bulk price update, product image refresh, or catalog deploy can DEL/UNLINK thousands of catalog keys simultaneously (catalog.purge_trigger names which one fired; no page-view spike rules out organic traffic).
-  3. If purged_keys={invalidation_keys} landed in one burst, this is a thundering herd — stagger FLUSH/DEL batches and enable request coalescing on the catalog service.
-  4. Review origin/catalog CPU — if origin_cpu_pct={origin_cpu_pct}%, backends are overwhelmed by cache-bypass reads. Serve stale keys with a short TTL while Redis recovers.
-  5. Raise maxmemory or reduce catalog key cardinality; rate-limit admin purge APIs to {max_invalidations_per_min}/min — a purge rate above that limit marks the storm.
+  Root cause: product-catalog was rolled out to revision 141 (CR-4206), which changed cache invalidation on price updates from per-SKU keys to a pattern purge (UNLINK {purge_pattern}). The price job runs every 5 minutes, so each run now removes about {purged_keys} keys instead of the roughly 1,500 SKUs whose price changed. The storefront's Redis catalog cache goes cold (storefront.cache_hit_rate_pct from about 93% to about 12%), cache misses go to product-catalog without request coalescing (storefront.origin_rps from about 250 to about 4,000), and the refill of new price-versioned keys while UNLINK is still lazily freeing the old ones pushes Redis toward maxmemory with evictions. Raising Redis maxmemory or scaling product-catalog only treats the symptom: the next price run purges the whole keyspace again. Traffic is organic and normal (analytics-pipeline counts about 3,400 page views per minute, the usual rate for the hour), so this is not a traffic spike, and it is not the recommendation cache filling up: here a purge precedes the symptoms and the catalog keyspace shrinks (storefront.catalog_cache_keys from about 520,000 to under 50,000) instead of growing.
+  Confirm:
+    - product-catalog status lines show attributes.catalog.cache_purge_mode pattern (per-sku before the rollout) and metrics.catalog.cache_keys_purged_per_min near 95,000 (normally about 1,500)
+    - the product-catalog line "[Deploy] rollout to revision 141 ... cache invalidation per-sku -> pattern" (attributes.change.request CR-4206) and a "price run ... UNLINK {purge_pattern}" line come before the first REDIS-PURGE-STORM line
+    - storefront-gateway "storefront.catalog_cache" lines show status=ANOMALY with hit_rate_pct about 12, origin_rps about 4,000 and keys under 50,000; metrics.storefront.cache_hit_rate_pct and metrics.storefront.origin_rps move together, and Redis used memory is near maxmemory with evicted keys rising
+  Remediation: roll product-catalog back with opsctl rollback deployment/product-catalog --to-revision previous (revision 140, per-SKU invalidation). Purges return to about 1,500 keys per minute within about 20 seconds of the rollout completing. The cache then refills from normal traffic: the hit rate climbs back to about 93% and origin_rps back to about 250 over about 3 minutes, and Redis evictions stop as the lazily freed memory is reclaimed. Do not flush Redis; that only empties the cache again.
 remediation_action: throttle_redis_purge
-error_message: '[StorefrontGateway] REDIS-PURGE-STORM: cache_hit_rate={cache_hit_rate_pct}% (normal >{normal_hit_rate_pct}%)
-  origin_rps={origin_rps} purged_keys={invalidation_keys} origin_cpu={origin_cpu_pct}%'
-stack_trace: |-
-  Traceback (most recent call last):
-    File "/app/storefront/product.py", line 64, in serve_product
-      page = self.catalog_cache.get_or_fetch(request.path)
-    File "/app/storefront/catalog_cache.py", line 219, in get_or_fetch
-      raise CachePurgeStorm("REDIS-PURGE-STORM")
-  storefront.cache.CachePurgeStorm: REDIS-PURGE-STORM
-  Request path:      {request_path}
-  Cache hit rate:    {cache_hit_rate_pct}% (normal: {normal_hit_rate_pct}%)
-  Origin RPS:        {origin_rps}
-  Purged keys:       {invalidation_keys}
-  Origin CPU:        {origin_cpu_pct}%
-  CDN edges:         {cdn_edge_count}
+remediation_command: |-
+  opsctl rollback deployment/product-catalog --to-revision previous
+error_message: 'ERROR storefront.catalog_cache [REDIS-PURGE-STORM] catalog cache cold: hit_rate={cache_hit_rate_pct}% origin_rps={origin_rps} miss key=catalog:product:{sku}:p{price_version} path={request_path} redis used_memory={redis_used_memory_pct}% of maxmemory evicted_keys={evicted_keys}'
+stack_trace: ""
 correlation_attr:
-  key: storefront.redis_cache_cold
-  value: true
+  key: catalog.cache_purge_mode
+  value: pattern
 fault_params:
-  cache_hit_rate_pct: {uniform: [5, 25], round: 1}
-  normal_hit_rate_pct: 92
-  origin_rps: {randint: [5000, 50000]}
-  invalidation_keys: {randint: [10000, 500000]}
-  origin_cpu_pct: {randint: [70, 98]}
-  max_invalidations_per_min: 1000
-  request_path: {choice: ["/p/12345", "/category/electronics", "/search?q=laptop", "/home"]}
-  cdn_edge_count: {randint: [3, 12]}
+  cache_hit_rate_pct: {uniform: [10, 14], round: 1}
+  origin_rps: {randint: [3800, 4300]}
+  purged_keys: 481236
+  purge_pattern: 'catalog:product:*'
+  sku: {format: "SKU-{n}", n: {randint: [100000, 999999]}}
+  price_version: {randint: [20261117001, 20261117999]}
+  request_path: {choice: ["/p/sku-418220", "/category/electronics", "/search?q=laptop", "/p/sku-102934"]}
+  redis_used_memory_pct: {uniform: [91, 96], round: 1}
+  evicted_keys: {randint: [1200, 6500]}
 rca_clues:
   storefront-gateway:
-    storefront.redis_hit_rate_pct: {uniform: [5, 25], round: 1}
-    storefront.origin_rps_spike: {randint: [5000, 50000]}
+    storefront.cache_hit_rate_pct: {uniform: [10, 14], round: 1}
+    storefront.origin_rps: {randint: [3800, 4300]}
+    storefront.catalog_cache_keys: {randint: [20000, 48000]}
   product-catalog:
-    catalog.origin_requests_spike: {randint: [2000, 20000]}
-    catalog.request_coalescing_failures: {randint: [100, 2000]}
-    catalog.purge_trigger: bulk_price_update
-    catalog.admin_purge_rate_per_min: {randint: [5000, 50000]}
+    catalog.cache_purge_mode: pattern
+    catalog.cache_keys_purged_per_min: {randint: [90000, 99000]}
+    catalog.deploy_revision: 141
+    catalog.request_coalescing: disabled
   analytics-pipeline:
-    analytics.page_view_spike_detected: false
-    analytics.ingest_backpressure: true
+    analytics.page_views_per_min: {uniform: [3300, 3500], round: 0}
+    analytics.product_view_p95_ms: {randint: [2400, 3200]}
+cascade_messages:
+  product-catalog:
+    - severity: WARN
+      message: '[http-nio-8080-exec-112] WARN  c.e.catalog.cache.CatalogCacheLoader - origin load 4.1k rps from storefront-gateway cache misses; 31% duplicate in-flight fetches for the same key (request coalescing disabled), Hikari pool catalog-db active 48/50'
+    - severity: INFO
+      message: '[price-sync-1] INFO  c.e.catalog.pricing.PriceRunJob - price run complete: 1,412 SKUs repriced, cache invalidation mode=pattern UNLINK catalog:product:* removed {purged_keys} keys'
+  analytics-pipeline:
+    - severity: WARN
+      message: 'WARNING analytics.web_vitals: product_view p95 latency 2.8s (7d same-hour 0.31s) while page_views_per_min 3,412 is at the normal rate; storefront slowdown, not a traffic spike'
+fault_scope:
+  cluster: ecommerce-eks-cluster
+  workloads: [product-catalog, storefront-gateway]
+infrastructure_events:
+  - service: product-catalog
+    severity: INFO
+    offset_seconds: -90
+    body: '[Deploy] rollout to revision 141 started: cache invalidation on price update per-sku -> pattern (UNLINK catalog:product:*); deployed by catalog-team (CR-4206)'
+    attributes:
+      user.name: catalog-team
+      change.request: CR-4206
+      operation: deployment_rollout
+      deploy.revision: 141
+      change.summary: 'cache invalidation: per-sku -> pattern'
+      catalog.cache_purge_mode: pattern
+  - service: product-catalog
+    severity: INFO
+    offset_seconds: -5
+    body: '[price-sync-1] INFO  c.e.catalog.pricing.PriceRunJob - price run started: 1,412 SKUs repriced, invalidating cache with UNLINK catalog:product:* (mode=pattern, 481,236 keys)'
+    attributes:
+      operation: price_run
+      catalog.cache_purge_mode: pattern
+remediation_effects:
+  log_taper_seconds: 90
+  log_events:
+    - service: product-catalog
+      severity: INFO
+      offset_seconds: 1
+      body: '[CHG] CHANGE APPLIED opsctl rollback deployment/product-catalog --to-revision previous by {actor}: rollout undo from revision 141 to revision 140 (cache invalidation pattern -> per-sku)'
+      attributes:
+        operation: change_applied
+        change.target: deployment/product-catalog
+    - service: product-catalog
+      severity: INFO
+      offset_seconds: 18
+      body: 'deployment product-catalog rolled back to revision 140: all pods updated and available, cache invalidation mode per-sku'
+      attributes:
+        operation: deployment_rollout
+        deploy.revision: 140
+        catalog.cache_purge_mode: per-sku
+    - service: product-catalog
+      severity: INFO
+      offset_seconds: 25
+      body: '[price-sync-1] INFO  c.e.catalog.pricing.PriceRunJob - price run complete: 1,388 SKUs repriced, cache invalidation mode=per-sku removed 1,388 keys'
+      attributes:
+        operation: price_run
+        catalog.cache_purge_mode: per-sku
+    - service: storefront-gateway
+      severity: INFO
+      offset_seconds: 90
+      body: 'storefront.catalog_cache refill in progress: hit_rate_pct 53, keys 276,000, origin_rps 1,900'
+      attributes:
+        operation: catalog_cache_status
+    - service: storefront-gateway
+      severity: INFO
+      offset_seconds: 180
+      body: 'storefront.catalog_cache refilled: hit_rate_pct 93, keys 520,000, origin_rps 250'
+      attributes:
+        operation: catalog_cache_status
+  verification:
+    - signal: storefront.cache_hit_rate_pct
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "storefront-gateway"'
+      field: 'metrics.storefront.cache_hit_rate_pct'
+      expect: 'climbs from about 12% back to about 93% over about 180s as the cache refills (origin_rps falls from about 4,000 to about 250 with it)'
+      within_seconds: 240
+    - signal: catalog.cache_keys_purged_per_min
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "product-catalog"'
+      field: 'metrics.catalog.cache_keys_purged_per_min'
+      expect: 'back to about 1,500 (was about 95,000) within about 20s of the rollback'
+      within_seconds: 60
+    - signal: REDIS-PURGE-STORM lines
+      from: 'logs.otel.ecommerce'
+      where: 'body.text LIKE "*REDIS-PURGE-STORM*"'
+      expect: 'fade out over about 90s and stop as the hit rate recovers'
+      within_seconds: 240
+    - signal: catalog cache purge mode
+      from: 'logs.otel.ecommerce'
+      where: 'resource.attributes.service.name == "product-catalog"'
+      field: 'attributes.catalog.cache_purge_mode'
+      expect: 'pattern while revision 141 runs; per-sku once the rollback completes'
+      within_seconds: 60
 business_impact:
   - kpi: business.sessions_per_min
     value: {uniform: [446.4, 513.6]}
@@ -66,3 +152,6 @@ generator_impact:
   redis_otel:
     high_eviction_rate: 350.0
     memory_approaching_maxmemory: 95.0
+generator_hold_seconds: {redis_otel: 180}
+# dependents degrade after the component at fault, in dependency order
+service_lag_seconds: {storefront-gateway: 10, analytics-pipeline: 30}

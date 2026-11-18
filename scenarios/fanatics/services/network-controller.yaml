@@ -55,31 +55,13 @@ steps:
     by: 1
 - sample:
     in_octets:
-      randint:
-      - 50000000
-      - 500000000
+      expr: "max(0, round(180000000 + rand.gauss(0, 15000000)))"
     out_octets:
-      randint:
-      - 50000000
-      - 500000000
+      expr: "max(0, round(150000000 + rand.gauss(0, 15000000)))"
     in_errors:
-      if_active:
-        randint:
-        - 10
-        - 100
-      else:
-        randint:
-        - 0
-        - 2
+      expr: "max(0, round(rand.gauss(0.6, 0.7)))"
     crc_errors:
-      if_active:
-        randint:
-        - 5
-        - 50
-      else:
-        randint:
-        - 0
-        - 1
+      expr: "max(0, round(rand.gauss(0.2, 0.4)))"
 - metric:
     name: network.interface.in_octets
     value:
@@ -111,73 +93,266 @@ steps:
         var: in_errors
       network.crc_errors:
         var: crc_errors
+# Channel 3: route-policy-v3.2.0-rc1 sets hold timer 9s on edge-rtr-01. Symptoms start 15s after
+# the push (first expired hold timer) and peers drop within ~10s. The rollback hard-resets the
+# sessions: all 6 drop for ~10s, then they re-establish one by one, back to 6/6 in about 40s.
 - every:
     seconds: 10
     state_key: _last_bgp_check
     steps:
     - sample:
         bgp_peers:
-          randint:
-          - 3
-          - 6
+          expr: "6"
+        bgp_fixed:
+          expr: "3 in fixed_channels and 3 not in all_active"
+        bgp_ramp:
+          expr: "min(1.0, max(0.0, elapsed.get(3, 0) - 15.0) / 10.0)"
+        bgp_since:
+          expr: "since_fix.get(3, 0) if bgp_fixed else 0"
+        bgp_flap_fault:
+          expr: "max(7, min(13, round(10 + rand.gauss(0, 0.8))))"
         established:
-          if_active:
-            expr: rand.randint(1, max(1, bgp_peers - 1))
-          else:
-            var: bgp_peers
+          expr: "max(1, min(5, round(6 - 3 * bgp_ramp + rand.gauss(0, 0.4)))) if 3 in all_active and bgp_ramp > 0 else (6 if 3 in all_active else ((0 if bgp_since < 10 else min(6, int((bgp_since - 10) / 6) + 1)) if bgp_fixed else 6))"
+        bgp_flaps:
+          expr: "round(bgp_flap_fault * bgp_ramp) if 3 in all_active else (round(bgp_flap_fault * max(0.0, 1.0 - bgp_since / 60.0)) if bgp_fixed else 0)"
+        bgp_policy_rev:
+          expr: "'route-policy-v3.2.0-rc1' if 3 in all_active else 'route-policy-v3.1.4'"
+        bgp_hold_s:
+          expr: "9 if 3 in all_active else 180"
+        bgp_status:
+          expr: "'ANOMALY' if (3 in all_active and bgp_ramp > 0) or established < bgp_peers or bgp_flaps > 0 else 'NOMINAL'"
+        bgp_adj:
+          expr: "'Down BGP Notification sent' if rand.random() < 0.5 else 'Up'"
     - metric:
         name: network.bgp.peers_established
         value:
           var: established
         unit: peers
+    - metric:
+        name: network.bgp.session_flaps_per_min
+        value:
+          var: bgp_flaps
+        unit: flaps
     - log:
         level: INFO
-        message: '%BGP-5-ADJCHANGE: neighbor 10.0.0.1 Up, {established}/{bgp_peers} peers Established'
+        message: 'bgp-summary router=edge-rtr-01 neighbors_established={established}/{bgp_peers} route_policy={bgp_policy_rev} hold_timer={bgp_hold_s}s adjacency_changes_1m={bgp_flaps} status={bgp_status}'
         attrs:
           operation: bgp_check
+          network.device: edge-rtr-01
           bgp.total_peers:
             var: bgp_peers
           bgp.established:
             var: established
+          bgp.flaps_per_min:
+            var: bgp_flaps
+          bgp.hold_timer_s:
+            var: bgp_hold_s
+          bgp.status:
+            var: bgp_status
+          network.bgp_policy_rev:
+            var: bgp_policy_rev
+    - when: "(3 in all_active and bgp_ramp > 0) or (bgp_fixed and bgp_since >= 10 and bgp_since < 45)"
+      log:
+        level: WARN
+        message: '%BGP-5-ADJCHANGE: neighbor 169.254.21.1 {bgp_adj}'
+        attrs:
+          operation: bgp_adjacency
+          network.device: edge-rtr-01
+          bgp.neighbor: 169.254.21.1
+    - log:
+        level: INFO
+        message: 'bgp-summary router=edge-rtr-02 neighbors_established=6/6 route_policy=route-policy-v3.1.4 hold_timer=180s adjacency_changes_1m=0 status=NOMINAL'
+        attrs:
+          operation: bgp_check
+          network.device: edge-rtr-02
+          bgp.status: NOMINAL
+# Channel 2: ios-xe-17.9.4a-prerelease on dist-sw-02. The switch reloads onto the new image, and
+# TCNs start about 10s after it rejoins. The rollback is another reload: dist-sw-02 is not
+# pollable for ~40s (no readings), then RSTP resyncs with a short burst that settles in ~25s.
 - sample:
+    stp_fixed:
+      expr: "2 in fixed_channels and 2 not in all_active"
+    stp_ramp:
+      expr: "min(1.0, max(0.0, elapsed.get(2, 0) - 10.0) / 8.0)"
+    stp_since:
+      expr: "since_fix.get(2, 0) if stp_fixed else 0"
+    stp_gap:
+      expr: "stp_fixed and stp_since < 40"
+    stp_base:
+      expr: "max(0, round(rand.gauss(0.2, 0.45)))"
+    stp_fault:
+      expr: "max(33, min(47, round(40 + rand.gauss(0, 2.5))))"
+    stp_burst:
+      expr: "max(0, round(5 * max(0.0, 1.0 - (stp_since - 40.0) / 25.0) + rand.gauss(0, 0.5)))"
     stp_changes:
-      if_active:
-        randint:
-        - 3
-        - 15
-      else:
-        randint:
-        - 0
-        - 1
-- metric:
+      expr: "round(stp_base + (stp_fault - stp_base) * stp_ramp) if 2 in all_active else (stp_burst if stp_fixed else stp_base)"
+    stp_fw:
+      expr: "'ios-xe-17.9.4a-prerelease' if 2 in all_active else 'ios-xe-17.9.3'"
+    stp_status:
+      expr: "'ANOMALY' if (2 in all_active and stp_ramp > 0) or stp_changes > 3 else 'NOMINAL'"
+- when: "not stp_gap"
+  metric:
     name: network.stp.topology_changes
     value:
       var: stp_changes
     unit: changes
-- log:
+- when: "not stp_gap"
+  log:
     level: INFO
-    message: '%SPANTREE-6-PORT_STATE: VLAN0100 {iface} state -> forwarding, {stp_changes} topology changes this interval'
+    message: 'stp-poll switch=dist-sw-02 vlan=100 tcn_last_30s={stp_changes} ios_xe={stp_fw} status={stp_status}'
     attrs:
       operation: stp_check
+      network.device: dist-sw-02
       stp.topology_changes:
         var: stp_changes
+      stp.status:
+        var: stp_status
+      infra.stp_firmware:
+        var: stp_fw
+- when: "2 in all_active and stp_ramp > 0"
+  log:
+    level: WARN
+    message: '%SPANTREE-5-TOPOTRAP: Topology Change Trap for vlan 100'
+    attrs:
+      operation: stp_topology_change
+      network.device: dist-sw-02
+- log:
+    level: INFO
+    message: 'stp-poll switch=dist-sw-01 vlan=100 tcn_last_30s=0 ios_xe=17.9.3 status=NOMINAL'
+    attrs:
+      operation: stp_check
+      network.device: dist-sw-01
+      stp.status: NOMINAL
+# Channel 1: net-core-v2.8.1-canary drops the LACP channel-group on acc-sw-wh01 (Gi0/0/1, Gi0/0/4).
+# MAC moves start ~5s after the unbundle. Re-bundling is quick: moves stop within ~12s.
 - sample:
     mac_entries:
-      randint:
-      - 800
-      - 2500
+      expr: "round(3850 + rand.gauss(0, 25))"
     mac_utilization_pct:
       expr: round(mac_entries / 8192 * 100, 1)
+    mf_fixed:
+      expr: "1 in fixed_channels and 1 not in all_active"
+    mf_ramp:
+      expr: "min(1.0, max(0.0, elapsed.get(1, 0) - 5.0) / 10.0)"
+    mf_since:
+      expr: "since_fix.get(1, 0) if mf_fixed else 0"
+    mf_conv:
+      expr: "min(1.0, mf_since / 12.0)"
+    mf_base:
+      expr: "max(0, round(rand.gauss(0.3, 0.5)))"
+    mf_fault:
+      expr: "max(52, min(68, round(60 + rand.gauss(0, 3.5))))"
+    mac_flaps:
+      expr: "round(mf_base + (mf_fault - mf_base) * mf_ramp) if 1 in all_active else (round(mf_fault * (1.0 - mf_conv) + mf_base * mf_conv) if mf_fixed else mf_base)"
+    lacp_members:
+      expr: "0 if 1 in all_active or (mf_fixed and mf_since < 4) else 2"
+    release_train:
+      expr: "'net-core-v2.8.1-canary' if 1 in all_active else 'net-core-v2.8.0'"
+    mac_status:
+      expr: "'ANOMALY' if (1 in all_active and mf_ramp > 0) or mac_flaps > 3 else 'NOMINAL'"
+    mac_entries_wh02:
+      expr: "round(2100 + rand.gauss(0, 20))"
 - metric:
     name: network.mac_table.entries
     value:
       var: mac_entries
     unit: entries
+- metric:
+    name: network.mac_flaps_per_min
+    value:
+      var: mac_flaps
+    unit: moves
 - log:
     level: INFO
-    message: '%SW_MATM-6-MACCOUNT: MAC address table entries {mac_entries}/8192 ({mac_utilization_pct}% utilization)'
+    message: 'mac-table switch=acc-sw-wh01 total_in_use={mac_entries}/8192 utilization={mac_utilization_pct}% po12_bundled={lacp_members}/2 mac_moves_per_min={mac_flaps} release_train={release_train} status={mac_status}'
     attrs:
       operation: mac_table_check
+      network.device: acc-sw-wh01
       mac_table.entries:
         var: mac_entries
       mac_table.capacity: 8192
+      switching.lacp_bundle_members:
+        var: lacp_members
+      switching.mac_moves_per_min:
+        var: mac_flaps
+      switching.status:
+        var: mac_status
+      deployment.release_train:
+        var: release_train
+- log:
+    level: INFO
+    message: 'mac-table switch=acc-sw-wh02 total_in_use={mac_entries_wh02}/8192 po12_bundled=2/2 mac_moves_per_min=0 release_train=net-core-v2.8.0 status=NOMINAL'
+    attrs:
+      operation: mac_table_check
+      network.device: acc-sw-wh02
+      switching.status: NOMINAL
+# Channel 20: vgw-strongswan-5.9.14-rc2 on vgw-aws-azure. The gateway restarts on the new image
+# and the first child-SA rekey fails ~30s later, then flaps start. The rollback restarts the
+# gateway (tunnel down ~30s), then IKE and IPsec renegotiate; the tunnel is up again at ~80s.
+- sample:
+    vpn_fixed:
+      expr: "20 in fixed_channels and 20 not in all_active"
+    vpn_ramp:
+      expr: "min(1.0, max(0.0, elapsed.get(20, 0) - 30.0) / 20.0)"
+    vpn_since:
+      expr: "since_fix.get(20, 0) if vpn_fixed else 0"
+    vpn_flap_fault:
+      expr: "max(3, min(5, round(4 + rand.gauss(0, 0.5))))"
+    vpn_flaps:
+      expr: "round(vpn_flap_fault * vpn_ramp) if 20 in all_active else (round(vpn_flap_fault * max(0.0, 1.0 - vpn_since / 60.0)) if vpn_fixed else 0)"
+    vpn_state:
+      expr: "'DOWN' if vpn_fixed and vpn_since < 30 else ('NEGOTIATING' if vpn_fixed and vpn_since < 80 else ('REKEYING' if 20 in all_active and vpn_ramp > 0 else 'ESTABLISHED'))"
+    vpn_up:
+      expr: "0 if (vpn_fixed and vpn_since < 80) or (20 in all_active and vpn_ramp > 0 and rand.random() < 0.4 * vpn_ramp) else 1"
+    vpn_fw:
+      expr: "'vgw-strongswan-5.9.14-rc2' if 20 in all_active else 'vgw-strongswan-5.9.13'"
+    vpn_status:
+      expr: "'ANOMALY' if vpn_state != 'ESTABLISHED' or vpn_flaps > 0 else 'NOMINAL'"
+- metric:
+    name: network.vpn.tunnel_flaps_per_min
+    value:
+      var: vpn_flaps
+    unit: flaps
+- metric:
+    name: network.vpn.ike_rekey_failures
+    value:
+      var: vpn_flaps
+    unit: failures
+- metric:
+    name: network.vpn.tunnel_up
+    value:
+      var: vpn_up
+    unit: state
+- log:
+    level: INFO
+    message: 'ipsec-status gateway=vgw-aws-azure conn=aws-to-azure-01 state={vpn_state} tunnel_up={vpn_up} child_sa_rekey_failures_1m={vpn_flaps} flaps_1m={vpn_flaps} version={vpn_fw} status={vpn_status}'
+    attrs:
+      operation: vpn_check
+      network.device: vgw-aws-azure
+      vpn.tunnel: aws-to-azure-01
+      vpn.tunnel_state:
+        var: vpn_state
+      vpn.flaps_per_min:
+        var: vpn_flaps
+      vpn.rekey_failures:
+        var: vpn_flaps
+      vpn.status:
+        var: vpn_status
+      network.vpn_gw_firmware:
+        var: vpn_fw
+- when: "20 in all_active and vpn_ramp > 0 and vpn_flaps > 0"
+  log:
+    level: WARN
+    message: 'charon: 11[IKE] CHILD_SA aws-to-azure-01{12} expired before rekey completed, closing IKE_SA aws-to-azure-01[3]'
+    attrs:
+      operation: vpn_rekey
+      network.device: vgw-aws-azure
+      vpn.tunnel: aws-to-azure-01
+- log:
+    level: INFO
+    message: 'ipsec-status gateway=vgw-aws-gcp conn=aws-to-gcp-01 state=ESTABLISHED tunnel_up=1 child_sa_rekey_failures_1m=0 flaps_1m=0 version=vgw-strongswan-5.9.13 status=NOMINAL'
+    attrs:
+      operation: vpn_check
+      network.device: vgw-aws-gcp
+      vpn.tunnel: aws-to-gcp-01
+      vpn.status: NOMINAL

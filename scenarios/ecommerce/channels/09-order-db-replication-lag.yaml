@@ -5,61 +5,145 @@ error_type: ORDER-DB-REPLICATION-LAG
 sensor_type: db_replication
 affected_services:
 - order-management
+error_services:
+- order-management
 cascade_services:
 - payment-processor
 - fulfillment-orchestrator
-description: Order database replica lagging behind primary, causing stale reads for order status queries and payment confirmation
-  lookups
+description: Order-status reads from order-db-replica-2 return stale rows because the order-db-backup CronJob was moved to 14:00 UTC and its xtrabackup now saturates the replica's disk at peak, leaving the replica ~78s behind the source.
+onset_delay_seconds: 10
 investigation_notes: |-
-  1. Check order-management logs for ORDER-DB-REPLICATION-LAG — replication_lag_ms={replication_lag_ms} vs max {max_replication_lag_ms}ms.
-  2. Run `SHOW REPLICA STATUS\G` on the replica (`SHOW SLAVE STATUS\G` before MySQL 8.0.22) — `Seconds_Behind_Source` (`Seconds_Behind_Master`) and `Relay_Log_Space` are key indicators.
-  3. Check for long-running transactions on the primary: `SELECT * FROM information_schema.innodb_trx WHERE trx_started < NOW() - INTERVAL 30 SECOND` — these block replication (a count of 0 rules them out).
-  4. Look at replica I/O thread vs SQL thread: if I/O thread is fast but SQL thread is slow, the replica is I/O-bound not network-bound — check disk throughput (replica disk utilization above 90% confirms an I/O-bound SQL thread).
-  5. Route order-status reads to the primary temporarily to prevent customers from seeing stale state (order stuck in 'processing' when already shipped).
-  6. If lag exceeds {failover_threshold_ms}ms, take {replica_host} out of the read pool (route its reads to the primary or a healthy replica) and fix or replace its storage. Do not promote a lagging replica to primary: it is missing transactions the primary already committed.
+  Root cause: the order-db-backup CronJob schedule was changed from '0 7 * * *' to '0 14 * * *' (CR-2961). The change request asked for 14:00 local time, but CronJob schedules are evaluated in UTC, so the nightly xtrabackup of {replica_host} now starts at 14:00 UTC, in the middle of the US morning peak (job {backup_job}). The backup streams the whole datadir off the replica's volume and drives its disk to about 98% utilisation, so the replica SQL thread cannot apply row changes as fast as the source writes them: Seconds_Behind_Source climbs about 0.65s per second to about 78s. Order-status reads routed to replica-2 return rows from over a minute ago, so customers see orders stuck in pending or processing and payment-processor and fulfillment-orchestrator read stale state. Promoting replica-2 or failing over is the tempting fix and is wrong: replica-2 is missing transactions the primary already committed, and a promotion would lose them. The primary is healthy (no long-running transactions, db.primary_long_running_trx 0), the replica I/O and SQL threads are both running, and replicas order-db-replica-1 and order-db-replica-3 stay under 1s of lag with ~35% disk utilisation, so this is not a replication break, a network problem or a write surge.
+  Confirm:
+    - order-management metrics.orders.replica_lag_s (replica-2) rises from about 0.3s to about 78s over about 120s; metrics.orders.replica_disk_util_pct goes from about 35% to about 98%
+    - order-management "replica status" lines for {replica_host} show status=ANOMALY, backup_job={backup_job} and attributes.db.backup_schedule '0 14 * * *' (was '0 7 * * *'); the lines for replicas 1 and 3 show seconds_behind_source under 1 and status=NOMINAL
+    - the order-management lines "cronjob/order-db-backup updated: schedule '0 7 * * *' -> '0 14 * * *'" and "xtrabackup started on order-db-replica-2 (job {backup_job})" come before the first ORDER-DB-REPLICATION-LAG line
+    - payment-processor logs payment confirmations reading a pending order that is already captured; fulfillment-orchestrator defers status updates because order-management returns stale status
+  Remediation: stop the running backup with opsctl delete job/{backup_job}, then restore the schedule with opsctl rollback cronjob/order-db-backup --to-revision previous (back to '0 7 * * *', so tomorrow's backup runs off-peak). Once the xtrabackup process is gone the replica disk is back to about 35% within about 10s, and the SQL thread catches up at about 0.65s per second: Seconds_Behind_Source falls from about 78s to about 0.3s in about 120s. Stale order-status reads stop once the replica is current; no failover or replica rebuild is needed.
 remediation_action: drain_lagging_replica
-error_message: '[OrderManagement] ORDER-DB-REPLICATION-LAG: replica={replica_host} lag={replication_lag_ms}ms (max {max_replication_lag_ms}ms)
-  relay_log_space_mb={relay_log_space_mb} seconds_behind_master={seconds_behind_master}'
-stack_trace: |-
-  get order status order_id={order_id}: read from replica {replica_host}: ORDER-DB-REPLICATION-LAG: lag {replication_lag_ms}ms exceeds {max_replication_lag_ms}ms
-  goroutine 214 [running]:
-  runtime/debug.Stack()
-  	/usr/local/go/src/runtime/debug/stack.go:26 +0x5e
-  github.com/ecommerce/order-management/internal/store.(*OrderRepository).readFromReplica(0xc00021e0c0, {{0x1a9f3e0, 0xc0004b6000}})
-  	/app/internal/store/order_repository.go:203 +0x31c
-  github.com/ecommerce/order-management/internal/orders.(*OrderService).GetOrderStatus(0xc0001b4000, {{0x1a9f3e0, 0xc0004b6000}})
-  	/app/internal/orders/service.go:117 +0x1e9
-  Relay log space:      {relay_log_space_mb}MB
-  Seconds behind source: {seconds_behind_master}s
-  Failover threshold:   {failover_threshold_ms}ms
-  Replica_IO_Running:   Yes
-  Replica_SQL_Running:  Yes (applying, behind source)
+remediation_command: |-
+  opsctl delete job/order-db-backup-29384117
+  opsctl rollback cronjob/order-db-backup --to-revision previous
+error_message: 'level=error ts={iso_now} caller=store/order_repository.go:203 msg="ORDER-DB-REPLICATION-LAG: order status read from replica is behind source" replica={replica_host} order_id={order_id} query=GetOrderStatus {stale_status} max_staleness_s=1'
+stack_trace: ''
 correlation_attr:
-  key: orders.db_replication_lagging
-  value: true
+  key: db.backup_schedule
+  value: '0 14 * * *'
 fault_params:
-  replica_host:
-    format: "order-db-replica-{n}.us-east-1.internal"
-    n: {randint: [1, 3]}
-  replication_lag_ms: 78000
-  max_replication_lag_ms: 1000
-  relay_log_space_mb: {randint: [500, 5000]}
-  seconds_behind_master: 78
+  replica_host: order-db-replica-2.us-east-1.internal
+  backup_job: order-db-backup-29384117
   order_id: {format: "ORD-{n}", n: {randint: [100000, 999999]}}
-  failover_threshold_ms: 30000
+  stale_status: {choice: ["served_status=pending source_status=paid", "served_status=processing source_status=shipped", "served_status=paid source_status=refunded"]}
 rca_clues:
   order-management:
-    db.replica_lag_ms: 78000
-    db.stale_reads_detected: true
-    db.seconds_behind_master: 78
-    db.replica_disk_util_pct: {uniform: [95, 100], round: 0}
+    db.replica_host: order-db-replica-2.us-east-1.internal
+    db.seconds_behind_source: {randint: [60, 78]}
+    db.replica_disk_util_pct: {uniform: [96.0, 99.5], round: 1}
+    db.backup_job: order-db-backup-29384117
+    db.backup_schedule: '0 14 * * *'
     db.primary_long_running_trx: 0
+    db.replica_1_lag_s: {uniform: [0.1, 0.6], round: 2}
+    db.replica_3_lag_s: {uniform: [0.1, 0.6], round: 2}
   payment-processor:
-    payment.confirmation_stale_reads: {randint: [10, 100]}
-    payment.duplicate_charge_risk: true
+    payments.confirmation_stale_reads_per_min: {randint: [10, 100]}
   fulfillment-orchestrator:
-    fulfillment.order_status_stale: true
-    fulfillment.double_ship_risk_orders: {randint: [1, 20]}
+    fulfillment.order_status_stale_per_min: {randint: [20, 200]}
+cascade_messages:
+  payment-processor:
+    - severity: WARN
+      message: 'warn: Payments.Confirmation.PaymentConfirmService[2104] Order {order_id} read as pending from order-management after capture succeeded; confirmation deferred, retrying in 5s'
+  fulfillment-orchestrator:
+    - severity: WARN
+      message: '{iso_now} WARN  [shipment-sync-2] c.e.fulfillment.OrderStatusClient - order {order_id} status from order-management is older than the carrier scan ({stale_status}); deferring status update'
+fault_scope:
+  cluster: ecommerce-eks-cluster
+  workloads: [order-management]
+infrastructure_events:
+  - service: order-management
+    severity: INFO
+    offset_seconds: -140
+    body: "[Deploy] cronjob/order-db-backup updated: schedule '0 7 * * *' -> '0 14 * * *' (xtrabackup of order-db-replica-2.us-east-1.internal), applied by dba-oncall (CR-2961)"
+    attributes:
+      user.name: dba-oncall
+      change.request: CR-2961
+      operation: cronjob_change
+      change.target: cronjob/order-db-backup
+      db.backup_schedule: '0 14 * * *'
+      change.summary: "schedule: '0 7 * * *' -> '0 14 * * *'"
+  - service: order-management
+    severity: INFO
+    offset_seconds: -120
+    body: 'level=info ts={iso_now} caller=store/replica_monitor.go:88 msg="xtrabackup started on order-db-replica-2 (job order-db-backup-29384117)" replica=order-db-replica-2.us-east-1.internal backup_schedule="0 14 * * *" throttle=none'
+    attributes:
+      user.name: dba-oncall
+      change.request: CR-2961
+      operation: db_backup_started
+      db.replica_host: order-db-replica-2.us-east-1.internal
+      db.backup_job: order-db-backup-29384117
+      db.backup_schedule: '0 14 * * *'
+remediation_effects:
+  log_taper_seconds: 100
+  log_events:
+    - service: order-management
+      severity: INFO
+      offset_seconds: 0
+      body: '[CHG] CHANGE APPLIED opsctl delete job/order-db-backup-29384117 by {actor}: job order-db-backup-29384117 deleted, xtrabackup on order-db-replica-2.us-east-1.internal terminated'
+      attributes:
+        operation: change_applied
+        change.target: job/order-db-backup-29384117
+    - service: order-management
+      severity: INFO
+      offset_seconds: 1
+      body: "[CHG] CHANGE APPLIED opsctl rollback cronjob/order-db-backup --to-revision previous by {actor}: cronjob order-db-backup schedule '0 14 * * *' -> '0 7 * * *'"
+      attributes:
+        operation: change_applied
+        change.target: cronjob/order-db-backup
+        db.backup_schedule: '0 7 * * *'
+    - service: order-management
+      severity: INFO
+      offset_seconds: 12
+      body: 'level=info ts={iso_now} caller=store/replica_monitor.go:64 msg="replica disk idle again, SQL thread catching up" replica=order-db-replica-2.us-east-1.internal disk_util_pct=36 seconds_behind_source=72'
+      attributes:
+        operation: db_replica_status
+        db.replica_host: order-db-replica-2.us-east-1.internal
+    - service: order-management
+      severity: INFO
+      offset_seconds: 60
+      body: 'level=info ts={iso_now} caller=store/replica_monitor.go:64 msg="replica catching up" replica=order-db-replica-2.us-east-1.internal seconds_behind_source=39'
+      attributes:
+        operation: db_replica_status
+        db.replica_host: order-db-replica-2.us-east-1.internal
+    - service: order-management
+      severity: INFO
+      offset_seconds: 122
+      body: 'level=info ts={iso_now} caller=store/replica_monitor.go:64 msg="replica caught up with source" replica=order-db-replica-2.us-east-1.internal seconds_behind_source=0'
+      attributes:
+        operation: db_replica_status
+        db.replica_host: order-db-replica-2.us-east-1.internal
+  verification:
+    - signal: orders.replica_lag_s
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "order-management"'
+      field: 'metrics.orders.replica_lag_s'
+      expect: 'falls steadily from about 78s and is under 1s (about 0.3s) within about 120s'
+      within_seconds: 240
+    - signal: orders.replica_disk_util_pct
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "order-management"'
+      field: 'metrics.orders.replica_disk_util_pct'
+      expect: 'back to about 35% within about 10s (was about 98%)'
+      within_seconds: 60
+    - signal: ORDER-DB-REPLICATION-LAG lines
+      from: 'logs.otel.ecommerce'
+      where: 'body.text LIKE "*ORDER-DB-REPLICATION-LAG*"'
+      expect: 'thin out as the replica catches up and stop within about 100s'
+      within_seconds: 240
+    - signal: backup schedule
+      from: 'logs.otel.ecommerce'
+      where: 'resource.attributes.service.name == "order-management"'
+      field: 'attributes.db.backup_schedule'
+      expect: "'0 7 * * *' on the replica status lines (was '0 14 * * *')"
+      within_seconds: 60
 business_impact:
   - kpi: business.orders_placed_per_min
     value: {uniform: [51.38, 59.12]}
@@ -69,3 +153,4 @@ business_impact:
     factor: {uniform: [2.0, 4.5]}
   - kpi: business.csat_score_0_5
     factor: {uniform: [0.3, 0.55]}
+service_lag_seconds: {payment-processor: 30, fulfillment-orchestrator: 30}

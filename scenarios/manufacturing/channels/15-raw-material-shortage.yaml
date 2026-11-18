@@ -8,60 +8,128 @@ affected_services:
 cascade_services:
 - mes-controller
 - oee-analytics
-description: Raw material on-hand fell below reorder point; line scheduled to starve in N hours
+description: A material master change switched the aluminium bar stock base unit from KG to LB without converting stock; WMS now reports less than half the real on-hand and MRP raises a shortage
 investigation_notes: |-
-  Root Cause: A reorder-point breach can come from a short PO from the supplier, a higher-than-forecast consumption rate (from scrap, or from a forecast that runs low), or a delayed receipt at the dock. Consumption more than 20% above forecast with scrap under 5% points to the forecast; a PO fill rate under 95% would mean a short PO, and an ETA slip above 0 days a delayed receipt. The MES forward-look projection is the most accurate predictor of when the line will starve.
-  Remediation: 1) Confirm the on-hand vs. system count: `wms-admin physical-vs-system --material {material_code}`. 2) Expedite an open PO: `erp-admin expedite-po --po {po_number}`. 3) If no open PO, issue an emergency PO: `erp-admin issue-po --material {material_code} --qty {emergency_qty} --priority CRITICAL`. 4) Check substitute lots: `mes-admin substitute-options --material {material_code}`. 5) Notify production planning to reschedule affected work orders. 6) Open a supplier scorecard issue.
-remediation_action: expedite_po
-error_message: '[WMS] RAW-MATERIAL-SHORTAGE: material={material_code} on_hand={on_hand} reorder_point={reorder_point} hours_to_starve={hours_to_starve}'
+  Root cause: a MATMAS05 material master update for {material_code} reached inventory-sync shortly before the first RAW-MATERIAL-SHORTAGE (by sap-mdm, CHG-7392) and changed the base unit of measure from KG to LB. inventory-sync applied the new unit to the existing stock records without converting the quantities, so the 4,200 on hand is now read as 4,200 LB, which is 1,905 KG, below the 3,000 KG reorder point. MRP flags the material as short and LINE-03 work orders that consume {material_code} are put on material hold. The shortage is phantom: the bin counts in the warehouse are unchanged, goods issues to LINE-03 are at their normal rate, and the open purchase order {po_number} is on schedule. The other raw materials are normal.
+  Confirm:
+    - inventory-sync stock_status lines for {material_code} show base_uom=LB (attributes.inventory.base_uom); metric inventory.alu_6061_on_hand_kg drops from about 4,200 to about 1,905 with no matching goods issue
+    - the inventory-sync material master line (CHG-7392) comes before the first RAW-MATERIAL-SHORTAGE
+    - metric inventory.cycle_count_variance_pct jumps from 0.2-0.8% to about 55% for {material_code}; inventory.materials_below_reorder goes from 0 to 1
+  Remediation: two steps, both required. 1) Roll the material master back: opsctl rollback material-master/RM-ALU-6061 --to-revision previous; the base unit returns to KG. 2) Recompute the stock records written under the wrong unit: opsctl run job/inventory-reconcile. After the reconcile, on-hand is 4,200 KG again, the material leaves the below-reorder list and the LINE-03 material holds are released within about a minute. Rolling back the master alone leaves the stock records that were re-expressed in LB.
+remediation_action: rollback_material_master
+remediation_command: |-
+  opsctl rollback material-master/RM-ALU-6061 --to-revision previous
+  opsctl run job/inventory-reconcile
+error_message: '[WMS] RAW-MATERIAL-SHORTAGE: material={material_code} on_hand=1905 KG (4200 LB) reorder_point={reorder_point} KG base_uom=LB hours_to_starve={hours_to_starve} affected_work_orders={affected_wo_count}'
 stack_trace: |-
   === INVENTORY REORDER ALERT — {material_code} ===
-  On-hand: {on_hand} | Reorder Point: {reorder_point} | Safety Stock: {safety_stock}
+  On-hand: 4200 LB = 1905 KG | Reorder point: {reorder_point} KG | Safety stock: 1200 KG
+  Base unit of measure: LB (changed from KG by MATMAS05, CHG-7392)
   ------------------------------------------------------------------------
   Open POs:
-    PO {po_number} | qty={po_quantity} | supplier=SUP-{supplier_id} | ETA={po_eta}
-  Forward consumption (next 8h): est {forward_consumption} units
-  Affected work orders: {affected_wo_count}
+    {po_number} | qty=6000 KG | supplier=SUP-4417 | on schedule
+  Bin count (last cycle count): 4200 KG | System quantity: 1905 KG | Variance: -54.6%
+  Affected work orders: {affected_wo_count} (LINE-03)
   ------------------------------------------------------------------------
-  RAW-MATERIAL-SHORTAGE: line will starve in {hours_to_starve}h without expedite
+  RAW-MATERIAL-SHORTAGE: below reorder point; MRP exception raised
 correlation_attr:
-  key: deployment.wms_forecast_engine
-  value: forecast-v3.0.0-tuning
+  key: inventory.base_uom
+  value: LB
 fault_params:
-  material_code: {choice: [RM-STEEL-A36, RM-ALU-6061, RM-PLASTIC-ABS, RM-COPPER-110]}
-  on_hand: {randint: [800, 1800]}
-  reorder_point: {randint: [2000, 4000]}
-  safety_stock: {randint: [500, 1500]}
-  po_number:
-    format: "PO-{n}"
-    n: {randint: [100000, 999999]}
-  po_quantity: {randint: [2000, 12000]}
-  supplier_id: {randint: [1000, 9999]}
-  po_eta: 2026-05-12T08:00:00Z
-  forward_consumption: {randint: [1500, 4500]}
-  affected_wo_count: {randint: [3, 18]}
-  hours_to_starve: {randint: [2, 14]}
-  emergency_qty: {randint: [2000, 5000]}
+  material_code: RM-ALU-6061
+  reorder_point: 3000
+  po_number: PO-4500918273
+  affected_wo_count: {randint: [4, 9]}
+  hours_to_starve: {randint: [6, 12]}
 rca_clues:
   inventory-sync:
-    inventory.material_below_reorder: true
-    inventory.hours_to_starve: {randint: [2, 14]}
-    inventory.consumption_vs_forecast_pct: {uniform: [130, 180], round: 0}
-    inventory.po_fill_rate_pct: {uniform: [98, 100], round: 0}
+    inventory.goods_issue_rate_vs_plan_pct: {uniform: [96, 104], round: 0}
     inventory.po_eta_slip_days: 0
+    inventory.bin_count_kg: 4200
   mes-controller:
-    mes.work_orders_at_risk: {randint: [3, 18]}
+    mes.work_orders_on_material_hold: {randint: [4, 9]}
   oee-analytics:
-    oee.starvation_risk_pct: {uniform: [15.0, 65.0], round: 1}
-    oee.scrap_rate_pct: {uniform: [1.0, 2.5], round: 1}
+    oee.starvation_risk_pct: {uniform: [15.0, 40.0], round: 1}
+cascade_messages:
+  mes-controller:
+    - severity: WARN
+      message: '[MES] material_check LINE-03 work orders consuming RM-ALU-6061 put on material hold: WMS reports 1905 KG available, below reservation'
+  oee-analytics:
+    - severity: WARN
+      message: '[OEE] LINE-03 schedule at risk: material hold on RM-ALU-6061 from MES'
+fault_scope:
+  cluster: mfg-aks-cluster
+  workloads: [inventory-sync]
+infrastructure_events:
+  - service: inventory-sync
+    severity: INFO
+    offset_seconds: -90
+    body: '[WMS] material master update MATMAS05 material=RM-ALU-6061 base_uom KG -> LB (no conversion factor in IDoc); 1 plant, 6 storage bins updated; sent by sap-mdm (CHG-7392)'
+    attributes:
+      operation: config_change
+      user.name: sap-mdm
+      change.request: CHG-7392
+      inventory.base_uom: LB
+      change.summary: 'RM-ALU-6061 base unit: KG -> LB'
+service_lag_seconds:
+  mes-controller: 20
+  oee-analytics: 40
+remediation_effects:
+  log_events:
+    - service: inventory-sync
+      severity: INFO
+      offset_seconds: 1
+      body: '[CHG] CHANGE APPLIED opsctl rollback material-master/RM-ALU-6061 --to-revision previous by {actor}: base_uom LB -> KG'
+      attributes:
+        operation: change_applied
+        change.target: material-master/RM-ALU-6061
+    - service: inventory-sync
+      severity: INFO
+      offset_seconds: 2
+      body: '[CHG] CHANGE APPLIED opsctl run job/inventory-reconcile by {actor}: recomputing stock records for RM-ALU-6061'
+      attributes:
+        operation: change_applied
+        change.target: job/inventory-reconcile
+    - service: inventory-sync
+      severity: INFO
+      offset_seconds: 40
+      body: '[WMS] inventory-reconcile completed: RM-ALU-6061 6 bins corrected, on_hand 4200 KG, below_reorder=false'
+      attributes:
+        operation: inventory_reconcile
+  steady_attributes:
+    inventory-sync:
+      inventory.base_uom: KG
+  log_taper_seconds: 20
+  verification:
+    - signal: inventory.alu_6061_on_hand_kg
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "inventory-sync"'
+      field: 'metrics.inventory.alu_6061_on_hand_kg'
+      expect: 'back to about 4,200 KG (was about 1,905)'
+      within_seconds: 90
+    - signal: inventory.materials_below_reorder
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "inventory-sync"'
+      field: 'metrics.inventory.materials_below_reorder'
+      expect: '0 (was 1)'
+      within_seconds: 90
+    - signal: RAW-MATERIAL-SHORTAGE lines
+      from: 'logs.otel.mfg'
+      where: 'body.text LIKE "*RAW-MATERIAL-SHORTAGE*"'
+      expect: '0 new lines'
+      within_seconds: 90
+    - signal: RM-ALU-6061 base unit
+      from: 'logs.otel.mfg'
+      where: 'resource.attributes.service.name == "inventory-sync" AND body.text LIKE "*stock_status material=RM-ALU-6061*"'
+      field: 'attributes.inventory.base_uom'
+      expect: 'KG on every line logged since the fix; LB stops appearing'
+      within_seconds: 60
 business_impact:
-  - kpi: business.throughput_units_per_hour
-    factor: {uniform: [0.15, 0.45]}
   - kpi: business.on_time_delivery_pct
-    factor: {uniform: [0.25, 0.55]}
-  - kpi: business.inventory_turns
-    factor: {uniform: [0.30, 0.60]}
+    factor: {uniform: [0.55, 0.80]}
+  - kpi: business.throughput_units_per_hour
+    factor: {uniform: [0.70, 0.85]}
   - kpi: business.oee_availability_pct
-    factor: {uniform: [0.30, 0.60]}
+    factor: {uniform: [0.75, 0.85]}
   - kpi: business.material_variance_usd
-    factor: {uniform: [2.5, 5.0]}
+    value: {uniform: [14200.0, 16800.0], round: 1}

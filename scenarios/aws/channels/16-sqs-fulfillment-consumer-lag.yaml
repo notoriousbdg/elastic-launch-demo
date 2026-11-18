@@ -11,12 +11,16 @@ description: >
 
 investigation_notes: |
   1. Search body.text LIKE *FUL-SQS-CONSUMER-LAG* and confirm queue={queue_name} reports backlog={visible_messages} with oldest_age_s={oldest_age_s}.
-  2. Compare CloudWatch ApproximateNumberOfMessagesVisible and ApproximateAgeOfOldestMessage for the queue against its own baseline; both rising while NumberOfMessagesDeleted stays flat means consumers are the bottleneck, not producers.
+  2. Compare CloudWatch ApproximateNumberOfMessagesVisible and ApproximateAgeOfOldestMessage for the queue against its own baseline; both rising while NumberOfMessagesDeleted stays flat at the consumers' ceiling (about 4 messages/s across 4 tasks) means consumers are the bottleneck, not producers; age is roughly backlog / delete rate (for example 2400 messages / 4 per second = 600 s).
   3. Check the fulfillment-worker ECS service: running_tasks={running_tasks} of desired={desired_tasks} and CPU near {task_cpu_pct}% show the consumers are saturated, not failing.
   4. Confirm DLQ depth is 0 and ApproximateNumberOfMessagesNotVisible is below the in-flight limit (120,000 for a standard queue), so messages are only waiting and no poison messages are involved.
   5. Check orders-service rca_clues (fulfillment.pending_orders): pending orders rise with the backlog, but order writes to orders-db still succeed.
-  6. Remediation is bounded and safe: scale out fulfillment-worker consumers (raise desired count to {target_tasks}); the backlog drains at the new consumer rate and the oldest message age recovers within minutes.
+  6. Confirm the cause: the CloudWatch NumberOfMessagesSent datapoints for the queue jumped to a multiple of baseline about 90 seconds before the age alarm, while the ECS desired count stayed at {desired_tasks} (attributes.aws.ecs.desired_count on fulfillment-worker logs) and no Application Auto Scaling target is registered for the service.
+  7. Confirm the fix target: DLQ depth is 0 and the consumers are only saturated, so more consumers is safe.
+  8. Remediation: `opsctl patch ecs-service/fulfillment-worker --desired-count 12`; the 8 new Fargate tasks need about a minute to start and pass health checks, then 12 consumers (about 12 messages/s) drain the backlog while the enqueue burst has subsided, so the oldest message age is back to baseline in about 5 minutes.
 remediation_action: scale_out_fulfillment_consumers
+remediation_command: |-
+  opsctl patch ecs-service/fulfillment-worker --desired-count 12
 
 error_message: |
   FUL-SQS-CONSUMER-LAG: queue={queue_name} visible_messages={visible_messages} oldest_age_s={oldest_age_s} running_tasks={running_tasks}
@@ -27,7 +31,7 @@ stack_trace: |
   --- CLOUDWATCH METRICS ---
     ApproximateNumberOfMessagesVisible={visible_messages}  (baseline ~120)
     ApproximateAgeOfOldestMessage={oldest_age_s}s  (baseline ~15s)
-    NumberOfMessagesDeleted=flat  NumberOfMessagesReceived=flat
+    NumberOfMessagesSent=3.4x_baseline  NumberOfMessagesDeleted=flat_at_consumer_ceiling
   --- CONSUMER STATE ---
     ecs_service=fulfillment-worker  running_tasks={running_tasks}  desired_tasks={desired_tasks}
     task_cpu_utilization={task_cpu_pct}%  receive_batch_size=10
@@ -36,7 +40,19 @@ stack_trace: |
   ACTION: scale_out_consumers=true  target_tasks={target_tasks}  alert=FUL-SQS-CONSUMER-LAG
 
 infrastructure_events:
-- body: '[CloudWatch] Alarm in ALARM: awsorders-fulfillment-queue ApproximateAgeOfOldestMessage > 300s for 3 datapoints region=us-west-2'
+- body: '[CloudWatch] awsorders-fulfillment-queue NumberOfMessagesSent 3.4x baseline for 2 datapoints region=us-west-2; order enqueue burst from orders-service after the summer promotion campaign went live, ECS desired count unchanged at 4'
+  severity: WARN
+  event_name: aws.cloudwatch.MetricAnomaly
+  service: fulfillment-worker
+  offset_seconds: -90
+  attributes:
+    cloud.provider: aws
+    cloud.service: sqs
+    aws.sqs.queue_name: awsorders-fulfillment-queue
+    aws.ecs.desired_count: 4
+    infrastructure.source: CloudWatch
+- offset_seconds: 30
+  body: '[CloudWatch] Alarm in ALARM: awsorders-fulfillment-queue ApproximateAgeOfOldestMessage > 300s for 3 datapoints region=us-west-2'
   severity: WARN
   event_name: aws.cloudwatch.AlarmStateChange
   service: fulfillment-worker
@@ -51,23 +67,82 @@ correlation_attr:
   key: deployment.fulfillment_worker_desired_count
   value: ecs-fulfillment-worker-desired-4
 
+cascade_messages:
+  orders-service:
+    - severity: WARN
+      message: 'fulfillment enqueue accepted but pending_orders={visible_messages} and oldest queued order is {oldest_age_s}s old; order confirmation emails are delayed'
+fault_scope:
+  cluster: awsorders-eks-usw2
+  workloads: [fulfillment-worker]
+service_lag_seconds: {orders-service: 60}
+onset_delay_seconds: 30
+ramp_seconds: 90
+remediation_effects:
+  transition_seconds: 300
+  log_events:
+    - service: orders-service
+      severity: INFO
+      offset_seconds: 1
+      body: 'cloudtrail: eventSource=ecs.amazonaws.com eventName=UpdateService userIdentity={actor} requestParameters.cluster=awsorders requestParameters.service=fulfillment-worker requestParameters.desiredCount=12 errorCode=none'
+      attributes:
+        command.target: ecs-service/fulfillment-worker
+    - service: fulfillment-worker
+      severity: INFO
+      offset_seconds: 60
+      body: '(service fulfillment-worker) has reached a steady state. runningCount=12 desiredCount=12 cluster=awsorders'
+      attributes:
+        aws.ecs.desired_count: 12
+        aws.ecs.running_tasks: 12
+  steady_attributes:
+    fulfillment-worker:
+      aws.ecs.desired_count: 12
+  verification:
+    - signal: queue oldest message age
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "fulfillment-worker"'
+      field: 'metrics.aws.sqs.approximate_age_of_oldest_message_s'
+      expect: 'back in 1-25 s (was 380-800 s)'
+      within_seconds: 360
+    - signal: SQS oldest message age (AWS integration stream)
+      from: 'metrics-aws.sqs.otel-*'
+      where: 'Namespace == "AWS/SQS" AND MetricName == "ApproximateAgeOfOldestMessage" AND stat == "Maximum" AND QueueName NOT LIKE "*dlq*"'
+      field: '`metrics.amazonaws.com/AWS/SQS/ApproximateAgeOfOldestMessage`'
+      expect: 'falling back to under 10 s (was over 380 s) as the new consumers drain the backlog'
+      within_seconds: 360
+    - signal: queue visible messages
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "fulfillment-worker"'
+      field: 'metrics.aws.sqs.approximate_number_of_messages_visible'
+      expect: 'back in 0-120 messages (was 1500-3200)'
+      within_seconds: 360
+    - signal: FUL-SQS-CONSUMER-LAG lines
+      from: 'logs.otel.awsorders'
+      where: 'body.text LIKE "*FUL-SQS-CONSUMER-LAG*"'
+      expect: '0 new lines'
+      within_seconds: 360
+    - signal: ECS desired count
+      from: 'logs.otel.awsorders'
+      where: 'resource.attributes.service.name == "fulfillment-worker"'
+      field: 'attributes.aws.ecs.desired_count'
+      expect: '12 on every line since the fix (was 4)'
+      within_seconds: 360
 fault_params:
   queue_name: awsorders-fulfillment-queue
-  visible_messages: {randint: [5200, 14000]}
-  oldest_age_s: {randint: [920, 2400]}
+  visible_messages: {randint: [1500, 3200]}
+  oldest_age_s: {randint: [380, 800]}
   running_tasks: 4
   desired_tasks: 4
   task_cpu_pct: {randint: [88, 99]}
-  target_tasks: {choice: [10, 12, 16]}
+  target_tasks: 12
 
 rca_clues:
   fulfillment-worker:
-    sqs.messages_visible: {randint: [5200, 14000]}
+    sqs.messages_visible: {randint: [1500, 3200]}
     ecs.task_cpu_utilization_pct: {randint: [88, 99]}
     sqs.dlq_depth: 0
-    sqs.messages_in_flight: {randint: [30, 40]}
+    sqs.messages_in_flight: {randint: [22, 35]}
   orders-service:
-    fulfillment.pending_orders: {randint: [400, 3000]}
+    fulfillment.pending_orders: {randint: [1500, 3200]}
     fulfillment.enqueue_rate_vs_baseline: {uniform: [2.5, 4.0], round: 1}
 
 business_impact:
@@ -87,7 +162,9 @@ business_impact:
     uniform: [1.4, 2.2]
 generator_impact:
   aws_sqs_otel:
-    high_backlog: 5000.0
-    oldest_message_age_high: 900.0
+    high_backlog: 1500.0
+    oldest_message_age_high: 380.0
   aws_ecs_otel:
     cpu_utilization_high: 92.0
+# the package streams keep the fault while the scenario's own metrics converge
+generator_hold_seconds: {aws_sqs_otel: 300, aws_ecs_otel: 300}

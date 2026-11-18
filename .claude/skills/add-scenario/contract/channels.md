@@ -30,7 +30,7 @@ remediation_command: |-                       # schema 1.3: one opsctl command p
 error_message: 'level=error msg="charge failed" provider={payment_provider} timeout_ms={timeout_ms} err="context deadline exceeded (Client.Timeout exceeded while awaiting headers)"'
 stack_trace: ''                               # empty unless the component really logs one
 correlation_attr:
-  key: deployment.gateway_sdk_version     # attribute correlated with errors for this channel
+  key: deployment.gateway_sdk_version     # attribute correlated with errors; set on affected_services' spans only
   value: payments-sdk-v14.2.0
 fault_params:
   # One key per {placeholder} in error_message + stack_trace above — parity is LOCAL
@@ -80,6 +80,8 @@ New scenarios are generated at schema 1.3 (`schema_version: "1.3"`). Checks 37-4
 | `fault_scope` | warning if absent (Check 39) | `{cluster, node_pool, nodes, az, workloads, namespaces}` | Where the fault lives. With a pinned `k8s_topology`, fault logs come from pods or nodes inside the scope, `kubernetes_otel` and `host_metrics` degrade only those entities, and the runbook states the scope as a fact. Every name must exist in `k8s_topology` (nodes may also be added by the channel's own state). Without `k8s_topology`, use only `cluster` and `workloads`. |
 | `infrastructure_events[].offset_seconds` | Check 42 warns without a preceding event | number | Negative: the record is backdated relative to the trigger (the change that caused the fault). Positive: the record is held back until that many seconds after the trigger. Events fire from every service a triggered channel names, before the symptoms start. Bodies may use runtime placeholders. |
 | `onset_delay_seconds` | optional | number | Seconds after the trigger before the error lines, cascade lines and generator impacts start. |
+| `service_lag_seconds` | optional | map service → number | Extra seconds for that service only (added to `onset_delay_seconds`): dependents show symptoms after the component at fault. Keys are affected or cascade services. Metrics in the service's DSL use `lag.get(N, 0)`. |
+| `generator_hold_seconds` | optional | `{generator_id: number}` | Keep that generator's `generator_impact` applied this many seconds after the fix, so a package stream (Azure OpenAI, Application Gateway...) recovers together with the scenario's own metrics instead of snapping to baseline. Keys must be in the channel's `generator_impact`. Leave out event-style generators (audit and security events): their records stop when the fix lands. |
 | `ramp_seconds` | optional | number | `kubernetes_otel` ramps the impact in over this many seconds after onset. |
 | `cascade_messages` | optional (Check 40) | `{service: [str or {severity, message}]}` | Per-service lines a real dependent logs, instead of the neutral fallback. Keys must be cascade services, or affected services outside `error_services`. Placeholders must be `fault_params` keys or runtime placeholders. |
 | `error_services` | optional (Check 40) | list, subset of `affected_services` | Only these services emit `error_message`; the other affected services (typically the API gateway whose requests fail as a result) emit their `cascade_messages` lines instead. |

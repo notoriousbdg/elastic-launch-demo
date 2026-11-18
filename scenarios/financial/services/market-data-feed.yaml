@@ -14,22 +14,43 @@ entry_endpoints:
 emit_fault_logs: true
 kpi_emitter: false
 constants:
+  # Exchange A/B multicast lines are bridged from the colo into GKE as UDP unicast; the
+  # vendor feeds are TCP sessions. Each feed handler runs on its own node pool.
   FEEDS:
     CQS-SIP:
       exchange: NYSE/NASDAQ
       symbols: 8000
+      transport: udp
+      pool: mdf-c2-pool
     OPRA:
       exchange: Options
       symbols: 500000
+      transport: udp
+      pool: mdf-c2-pool
     CME-MDP3:
       exchange: CME
       symbols: 3000
+      transport: udp
+      pool: mdf-n2-pool
     Bloomberg-B-PIPE:
       exchange: Multi
       symbols: 50000
+      transport: tcp
+      pool: mdf-vendor-pool
     Reuters-Elektron:
       exchange: Multi
       symbols: 40000
+      transport: tcp
+      pool: mdf-vendor-pool
+  C2_FEEDS: [CQS-SIP, OPRA]
+  OTHER_FEEDS: [CME-MDP3, Bloomberg-B-PIPE, Reuters-Elektron]
+  MDF_C2_NODES:
+  - gke-finserv-gke-mdf-c2-pool-5c1e9a0b-7kqp
+  - gke-finserv-gke-mdf-c2-pool-5c1e9a0b-m2xd
+  - gke-finserv-gke-mdf-c2-pool-5c1e9a0b-r9vt
+  POOL_NODES:
+    mdf-n2-pool: gke-finserv-gke-mdf-n2-pool-a41d7c22-q8wz
+    mdf-vendor-pool: gke-finserv-gke-mdf-vendor-pool-3e90b1f4-h5nc
   SYMBOLS:
   - AAPL
   - GOOGL
@@ -84,23 +105,139 @@ steps:
         var: feed_exchange
       tick.latency_us:
         var: tick_latency_us
+# Ch 3: the mdf-c2-pool node image dropped net.core.rmem_max back to the kernel default
+# (212992), so the feed handlers' 16 MiB SO_RCVBUF is capped and bursts overflow it on every
+# node. The sysctl patch recreates the 3 nodes one at a time (~60 s each), so errors fall by a
+# third per node.
 - sample:
-    health_feed:
-      choice: FEEDS
-    gap_count:
-      randint:
-      - 0
-      - 2
+    c3_bad_nodes:
+      expr: "3 if 3 in all_active else ((3 - min(3, int(since_fix.get(3, 0) / 60.0))) if 3 in fixed_channels else 0)"
+    c3_ramp:
+      expr: "min(1.0, max(0.0, elapsed.get(3, 0) - lag.get(3, 0)) / 30.0) if 3 in all_active else 1.0"
+    c3_node_level:
+      expr: "max(400.0, min(1333.0, rand.gauss(800.0, 150.0)))"
+    udp_rcvbuf_errors:
+      expr: "round(c3_bad_nodes * c3_node_level * c3_ramp)"
+    seq_gaps_per_min:
+      expr: "(min(79, round(udp_rcvbuf_errors / 50.0)) + rand.randint(0, 1)) if udp_rcvbuf_errors > 0 else rand.randint(0, 1)"
+    c2_feed:
+      choice: C2_FEEDS
+    c2_node_idx:
+      randint: [0, 2]
+    c2_node:
+      expr: MDF_C2_NODES[c2_node_idx]
+    c2_node_bad:
+      expr: "c2_node_idx >= 3 - c3_bad_nodes"
+    c2_rmem_max:
+      expr: "212992 if c2_node_bad else 16777216"
+    c2_so_rcvbuf:
+      expr: "2 * c2_rmem_max"
+    c2_node_errors:
+      expr: "round(c3_node_level * c3_ramp) if c2_node_bad else 0"
+    c2_gaps_60s:
+      expr: "(round(c2_node_errors / 100.0) + rand.randint(0, 1)) if c2_node_errors > 0 else rand.randint(0, 1)"
+    c2_status:
+      expr: "'ANOMALY' if c2_node_errors > 50 else 'NOMINAL'"
+    cmp_feed:
+      choice: OTHER_FEEDS
+    cmp_info:
+      expr: FEEDS[cmp_feed]
+    cmp_transport:
+      expr: cmp_info['transport']
+    cmp_pool:
+      expr: cmp_info['pool']
+    cmp_node:
+      expr: POOL_NODES[cmp_pool]
+    cmp_gaps_60s:
+      expr: "rand.randint(0, 1) if cmp_transport == 'udp' else 0"
 - log:
     level: INFO
-    message: '[MDF] feed_health feed={health_feed} gaps_60s={gap_count} status=CONNECTED'
+    message: '[MDF] feed_health feed={c2_feed} transport=udp node={c2_node} pool=mdf-c2-pool so_rcvbuf={c2_so_rcvbuf} rmem_max={c2_rmem_max}
+      udp_rcvbuf_errors_1s={c2_node_errors} gaps_60s={c2_gaps_60s} status={c2_status}'
     attrs:
       operation: feed_health
       feed.name:
-        var: health_feed
+        var: c2_feed
+      feed.transport: udp
       feed.gap_count:
-        var: gap_count
+        var: c2_gaps_60s
       feed.status: CONNECTED
+      feed.health_status:
+        var: c2_status
+      feed.socket_rcvbuf_bytes:
+        var: c2_so_rcvbuf
+      feed.udp_rcvbuf_errors_per_s:
+        var: c2_node_errors
+      host.sysctl.net_core_rmem_max:
+        var: c2_rmem_max
+      k8s.node_pool: mdf-c2-pool
+      k8s.node.name:
+        var: c2_node
+- log:
+    level: INFO
+    message: '[MDF] feed_health feed={cmp_feed} transport={cmp_transport} node={cmp_node} pool={cmp_pool} so_rcvbuf=33554432
+      rmem_max=16777216 udp_rcvbuf_errors_1s=0 gaps_60s={cmp_gaps_60s} status=NOMINAL'
+    attrs:
+      operation: feed_health
+      feed.name:
+        var: cmp_feed
+      feed.transport:
+        var: cmp_transport
+      feed.gap_count:
+        var: cmp_gaps_60s
+      feed.status: CONNECTED
+      feed.health_status: NOMINAL
+      feed.socket_rcvbuf_bytes: 33554432
+      feed.udp_rcvbuf_errors_per_s: 0
+      host.sysctl.net_core_rmem_max: 16777216
+      k8s.node_pool:
+        var: cmp_pool
+      k8s.node.name:
+        var: cmp_node
+# Ch 18: market-data-feed 1.7.0 reads the unitless conflation.interval: 30 as seconds, so the
+# B-PIPE quote cache is republished every 30 s. The gauge is the max quote age over the 10 s
+# reporting window: 10-30 s while the sawtooth climbs, ~30 s right after a publish.
+- sample:
+    c18_phase:
+      expr: "epoch_now % 30.0"
+    c18_window_max_ms:
+      expr: "(c18_phase if c18_phase >= 10.0 else 30.0) * 1000.0"
+    quote_age_base:
+      expr: "max(5.0, min(80.0, rand.gauss(32.0, 12.0)))"
+    quote_age_ms:
+      expr: "round(max(9500.0, min(30500.0, c18_window_max_ms + rand.gauss(0.0, 150.0)))) if 18 in all_active
+        else (round(quote_age_base + max(0.0, c18_window_max_ms - quote_age_base) * max(0.0, 1.0 - since_fix.get(18, 0) / 25.0)) if 18 in fixed_channels
+        else round(quote_age_base))"
+    c18_bad_cfg:
+      expr: "18 in all_active or (18 in fixed_channels and since_fix.get(18, 0) < 5.0)"
+    conflation_interval:
+      expr: "'30s' if c18_bad_cfg else '30ms'"
+    publishes_10s:
+      expr: "(1 if c18_phase < 10.0 else 0) if c18_bad_cfg else rand.randint(328, 334)"
+    quote_cache_status:
+      expr: "'ANOMALY' if quote_age_ms > 3000 else 'NOMINAL'"
+    bpipe_last_msg_ms:
+      randint: [1, 40]
+- log:
+    level: INFO
+    message: '[MDF] quote_cache source=Bloomberg-B-PIPE session=CONNECTED last_msg_age_ms={bpipe_last_msg_ms} symbols_cached=50000
+      max_quote_age_ms={quote_age_ms} conflation_interval={conflation_interval} publishes_10s={publishes_10s} status={quote_cache_status}'
+    attrs:
+      operation: quote_cache
+      feed.name: Bloomberg-B-PIPE
+      feed.status: CONNECTED
+      feed.last_msg_age_ms:
+        var: bpipe_last_msg_ms
+      quote_cache.max_age_ms:
+        var: quote_age_ms
+      quote_cache.publishes_10s:
+        var: publishes_10s
+      quote_cache.status:
+        var: quote_cache_status
+      config.conflation_interval:
+        var: conflation_interval
+      deployment.version:
+        expr: "'1.7.0' if (18 in all_active or 18 in fixed_channels) else '1.6.4'"
 - every:
     seconds: 10
     state_key: _last_feed_summary
@@ -118,21 +255,37 @@ steps:
           summary.total_ticks:
             var: _ticks_processed
           summary.status: NOMINAL
+# Ticks still arrive during ch 18 (the session is fine); during ch 3 the dropped datagrams
+# never reach the handler.
 - sample:
     tps:
-      if_active:
-        randint:
-        - 5000
-        - 20000
-      else:
-        randint:
-        - 50000
-        - 200000
+      expr: "max(0, round(rand.gauss(120000.0, 15000.0)) - udp_rcvbuf_errors)"
 - metric:
     name: market_data.ticks_per_second
     value:
       var: tps
     unit: tps
+- metric:
+    name: market_data.udp_rcvbuf_errors_per_s
+    value:
+      var: udp_rcvbuf_errors
+    unit: '1/s'
+    attrs:
+      k8s.node_pool: mdf-c2-pool
+- metric:
+    name: market_data.sequence_gaps_per_min
+    value:
+      var: seq_gaps_per_min
+    unit: gaps/min
+    attrs:
+      k8s.node_pool: mdf-c2-pool
+- metric:
+    name: market_data.quote_age_ms
+    value:
+      var: quote_age_ms
+    unit: ms
+    attrs:
+      feed.name: Bloomberg-B-PIPE
 - metric:
     name: market_data.feed_latency_us
     value:

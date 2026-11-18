@@ -27,27 +27,57 @@ db_operations:
   - UPDATE inventory SET reserved_qty = reserved_qty + ? WHERE sku = ? AND available_qty - reserved_qty >= ?
 emit_fault_logs: true
 kpi_emitter: false
+state:
+  inv_backlog:
+    init: 0
+  inv_t:
+    init: now
 steps:
 - sample:
+    dt:
+      expr: "min(10.0, max(0.0, time.time() - inv_t))"
+- counter:
+    state_key: inv_t
+    by:
+      expr: "dt"
+# Ch 7: config revision 31 set max.poll.interval.ms to 30000 while a batch takes ~45s to apply, so
+# every member is evicted mid-batch and the group rebalances in a loop. Inbound events keep
+# arriving at ~6,000/s and the backlog grows ~5,000/s (lag_ms = backlog / 6000 * 1000). After the
+# rollback the group needs ~20s to stabilise, then drains at ~14,000/s (net ~8,000/s).
+- sample:
+    inv_delta:
+      expr: "(5000.0 * dt if elapsed.get(7, 0) > lag.get(7, 0) else 0.0) if 7 in all_active else ((5000.0 * dt if since_fix.get(7, 0) < 20 else -min(inv_backlog, 8000.0 * dt)) if 7 in fixed_channels else -inv_backlog)"
+- counter:
+    state_key: inv_backlog
+    by:
+      expr: "inv_delta"
+- sample:
+    inv_ramp:
+      expr: "min(1.0, max(0.0, elapsed.get(7, 0) - lag.get(7, 0)) / 20.0) if 7 in all_active else 0.0"
     items_tracked:
-      randint:
-      - 1500000
-      - 3500000
+      expr: "round(2480000 + rand.gauss(0, 2500))"
     sync_lag_ms:
-      uniform:
-      - 50.0
-      - 800.0
-      round: 1
+      expr: "round(max(300.0, 800.0 + rand.gauss(0, 150.0)) + inv_backlog / 6000.0 * 1000.0, 1)"
+    sync_backlog_events:
+      expr: "round(inv_backlog)"
+    consumer_rebalances:
+      expr: "round(max(0.0, (12.0 + rand.gauss(0, 1.5)) * inv_ramp)) if 7 in all_active else (round(max(0.0, (12.0 + rand.gauss(0, 1.0)) * (1.0 - min(1.0, since_fix.get(7, 0) / 30.0)))) if 7 in fixed_channels else 0)"
+    inbound_eps:
+      expr: "round(6000.0 + rand.gauss(0, 180.0))"
+    applied_eps:
+      expr: "round(max(0.0, (900.0 + rand.gauss(0, 200.0)) * inv_ramp + inbound_eps * (1.0 - inv_ramp))) if 7 in all_active else (round(900.0 + rand.gauss(0, 200.0)) if (7 in fixed_channels and since_fix.get(7, 0) < 20) else (round(14000.0 + rand.gauss(0, 350.0)) if inv_backlog > 1.0 else round(inbound_eps + rand.gauss(0, 60.0))))"
+    db_write_p95_ms:
+      expr: "round(11.0 + rand.gauss(0, 1.2), 1)"
+    max_poll_interval_ms:
+      expr: "30000 if 7 in all_active else 300000"
+    sync_config_rev:
+      expr: "31 if 7 in all_active else 30"
+    sync_status:
+      expr: "'ANOMALY' if (sync_lag_ms > 2000 or consumer_rebalances > 0) else 'NOMINAL'"
     stockout_rate_pct:
-      uniform:
-      - 0.5
-      - 3.5
-      round: 2
+      expr: "round(1.8 + rand.gauss(0, 0.2), 2)"
     reservation_success_rate_pct:
-      uniform:
-      - 98.5
-      - 99.9
-      round: 2
+      expr: "round(min(99.95, 99.3 + rand.gauss(0, 0.2)), 2)"
 - metric:
     name: inventory.items_tracked
     value:
@@ -58,6 +88,11 @@ steps:
     value:
       var: sync_lag_ms
     unit: ms
+- metric:
+    name: inventory.consumer_rebalances_per_min
+    value:
+      var: consumer_rebalances
+    unit: rebalances/min
 - metric:
     name: inventory.stockout_rate_pct
     value:
@@ -81,6 +116,35 @@ steps:
         var: stockout_rate_pct
       inventory.reservation_success_rate_pct:
         var: reservation_success_rate_pct
+- log:
+    level: INFO
+    message: 'level=info ts={iso_now} caller=sync/consumer.go:118 msg="sync status" group=inventory-sync-consumer topic=inventory.stock-events
+      members=12 partitions=48 inbound_eps={inbound_eps} applied_eps={applied_eps} backlog_events={sync_backlog_events} lag_ms={sync_lag_ms}
+      rebalances_per_min={consumer_rebalances} db_write_p95_ms={db_write_p95_ms} max_poll_interval_ms={max_poll_interval_ms}
+      config_revision={sync_config_rev} status={sync_status}'
+    attrs:
+      operation: inventory_sync_status
+      kafka.consumer_group: inventory-sync-consumer
+      kafka.topic: inventory.stock-events
+      inventory.consumer_group_members: 12
+      inventory.inbound_event_rate_eps:
+        var: inbound_eps
+      inventory.sync_apply_rate_eps:
+        var: applied_eps
+      inventory.sync_backlog_events:
+        var: sync_backlog_events
+      inventory.sync_lag_ms:
+        var: sync_lag_ms
+      inventory.consumer_rebalances_per_min:
+        var: consumer_rebalances
+      inventory.db_write_p95_ms:
+        var: db_write_p95_ms
+      inventory.max_poll_interval_ms:
+        var: max_poll_interval_ms
+      config.revision:
+        var: sync_config_rev
+      inventory.sync_status:
+        var: sync_status
 - sample:
     warehouse_utilization_pct:
       uniform:

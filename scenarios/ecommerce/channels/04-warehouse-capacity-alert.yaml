@@ -6,47 +6,139 @@ sensor_type: storage_utilization
 affected_services:
 - fulfillment-orchestrator
 - inventory-service
+error_services:
+- fulfillment-orchestrator
 cascade_services:
 - order-management
-description: Warehouse storage capacity approaching critical threshold — new inbound shipments being rejected, causing supply
-  chain delays
+description: WH-US-OH-02 reports 94.6% storage utilization and rejects inbound ASNs at receiving because cycle count CC-2291 was closed without releasing its location hold on zones C and D.
+onset_delay_seconds: 8
 investigation_notes: |-
-  1. Check fulfillment-orchestrator logs for WAREHOUSE-CAPACITY-ALERT — capacity={capacity_used_pct}% at {warehouse_id}.
-  2. Identify the capacity drivers: check inventory.items_tracked metric by category — overstocked SKUs consuming disproportionate space.
-  3. Review inbound shipment schedule: if {inbound_units} units arriving in next 48hrs and capacity is already at {capacity_used_pct}%, overflow is imminent.
-  4. Prioritize outbound to free space: run velocity analysis on slow-moving SKUs ({slow_sku_count} items with 0 sales in 30 days) for clearance.
-  5. Activate overflow warehouse at {overflow_facility} — reroute inbound from top {slow_sku_categories} categories to free primary warehouse capacity.
-  6. Alert merchandising team: if capacity remains critical, new product listings should be paused until space is freed.
+  Root cause: cycle count CC-2291 at {warehouse_id} (zones C and D, 3,412 locations) was closed about a minute before the first rejection, but its location hold was never released; the release step was skipped (CR-4471). The WMS treats held locations as unavailable, so roughly 220,000 sqft drops out of counted storage: {capacity_used_sqft} sqft used now reads against {capacity_available_sqft} sqft available, which is {capacity_used_pct}%, above the {receiving_gate_pct}% receiving gate, and every inbound receipt is rejected. Physically nothing changed: the building has 1,000,000 sqft and the same 738,000 sqft in use, so real utilization is about 73.8%, the same as before the count. The warehouse is not full, so activating the overflow facility, rerouting inbound or pausing new listings would treat a symptom that does not exist. The other warehouses report normal capacity (WH-US-NJ-01 about 81%, WH-US-TX-03 about 77%, WH-US-CA-04 about 70%) with no holds, which rules out a network-wide inventory surge.
+  Confirm:
+    - fulfillment-orchestrator metrics.fulfillment.warehouse_capacity_pct steps from about 73.8 to {capacity_used_pct} on the first capacity snapshot after the hold (about a minute after the cycle count close); metrics.fulfillment.inbound_rejected_per_min goes from 0 to about 14 and metrics.fulfillment.receiving_queue_asns climbs from about 3 by about 2 ASNs per minute
+    - the "c.e.fulfillment.wms.CapacityMonitor : warehouse={warehouse_id}" status lines show available_sqft={capacity_available_sqft} (other warehouses 1000000), attributes.wms.location_holds = CC-2291 and attributes.wms.locked_zones = C,D, status=ANOMALY
+    - the fulfillment-orchestrator line "[WMS] cycle count CC-2291 closed at {warehouse_id} zones C,D: 3,412 locations counted; location hold CC-2291 still active" comes before the first WAREHOUSE-CAPACITY-ALERT receipt rejection
+    - inventory-service pauses receiving for the {inbound_skus_held} SKUs bound to {warehouse_id}, and order-management extends delivery estimates for those SKUs by {estimate_added_days} days
+  Remediation: release the stale hold with opsctl delete location-hold/cc-2291. The 3,412 locations return to available within about 8 seconds, warehouse_capacity_pct drops back to about 73.8 within about 10 seconds, the receiving gate reopens (inbound_rejected_per_min back to 0) and the ASNs queued at the docks are received over about 2 minutes until receiving_queue_asns is back to about 3. No overflow activation or listing pause is needed.
 remediation_action: rebalance_warehouse_capacity
-error_message: '[FulfillmentOrchestrator] WAREHOUSE-CAPACITY-ALERT: warehouse={warehouse_id} capacity={capacity_used_pct}%
-  ({capacity_used_sqft}/{capacity_total_sqft} sqft) inbound_units={inbound_units} slow_skus={slow_sku_count}'
-stack_trace: "com.ecommerce.fulfillment.CapacityException: WAREHOUSE-CAPACITY-ALERT warehouse={warehouse_id} asn={asn_id}\n\tat com.ecommerce.fulfillment.WarehouseManager.checkCapacity(WarehouseManager.java:214)\n\
-  \tat com.ecommerce.fulfillment.FulfillmentOrchestrator.receiveInbound(FulfillmentOrchestrator.java:131)\nWarehouse:         {warehouse_id}\n\
-  Capacity used:     {capacity_used_pct}% ({capacity_used_sqft}/{capacity_total_sqft} sqft)\nInbound (48h):     {inbound_units}\
-  \ units\nSlow SKUs:         {slow_sku_count}\nOverflow facility: {overflow_facility}"
+remediation_command: |-
+  opsctl delete location-hold/cc-2291
+error_message: '[receiving-worker-3] c.e.fulfillment.wms.InboundReceivingService : WAREHOUSE-CAPACITY-ALERT receipt rejected warehouse={warehouse_id} asn={asn_id} dock={dock_door} capacity_pct={capacity_used_pct} gate_pct={receiving_gate_pct} used_sqft={capacity_used_sqft} available_sqft={capacity_available_sqft}'
+stack_trace: |-
+  com.ecommerce.fulfillment.wms.CapacityExceededException: WAREHOUSE-CAPACITY-ALERT warehouse {warehouse_id} at {capacity_used_pct}% of available storage (gate {receiving_gate_pct}%), ASN {asn_id} not accepted
+  	at com.ecommerce.fulfillment.wms.CapacityGate.checkInbound(CapacityGate.java:88)
+  	at com.ecommerce.fulfillment.wms.InboundReceivingService.receive(InboundReceivingService.java:142)
+  	at com.ecommerce.fulfillment.wms.InboundReceivingService.lambda$onAsnArrived$2(InboundReceivingService.java:97)
+  	at java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1144)
+  	at java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:642)
+  	at java.base/java.lang.Thread.run(Thread.java:1583)
 correlation_attr:
-  key: fulfillment.warehouse_capacity_critical
-  value: true
+  key: wms.location_holds
+  value: CC-2291
 fault_params:
-  warehouse_id: {choice: [WH-US-NJ-01, WH-US-OH-02, WH-US-TX-03]}
+  warehouse_id: WH-US-OH-02
   capacity_used_pct: 94.6
-  capacity_used_sqft: 946000
-  capacity_total_sqft: 1000000
-  inbound_units: {randint: [5000, 50000]}
-  slow_sku_count: {randint: [500, 10000]}
-  slow_sku_categories: {choice: [home-decor, seasonal, electronics-accessories]}
-  overflow_facility: {choice: [WH-US-PA-OVERFLOW, WH-US-IN-OVERFLOW]}
+  capacity_used_sqft: 738000
+  capacity_available_sqft: 780000
+  receiving_gate_pct: 92.0
   asn_id: {format: "ASN-{n}", n: {randint: [10000, 99999]}}
+  dock_door: {format: "D{n:02d}", n: {randint: [1, 36]}}
+  inbound_skus_held: {randint: [300, 900]}
+  estimate_added_days: {randint: [2, 3]}
 rca_clues:
   fulfillment-orchestrator:
-    fulfillment.warehouse_capacity_pct: {uniform: [88, 98], round: 1}
-    fulfillment.inbound_rejected_count: {randint: [10, 200]}
+    fulfillment.warehouse_id: WH-US-OH-02
+    fulfillment.warehouse_capacity_pct: {uniform: [94.2, 95.0], round: 1}
+    wms.location_holds: CC-2291
+    wms.locked_zones: C,D
+    wms.counted_available_sqft: 780000
+    wms.physical_storage_sqft: 1000000
   inventory-service:
-    inventory.overflow_sku_count: {randint: [100, 5000]}
-    inventory.receiving_paused_categories: {randint: [1, 5]}
+    inventory.receiving_paused_warehouse: WH-US-OH-02
+    inventory.inbound_skus_held: {randint: [300, 900]}
   order-management:
-    order.new_listing_hold: true
     order.extended_delivery_estimate: true
+    order.delivery_estimate_added_days: {randint: [2, 3]}
+cascade_messages:
+  inventory-service:
+    - severity: WARN
+      message: 'level=warn ts={iso_now} caller=receiving/binding.go:211 msg="inbound receipt paused for SKUs bound to warehouse" warehouse={warehouse_id} skus_held={inbound_skus_held} reason=receiving_rejected upstream=fulfillment-orchestrator'
+  order-management:
+    - severity: INFO
+      message: 'level=info ts={iso_now} caller=promise/estimator.go:164 msg="delivery estimate extended" reason=inbound_receiving_paused warehouse={warehouse_id} skus={inbound_skus_held} added_days={estimate_added_days}'
+fault_scope:
+  cluster: ecommerce-aks-cluster
+  workloads: [fulfillment-orchestrator]
+infrastructure_events:
+  - service: fulfillment-orchestrator
+    severity: INFO
+    offset_seconds: -60
+    body: '[WMS] cycle count CC-2291 closed at WH-US-OH-02 zones C,D: 3,412 locations counted; location hold CC-2291 still active'
+    attributes:
+      user.name: ic-lead.oh02
+      change.request: CR-4471
+      operation: cycle_count_close
+      fulfillment.warehouse_id: WH-US-OH-02
+      wms.cycle_count_id: CC-2291
+      wms.location_holds: CC-2291
+      wms.locked_zones: C,D
+remediation_effects:
+  log_taper_seconds: 10
+  log_events:
+    - service: fulfillment-orchestrator
+      severity: INFO
+      offset_seconds: 1
+      body: '[CHG] CHANGE APPLIED opsctl delete location-hold/cc-2291 by {actor}: location hold CC-2291 released at WH-US-OH-02 zones C,D (3,412 locations)'
+      attributes:
+        operation: change_applied
+        change.target: location-hold/cc-2291
+    - service: fulfillment-orchestrator
+      severity: INFO
+      offset_seconds: 6
+      body: '[WMS] location hold CC-2291 released: 3,412 locations in zones C,D returned to available at WH-US-OH-02; available_sqft 780000 -> 1000000'
+      attributes:
+        operation: location_hold_release
+        fulfillment.warehouse_id: WH-US-OH-02
+        wms.location_holds: none
+    - service: fulfillment-orchestrator
+      severity: INFO
+      offset_seconds: 10
+      body: '[receiving-worker-3] c.e.fulfillment.wms.InboundReceivingService : receiving gate open warehouse=WH-US-OH-02 capacity_pct=73.8 gate_pct=92.0; resuming queued ASNs'
+      attributes:
+        operation: receiving_resume
+        fulfillment.warehouse_id: WH-US-OH-02
+    - service: fulfillment-orchestrator
+      severity: INFO
+      offset_seconds: 120
+      body: '[receiving-worker-3] c.e.fulfillment.wms.InboundReceivingService : queued ASNs received and put away at WH-US-OH-02; receiving queue back to normal'
+      attributes:
+        operation: receiving_resume
+        fulfillment.warehouse_id: WH-US-OH-02
+  verification:
+    - signal: fulfillment.warehouse_capacity_pct
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "fulfillment-orchestrator"'
+      field: 'metrics.fulfillment.warehouse_capacity_pct'
+      expect: 'back to about 73.8 within about 10s of the hold release (was 94.6)'
+      within_seconds: 60
+    - signal: fulfillment.receiving_queue_asns
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "fulfillment-orchestrator"'
+      field: 'metrics.fulfillment.receiving_queue_asns'
+      expect: 'drains over about 120s back to about 3 queued ASNs; inbound_rejected_per_min is 0 once capacity is back under the 92% gate'
+      within_seconds: 240
+    - signal: WAREHOUSE-CAPACITY-ALERT lines
+      from: 'logs.otel.ecommerce'
+      where: 'body.text LIKE "*WAREHOUSE-CAPACITY-ALERT*"'
+      expect: 'no new receipt rejections after about 10s'
+      within_seconds: 60
+    - signal: WMS location holds
+      from: 'logs.otel.ecommerce'
+      where: 'resource.attributes.service.name == "fulfillment-orchestrator" AND body.text LIKE "*warehouse=WH-US-OH-02*"'
+      field: 'attributes.wms.location_holds'
+      expect: 'CC-2291 while the hold is active; none after the release'
+      within_seconds: 60
+service_lag_seconds: {inventory-service: 20, order-management: 35}
 business_impact:
   - kpi: business.fulfillment_sla_pct
     factor: {uniform: [0.20, 0.45]}

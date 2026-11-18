@@ -52,7 +52,8 @@ steps:
     if: "${{ steps.claim_alert.output.result == 'created' }}"
     with:
       query: >
-        FROM __NS__-chaos-context
+        FROM __NS__-notify-context
+        | WHERE error_type == "{{ inputs.payload.alerts[0].data.error_type }}"
         | SORT @timestamp DESC
         | KEEP user_email
         | LIMIT 1

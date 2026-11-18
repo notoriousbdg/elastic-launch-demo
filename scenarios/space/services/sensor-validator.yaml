@@ -44,6 +44,9 @@ state:
     init: 0
   _last_pipeline_report:
     init: now
+  # SENS-4417 epoch check every few seconds (0: the first cycle reports).
+  _last_epoch_check:
+    init: 0
 per_active_channel_steps:
 - log:
     level: ERROR
@@ -107,16 +110,30 @@ steps:
     state_key: _validation_count
     by:
       var: n_validated
+# V&V throughput. Blocking gen2 GC pauses (>4 s at an 11.8 G heap) stall the
+# workers: the rate falls to 1-10/s and the queue climbs to thousands over ~60 s.
+# After the compaction and the 12g heap limit the backlog drains over ~60 s.
 - sample:
+    vv_fault:
+      expr: 17 in all_active
+    vv_fixed:
+      expr: 17 in fixed_channels and 17 not in all_active
+    vv_ramp:
+      expr: min(1.0, elapsed.get(17, 0) / 60.0)
+    vv_conv:
+      expr: min(1.0, since_fix.get(17, 0) / 60.0)
     validations_per_sec:
-      uniform:
-      - 45.0
-      - 65.0
-      round: 1
+      expr: "round(55.0 - (55.0 - rand.uniform(1.5, 9.5)) * vv_ramp, 1) if vv_fault else (round(rand.uniform(55.0,
+        65.0), 1) if vv_fixed else round(rand.uniform(45.0, 65.0), 1))"
     queue_depth:
-      randint:
-      - 0
-      - 20
+      expr: "int(10 + (rand.randint(1500, 4800) - 10) * vv_ramp) if vv_fault else (int(rand.randint(0, 20) + 3000 * (1.0
+        - vv_conv)) if vv_fixed else rand.randint(0, 20))"
+    vv_gc_pause_ms:
+      expr: "rand.randint(4100, 6400) if vv_fault else rand.randint(15, 60)"
+    vv_heap_limit:
+      expr: "'12g' if vv_fixed else 'unset'"
+    vv_status:
+      expr: "'ANOMALY' if vv_fault or queue_depth > 200 or validations_per_sec < 40 else 'NOMINAL'"
 - metric:
     name: sensor_validator.validations_per_sec
     value:
@@ -138,7 +155,8 @@ steps:
     steps:
     - log:
         level: INFO
-        message: '[VV] pipeline_status rate={validations_per_sec}/s queue_depth={queue_depth} total={_validation_count} status=NOMINAL'
+        message: '[VV] pipeline_status rate={validations_per_sec}/s queue_depth={queue_depth} total={_validation_count} gc_pause={vv_gc_pause_ms}ms
+          heap_limit={vv_heap_limit} status={vv_status}'
         attrs:
           operation: pipeline_health
           validation.rate:
@@ -147,13 +165,66 @@ steps:
             var: queue_depth
           validation.total_count:
             var: _validation_count
+          validation.gc_pause_ms:
+            var: vv_gc_pause_ms
+          validation.heap_limit:
+            var: vv_heap_limit
+          sensor.status:
+            var: vv_status
     else:
     - log:
         level: INFO
-        message: '[VV] pipeline_status rate={validations_per_sec}/s queue_depth={queue_depth} status=NOMINAL'
+        message: '[VV] pipeline_status rate={validations_per_sec}/s queue_depth={queue_depth} gc_pause={vv_gc_pause_ms}ms heap_limit={vv_heap_limit}
+          status={vv_status}'
         attrs:
           operation: pipeline_health
           validation.rate:
             var: validations_per_sec
           validation.queue_depth:
             var: queue_depth
+          validation.gc_pause_ms:
+            var: vv_gc_pause_ms
+          validation.heap_limit:
+            var: vv_heap_limit
+          sensor.status:
+            var: vv_status
+# SENS-4417 calibration epoch. When its NTP sync fails the RTC free-runs and the
+# sensor applies a stale calibration table: skew ~41,800 s (11.6 h) within ~30 s of
+# detection. After the clock sync and the reference restore it is back to <1 s in ~45 s.
+- sample:
+    ep_fault:
+      expr: 18 in all_active
+    ep_fixed:
+      expr: 18 in fixed_channels and 18 not in all_active
+    epoch_skew:
+      expr: "round(41760.0 * min(1.0, elapsed.get(18, 0) / 30.0) + 0.02 * elapsed.get(18, 0), 1) if ep_fault else (round(max(rand.uniform(0.05,
+        0.4), 41760.0 * (1.0 - min(1.0, since_fix.get(18, 0) / 45.0))), 1) if ep_fixed else round(rand.uniform(0.05, 0.4), 2))"
+    ep_ntp:
+      expr: "'UNSYNCED' if ep_fault else 'SYNCED'"
+    ep_table:
+      expr: "'local-1738059040' if ep_fault else 'reference-1738100800'"
+    ep_status:
+      expr: "'ANOMALY' if ep_fault or epoch_skew > 1.0 else 'NOMINAL'"
+- metric:
+    name: sensor_validator.epoch_skew_s
+    value:
+      var: epoch_skew
+    unit: s
+- every:
+    seconds: 5
+    state_key: _last_epoch_check
+    steps:
+    - log:
+        level: INFO
+        message: '[VV] epoch_check sensor=SENS-4417 epoch_skew={epoch_skew}s calibration_table={ep_table} ntp={ep_ntp} status={ep_status}'
+        attrs:
+          operation: epoch_check
+          validation.sensor_id: SENS-4417
+          validation.epoch_skew_s:
+            var: epoch_skew
+          validation.calibration_table:
+            var: ep_table
+          validation.ntp_sync_state:
+            var: ep_ntp
+          sensor.status:
+            var: ep_status

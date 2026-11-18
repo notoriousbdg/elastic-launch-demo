@@ -28,45 +28,111 @@ db_operations:
 emit_fault_logs: true
 kpi_emitter: true
 constants:
+  # Gross limits from the daily risk-limits file; exposure runs in a normal band per desk.
   DESKS:
     EQ-FLOW:
       limit_m: 200
       asset_class: equity
+      exp_lo: 90
+      exp_hi: 130
     EQ-PROP:
-      limit_m: 100
+      limit_m: 400
       asset_class: equity
+      exp_lo: 124
+      exp_hi: 160
     FI-RATES:
       limit_m: 500
       asset_class: fixed_income
+      exp_lo: 250
+      exp_hi: 340
     FX-SPOT:
       limit_m: 300
       asset_class: fx
+      exp_lo: 120
+      exp_hi: 180
     DRV-VOL:
       limit_m: 150
       asset_class: derivatives
+      exp_lo: 60
+      exp_hi: 95
+  OTHER_DESKS: [EQ-FLOW, FI-RATES, FX-SPOT, DRV-VOL]
 state:
   _last_var_calc:
     init: now
   _risk_checks:
     init: 0
+  _coll_age_fix:
+    init: 900
 steps:
+# Ch 4: risk-limits r4412 carries EQ-PROP gross limit 40M instead of 400M. Exposure is
+# unchanged; utilization is 10x. The rollback reloads the limits in ~15 s and the gauge (a 30 s
+# average of the pre-trade checks) settles over the next 30 s.
+- sample:
+    c4_bad_limit:
+      expr: "4 in all_active or (4 in fixed_channels and since_fix.get(4, 0) < 15.0)"
+    limits_rev:
+      expr: "'r4412' if c4_bad_limit else 'r4411'"
+    eqp_exposure_m:
+      expr: "round(rand.uniform(DESKS['EQ-PROP']['exp_lo'], DESKS['EQ-PROP']['exp_hi']), 1)"
+    eqp_limit_m:
+      expr: "40 if c4_bad_limit else 400"
+    eqp_check_util:
+      expr: "round(eqp_exposure_m / eqp_limit_m * 100.0, 1)"
+    eqp_util_ok:
+      expr: "round(eqp_exposure_m / 4.0, 1)"
+    eqp_util_bad:
+      expr: "round(eqp_exposure_m * 2.5, 1)"
+    eqp_util_pct:
+      expr: "round(eqp_util_ok + (eqp_util_bad - eqp_util_ok) * min(1.0, max(0.0, elapsed.get(4, 0) - lag.get(4, 0)) / 10.0), 1) if 4 in all_active
+        else (round(eqp_util_bad + (eqp_util_ok - eqp_util_bad) * min(1.0, max(0.0, since_fix.get(4, 0) - 15.0) / 30.0), 1) if 4 in fixed_channels
+        else eqp_util_ok)"
+    eqp_result:
+      expr: "'REJECT' if eqp_check_util > 100.0 else 'PASS'"
+    eqp_kill_switch:
+      expr: "'ENGAGED' if eqp_check_util > 100.0 else 'DISARMED'"
+    eqp_status:
+      expr: "'ANOMALY' if eqp_util_pct > 100.0 else 'NOMINAL'"
+- log:
+    level: INFO
+    message: '[RISK] pre_trade_check desk=EQ-PROP exposure_m=${eqp_exposure_m} limit_m=${eqp_limit_m} utilization={eqp_check_util}%
+      asset_class=equity limits_rev={limits_rev} kill_switch={eqp_kill_switch} result={eqp_result}'
+    attrs:
+      operation: risk_check
+      risk.desk: EQ-PROP
+      risk.exposure_m:
+        var: eqp_exposure_m
+      risk.limit_m:
+        var: eqp_limit_m
+      risk.utilization_pct:
+        var: eqp_check_util
+      risk.limit_utilization_avg_pct:
+        var: eqp_util_pct
+      risk.result:
+        var: eqp_result
+      risk.kill_switch:
+        var: eqp_kill_switch
+      risk.status:
+        var: eqp_status
+      risk.asset_class: equity
+      risk.limits_file_revision:
+        var: limits_rev
 - sample:
     desk_name:
-      choice: DESKS
+      choice: OTHER_DESKS
     desk:
       expr: DESKS[desk_name]
     exposure_m:
-      expr: round(rand.uniform(10, desk['limit_m'] * 0.8), 1)
-    utilization:
-      expr: round(exposure_m / desk['limit_m'] * 100, 1)
-    asset_class:
-      expr: desk['asset_class']
+      expr: round(rand.uniform(desk['exp_lo'], desk['exp_hi']), 1)
     limit_m:
       expr: desk['limit_m']
+    utilization:
+      expr: round(exposure_m / limit_m * 100, 1)
+    asset_class:
+      expr: desk['asset_class']
 - log:
     level: INFO
     message: '[RISK] pre_trade_check desk={desk_name} exposure_m=${exposure_m} limit_m=${limit_m} utilization={utilization}%
-      asset_class={asset_class} result=PASS'
+      asset_class={asset_class} limits_rev={limits_rev} kill_switch=DISARMED result=PASS'
     attrs:
       operation: risk_check
       risk.desk:
@@ -78,36 +144,94 @@ steps:
       risk.utilization_pct:
         var: utilization
       risk.result: PASS
+      risk.kill_switch: DISARMED
+      risk.status: NOMINAL
       risk.asset_class:
         var: asset_class
+      risk.limits_file_revision:
+        var: limits_rev
+# Ch 5: cronjob/collateral-reval was suspended ~300 s before onset and never resumed, so the
+# oldest collateral valuation keeps ageing; past 300 s the margin policy haircuts it to 0.
+# After the fix the manual run takes ~40 s, then the sweep sees fresh valuations.
 - sample:
+    coll_age_base:
+      expr: "round(rand.uniform(30.0, 120.0))"
+    coll_age_s:
+      expr: "round(min(1800.0, 320.0 + elapsed.get(5, 0) + rand.gauss(0.0, 4.0))) if 5 in all_active
+        else ((round(min(1800.0, _coll_age_fix + since_fix.get(5, 0))) if since_fix.get(5, 0) < 40.0
+          else round(min(1800.0, _coll_age_fix + 40.0) + (coll_age_base - min(1800.0, _coll_age_fix + 40.0)) * min(1.0, (since_fix.get(5, 0) - 40.0) / 35.0)))
+          if 5 in fixed_channels else coll_age_base)"
+    c5_factor:
+      expr: "min(1.0, max(0.0, elapsed.get(5, 0) - lag.get(5, 0)) / 60.0) if 5 in all_active
+        else ((1.0 if since_fix.get(5, 0) < 40.0 else max(0.0, 1.0 - (since_fix.get(5, 0) - 40.0) / 35.0)) if 5 in fixed_channels else 0.0)"
+    margin_calls_per_min:
+      expr: "min(150, round(rand.uniform(0.0, 3.0) + c5_factor * max(40.0, min(147.0, rand.gauss(95.0, 20.0)))))"
+    margin_utilization_pct:
+      expr: "round(max(50.0, min(75.0, rand.gauss(62.0, 3.0))) + c5_factor * rand.uniform(50.0, 80.0), 1)"
+    reval_suspended:
+      expr: "5 in all_active"
+    reval_last_success_age_s:
+      expr: "max(0, coll_age_s - round(rand.uniform(15.0, 30.0)))"
     accounts_checked:
       randint:
       - 100
       - 500
-    margin_calls:
-      randint:
-      - 0
-      - 3
+    margin_status:
+      expr: "'ANOMALY' if coll_age_s > 300 or margin_calls_per_min > 10 else 'NOMINAL'"
+- counter:
+    state_key: _coll_age_fix
+    by:
+      expr: "(coll_age_s - _coll_age_fix) if 5 in all_active else 0"
 - log:
     level: INFO
-    message: '[RISK] margin_sweep accounts_checked={accounts_checked} calls_pending={margin_calls} status=OK'
+    message: '[RISK] margin_sweep accounts_checked={accounts_checked} calls_issued_60s={margin_calls_per_min} collateral_valuation_age_max_s={coll_age_s}
+      collateral_reval_suspended={reval_suspended} status={margin_status}'
     attrs:
       operation: margin_sweep
       margin.accounts_checked:
         var: accounts_checked
       margin.calls_pending:
-        var: margin_calls
+        var: margin_calls_per_min
+      margin.collateral_valuation_age_s:
+        var: coll_age_s
+      margin.status:
+        var: margin_status
+      collateral_reval.suspended:
+        var: reval_suspended
+      collateral_reval.last_success_age_s:
+        var: reval_last_success_age_s
+# Dependents of other components: stale prices (ch 3, 18), position breaks against booked
+# trades (ch 1, 6, 9), short sales without a locate (ch 8), FX conversion calls (ch 14).
+- sample:
+    f1:
+      expr: "min(1.0, max(0.0, elapsed.get(1, 0) - lag.get(1, 0)) / 60.0) if 1 in all_active else (max(0.0, 1.0 - since_fix.get(1, 0) / 120.0) if 1 in fixed_channels else 0.0)"
+    f3:
+      expr: "min(1.0, max(0.0, elapsed.get(3, 0) - lag.get(3, 0)) / 60.0) if 3 in all_active else (max(0.0, 1.0 - since_fix.get(3, 0) / 200.0) if 3 in fixed_channels else 0.0)"
+    f6:
+      expr: "min(1.0, max(0.0, elapsed.get(6, 0) - lag.get(6, 0)) / 120.0) if 6 in all_active else (max(0.0, 1.0 - since_fix.get(6, 0) / 120.0) if 6 in fixed_channels else 0.0)"
+    f8:
+      expr: "min(1.0, max(0.0, elapsed.get(8, 0) - lag.get(8, 0)) / 60.0) if 8 in all_active else (max(0.0, 1.0 - since_fix.get(8, 0) / 90.0) if 8 in fixed_channels else 0.0)"
+    f9:
+      expr: "min(1.0, max(0.0, elapsed.get(9, 0) - lag.get(9, 0)) / 30.0) if 9 in all_active else (max(0.0, 1.0 - since_fix.get(9, 0) / 120.0) if 9 in fixed_channels else 0.0)"
+    f14:
+      expr: "min(1.0, max(0.0, elapsed.get(14, 0) - lag.get(14, 0)) / 60.0) if 14 in all_active else (max(0.0, 1.0 - since_fix.get(14, 0) / 60.0) if 14 in fixed_channels else 0.0)"
+    f18:
+      expr: "min(1.0, max(0.0, elapsed.get(18, 0) - lag.get(18, 0)) / 60.0) if 18 in all_active else (max(0.0, 1.0 - since_fix.get(18, 0) / 40.0) if 18 in fixed_channels else 0.0)"
+    stale_price_calcs_per_min:
+      expr: "max(0, round(rand.uniform(0.0, 2.0) + f18 * rand.uniform(40.0, 120.0) + f3 * rand.uniform(10.0, 40.0)))"
+    position_breaks:
+      expr: "max(0, round(rand.uniform(0.0, 3.0) + f6 * rand.uniform(40.0, 90.0) + f9 * rand.uniform(8.0, 16.0) + f1 * rand.uniform(4.0, 12.0)))"
+    short_locate_failures_per_min:
+      expr: "max(0, round(f8 * rand.uniform(15.0, 60.0)))"
+    fx_conversion_ms:
+      expr: "round(max(1.0, min(10.0, rand.gauss(4.0, 1.2))) + f14 * rand.uniform(3000.0, 10000.0), 1)"
 - every:
     seconds: 12
     state_key: _last_var_calc
     steps:
     - sample:
         var_95:
-          uniform:
-          - 5.0
-          - 25.0
-          round: 2
+          expr: "round(max(11.0, min(18.0, rand.gauss(14.5, 0.8))), 2)"
         var_99:
           expr: round(var_95 * 1.5, 2)
         scenarios:
@@ -116,7 +240,8 @@ steps:
           - 50000
     - log:
         level: INFO
-        message: '[RISK] var_calculation var_95=${var_95}M var_99=${var_99}M scenarios={scenarios} status=WITHIN_LIMITS'
+        message: '[RISK] var_calculation var_95=${var_95}M var_99=${var_99}M scenarios={scenarios} stale_price_calcs_60s={stale_price_calcs_per_min}
+          status=WITHIN_LIMITS'
         attrs:
           operation: var_calculation
           var.95_percentile_m:
@@ -125,28 +250,61 @@ steps:
             var: var_99
           var.scenario_count:
             var: scenarios
+          var.stale_price_calcs:
+            var: stale_price_calcs_per_min
           var.status: WITHIN_LIMITS
 - counter:
     state_key: _risk_checks
-    by: 1
+    by: 2
 - metric:
     name: risk_calculator.risk_checks
     value:
       var: _risk_checks
     unit: checks
 - metric:
-    name: risk_calculator.var_95
+    name: risk_calculator.limit_utilization_pct
     value:
-      uniform:
-      - 5.0
-      - 25.0
-      round: 2
-    unit: M_USD
+      var: eqp_util_pct
+    unit: '%'
+    attrs:
+      risk.desk: EQ-PROP
+- metric:
+    name: risk_calculator.collateral_valuation_age_s
+    value:
+      var: coll_age_s
+    unit: s
+- metric:
+    name: risk_calculator.margin_calls_issued_per_min
+    value:
+      var: margin_calls_per_min
+    unit: calls/min
 - metric:
     name: risk_calculator.margin_utilization
     value:
-      uniform:
-      - 40.0
-      - 85.0
-      round: 1
+      var: margin_utilization_pct
     unit: '%'
+- metric:
+    name: risk_calculator.var_95
+    value:
+      expr: "round(max(11.0, min(18.0, rand.gauss(14.5, 0.8))), 2)"
+    unit: M_USD
+- metric:
+    name: risk_calculator.stale_price_calcs_per_min
+    value:
+      var: stale_price_calcs_per_min
+    unit: calcs/min
+- metric:
+    name: risk_calculator.position_breaks
+    value:
+      var: position_breaks
+    unit: positions
+- metric:
+    name: risk_calculator.short_locate_failures_per_min
+    value:
+      var: short_locate_failures_per_min
+    unit: failures/min
+- metric:
+    name: risk_calculator.fx_conversion_ms
+    value:
+      var: fx_conversion_ms
+    unit: ms

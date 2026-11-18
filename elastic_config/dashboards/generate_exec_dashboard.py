@@ -505,7 +505,9 @@ def generate_dashboard_ndjson(scenario) -> str:
     tag_line = _tag_saved_object(namespace) + "\n"
 
     main = _build_dashboard_ndjson(
-        scenario_name, namespace, cloud_groups, dashboard_id, error_types
+        scenario_name, namespace, cloud_groups, dashboard_id, error_types,
+        log_error_services=scenario.dashboard_log_error_services,
+        cluster_health_tiles=scenario.dashboard_cluster_health_tiles,
     )
     biz = _build_business_executive_dashboard_ndjson(scenario)
     return tag_line + main + biz if biz else tag_line + main
@@ -517,6 +519,8 @@ def _build_dashboard_ndjson(
     cloud_groups: list[dict],
     dashboard_id: str,
     error_types: "list[str] | None" = None,
+    log_error_services: "list[str] | None" = None,
+    cluster_health_tiles: bool = False,
 ) -> str:
     """Build the full dashboard NDJSON from parameters."""
     # Override module-level constants so every panel references the deployed,
@@ -544,6 +548,66 @@ def _build_dashboard_ndjson(
             "gridData": {"h": 2, "i": pid, "w": group["col_width"], "x": group["x_start"], "y": 0},
         })
 
+    # ── Overview tiles per cloud column ──────────────────────────────────────
+    # Each column gets a list of tiles. Services with traces show a trace-based
+    # error rate; services listed in log_error_services (infra components with
+    # no traces) show an error-log ratio instead. A column with no services of
+    # its own can show per-cluster infra health tiles (opt-in).
+    log_error_services = set(log_error_services or [])
+    infra_cols = {
+        "n_nodes": ("Nodes", "unique_count(resource.attributes.k8s.node.name)", None),
+        "n_pods": ("Pods", "unique_count(resource.attributes.k8s.pod.name)", None),
+        "restarts": ("Restarts", "max(metrics.k8s.container.restarts)", None),
+        "disk": ("Disk %", "average(metrics.k8s.node.filesystem.utilization)", None),
+        "pod_cpu": ("Pod CPU %", "average(metrics.k8s.pod.cpu.node.utilization)", PALETTE_CPU),
+        "pod_mem": ("Pod Mem %", "average(metrics.k8s.pod.memory.node.utilization)", None),
+        "deploys": (
+            "Deploys Ready",
+            "sum(metrics.k8s.deployment.available) / sum(metrics.k8s.deployment.desired)",
+            None,
+        ),
+    }
+
+    def _group_tiles(group):
+        tiles = []
+        for svc_name in group["services"]:
+            q = f'resource.attributes.service.name: "{svc_name}"'
+            if svc_name in log_error_services:
+                tiles.append({
+                    "title": svc_name, "subtitle": f"{svc_name} \u00b7 logs", "dv": DATA_VIEW_ID_LOGS,
+                    "query": q, "label": "Error Rate",
+                    "formula": "count(kql='severity_text: ERROR') / count()",
+                    "viz": {"palette": PALETTE_ERROR_RATE},
+                })
+            else:
+                tiles.append({
+                    "title": svc_name, "subtitle": svc_name, "dv": DATA_VIEW_ID_TRACES,
+                    "query": q, "label": "Error Rate",
+                    "formula": "count(kql='status.code: Error') / count()",
+                    "viz": {"palette": PALETTE_ERROR_RATE},
+                })
+        if not tiles and cluster_health_tiles and group.get("cluster"):
+            cname = group["cluster"]
+            for title, formula, palette in infra_cols.values():
+                tiles.append({
+                    "title": title, "subtitle": cname, "dv": DATA_VIEW_ID_METRICS,
+                    "query": f'resource.attributes.k8s.cluster.name: "{cname}"',
+                    "label": title, "formula": formula,
+                    "viz": {"palette": palette} if palette else {"color": "#6092C0"},
+                })
+        return tiles
+
+    group_tiles = [_group_tiles(g) for g in cloud_groups]
+
+    # Tiles wrap into extra rows when a column holds more tiles than fit
+    # across its width, so they never spill into the neighbouring column.
+    SVC_ROW_H = 6
+    max_svc_rows = 1
+    for group, tiles in zip(cloud_groups, group_tiles):
+        per_row = max(1, group["col_width"] // TILE_WIDTH)
+        max_svc_rows = max(max_svc_rows, -(-len(tiles) // per_row))
+    row_shift = (max_svc_rows - 1) * SVC_ROW_H  # pushes everything below down
+
     # Vertical separators between cloud columns
     for sep_x in [15, 32]:
         pid = f"p_sep_{sep_x}"
@@ -553,36 +617,40 @@ def _build_dashboard_ndjson(
                 "content": "",
             },
             "panelIndex": pid,
-            "gridData": {"h": 14, "i": pid, "w": 1, "x": sep_x, "y": 0},
+            "gridData": {"h": 14 + row_shift, "i": pid, "w": 1, "x": sep_x, "y": 0},
         })
 
-    # Row 1 (y=2, h=6): 9 Service Health Tiles (error rate per service)
+    # Rows of overview tiles (y=2, 8, ...)
     tile_idx = 0
-    for group in cloud_groups:
-        for svc_offset, svc_name in enumerate(group["services"]):
+    for group, tiles in zip(cloud_groups, group_tiles):
+        per_row = max(1, group["col_width"] // TILE_WIDTH)
+        for t_idx, tile in enumerate(tiles):
+            t_row, t_offset = divmod(t_idx, per_row)
             tile_idx += 1
             pid = f"p_svc_{tile_idx}"
             lid = uid()
             cid = uid()
-            svc_query = f'resource.attributes.service.name: "{svc_name}"'
-            columns = {cid: col_formula("count(kql='status.code: Error') / count()", "Error Rate")}
-            layer = make_layer(lid, [cid], columns, DATA_VIEW_ID_TRACES)
+            columns = {cid: col_formula(tile["formula"], tile["label"])}
+            layer = make_layer(lid, [cid], columns, tile["dv"])
             state = make_state(layer, {
                 "layerId": lid,
                 "layerType": "data",
                 "metricAccessor": cid,
-                "palette": PALETTE_ERROR_RATE,
-                "subtitle": svc_name,
-            }, query=svc_query)
-            x = group["x_start"] + svc_offset * TILE_WIDTH
-            w = TILE_WIDTH if svc_offset < 2 else (group["col_width"] - 2 * TILE_WIDTH)
+                "subtitle": tile["subtitle"],
+                **tile["viz"],
+            }, query=tile["query"])
+            x = group["x_start"] + t_offset * TILE_WIDTH
+            is_row_end = t_offset == per_row - 1 or t_idx == len(tiles) - 1
+            # Last tile in a row stretches to the column edge. A short final row
+            # must be full width, otherwise Kibana floats the K8s tiles up into the gap.
+            w = TILE_WIDTH if not is_row_end else (group["col_width"] - t_offset * TILE_WIDTH)
             panels.append(make_panel(
                 pid,
-                {"h": 6, "i": pid, "w": w, "x": x, "y": 2},
-                svc_name,
+                {"h": SVC_ROW_H, "i": pid, "w": w, "x": x, "y": 2 + t_row * SVC_ROW_H},
+                tile["title"],
                 "lnsMetric",
                 state,
-                [make_ref(DATA_VIEW_ID_TRACES, lid)],
+                [make_ref(tile["dv"], lid)],
             ))
 
     # Row 2 (y=8, h=6): K8s Tiles per Cloud Region
@@ -610,7 +678,7 @@ def _build_dashboard_ndjson(
             "subtitle": "Node CPU",
         }, query=cpu_query)
         panels.append(make_panel(pid,
-            {"h": 6, "i": pid, "w": left_w, "x": x_base, "y": 8},
+            {"h": 6, "i": pid, "w": left_w, "x": x_base, "y": 8 + row_shift},
             "Node CPU", "lnsMetric", state, [make_ref(DATA_VIEW_ID_METRICS, lid)]))
 
         # Node Memory tile (right half of column) — scoped to this cluster
@@ -629,8 +697,10 @@ def _build_dashboard_ndjson(
             "subtitle": "Node Memory",
         }, query=mem_query)
         panels.append(make_panel(pid,
-            {"h": 6, "i": pid, "w": right_w, "x": x_base + left_w, "y": 8},
+            {"h": 6, "i": pid, "w": right_w, "x": x_base + left_w, "y": 8 + row_shift},
             "Node Memory", "lnsMetric", state, [make_ref(DATA_VIEW_ID_METRICS, lid)]))
+
+    below_start = len(panels)
 
     # ── Section 2 (y=14): RED Metrics ──────────────────────────────────────────
 
@@ -1301,6 +1371,11 @@ def _build_dashboard_ndjson(
     panels.append(make_panel("p26",
         {"h": 14, "i": "p26", "w": 48, "x": 0, "y": 114},
         "Significant Event Logs", "lnsDatatable", esql_state, []))
+
+    # Shift every section below the cloud overview down by the extra tile rows
+    if row_shift:
+        for panel in panels[below_start:]:
+            panel["gridData"]["y"] += row_shift
 
     # ── Collect all references from panels ───────────────────────────────────
 

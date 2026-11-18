@@ -9,56 +9,124 @@ affected_services:
 cascade_services:
 - mobile-gateway
 - document-vault
-description: Scheduled bill payments failing to execute on due date
+description: Scheduled electronic bill payments due today are held instead of sent, because the payment engine believes today is not a Federal Reserve business day.
 investigation_notes: |-
-  1. Check FedACH window status — bill pay electronic payments can only transmit during Fed operating windows. If the window is CLOSED and retries are exhausted, payments queue until next window (06:00 ET).
-  2. Review the specific failure reason: INSUFFICIENT_FUNDS requires member notification with balance info; PAYEE_ACCOUNT_CLOSED needs payee record update; ROUTING_NUMBER_INVALID indicates stale payee data.
-  3. Assess late fee and credit impact risk — failed bill payments on due date can trigger late fees from payees and potential credit score impact. Flag HIGH risk payments for immediate member outreach.
-  4. Check payment-engine retry logic — 3/3 attempts exhausted means auto-retry will not help. Manual intervention required: SELECT * FROM bill_payments WHERE status='FAILED' AND due_date=CURRENT_DATE.
-  5. For military members on deployment, verify SCRA protections apply — late fees may be waivable under Servicemembers Civil Relief Act. Check member.deployment_status in member profile.
-remediation_action: restart_billpay_processor
-error_message: '[PAY] PAY-BILLPAY-FAIL: payment={billpay_id} payee={payee_name} amount=${billpay_amount} member={member_id}
-  reason={billpay_reason}'
+  1. Search logs.otel.banking for body.text containing PAY-BILLPAY-FAIL on payment-engine: payment={billpay_id} to {payee_name} for ${billpay_amount} fails with reason={billpay_reason} after all retries. metrics.payment_engine.billpay_on_time_pct normally reads 99.0-99.8% and has fallen below 10%, while metrics.payment_engine.billpay_pending keeps growing.
+  2. The FedACH windows are actually open today: other ACH traffic (payroll credits, transfers) is being submitted normally. The bill pay worker decides for itself whether a window is open from the Fed holiday calendar; its billpay_status line carries attributes.billpay.fed_calendar_rev and attributes.billpay.fed_business_day, which read rev-8 and false.
+  3. Find the change: ConfigMap fedach-holiday-calendar was reloaded as rev-8 (2027 calendar import) shortly before the first failure. The import loaded 262 entries: the list of Fed business days instead of the 11 Fed holidays, so every business day, including today, is treated as a non-processing day.
+  4. Rule out funds and payee data: available balances are well above the payment amounts and payee routing numbers validate; retries do not help because each retry re-reads the same calendar.
+  5. Fix: opsctl rollback configmap/fedach-holiday-calendar -n payments --to-revision previous. The worker reloads the calendar within seconds and the payments still held for today are submitted in the open window, so the on-time rate recovers over about a minute. Members do not need to reschedule; correct the 2027 import before it is loaded again.
+  6. Recovery: billpay.fed_business_day reads true and fed_calendar_rev reads rev-7, billpay_on_time_pct back above 99%, billpay_pending draining, and no new PAY-BILLPAY-FAIL lines. Review late-fee exposure for payments that missed their due date and apply SCRA protections for deployed members.
+remediation_action: rollback_fed_calendar
+remediation_command: |-
+  opsctl rollback configmap/fedach-holiday-calendar -n payments --to-revision previous
+error_message: '[PAY] PAY-BILLPAY-FAIL: payment={billpay_id} payee={payee_name} amount=${billpay_amount} member={member_id} reason={billpay_reason} fed_business_day=false calendar_rev=rev-8'
 stack_trace: |-
   === BILL PAY EXECUTION LOG ===
   payment={billpay_id}  member={member_id}
   --- PAYMENT DETAILS ---
     payee={payee_name}  amount=${billpay_amount}
-    method=ELECTRONIC  scheduled_date=2026-02-18
+    method=ELECTRONIC  scheduled_date=today
     funding_account=****{acct_last4}  available_balance=${available_balance}
   --- EXECUTION ATTEMPT ---
     attempt=3/3  last_error={billpay_reason}
-    FedACH_window=CLOSED  next_window=06:00_ET_TOMORROW
+    fed_calendar=fedach-holiday-calendar rev-8  entries=262  fed_business_day=false
     payee_routing={routing_number}  payee_status=ACTIVE
   --- MEMBER IMPACT ---
-    late_fee_risk=HIGH  credit_score_impact=POSSIBLE
-    auto_retry=EXHAUSTED  member_notified=false
+    late_fee_risk=HIGH  auto_retry=EXHAUSTED  member_notified=false
   ACTION: notify_member=true  schedule_retry=true  alert=PAY-BILLPAY-FAIL
 correlation_attr:
-  key: deployment.billpay_scheduler
-  value: gocron-v2.5.0-experimental
+  key: billpay.fed_calendar_rev
+  value: rev-8
 fault_params:
   billpay_id: {format: "BP-{n}", n: {randint: [100000, 999999]}}
   payee_name: {choice: [Auto Insurance Premium, Credit Union Transfer, "AT&T Wireless", GEICO, State Farm, Mortgage Company, Electric Utility, Water Authority, Comcast, Progressive Insurance]}
   billpay_amount: {uniform: [25.0, 3000.0], round: 2}
-  member_id: {format: "{p}-{n}", p: {choice: [M, MBR, USR]}, n: {randint: [1000000, 9999999]}}
+  member_id: {format: "{p}-{n}", p: {choice: [M, MBR]}, n: {randint: [1000000, 9999999]}}
   billpay_reason: FEDACH_WINDOW_CLOSED
   acct_last4: {randint: [1000, 9999]}
-  available_balance: {uniform: [100.0, 25000.0], round: 2}
-  routing_number: {randint: [100000000, 999999999]}
+  available_balance: {uniform: [3500.0, 25000.0], round: 2}
+  routing_number: {choice: ['111000025', '021000021', '026009593', '061000104']}
 rca_clues:
   payment-engine:
-    payment.billpay_fedach_window: CLOSED
-    payment.retry_attempts_exhausted: true
+    billpay.fed_business_day: false
+    billpay.fed_calendar_rev: rev-8
+    billpay.retry_attempts_exhausted: true
   member-portal:
     portal.billpay_failure_notifications: {randint: [100, 500]}
     portal.late_fee_risk_count: {randint: [50, 200]}
   mobile-gateway:
-    gateway.billpay_status_queries_spike: {randint: [2000, 8000]}
-    gateway.payment_confirmation: PENDING
+    gateway.billpay_status_queries_per_min: {randint: [2000, 8000]}
   document-vault:
-    document.payment_receipt_generation: BLOCKED
-    document.receipt_queue_depth: {randint: [200, 800]}
+    document.payment_receipt_queue: {randint: [200, 800]}
+error_services:
+- payment-engine
+service_lag_seconds:
+  member-portal: 30
+  mobile-gateway: 60
+  document-vault: 60
+cascade_messages:
+  member-portal:
+  - severity: WARN
+    message: '[PORTAL] notice_queued type=BILLPAY_NOT_SENT payment={billpay_id} payee="{payee_name}" status=PENDING'
+  mobile-gateway:
+  - severity: INFO
+    message: '[MOBILE] api_request endpoint=/api/v1/mobile/pay-bills payment={billpay_id} payment_status=HELD status=200'
+  document-vault:
+  - severity: INFO
+    message: '[DOC] receipt_generation payment={billpay_id} reason=payment_not_sent status=DEFERRED'
+fault_scope:
+  cluster: banking-eks-cluster
+  workloads: [payment-engine]
+infrastructure_events:
+- service: payment-engine
+  severity: INFO
+  offset_seconds: -90
+  body: '[PAY] config_reload configmap=payments/fedach-holiday-calendar rev-7 -> rev-8 source="2027 Fed calendar import" entries=11 -> 262 applied_by=argocd/payments status=RELOADED'
+  attributes:
+    operation: config_reload
+    billpay.fed_calendar_rev: rev-8
+    user.name: argocd/payments
+remediation_effects:
+  transition_seconds: 60
+  log_events:
+  - service: payment-engine
+    severity: INFO
+    offset_seconds: 1
+    body: '[change-audit] change applied action=rollback target=configmap/fedach-holiday-calendar namespace=payments cmd="opsctl rollback configmap/fedach-holiday-calendar -n payments --to-revision previous" actor={actor} result="rev-8 -> rev-7 (11 holidays)"'
+    attributes:
+      operation: change_applied
+      change.target: configmap/fedach-holiday-calendar
+      billpay.fed_calendar_rev: rev-7
+  - service: payment-engine
+    severity: INFO
+    offset_seconds: 8
+    body: '[PAY] config_reload configmap=payments/fedach-holiday-calendar rev-8 -> rev-7 entries=262 -> 11 fed_business_day=true held_payments_resubmitted=true status=RELOADED'
+    attributes:
+      operation: config_reload
+      billpay.fed_calendar_rev: rev-7
+      billpay.fed_business_day: true
+  steady_attributes:
+    payment-engine:
+      billpay.fed_calendar_rev: rev-7
+  verification:
+  - signal: payment_engine.billpay_on_time_pct
+    from: metrics-generic.otel-default
+    where: resource.attributes.service.name == "payment-engine"
+    field: metrics.payment_engine.billpay_on_time_pct
+    expect: back in 99.0-99.8% (was 3-9%)
+    within_seconds: 120
+  - signal: Fed business day on the bill pay worker
+    from: logs.otel.banking
+    where: resource.attributes.service.name == "payment-engine" AND attributes.operation == "billpay_status"
+    field: attributes.billpay.fed_business_day
+    expect: true on every line logged since the fix
+    within_seconds: 60
+  - signal: PAY-BILLPAY-FAIL lines
+    from: logs.otel.banking
+    where: body.text LIKE "*PAY-BILLPAY-FAIL*"
+    expect: 0 new lines
+    within_seconds: 120
 business_impact:
   - kpi: business.fee_revenue_usd_per_min
     value: {uniform: [7254.0, 8346.0], round: 1}

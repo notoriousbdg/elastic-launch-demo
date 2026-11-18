@@ -10,15 +10,22 @@ cascade_services:
 - fuel-system
 - navigation
 description: Sensor calibration epoch does not match expected reference
-investigation_notes: 'Root cause: clock synchronization failure between the sensor''s onboard time reference and the ground
-  NTP stratum-1 server. The sensor''s calibration table was generated at a different epoch than the current mission reference
-  time, causing all calibrated readings to apply stale correction coefficients. GPS_UTC reference clock shows LOCKED but the
-  sensor''s local RTC may have drifted during a power cycle or brown-out event. Delta between actual and expected epochs >3600s
-  indicates the sensor missed at least one calibration upload cycle. Remediation: force NTP resynchronization on the affected
-  sensor (VV_NTP_SYNC {sensor_id}), then reload the current calibration epoch table (VV_EPOCH_RELOAD {sensor_id} FROM_REFERENCE).
-  Verify the sensor''s RTC battery voltage (>2.8V required). After resync, confirm epoch delta is <1s and downstream calibrated
+investigation_notes: 'Root cause: NTP synchronization to sensor {sensor_id} failed (Sensor Validator logged the failed sync
+  shortly before the first epoch alarm), so the sensor''s onboard RTC is free-running and has drifted from the ground NTP stratum-1
+  reference. The sensor''s calibration table was generated at a different epoch than the current mission reference time
+  ({expected_epoch}), causing all calibrated readings to apply stale correction coefficients. GPS_UTC reference clock shows LOCKED,
+  so the ground reference is fine; the fault is the sensor''s own clock. Other sensors (SENS-2001, SENS-3042) are on the reference
+  epoch. Delta between actual and expected epochs >3600s indicates the sensor missed at least one calibration upload cycle. The
+  epoch_check log shows epoch_skew, calibration_table and ntp state. Remediation: force a clock resynchronization on the sensor
+  (opsctl sync clock/sens-4417), then restore its calibration table from the reference epoch (opsctl restore
+  calibration/sens-4417 --epoch=reference). Recovery: the epoch skew (metrics.sensor_validator.epoch_skew_s) falls back below 1s
+  within about 45 seconds, epoch_check shows calibration_table=reference-1738100800 ntp=SYNCED status=NOMINAL and the
+  VV-EPOCH-DRIFT errors stop. Afterwards verify the sensor''s RTC battery voltage (>2.8V required) and confirm downstream calibrated
   readings match cross-check sensors.'
 remediation_action: resync_calibration_epoch
+remediation_command: |-
+  opsctl sync clock/sens-4417
+  opsctl restore calibration/sens-4417 --epoch=reference
 error_message: '[VV] VV-EPOCH-DRIFT: sensor={sensor_id} actual_epoch={actual_epoch} expected_epoch={expected_epoch} drift=CRITICAL'
 stack_trace: |-
   == VALIDATION PIPELINE STATUS == EPOCH CHECKER ==
@@ -36,14 +43,13 @@ correlation_attr:
   key: infra.rtc_crystal
   value: txco-40mhz-batch-2024Q3
 fault_params:
-  sensor_id:
-    format: "SENS-{n}"
-    n: {randint: [1000, 9999]}
-  actual_epoch: {randint: [1738014400, 1738097100]}
+  sensor_id: SENS-4417
+  actual_epoch: {randint: [1738058900, 1738059100]}
   expected_epoch: 1738100800
 rca_clues:
   sensor-validator:
-    validation.epoch_delta_s: {randint: [3700, 86400]}
+    validation.epoch_delta_s: {randint: [41700, 41900]}
+    validation.sensor_id: SENS-4417
     validation.rtc_battery_v: {uniform: [2.2, 2.7], round: 1}
   mission-control:
     upstream.degraded_subsystem: validation
@@ -61,3 +67,66 @@ business_impact:
     factor: {uniform: [0.65, 0.85]}
   - kpi: business.mission_success_probability_pct
     factor: {uniform: [0.70, 0.88]}
+cascade_messages:
+  mission-control:
+  - severity: WARN
+    message: '[MCC] calibration status STALE: sensor {sensor_id} epoch {actual_epoch} vs reference {expected_epoch}, calibrated
+      readings flagged'
+  fuel-system:
+  - severity: WARN
+    message: '[PMS] calibrated reading cross-check mismatch: sensor {sensor_id} on calibration epoch {actual_epoch}, reference
+      {expected_epoch}, confidence LOW'
+  navigation:
+  - severity: WARN
+    message: '[GNC] sensor {sensor_id} calibration epoch {actual_epoch} does not match reference {expected_epoch}, excluded from
+      the navigation filter'
+fault_scope:
+  workloads: [sensor-validator]
+infrastructure_events:
+- service: sensor-validator
+  severity: WARN
+  offset_seconds: -120
+  body: '[VV] NTP sync failed sensor=SENS-4417 server=ntp1.gnd stratum=1 retries=4; sensor RTC free-running crystal=txco-40mhz-batch-2024Q3
+    rtc_battery=2.4V'
+  attributes:
+    operation: epoch_check
+    validation.sensor_id: SENS-4417
+    validation.ntp_sync_state: UNSYNCED
+    infra.rtc_crystal: txco-40mhz-batch-2024Q3
+remediation_effects:
+  log_events:
+  - service: mission-control
+    severity: INFO
+    offset_seconds: 1
+    body: '[MCC] CMD ACCEPTED opsctl sync clock/sens-4417 from {actor}: SENS-4417 RTC stepped to GPS_UTC reference'
+  - service: mission-control
+    severity: INFO
+    offset_seconds: 4
+    body: '[MCC] CMD ACCEPTED opsctl restore calibration/sens-4417 --epoch=reference from {actor}: SENS-4417 calibration table
+      local-1738059040 -> reference-1738100800'
+  - service: sensor-validator
+    severity: INFO
+    offset_seconds: 30
+    body: '[VV] SENS-4417 calibration_table=reference-1738100800 loaded; epoch_skew=0.2s ntp=SYNCED status=NOMINAL'
+    attributes:
+      operation: epoch_check
+      validation.sensor_id: SENS-4417
+      validation.calibration_table: reference-1738100800
+  verification:
+  - signal: sensor_validator.epoch_skew_s
+    from: metrics-generic.otel-default
+    where: resource.attributes.service.name == "sensor-validator"
+    field: metrics.sensor_validator.epoch_skew_s
+    expect: 'below 1 s; was ~41,800 s'
+    within_seconds: 90
+  - signal: VV-EPOCH-DRIFT errors
+    from: logs.otel.nova7
+    where: body.text LIKE "*VV-EPOCH-DRIFT*"
+    expect: '0 new lines'
+    within_seconds: 90
+  - signal: SENS-4417 calibration table
+    from: logs.otel.nova7
+    where: resource.attributes.service.name == "sensor-validator"
+    field: attributes.validation.calibration_table
+    expect: 'reference-1738100800 on the latest epoch_check lines'
+    within_seconds: 90

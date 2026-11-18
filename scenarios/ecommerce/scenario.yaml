@@ -5,7 +5,7 @@ scenario_description: Global e-commerce marketplace running on multi-cloud infra
 namespace: ecommerce
 scenario_icon: 🛒
 sort_order: 7
-schema_version: "1.2"
+schema_version: "1.3"
 nominal_label: NORMAL
 hosts:
 - host.name: ecommerce-aws-host-01
@@ -376,7 +376,7 @@ trace_attributes:
       catalog.search_type: {choice: [keyword, category, filter, recommendation]}
       catalog.result_count: {randint: [0, 200]}
       catalog.category: {choice: [electronics, apparel, home, beauty, sports, books]}
-      catalog.index_version: {choice: [v12, v12, v12, v13]}
+      catalog.index_version: products-v12
     order-management:
       order.channel: {choice: [web, mobile_app, mobile_web, api]}
       order.payment_method: {choice: [credit_card, debit_card, paypal, apple_pay, google_pay, buy_now_pay_later]}
@@ -391,7 +391,7 @@ trace_attributes:
       reco.algorithm: {choice: [collaborative_filter, content_based, hybrid, trending]}
       reco.context: {choice: [homepage, pdp_related, cart_upsell, post_purchase, email]}
       reco.personalized: {choice: [true, true, true, false]}
-      reco.model_version: {choice: [v8, v8, v8, v9]}
+      reco.model_version: reco-ranker-v8
     inventory-service:
       inventory.warehouse_region: {choice: [us-east, us-west, us-central, eu-west]}
       inventory.sku_category: {choice: [electronics, apparel, home, beauty, sports]}

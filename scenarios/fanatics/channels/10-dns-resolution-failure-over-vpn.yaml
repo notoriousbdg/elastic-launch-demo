@@ -6,49 +6,51 @@ sensor_type: dns_query
 affected_services: [dns-dhcp-service, network-controller, digital-marketplace]
 cascade_services: [auction-engine, cloud-inventory-scanner]
 description: DNS queries traversing VPN tunnel failing to resolve internal records
+onset_delay_seconds: 15
 investigation_notes: |-
-  1. Verify VPN tunnel status first: if the tunnel carrying DNS traffic is down, all forwarded queries will fail — check `show vpn ike-sa` / `show vpn ipsec-sa`. If the tunnel is DOWN because its IPsec SA expired and the rekey failed, that is the cause.
-  2. Test DNS resolution from within the tunnel: `dig @<forwarder_ip> <query_name> +tcp` — if TCP works but UDP fails, MTU/fragmentation is the issue; here TCP queries fail too, so it is not MTU.
-  3. Check `named.conf` forwarder configuration: ensure both primary and fallback forwarders are reachable over the VPN and DNS port 53 is permitted.
-  4. Run `rndc querylog on` to enable query logging on the DNS server, then trace the query path to identify where resolution breaks.
-  5. If the forwarder is in Azure, verify Azure Private DNS zone is linked to the correct VNet and conditional forwarding rules are configured.
-  6. As a workaround, add static host entries for critical internal services to `/etc/hosts` or Windows DNS client cache while resolving the VPN issue.
+  Root cause: change CR-2412 switched the IKE profile on the aws-to-azure-01 VPN gateway from ikev2-profile-aes256-sha256 to ikev2-profile-aes256-sha512 and raised the Phase 2 lifetime from 3600s to 28800s. The Azure peer still proposes 3600s, so at the first CHILD_SA rekey no proposal matches, the IPsec SA expires and the tunnel carrying forwarded DNS goes down. {dns_forwarder_ip} and {dns_fallback_ip} are only reachable over that tunnel, so named times out on every query for the VPN-hosted zones (collectibles.prod, cloud-ops.internal) and returns {dns_rcode}. Cached answers hide it for the first seconds, so the SERVFAIL rate steps up and then climbs to roughly 68% as TTLs expire. Zones hosted locally (fanatics.internal, warehouse.local) keep resolving, the forwarders themselves are healthy, and TCP queries fail as well as UDP, which rules out MTU or fragmentation.
+  Confirm:
+    - dns-dhcp-service logs "named[...]: info: forwarders check: 10.2.0.4#53 via aws-to-azure-01 reachable=0 ... status=ANOMALY" with attributes.network.vpn_ike_profile = ikev2-profile-aes256-sha512; metric dns.servfail_pct jumps to about 28% then climbs to 60-70% and dns.forwarder_reachable drops to 0
+    - the network-controller line "[CHG] vpn gateway aws-to-azure-01 IKE profile changed" (CR-2412) comes before the first NAMED-SERVFAIL-FORWARDER
+    - zone lines for fanatics.internal and warehouse.local keep dns.servfail_pct near 0.5
+  Remediation: roll the IKE configuration back with opsctl rollback config/ike-azure-aws --to-revision previous. The tunnel renegotiates in about 60 seconds and the forwarders answer again; SERVFAIL then decays over about 3 minutes while negative answers expire from the resolver cache, so allow around 5 minutes for dns.servfail_pct to return under 1%.
 remediation_action: restart_dns_forwarder
-error_message: 'named[12345]: NAMED-SERVFAIL-FORWARDER: query ''{dns_query_name}'' type {dns_query_type} via tunnel {vpn_tunnel_name}:
-  forwarder {dns_forwarder_ip} unreachable, fallback {dns_fallback_ip} timeout after {dns_timeout_ms}ms, returning {dns_rcode}'
+remediation_command: |-
+  opsctl rollback config/ike-azure-aws --to-revision previous
+error_message: "named[12345]: client @0x7f2a1c0b3e10 {dns_client_ip}#{dns_client_port} ({dns_query_name}): query failed (SERVFAIL) for {dns_query_name}/IN/{dns_query_type} at query.c:7721 (NAMED-SERVFAIL-FORWARDER: no response from forwarders {dns_forwarder_ip} {dns_fallback_ip} via {vpn_tunnel_name})"
 stack_trace: |-
-  named[12345]: debug: query '{dns_query_name}' IN {dns_query_type} +E(0)
-  named[12345]: debug: forwarding query to {dns_forwarder_ip} via {vpn_tunnel_name}
-  named[12345]: debug: send: no response from {dns_forwarder_ip}#53
-  named[12345]: debug: trying fallback forwarder {dns_fallback_ip}
-  named[12345]: debug: receive: timeout from {dns_fallback_ip}#53 after {dns_timeout_ms}ms
-  named[12345]: error: NAMED-SERVFAIL-FORWARDER: all forwarders unreachable for '{dns_query_name}'
-  named[12345]: debug: query failed (SERVFAIL) '{dns_query_name}/{dns_query_type}/IN': all forwarders failed
+  named[12345]: resolver: info: timed out resolving '{dns_query_name}/{dns_query_type}/IN': {dns_forwarder_ip}#53
+  named[12345]: resolver: info: timed out resolving '{dns_query_name}/{dns_query_type}/IN': {dns_fallback_ip}#53
+  named[12345]: query-errors: info: client @0x7f2a1c0b3e10 {dns_client_ip}#{dns_client_port} ({dns_query_name}): query failed (SERVFAIL) for {dns_query_name}/IN/{dns_query_type} at query.c:7721
+  named[12345]: query-errors: info: fetch completed at resolver.c:4150 for '{dns_query_name}/{dns_query_type}/IN' in {dns_timeout_ms}ms: timed out/timed out
 correlation_attr:
   key: network.vpn_ike_profile
   value: ikev2-profile-aes256-sha512
 fault_params:
   dns_query_name:
     choice:
-    - marketplace.fanatics.internal
+    - marketplace.collectibles.prod
     - auction-api.collectibles.prod
-    - card-printer-01.warehouse.local
     - inventory.cloud-ops.internal
-  dns_query_type: {choice: [A, AAAA, CNAME, SRV]}
+    - billing.cloud-ops.internal
+  dns_query_type: {choice: [A, AAAA, SRV]}
+  dns_client_ip: {choice: ["10.1.4.17", "10.1.4.23", "10.2.0.21", "172.16.2.40"]}
+  dns_client_port: {randint: [1024, 65000]}
   vpn_tunnel_name: aws-to-azure-01
-  dns_forwarder_ip: {choice: ["10.0.0.53", "10.1.0.53", "10.2.0.4"]}
-  dns_fallback_ip: {choice: ["10.0.1.53", "10.2.0.53"]}
+  dns_forwarder_ip: 10.2.0.4
+  dns_fallback_ip: 10.2.0.53
   dns_timeout_ms: {randint: [3000, 10000]}
   dns_rcode: SERVFAIL
 rca_clues:
   dns-dhcp-service:
     dns.forwarder_timeout_ms: {randint: [3000, 10000]}
-    dns.vpn_dependent_zones: {randint: [3, 12]}
+    dns.vpn_dependent_zones: 2
     dns.tcp_query_success: false
   network-controller:
     network.vpn_tunnel_state: DOWN
     network.ipsec_sa_expired: true
     network.vpn_tunnel_down: aws-to-azure-01
+    network.vpn_ike_profile: ikev2-profile-aes256-sha512
   digital-marketplace:
     marketplace.internal_api_dns_failures: {randint: [50, 500]}
     marketplace.service_discovery_degraded: true
@@ -67,3 +69,72 @@ business_impact:
     value: {uniform: [10416.0, 11984.0], round: 1}
   - kpi: business.betting_handle_usd_per_min
     value: {uniform: [108810.0, 125190.0], round: 1}
+cascade_messages:
+  auction-engine:
+    - severity: WARN
+      message: 'level=warn msg="dial tcp: lookup {dns_query_name} on 10.1.0.53:53: server misbehaving" component=bid-gateway fallback=cached-ip'
+  cloud-inventory-scanner:
+    - severity: WARN
+      message: 'scan provider=azure error="lookup {dns_query_name}: SERVFAIL" retry_in=60s resources_pending=true'
+fault_scope:
+  workloads: [dns-dhcp-service, network-controller, digital-marketplace]
+infrastructure_events:
+  - service: network-controller
+    severity: INFO
+    offset_seconds: -100
+    body: '[CHG] vpn gateway aws-to-azure-01 IKE profile changed ikev2-profile-aes256-sha256 -> ikev2-profile-aes256-sha512; phase2 lifetime 3600s -> 28800s; pushed by netsec-release (CR-2412)'
+    attributes:
+      user.name: netsec-release
+      change.request: CR-2412
+      operation: config_change
+      network.vpn_tunnel_name: aws-to-azure-01
+      network.vpn_ike_profile: ikev2-profile-aes256-sha512
+      change.summary: 'IKE profile: ikev2-profile-aes256-sha256 -> ikev2-profile-aes256-sha512'
+remediation_effects:
+  log_events:
+    - service: network-controller
+      severity: INFO
+      offset_seconds: 1
+      body: '[CHG] CHANGE APPLIED opsctl rollback config/ike-azure-aws --to-revision previous by {actor}: IKE profile ikev2-profile-aes256-sha512 -> ikev2-profile-aes256-sha256, phase2 lifetime 28800s -> 3600s'
+      attributes:
+        operation: change_applied
+        change.target: config/ike-azure-aws
+    - service: network-controller
+      severity: INFO
+      offset_seconds: 60
+      body: 'charon[2814]: 11[IKE] IKE_SA aws-to-azure-01[7] established between 10.0.0.1[aws-vgw]...10.2.0.1[azure-vgw] (profile ikev2-profile-aes256-sha256, child lifetime 3600s)'
+      attributes:
+        operation: config_change
+        network.vpn_tunnel_name: aws-to-azure-01
+        network.vpn_ike_profile: ikev2-profile-aes256-sha256
+    - service: dns-dhcp-service
+      severity: INFO
+      offset_seconds: 62
+      body: 'named[12345]: info: forwarders check: 10.2.0.4#53 via aws-to-azure-01 answering again; negative cache entries expire within the SOA minimum'
+      attributes:
+        operation: forwarder_check
+        network.vpn_ike_profile: ikev2-profile-aes256-sha256
+  steady_attributes:
+    dns-dhcp-service:
+      network.vpn_ike_profile: ikev2-profile-aes256-sha256
+  verification:
+    - signal: dns.servfail_pct
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "dns-dhcp-service"'
+      field: 'metrics.dns.servfail_pct'
+      expect: 'back under 1% (was 28-70%); it decays after the tunnel is back, so allow about 5 minutes'
+      within_seconds: 300
+    - signal: dns.forwarder_reachable
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "dns-dhcp-service"'
+      field: 'metrics.dns.forwarder_reachable'
+      expect: '1 (was 0); the tunnel needs about a minute to renegotiate'
+      within_seconds: 120
+    - signal: VPN IKE profile on the resolver
+      from: 'logs.otel.fanatics'
+      where: 'resource.attributes.service.name == "dns-dhcp-service"'
+      field: 'attributes.network.vpn_ike_profile'
+      expect: 'ikev2-profile-aes256-sha256 on every line logged since the fix; ikev2-profile-aes256-sha512 stops appearing'
+      within_seconds: 90
+# dependents degrade after the component at fault, in dependency order
+service_lag_seconds: {network-controller: 10, digital-marketplace: 30, auction-engine: 60, cloud-inventory-scanner: 90}

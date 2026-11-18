@@ -11,13 +11,15 @@ cascade_services:
 - cloud-cdn-service
 description: VPC subnet running out of available IP addresses, so new GKE pods stay Pending
 investigation_notes: |-
-  Root cause: Subnet CIDR range is nearly fully allocated (above 95% of addresses in use). GKE nodes, internal load balancer forwarding rules and other VMs consume IPs from the subnet's primary range. In a VPC-native cluster, pods use the secondary range, so a full primary range stops the autoscaler from adding nodes and new pods stay Pending. Identify top consumers with:
-    gcloud compute addresses list --filter='subnetwork:<subnet>' --project=<project>
-    gcloud compute instances list --filter='networkInterfaces.subnetwork:<subnet>'
-  Remediation: Expand the subnet CIDR range in-place (GCP supports non-disruptive expansion):
-    gcloud compute networks subnets expand-ip-range <subnet> --region=<region> --prefix-length=<new_prefix>
-  Alternatively, add secondary IP ranges for GKE pods/services, or migrate workloads to a new subnet with a larger CIDR block. Check for leaked IPs from deleted GKE nodes or orphaned internal load balancer forwarding rules.
-remediation_action: reconfigure_firewall_rules
+  Root cause: the GKE node pool pool-spot-n2d-burst (autoscaling up to 1200 nodes) was created in the subnet {subnet_name} ({subnet_cidr}, {subnet_total_ips} usable addresses) in {gcp_region}. Its nodes and the internal load balancer forwarding rules take addresses from the subnet's primary range, which climbed from ~70% to {subnet_util_pct}% ({subnet_used_ips}/{subnet_total_ips} in use). With the range full the autoscaler cannot add nodes, new nodes fail to create with IP_SPACE_EXHAUSTED and the pods waiting for them stay Pending. The subnets gcpnet-subnet-east1, gcpnet-subnet-europe1 and gcpnet-subnet-services stay at 35-80%, which rules out an address leak across the VPC; NAT, firewalls and routes are unchanged, which rules out a NAT port or routing fault.
+  Confirm:
+    - vpc-network-manager metric vpc.subnet_ip_utilization_pct climbs from ~70 to 98-99.5; log "subnet=gcpnet-subnet-central1 cidr=10.128.0.0/20 ... status=ANOMALY" with attributes.vpc.subnet.cidr = 10.128.0.0/20
+    - the vpc-network-manager line "node pool pool-spot-n2d-burst created" (attributes.infra.gke_node_pool) precedes the first VPC-SUBNET-IP-EXHAUSTION
+    - cloud-load-balancer and cloud-nat-gateway lines about blocked backend registration and IP allocation failures; pods Pending with FailedScheduling / IP space exhausted
+  Remediation: opsctl expand subnet/gcpnet-subnet-central1 --region us-central1 --prefix-length 19 grows the range in place and without disruption to 10.128.0.0/19 (8188 usable addresses), so the same allocation is about 49% used and the Pending pods schedule. Moving to a new subnet is not needed. Follow-up: cap pool-spot-n2d-burst max nodes or give it its own subnet.
+remediation_action: expand_subnet_cidr
+remediation_command: |-
+  opsctl expand subnet/gcpnet-subnet-central1 --region us-central1 --prefix-length 19
 error_message: level=error ts={{timestamp}} caller=subnet_monitor.go:189 msg="VPC-SUBNET-IP-EXHAUSTION" project={gcp_project}
   subnet={subnet_name} cidr={subnet_cidr} used={subnet_used_ips}/{subnet_total_ips} utilization={subnet_util_pct}% region={gcp_region}
 stack_trace: "goroutine 156 [running]:\ngcpnet/internal/vpc.(*SubnetMonitor).checkUtilization(0xc000420000)\n\t/app/internal/vpc/subnet_monitor.go:189\
@@ -27,16 +29,17 @@ correlation_attr:
   key: infra.gke_node_pool
   value: pool-spot-n2d-burst
 fault_params:
-  gcp_project: {choice: [gcpnet-prod-001, gcpnet-prod-002, gcpnet-staging]}
+  gcp_project: gcpnet-prod-001
   gcp_region: us-central1
   subnet_name: gcpnet-subnet-central1
   subnet_cidr: 10.128.0.0/20
-  subnet_used_ips: {randint: [3935, 4090]}
+  subnet_used_ips: 4045
   subnet_total_ips: 4092
-  subnet_util_pct: {uniform: [96.0, 99.9], round: 1}
+  subnet_util_pct: 98.9
 rca_clues:
   vpc-network-manager:
-    vpc.subnet_util_pct: {uniform: [96.0, 99.9], round: 1}
+    vpc.subnet_util_pct: 98.9
+    vpc.subnet.cidr: 10.128.0.0/20
     vpc.secondary_range_available: false
   cloud-nat-gateway:
     nat.ip_allocation_failures: {randint: [10, 50]}
@@ -46,6 +49,65 @@ rca_clues:
     lb.pending_ip_requests: {randint: [5, 20]}
   cloud-cdn-service:
     cdn.origin_health_check_ip: exhausted
+cascade_messages:
+  cloud-load-balancer:
+    - severity: WARN
+      message: 'lb-controller: new backend registration blocked in {subnet_name}: no free IP in {subnet_cidr} ({subnet_used_ips}/{subnet_total_ips} used); pending_ip_requests rising'
+  cloud-cdn-service:
+    - severity: WARN
+      message: 'cdn-origin-check: origin pods Pending, node creation failed: IP_SPACE_EXHAUSTED, IP space of subnetwork {subnet_name} ({subnet_cidr}) is exhausted'
+fault_scope:
+  cluster: gcpnet-gke-central1
+  workloads: [vpc-network-manager, cloud-load-balancer, cloud-cdn-service]
+infrastructure_events:
+  - service: vpc-network-manager
+    severity: INFO
+    offset_seconds: -90
+    body: 'gke: node pool pool-spot-n2d-burst created cluster=gcpnet-gke-central1 subnet=gcpnet-subnet-central1 machine_type=n2d-standard-8 spot=true autoscaling=0-1200 created_by=capacity-planner (CHG-7758)'
+    attributes:
+      user.name: capacity-planner
+      change.request: CHG-7758
+      infra.gke_node_pool: pool-spot-n2d-burst
+      operation: node_pool_create
+      change.summary: 'node pool pool-spot-n2d-burst max nodes 1200 in gcpnet-subnet-central1'
+remediation_effects:
+  transition_seconds: 30
+  log_events:
+    - service: vpc-network-manager
+      severity: INFO
+      offset_seconds: 2
+      body: 'gcp-audit: logName=cloudaudit.googleapis.com/activity serviceName=compute.googleapis.com methodName=v1.compute.subnetworks.expandIpCidrRange resourceName=projects/gcpnet-prod-001/regions/us-central1/subnetworks/gcpnet-subnet-central1 principalEmail={actor} status=OK'
+      attributes:
+        operation: expandIpCidrRange
+        cloud.provider: gcp
+    - service: vpc-network-manager
+      severity: INFO
+      offset_seconds: 15
+      body: 'vpc-monitor: subnet=gcpnet-subnet-central1 expanded 10.128.0.0/20 -> 10.128.0.0/19 (8188 usable IPs); pending pods are being scheduled'
+      attributes:
+        operation: subnet_expand
+        vpc.subnet.cidr: 10.128.0.0/19
+  steady_attributes:
+    vpc-network-manager:
+      vpc.subnet.cidr: 10.128.0.0/19
+  verification:
+    - signal: vpc.subnet_ip_utilization_pct
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "vpc-network-manager"'
+      field: 'metrics.vpc.subnet_ip_utilization_pct'
+      expect: 'about 49 (was 98-99.5)'
+      within_seconds: 60
+    - signal: subnet CIDR
+      from: 'logs.otel.gcpnet'
+      where: 'resource.attributes.service.name == "vpc-network-manager"'
+      field: 'attributes.vpc.subnet.cidr'
+      expect: '10.128.0.0/19 on every gcpnet-subnet-central1 line logged since the fix; 10.128.0.0/20 stops appearing'
+      within_seconds: 60
+    - signal: VPC-SUBNET-IP-EXHAUSTION lines
+      from: 'logs.otel.gcpnet'
+      where: 'body.text LIKE "*VPC-SUBNET-IP-EXHAUSTION*"'
+      expect: '0 new lines'
+      within_seconds: 90
 business_impact:
   - kpi: business.load_balancer_rps
     value: {uniform: [10416.0, 11984.0]}
