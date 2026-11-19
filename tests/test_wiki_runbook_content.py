@@ -129,3 +129,40 @@ def test_nightshift_context_is_neutral():
     assert "body.text" in text
     assert "log attributes" in text
     assert "wiki_runbook_demo-" in text and "chNN" not in text
+
+
+OWNER = {
+    "team": "Platform Networking",
+    "slack": "#platform-networking",
+    "oncall_slack": "#platform-networking-oncall",
+    "email": "platform-networking-oncall@example-saas.io",
+}
+
+
+def test_owner_section_names_who_applies_the_fix():
+    text = _runbook(owner=OWNER, remediation_command="opsctl rollback deploy/api --to-revision 41")
+    section = text.split("## Ownership and escalation\n\n", 1)[1]
+    assert section.startswith("- Owning team: **Platform Networking**. This team applies the remediation")
+    assert "- Slack: `#platform-networking` (on-call: `#platform-networking-oncall`)" in section
+    assert "- Email: `platform-networking-oncall@example-saas.io`" in section
+    # next to the fix, before the evidence
+    assert text.index("## Ownership and escalation") > text.index("- Remediation: run")
+    assert text.index("## Ownership and escalation") < text.index("## Evidence in this environment")
+    assert not re.search(r"\bchannels?\b", text, re.IGNORECASE)
+
+
+def test_no_owner_no_section():
+    assert "Ownership" not in _runbook()
+    assert "Ownership" not in _runbook(owner={"slack": "#x"})  # no team
+
+
+def test_kb_doc_has_owner():
+    text = _host()._generate_kb_doc(7, {**CH_DATA, "owner": OWNER})
+    assert "## Owner\n\n- Owning team: **Platform Networking**" in text
+    assert "## Owner" not in _host()._generate_kb_doc(7, CH_DATA)
+
+
+def test_nightshift_context_asks_for_the_owner():
+    text = _host()._nightshift_context_text()
+    assert "For every proposed action, say who should carry it out" in text
+    assert '"Ownership and escalation"' in text

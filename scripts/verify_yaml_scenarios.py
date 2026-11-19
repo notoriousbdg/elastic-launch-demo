@@ -73,9 +73,9 @@ Checks performed for each scenario:
       KB docs, Wiki runbooks and channel runbook skill fill them with the
       parameter's range, and an unknown one is shown as a literal {name}.
       Shell syntax such as curl's %{time_total} or ${VAR} is not a placeholder.
-  37-44. schema 1.3 scenarios only: remediation_command, state keys, fault_scope,
+  37-44, 46. schema 1.3 scenarios only: remediation_command, state keys, fault_scope,
       error_services / cascade_messages, verification, cause-before-effect and
-      coherence lint, quote-free error_type (see check_schema_13)
+      coherence lint, quote-free error_type, owner shape (see check_schema_13)
   36. (warning only) evidence quality: a choice rca_clue that can emit a
       healthy-looking value (OFF, INTACT, false...) does not always indicate the
       fault, which leaves investigations unable to confirm the cause; and a choice
@@ -1041,6 +1041,9 @@ def check_schema_13(s: Any) -> tuple[list[str], list[str]]:
     43. (warning) coherence: Pending pods need a scheduling/pull reason in
         ``k8s_events``; node_not_ready needs a ``fault_scope`` with nodes or a pool
     44. ``error_type`` contains no quote characters (it is embedded in KQL/ES|QL)
+    46. an optional ``owner`` is a mapping with a ``team`` and a ``slack`` or
+        ``email`` contact (keys: team, slack, oncall_slack, email); the Wiki runbook
+        names it as who applies the remediation
     """
     from app import ops_profile
     from app.ops import OpsError, parse_command
@@ -1235,6 +1238,19 @@ def check_schema_13(s: Any) -> tuple[list[str], list[str]]:
         et = str(ch.get("error_type", ""))
         if '"' in et or "'" in et:
             errors.append(f"{label}: error_type must not contain quotes (it is embedded in KQL): {et!r}")
+
+        # 46
+        owner = ch.get("owner")
+        if owner is not None:
+            if not isinstance(owner, dict) or not str(owner.get("team") or "").strip():
+                errors.append(f"{label}: owner must be a mapping with a non-empty team")
+            elif not (owner.get("slack") or owner.get("email")):
+                errors.append(f"{label}: owner needs a slack or an email contact")
+            else:
+                unknown = set(owner) - {"team", "slack", "oncall_slack", "email"}
+                if unknown:
+                    errors.append(f"{label}: owner: unknown key(s) {sorted(unknown)} "
+                                  f"(allowed: team, slack, oncall_slack, email)")
 
     return errors, warnings
 

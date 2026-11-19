@@ -71,3 +71,9 @@ business_impact:
     value: {uniform: [96.0, 99.0], round: 3}
   - kpi: business.error_budget_burn_rate
     value: {uniform: [900.0, 1000.0], round: 2}
+# Who applies the remediation and its follow-up (rendered into the Wiki runbook).
+owner:
+  team: API Gateway
+  slack: '#api-gateway'
+  oncall_slack: '#api-gateway-oncall'
+  email: api-gateway-oncall@example-saas.io

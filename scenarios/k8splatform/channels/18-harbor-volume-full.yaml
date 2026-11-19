@@ -101,3 +101,9 @@ business_impact:
     value: {uniform: [0.0, 2.0], round: 2}
   - kpi: business.deploy_success_rate_pct
     value: {uniform: [62.0, 70.0], round: 1}
+# Who applies the remediation and its follow-up (rendered into the Wiki runbook).
+owner:
+  team: Developer Platform
+  slack: '#developer-platform'
+  oncall_slack: '#developer-platform-oncall'
+  email: developer-platform-oncall@example-saas.io

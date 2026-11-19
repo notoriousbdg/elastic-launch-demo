@@ -184,3 +184,9 @@ business_impact:
     value: {uniform: [0.0, 4.0], round: 1}
   - kpi: business.api_availability_pct
     value: {uniform: [99.0, 99.3], round: 3}
+# Who applies the remediation and its follow-up (rendered into the Wiki runbook).
+owner:
+  team: Platform Security
+  slack: '#platform-security'
+  oncall_slack: '#platform-security-oncall'
+  email: platform-security-oncall@example-saas.io

@@ -93,3 +93,9 @@ business_impact:
     value: {uniform: [1.5, 2.1], round: 3}
   - kpi: business.api_availability_pct
     value: {uniform: [98.0, 98.6], round: 3}
+# Who applies the remediation and its follow-up (rendered into the Wiki runbook).
+owner:
+  team: API Gateway
+  slack: '#api-gateway'
+  oncall_slack: '#api-gateway-oncall'
+  email: api-gateway-oncall@example-saas.io
