@@ -107,3 +107,9 @@ business_impact:
     value: {uniform: [2.8, 3.4], round: 3}
   - kpi: business.error_budget_burn_rate
     value: {uniform: [30.0, 40.0], round: 2}
+# Who applies the remediation and its follow-up (rendered into the Wiki runbook).
+owner:
+  team: Platform Networking
+  slack: '#platform-networking'
+  oncall_slack: '#platform-networking-oncall'
+  email: platform-networking-oncall@example-saas.io

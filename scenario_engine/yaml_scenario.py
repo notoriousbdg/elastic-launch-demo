@@ -88,6 +88,8 @@ class YamlScenario(BaseScenario):
                     "remediation_command", "cascade_messages", "fault_scope",
                     "onset_delay_seconds", "service_lag_seconds", "generator_hold_seconds", "ramp_seconds", "k8s_events",
                     "fault_state", "remediation_effects", "error_services",
+                    # who applies the fix (team, slack, oncall_slack, email)
+                    "owner",
                 )
                 if k in ch
             }

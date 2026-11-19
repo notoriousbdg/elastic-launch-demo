@@ -93,3 +93,9 @@ business_impact:
     value: {uniform: [90.0, 93.0], round: 1}
   - kpi: business.pod_start_p95_s
     value: {uniform: [15.0, 16.0], round: 1}
+# Who applies the remediation and its follow-up (rendered into the Wiki runbook).
+owner:
+  team: Data Engineering
+  slack: '#data-engineering'
+  oncall_slack: '#data-engineering-oncall'
+  email: data-engineering-oncall@example-saas.io

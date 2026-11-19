@@ -160,3 +160,9 @@ business_impact:
     value: {uniform: [87.0, 88.5], round: 2}
   - kpi: business.daemonset_ready_pct
     value: {uniform: [87.0, 88.5], round: 1}
+# Who applies the remediation and its follow-up (rendered into the Wiki runbook).
+owner:
+  team: Platform Observability
+  slack: '#platform-observability'
+  oncall_slack: '#platform-observability-oncall'
+  email: platform-observability-oncall@example-saas.io

@@ -113,3 +113,9 @@ business_impact:
     value: {uniform: [97.4, 97.7], round: 1}
   - kpi: business.pod_start_p95_s
     value: {uniform: [14.6, 16.0], round: 1}
+# Who applies the remediation and its follow-up (rendered into the Wiki runbook).
+owner:
+  team: Platform Compute
+  slack: '#platform-compute'
+  oncall_slack: '#platform-compute-oncall'
+  email: platform-compute-oncall@example-saas.io

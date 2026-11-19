@@ -102,3 +102,9 @@ business_impact:
     value: {uniform: [80.0, 110.0], round: 1}
   - kpi: business.pending_pods
     value: {uniform: [5.0, 7.0], round: 0}
+# Who applies the remediation and its follow-up (rendered into the Wiki runbook).
+owner:
+  team: Developer Platform
+  slack: '#developer-platform'
+  oncall_slack: '#developer-platform-oncall'
+  email: developer-platform-oncall@example-saas.io

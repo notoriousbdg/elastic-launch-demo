@@ -84,3 +84,9 @@ business_impact:
     value: {uniform: [7.0, 9.0], round: 2}
   - kpi: business.api_p99_latency_ms
     value: {uniform: [266.0, 278.0], round: 0}
+# Who applies the remediation and its follow-up (rendered into the Wiki runbook).
+owner:
+  team: Platform Security
+  slack: '#platform-security'
+  oncall_slack: '#platform-security-oncall'
+  email: platform-security-oncall@example-saas.io

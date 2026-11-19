@@ -1,5 +1,8 @@
 # NOVA-7 Elastic Launch Demo — Learnings & API Reference
 
+> **Keep in sync:** the o11y-launch-next-instruqt track runs a copy of this folder from
+> `notoriousbdg/elastic-launch-demo@nightshift`. After a change here, sync that branch. See `../../CLAUDE.md`.
+
 ## Kibana Agent Builder API (9.4+/9.5)
 
 ### Tool Schema

@@ -108,3 +108,9 @@ business_impact:
     value: {uniform: [55.0, 70.0], round: 1}
   - kpi: business.cert_renewal_success_pct
     value: {uniform: [98.8, 98.9], round: 1}
+# Who applies the remediation and its follow-up (rendered into the Wiki runbook).
+owner:
+  team: Platform Security
+  slack: '#platform-security'
+  oncall_slack: '#platform-security-oncall'
+  email: platform-security-oncall@example-saas.io

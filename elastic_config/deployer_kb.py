@@ -84,6 +84,26 @@ def _remediation_fact(ch_data: dict[str, Any]) -> str:
     return f"- Remediation: run the `{action}` action."
 
 
+def _owner_section(ch_data: dict[str, Any], heading: str = "## Ownership and escalation") -> str:
+    """Who applies the remediation and its follow-up, with contacts; "" when the channel has no owner."""
+    owner = ch_data.get("owner")
+    if not isinstance(owner, dict) or not owner.get("team"):
+        return ""
+    lines = [
+        f"- Owning team: **{owner['team']}**. This team applies the remediation above and any "
+        "follow-up (Git revert, Terraform or config change). Name this team, with its contacts "
+        "below, as who should carry out each proposed action.",
+    ]
+    if owner.get("slack"):
+        oncall = f" (on-call: `{owner['oncall_slack']}`)" if owner.get("oncall_slack") else ""
+        lines.append(f"- Slack: `{owner['slack']}`{oncall}")
+    elif owner.get("oncall_slack"):
+        lines.append(f"- On-call Slack: `{owner['oncall_slack']}`")
+    if owner.get("email"):
+        lines.append(f"- Email: `{owner['email']}`")
+    return f"{heading}\n\n" + "\n".join(lines) + "\n"
+
+
 # Finds the audit records applied fixes leave (opsctl and the auto-remediator add change_id).
 FIX_AUDIT_QUERY = (
     'FROM logs.otel.* | WHERE @timestamp > NOW() - 30 minutes AND body.text LIKE "*change_id=chg-*" '
@@ -294,8 +314,11 @@ class KbMixin:
             f"- Root-cause evidence is in the log attributes (attributes.*) on the ERROR "
             f"lines; spans and metrics corroborate it.\n"
             f"- Each known failure mode has a Wiki runbook (id prefix wiki_runbook_{self.ns}-) "
-            f"with the error signature, investigation steps, the remediation command and the "
-            f"signals that confirm recovery."
+            f"with the error signature, investigation steps, the remediation command, the "
+            f"signals that confirm recovery and the owning team with its Slack and email contacts.\n"
+            f"- For every proposed action, say who should carry it out: the owning team, its "
+            f"Slack (and on-call Slack) and its email, from the runbook's \"Ownership and "
+            f"escalation\" section."
         )
 
     def _set_nightshift_context(self, client: httpx.Client, text: str | None) -> bool:
@@ -444,6 +467,9 @@ class KbMixin:
         scope_fact = _scope_fact(ch_data.get("fault_scope"), profile)
         remediation_fact = _remediation_fact(ch_data)
         recovery_fact = _recovery_fact(ch_data, profile)
+        owner_section = _owner_section(ch_data)
+        if owner_section:
+            owner_section = "\n" + owner_section
         investigation_section = ""
         if investigation_notes:
             investigation_section = f"""
@@ -467,7 +493,7 @@ class KbMixin:
 - Root cause indicators: other components in the {subsystem} subsystem failing at the same time, and errors that line up with infrastructure events.
 {remediation_fact}
 {recovery_fact}
-{investigation_section}
+{owner_section}{investigation_section}
 {self._evidence_section(ch_num, ch_data)}
 ## Open questions
 
@@ -592,6 +618,9 @@ class KbMixin:
         remediation_action = ch_data.get("remediation_action", "remediate")
         ch_int = int(ch_num)
         approval_mode = "skip" if ch_int in auto_remediate_channels(self.scenario) else "required"
+        owner_section = _owner_section(ch_data, "## Owner")
+        if owner_section:
+            owner_section = "\n" + owner_section
         investigation_notes = _substitute_fault_params(
             ch_data.get("investigation_notes", ""), self.scenario.fault_param_ranges(int(ch_num))
         )
@@ -627,7 +656,7 @@ class KbMixin:
 
 ## Remediation
 Consult the remediation guide skill (`{self.scenario.namespace}-remediation-guide`) for full decision guidance, then use `{self.scenario.prefixed_tool_id("remediation_action")}` with action_type: {remediation_action}, channel: {ch_num}, approval_mode: {approval_mode}, dry_run: false, and a justification. Channels {ops_profile.hitl_and_auto_ranges(self.scenario)[0]} must use approval_mode: required (the workflow includes a human-in-the-loop step that requests operator approval through waitForInput; relay that request and resume with the reply you receive). Only pass approval_mode: skip when the Auto-Remediate notification workflow explicitly requests it. Once the tool returns successfully, remediation has been executed, but do not declare the incident resolved yet.
-
+{owner_section}
 ## Confirming Recovery
 Consult the remediation guide skill (`{self.scenario.namespace}-remediation-guide`), then wait briefly and use `{self.scenario.prefixed_tool_id("verify_recovery")}` to confirm the fix propagated. Zero (or near-zero) error/warn counts means the incident is resolved. Do NOT rely on the 15-minute tools in the triage and investigation skills to judge current status immediately after remediation — they will keep showing the pre-fix errors as residual history for several minutes, which does not mean the fault is still active.
 """
