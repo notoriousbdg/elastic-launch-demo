@@ -1,0 +1,37 @@
+name: "GT envoyproxy_otel: listeners_warming"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-ENVOYPROXY-LISTENERS-WARMING
+sensor_type: impact_key_probe
+affected_services:
+  - gt-envoyproxy-aws-svc-1
+cascade_services:
+  - gt-envoyproxy-aws-svc-2
+description: "Tests impact_key listeners_warming on generator envoyproxy_otel."
+investigation_notes: |-
+  1. Verify envoyproxy_otel is active and reporting metrics.
+  2. Check that the listeners_warming metric has reached the trigger value (10).
+  3. Confirm generator_impact for envoyproxy_otel.listeners_warming is set to 10.
+  4. Look for correlated changes in service gt-envoyproxy-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_listeners_warming_baseline
+error_message: "GT-PROBE: gen=envoyproxy_otel key=listeners_warming value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=envoyproxy_otel
+  impact_key: listeners_warming
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 10
+  svc_name: gt-envoyproxy-aws-svc-1
+rca_clues:
+  gt-envoyproxy-aws-svc-1:
+    probe.generator: envoyproxy_otel
+    probe.impact_key: listeners_warming
+    probe.trigger_value: 10
+  gt-envoyproxy-aws-svc-2:
+    probe.upstream_generator: envoyproxy_otel
+    probe.upstream_key: listeners_warming
+generator_impact:
+  envoyproxy_otel:
+    listeners_warming: 10

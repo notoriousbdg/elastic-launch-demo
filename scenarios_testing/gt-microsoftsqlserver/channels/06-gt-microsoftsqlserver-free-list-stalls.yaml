@@ -1,0 +1,37 @@
+name: "GT microsoft_sqlserver_otel: free_list_stalls"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-MICROSOFTSQLSERVER-FREE-LIST-STALLS
+sensor_type: impact_key_probe
+affected_services:
+  - gt-microsoftsqlserver-aws-svc-1
+cascade_services:
+  - gt-microsoftsqlserver-aws-svc-2
+description: "Tests impact_key free_list_stalls on generator microsoft_sqlserver_otel."
+investigation_notes: |-
+  1. Verify microsoft_sqlserver_otel is active and reporting metrics.
+  2. Check that the free_list_stalls metric has reached the trigger value (50.0).
+  3. Confirm generator_impact for microsoft_sqlserver_otel.free_list_stalls is set to 50.0.
+  4. Look for correlated changes in service gt-microsoftsqlserver-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_free_list_stalls_baseline
+error_message: "GT-PROBE: gen=microsoft_sqlserver_otel key=free_list_stalls value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=microsoft_sqlserver_otel
+  impact_key: free_list_stalls
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 50.0
+  svc_name: gt-microsoftsqlserver-aws-svc-1
+rca_clues:
+  gt-microsoftsqlserver-aws-svc-1:
+    probe.generator: microsoft_sqlserver_otel
+    probe.impact_key: free_list_stalls
+    probe.trigger_value: 50.0
+  gt-microsoftsqlserver-aws-svc-2:
+    probe.upstream_generator: microsoft_sqlserver_otel
+    probe.upstream_key: free_list_stalls
+generator_impact:
+  microsoft_sqlserver_otel:
+    free_list_stalls: 50.0

@@ -1,0 +1,209 @@
+service: identity-broker
+sort_order: 9
+cloud_provider: azure
+cloud_region: westeurope
+cloud_platform: azure_vm
+cloud_availability_zone: westeurope-3
+subsystem: identity
+language: java
+
+# Topology: [downstream-service, endpoint, METHOD]
+topology: []
+
+db_operations: []
+
+emit_fault_logs: true
+kpi_emitter: false
+
+constants:
+  GRANT_TYPES:
+  - authorization_code
+  - refresh_token
+  - client_credentials
+  - on_behalf_of
+  TENANT_APPS:
+  - assistant-web-spa
+  - chat-orchestrator-api
+  - partner-portal
+  SECRETS:
+  - {name: assistant-web-client-secret, kv: kv-azureai-weu}
+  - {name: orchestrator-signing-cert, kv: kv-azureai-weu}
+  - {name: partner-portal-client-secret, kv: kv-azureai-weu}
+  - {name: identity-broker-client-secret, kv: kv-azureai-identity-prod}
+
+state:
+  _validations:
+    init: 0
+  _failures:
+    init: 0
+  _last_summary:
+    init: now
+
+steps:
+- sample:
+    grant_type:
+      choice: GRANT_TYPES
+    app:
+      choice: TENANT_APPS
+    validate_latency_ms:
+      expr: "round(rand.uniform(8.0, 60.0), 1)"
+    result:
+      expr: "rand.choice(['valid', 'expired', 'expired', 'invalid_client']) if 17 in all_active else rand.choice(['valid'] * 15 + ['expired'])"
+- counter:
+    state_key: _validations
+    by: 1
+- log:
+    level: INFO
+    message: 'entra[token_validate] app={app} grant={grant_type} result={result} latency={validate_latency_ms}ms issuer=login.microsoftonline.com jwks_cache=hit'
+    attrs:
+      operation: token_validate
+      auth.app:
+        var: app
+      auth.grant_type:
+        var: grant_type
+      auth.result:
+        var: result
+      auth.latency_ms:
+        var: validate_latency_ms
+- metric:
+    name: identity_broker.token_validation_latency_ms
+    value:
+      var: validate_latency_ms
+    unit: ms
+- sample:
+    f17:
+      expr: "min(1.0, since_fix.get(17, 0) / 60.0)"
+    r3:
+      expr: "min(1.0, elapsed.get(3, 0) / 45.0)"
+    f3:
+      expr: "min(1.0, since_fix.get(3, 0) / 60.0)"
+    issued_base:
+      expr: "rand.randint(2800, 5200)"
+    tokens_issued_per_min:
+      expr: "rand.randint(0, 10) if 17 in all_active else (int(rand.randint(0, 10) + (issued_base - 5) * f17) if 17 in fixed_channels else issued_base)"
+    validations_per_min:
+      expr: "rand.randint(14000, 26000)"
+    fail_base_pct:
+      expr: "round(rand.uniform(0.1, 1.2), 1)"
+    acq_failures:
+      expr: "rand.randint(300, 1500)"
+    failure_pct:
+      expr: "round(100.0 * acq_failures / (acq_failures + tokens_issued_per_min), 1) if 17 in all_active else (round(98.0 * (1.0 - f17) + fail_base_pct * f17, 1) if 17 in fixed_channels else fail_base_pct)"
+    failures_per_min:
+      expr: "acq_failures if 17 in all_active else int(validations_per_min * failure_pct / 100)"
+    client_secret_id:
+      expr: "'secret-2026-11-prod-c93e' if 17 in fixed_channels or 'client-secret/identity-broker' in applied else 'secret-2025-10-prod-a41c'"
+    unapproved_reads_per_min:
+      expr: "int(rand.randint(10, 24) * r3) if 3 in all_active else (int(rand.randint(10, 24) * (1.0 - f3)) if 3 in fixed_channels else 0)"
+    role_revoked:
+      expr: "3 in fixed_channels or 'role-assignment/7c1e5d2a-93b4-4f0e-a6d8-2b9f41c0e6a3' in applied"
+    role_assignment:
+      expr: "'revoked' if role_revoked else ('7c1e5d2a-93b4-4f0e-a6d8-2b9f41c0e6a3' if 3 in all_active else 'none')"
+    role_name:
+      expr: "'Owner' if 3 in all_active and not role_revoked else 'Key Vault Secrets User'"
+    secret_version:
+      expr: "'f7b20c5e' if 3 in fixed_channels or 'keyvault-secret/openai-api-key' in applied else 'a41c07d9'"
+    auth_status:
+      expr: "'ANOMALY' if 3 in all_active or 17 in all_active or unapproved_reads_per_min > 0 or failure_pct > 5.0 else 'NOMINAL'"
+- counter:
+    state_key: _failures
+    by:
+      var: failures_per_min
+- metric:
+    name: identity_broker.tokens_issued_per_min
+    value:
+      var: tokens_issued_per_min
+    unit: tokens/min
+- metric:
+    name: identity_broker.token_validations_per_min
+    value:
+      var: validations_per_min
+    unit: validations/min
+- metric:
+    name: identity_broker.token_failure_pct
+    value:
+      var: failure_pct
+    unit: '%'
+- metric:
+    name: identity_broker.keyvault_unapproved_secret_reads_per_min
+    value:
+      var: unapproved_reads_per_min
+    unit: reads/min
+- log:
+    level: INFO
+    message: 'entra[token_stats] issued={tokens_issued_per_min}/min validated={validations_per_min}/min failures={failures_per_min}/min failure_rate={failure_pct}% tenant=azureai-prod client_secret={client_secret_id} role_assignment={role_assignment} openai_api_key_version={secret_version} unapproved_secret_reads={unapproved_reads_per_min}/min status={auth_status}'
+    attrs:
+      operation: token_stats
+      auth.tokens_issued_per_min:
+        var: tokens_issued_per_min
+      auth.validations_per_min:
+        var: validations_per_min
+      auth.failures_per_min:
+        var: failures_per_min
+      auth.failure_pct:
+        var: failure_pct
+      auth.status:
+        var: auth_status
+      entra.client_secret_id:
+        var: client_secret_id
+      authz.role_assignment:
+        var: role_assignment
+      authz.role_name:
+        var: role_name
+      authz.principal: sp-identity-broker-prod
+      keyvault.secret_version:
+        var: secret_version
+      keyvault.unapproved_reads_per_min:
+        var: unapproved_reads_per_min
+- for_each:
+    in: SECRETS
+    as: s
+    steps:
+    - sample:
+        days_to_expiry:
+          expr: "(rand.randint(-2, -1) if 17 in all_active else (int(-1 + 181 * f17) if 17 in fixed_channels else rand.randint(21, 180))) if s['name'] == 'identity-broker-client-secret' else rand.randint(21, 180)"
+    - metric:
+        name: identity_broker.credential_days_to_expiry
+        value:
+          var: days_to_expiry
+        unit: days
+        attrs:
+          auth.credential:
+            expr: "s['name']"
+          auth.key_vault:
+            expr: "s['kv']"
+- every:
+    seconds: 10
+    state_key: _last_summary
+    steps:
+    - sample:
+        next_expiry_days:
+          expr: "rand.randint(-2, -1) if 17 in all_active else (int(-1 + 181 * f17) if 17 in fixed_channels else rand.randint(21, 180))"
+        key_vault_reads_per_min:
+          expr: "rand.randint(3, 14)"
+    - log:
+        level: INFO
+        message: 'entra[credential_health] next_expiry_in={next_expiry_days}d key_vault_reads={key_vault_reads_per_min}/min total_validations={_validations} total_failures={_failures} jwks_rotation=ok role_assignment={role_assignment} openai_api_key_version={secret_version} unapproved_secret_reads={unapproved_reads_per_min}/min client_secret={client_secret_id} status={auth_status}'
+        attrs:
+          operation: credential_health
+          auth.next_expiry_days:
+            var: next_expiry_days
+          auth.key_vault_reads_per_min:
+            var: key_vault_reads_per_min
+          auth.total_validations:
+            var: _validations
+          auth.total_failures:
+            var: _failures
+          auth.status:
+            var: auth_status
+          authz.role_assignment:
+            var: role_assignment
+          authz.role_name:
+            var: role_name
+          authz.principal: sp-identity-broker-prod
+          keyvault.secret_version:
+            var: secret_version
+          keyvault.unapproved_reads_per_min:
+            var: unapproved_reads_per_min
+          entra.client_secret_id:
+            var: client_secret_id

@@ -115,3 +115,37 @@ steps:
       - 10
       - 100
     unit: endorsements
+- sample:
+    f11p:
+      expr: min(1.0, max(0.0, elapsed.get(11, 0) - lag.get(11, 0)) / 30.0) if 11 in all_active else (max(0.0, 1.0 - since_fix.get(11,
+        0) / 90.0) if 11 in fixed_channels else 0.0)
+    c11_parallelism:
+      expr: 32 if 11 in all_active else 4
+    c11_failed:
+      expr: round(round(rand.uniform(0.0, 1.0) * (1.0 - f11p) + rand.uniform(40.0, 120.0) * f11p, 0))
+    c11_status:
+      expr: '''DEGRADED'' if 11 in all_active or f11p > 0.1 else ''NOMINAL'''
+- when: 11 in all_active
+  log:
+    level: WARN
+    message: '[POLICY] renewal_batch_status cronjob=policy-renewal-batch parallelism={c11_parallelism} rating_timeout_s=15
+      failed_per_min={c11_failed} status={c11_status}'
+    attrs: &id001
+      operation: renewal_batch_status
+      batch.parallelism:
+        var: c11_parallelism
+      batch.failed_per_min:
+        var: c11_failed
+      batch.status:
+        var: c11_status
+- when: 11 not in all_active
+  log:
+    level: INFO
+    message: '[POLICY] renewal_batch_status cronjob=policy-renewal-batch parallelism={c11_parallelism} rating_timeout_s=15
+      failed_per_min={c11_failed} status={c11_status}'
+    attrs: *id001
+- metric:
+    name: policy_manager.renewal_failed_per_min
+    value:
+      var: c11_failed
+    unit: policies/min

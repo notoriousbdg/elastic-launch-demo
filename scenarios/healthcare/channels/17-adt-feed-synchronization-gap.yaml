@@ -10,10 +10,14 @@ cascade_services:
 - patient-monitor
 - billing-processor
 - lab-integration
-description: ADT (Admit-Discharge-Transfer) event feed falls behind, causing stale patient location data
+description: ADT (Admit-Discharge-Transfer) event feed consumer falls behind on the ADT Kafka topic, causing stale patient location data
 investigation_notes: |-
-  Root Cause: ADT feed synchronization gaps occur when the HL7 ADT event processor cannot keep pace with admission/discharge/transfer volume — common during high-census periods, mass casualty events, or when the receiving interface engine (Mirth/Rhapsody) has a thread pool exhaustion issue.
-  Remediation: 1) Restart the ADT feed processor: `adt-admin restart-feed --feed {feed_id}`. 2) Check the ADT event queue depth and drain rate: `adt-admin queue-status --feed {feed_id} --verbose`. 3) Run a patient index reconciliation against the ADT master: `adt-admin reconcile --feed {feed_id} --source ADT-MASTER --mode FULL`. 4) Flush the dead-letter queue for unprocessable events: `adt-admin flush-dlq --feed {feed_id} --requeue-valid`. 5) Verify downstream consumers (bed board, billing, lab) are receiving events: `adt-admin subscriber-status`. 6) Scale the ADT processor thread pool: `adt-admin scale-threads --feed {feed_id} --count 8`.
+  Root cause: the queue threads on Mirth channel ADT-FEED-02 were cut from 8 to 1 by a change shortly before the first ADT-SYNC-FAIL. ADT events arrive at 2-6 per second and a single thread drains only 0.2-0.8 per second, so {feed_id} builds a queue of {queue_depth} events and falls {gap_seconds}s behind: patient {patient_id}'s {adt_event_type} is not delivered yet. ADT-FEED-01 and ADT-FEED-03 still run 8 threads and stay current, which rules out an inbound surge or a slow downstream database.
+  Confirm:
+    - ehr-system logs [EHR] adt_feed feed=ADT-FEED-02 queue_threads=1 ... status=LAGGING (attributes.adt.queue_threads, attributes.adt.queue_drain_rate_per_s); ADT-FEED-01 and ADT-FEED-03 show queue_threads=8 status=CURRENT
+    - metric ehr.adt_feed_lag_seconds rises from 0.5-3s to 300-420s after the change; Kafka consumer lag on the ADT topic climbs
+    - the ehr-system line "Mirth channel ADT-FEED-02 settings updated: queue threads 8 -> 1" comes before the first sync failure
+  Remediation: restore the thread count with opsctl patch channel/adt-feed-02 --queue-threads 8. The drain rate jumps above the arrival rate and the backlog works off: lag is back under 10 seconds within about 150 seconds. Restarting the channel does not help, because the queue is persistent and still single-threaded. Skipping the backlog would lose admits, transfers and discharges.
 remediation_action: restart_adt_feed
 error_message: '[EHR] ADT-SYNC-FAIL: feed={feed_id} lag={gap_seconds}s queue_depth={queue_depth} patient={patient_id} event={adt_event_type}'
 stack_trace: |-
@@ -31,12 +35,12 @@ stack_trace: |-
   Patient {patient_id} event {adt_event_type} pending delivery
   Downstream systems receiving stale location data
 correlation_attr:
-  key: deployment.adt_processor_build
-  value: mirth-adt-v3.12.0-hotfix9
+  key: adt.queue_threads
+  value: 1
 fault_params:
-  feed_id: {choice: [ADT-FEED-01, ADT-FEED-02, ADT-FEED-03]}
-  gap_seconds: {randint: [60, 600]}
-  queue_depth: {randint: [100, 5000]}
+  feed_id: ADT-FEED-02
+  gap_seconds: {randint: [300, 420]}
+  queue_depth: {randint: [600, 2500]}
   patient_id:
     format: "PT-{n}"
     n: {randint: [100000, 999999]}
@@ -44,7 +48,8 @@ fault_params:
 rca_clues:
   ehr-system:
     adt.feed_processor_threads_exhausted: true
-    adt.queue_drain_rate_per_s: {uniform: [0.5, 3.0], round: 1}
+    adt.queue_drain_rate_per_s: {uniform: [0.2, 0.8], round: 1}
+    adt.inbound_event_rate_per_s: {uniform: [2.0, 6.0], round: 1}
   scheduling-api:
     sched.patient_location_stale: true
     sched.bed_board_accuracy_pct: {uniform: [60, 85], round: 1}
@@ -56,12 +61,91 @@ rca_clues:
   lab-integration:
     lis.specimen_routing_stale: true
     lis.misrouted_results: {randint: [2, 10]}
+remediation_command: |-
+  opsctl patch channel/adt-feed-02 --queue-threads 8
+error_services: [ehr-system]
+generator_hold_seconds:
+  kafka_otel: 150
+service_lag_seconds:
+  scheduling-api: 20
+  patient-monitor: 30
+  lab-integration: 40
+  billing-processor: 45
+cascade_messages:
+  scheduling-api:
+    - severity: WARN
+      message: '[SCHED] patient_location_stale feed={feed_id} patient={patient_id} event={adt_event_type} lag={gap_seconds}s'
+  patient-monitor:
+    - severity: WARN
+      message: '[MONITOR] patient_assignment_stale patient={patient_id} event={adt_event_type} source={feed_id}'
+  billing-processor:
+    - severity: WARN
+      message: '[CLAIMS] encounter_sync_lag patient={patient_id} event={adt_event_type} lag={gap_seconds}s'
+  lab-integration:
+    - severity: WARN
+      message: '[LIS] specimen_routing_stale patient={patient_id} event={adt_event_type} source={feed_id}'
+fault_scope:
+  workloads: [ehr-system]
+infrastructure_events:
+  - service: ehr-system
+    severity: INFO
+    offset_seconds: -120
+    body: '[EHR] Mirth channel ADT-FEED-02 settings updated: queue threads 8 -> 1 (message ordering investigation) by integration-oncall (CHG0032317)'
+    attributes:
+      user.name: integration-oncall
+      change.request: CHG0032317
+      operation: channel_config
+      adt.feed_id: ADT-FEED-02
+      adt.queue_threads: 1
+      change.summary: 'ADT-FEED-02 queue threads: 8 -> 1'
+remediation_effects:
+  log_taper_seconds: 90
+  log_events:
+    - service: ehr-system
+      severity: INFO
+      offset_seconds: 1
+      body: '[CHG] CHANGE IMPLEMENTED opsctl patch channel/adt-feed-02 --queue-threads 8 by {actor}: ADT-FEED-02 queue threads 1 -> 8'
+      attributes:
+        operation: change_implemented
+        change.target: channel/adt-feed-02
+    - service: ehr-system
+      severity: INFO
+      offset_seconds: 5
+      body: '[EHR] Mirth channel ADT-FEED-02 queue threads=8 active; draining backlog'
+      attributes:
+        operation: channel_config
+        adt.feed_id: ADT-FEED-02
+        adt.queue_threads: 8
+  steady_attributes:
+    ehr-system:
+      adt.queue_threads: 8
+  verification:
+    - signal: ehr.adt_feed_lag_seconds
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "ehr-system"'
+      field: 'metrics.ehr.adt_feed_lag_seconds'
+      expect: 'back under 10 seconds (was 300-420s) within about 150 seconds as the backlog drains'
+      within_seconds: 240
+    - signal: ADT-SYNC-FAIL lines
+      from: 'logs.otel.healthcare'
+      where: 'body.text LIKE "*ADT-SYNC-FAIL*"'
+      expect: '0 new lines'
+      within_seconds: 240
+    - signal: adt.queue_threads
+      from: 'logs.otel.healthcare'
+      where: 'resource.attributes.service.name == "ehr-system" AND attributes.adt.feed_id == "ADT-FEED-02"'
+      field: 'attributes.adt.queue_threads'
+      expect: '8 on every ADT-FEED-02 adt_feed line since the fix; 1 stops appearing'
+      within_seconds: 120
 business_impact:
   - kpi: business.admits_per_min
-    factor: {uniform: [0.20, 0.50]}
+    value: {uniform: [0.3, 0.34], round: 2}
   - kpi: business.discharges_per_min
-    factor: {uniform: [0.20, 0.50]}
+    value: {uniform: [0.22, 0.26], round: 2}
   - kpi: business.hl7_messages_per_min
-    factor: {uniform: [0.20, 0.45]}
+    value: {uniform: [513.83, 591.18]}
   - kpi: business.unbilled_charges_usd_per_min
     factor: {uniform: [1.8, 3.5]}
+generator_impact:
+  kafka_otel:
+    high_consumer_lag_by_topic: 75000.0

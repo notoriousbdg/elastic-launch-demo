@@ -3,23 +3,21 @@ subsystem: manufacturing
 vehicle_section: quality_assurance
 error_type: MES-QC-REJECT-THRESHOLD
 sensor_type: qc_inspection
-affected_services:
-- card-printing-system
-- packaging-fulfillment
-cascade_services:
-- digital-marketplace
-- auction-engine
 description: Automated quality inspection system rejecting cards above acceptable defect rate
+affected_services: [card-printing-system, packaging-fulfillment]
+error_services: [card-printing-system]
+cascade_services: [digital-marketplace, auction-engine]
 investigation_notes: |-
-  1. Identify the primary defect type: `color_registration_shift` and `die_cut_misalignment` are mechanical issues; `foil_stamp_incomplete` is heat/pressure related.
-  2. Check the QC camera calibration: if the vision system is miscalibrated, it may be rejecting good cards — run `mes-qc calibrate --line <line>`.
-  3. For `centering_off` defects, inspect the sheet feeder alignment and gripper pressure on the affected print line.
-  4. Review the defect rate trend: a gradual increase indicates wear (replace cutting dies or print heads); a sudden spike indicates a material batch problem.
-  5. Cross-reference the reject batch with the paper/cardstock lot number — a bad material lot will cause consistent defects across all printers.
-  6. If the defect rate exceeds 10%, halt the production line for mechanical inspection rather than wasting material on continued rejects.
+  Root cause: the retrained vision model defect-detect v2.1.0-retrained was deployed to the QC cameras (CR-3342) shortly before the rejection rate stepped up. The retrained model over-flags {qc_defect_type}: about {qc_reject_pct}% of {qc_inspected_count} cards inspected in {qc_batch_id} ({qc_line_number}) were rejected against a {qc_threshold_pct}% threshold, yet most rejected cards pass manual re-inspection (print.manual_reinspect_pass_pct). The rate steps at the model deploy and is the same on LINE-A, LINE-B and LINE-C, so it is not one machine. The hardware and material are fine: the camera calibration check passes, die-cut and registration mechanics are in tolerance, the cardstock lot passed incoming QC (print.material_lot_qc is ACCEPTED), and print throughput and RIP render time are normal.
+  Confirm:
+    - card-printing-system logs "[QCInspector] ... model=defect-detect-v2.1.0-retrained ... status=ANOMALY" (attributes.deployment.qc_vision_model); card_printing.qc_reject_pct steps from under 1.5% to about 14%, and the cumulative card_printing.qc_rejected_total climbs about 14% as fast as card_printing.qc_inspected_total
+    - the card-printing-system line "[QCInspector] vision model defect-detect v2.0.3 -> v2.1.0-retrained deployed" comes before the first MES-QC-REJECT-THRESHOLD
+    - packaging-fulfillment reprints and marketplace stock fall behind only after the rejects, as the extra reprint jobs raise the arrival rate (about 14% more jobs)
+  Remediation: roll the vision model back with opsctl rollback model/defect-detect --to-revision previous. The cameras load defect-detect v2.0.3 about 30 seconds after the command and the reject rate steps back under {qc_threshold_pct}% as the 1-minute window rolls over. Cards already rejected stay rejected, so qc_rejected_total stops climbing but never falls. Halting the line for mechanical inspection is not needed.
 remediation_action: recalibrate_qc_sensors
-error_message: '[QCInspector] MES-QC-REJECT-THRESHOLD: batch={qc_batch_id} rejected={qc_reject_count}/{qc_inspected_count}
-  ({qc_reject_pct}% defect rate, threshold {qc_threshold_pct}%) defect={qc_defect_type} line={qc_line_number}'
+remediation_command: |-
+  opsctl rollback model/defect-detect --to-revision previous
+error_message: '[QCInspector] MES-QC-REJECT-THRESHOLD: batch={qc_batch_id} rejected={qc_reject_count}/{qc_inspected_count} ({qc_reject_pct}% defect rate, threshold {qc_threshold_pct}%) defect={qc_defect_type} line={qc_line_number}'
 stack_trace: "com.fanatics.mes.exception.QCRejectException: MES-QC-REJECT-THRESHOLD: defect rate {qc_reject_pct}% exceeds\
   \ threshold {qc_threshold_pct}%\n\tat com.fanatics.mes.quality.QCInspector.inspectBatch(QCInspector.java:234)\n\tat com.fanatics.mes.quality.QCInspector.runInspection(QCInspector.java:178)\n\
   \tat com.fanatics.mes.quality.InspectionPipeline.process(InspectionPipeline.java:145)\n\tat com.fanatics.mes.api.QCController.triggerInspection(QCController.java:56)\n\
@@ -33,39 +31,95 @@ fault_params:
   qc_batch_id:
     format: "BATCH-{n}"
     n: {randint: [1000, 9999]}
-  qc_reject_count: {randint: [20, 150]}
-  qc_inspected_count: {randint: [500, 2000]}
-  qc_reject_pct: {uniform: [5.0, 25.0], round: 1}
+  qc_reject_count: {randint: [130, 150]}
+  qc_inspected_count: 1000
+  qc_reject_pct: {uniform: [13.0, 15.0], round: 1}
   qc_threshold_pct: 2.0
-  qc_defect_type:
-    choice:
-    - color_registration_shift
-    - die_cut_misalignment
-    - foil_stamp_incomplete
-    - surface_scratch
-    - centering_off
+  qc_defect_type: color_registration_shift
   qc_line_number: {choice: [LINE-A, LINE-B, LINE-C]}
 rca_clues:
   card-printing-system:
-    print.defect_type: {choice: [color_registration_shift, die_cut_misalignment, foil_stamp_incomplete]}
-    print.material_lot:
-      format: "LOT-{n}"
-      n: {randint: [2024001, 2024999]}
+    print.defect_type: color_registration_shift
+    print.manual_reinspect_pass_pct: {uniform: [70, 95], round: 1}
+    print.material_lot_qc: ACCEPTED
   packaging-fulfillment:
-    warehouse.reprint_queue_depth: {randint: [20, 200]}
-    warehouse.wasted_material_sheets: {randint: [50, 500]}
+    warehouse.reprint_queue_growing: true
   digital-marketplace:
-    marketplace.out_of_stock_skus: {randint: [5, 50]}
-    marketplace.customer_refund_queue: {randint: [3, 30]}
+    marketplace.backorder_flags_raised: true
   auction-engine:
-    auction.delayed_shipment_auctions: {randint: [2, 20]}
-    auction.buyer_dispute_count: {randint: [1, 10]}
+    auction.delayed_shipment_auctions: true
+cascade_messages:
+  packaging-fulfillment:
+    - severity: WARN
+      message: '[WMS] reprint queue growing: {qc_reject_count} cards from {qc_batch_id} routed to reprint; wasted material sheets rising on {qc_line_number}'
+  digital-marketplace:
+    - severity: WARN
+      message: '[Inventory] available stock for SKUs in {qc_batch_id} below order demand after QC rejects; backorder flags raised'
+  auction-engine:
+    - severity: WARN
+      message: '[ShipmentTracker] auctions awaiting cards from {qc_batch_id} delayed; buyer delay notices queued'
+fault_scope:
+  cluster: fanatics-eks-cluster
+  workloads: [card-printing-system, packaging-fulfillment]
+infrastructure_events:
+  - service: card-printing-system
+    severity: INFO
+    offset_seconds: -100
+    body: '[QCInspector] vision model defect-detect v2.0.3 -> v2.1.0-retrained deployed to cameras on LINE-A, LINE-B, LINE-C (retrained on the Q1 defect set); deployed by mes-ml-release (CR-3342)'
+    attributes:
+      user.name: mes-ml-release
+      change.request: CR-3342
+      operation: model_deploy
+      deployment.qc_vision_model: defect-detect-v2.1.0-retrained
+      change.summary: 'QC vision model: v2.0.3 -> v2.1.0-retrained'
+remediation_effects:
+  log_events:
+    - service: card-printing-system
+      severity: INFO
+      offset_seconds: 1
+      body: '[CHG] CHANGE APPLIED opsctl rollback model/defect-detect --to-revision previous by {actor}: QC vision model v2.1.0-retrained -> v2.0.3 on LINE-A, LINE-B, LINE-C'
+      attributes:
+        operation: change_applied
+        change.target: model/defect-detect
+    - service: card-printing-system
+      severity: INFO
+      offset_seconds: 30
+      body: '[QCInspector] vision model defect-detect v2.0.3 loaded on LINE-A, LINE-B, LINE-C; inspection resumed'
+      attributes:
+        operation: model_deploy
+        deployment.qc_vision_model: defect-detect-v2.0.3
+  verification:
+    - signal: card_printing.qc_reject_pct
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "card-printing-system"'
+      field: 'metrics.card_printing.qc_reject_pct'
+      expect: 'under 2% within about 60s of the fix as the 1-minute window rolls over (was about 14%)'
+      within_seconds: 150
+    - signal: card_printing.qc_rejected_total
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "card-printing-system"'
+      field: 'metrics.card_printing.qc_rejected_total'
+      expect: 'a cumulative counter: it never falls; its increase per minute drops to about 1% of card_printing.qc_inspected_total (was about 14%)'
+      within_seconds: 150
+    - signal: MES-QC-REJECT-THRESHOLD lines
+      from: 'logs.otel.fanatics'
+      where: 'body.text LIKE "*MES-QC-REJECT-THRESHOLD*"'
+      expect: '0 new lines'
+      within_seconds: 120
+    - signal: QC vision model version
+      from: 'logs.otel.fanatics'
+      where: 'resource.attributes.service.name == "card-printing-system"'
+      field: 'attributes.deployment.qc_vision_model'
+      expect: 'defect-detect-v2.0.3 on every inspection line logged since the model reload; defect-detect-v2.1.0-retrained stops appearing'
+      within_seconds: 120
 business_impact:
   - kpi: business.merch_gmv_usd_per_min
-    factor: {uniform: [0.25, 0.55]}
+    value: {uniform: [10416.0, 11984.0], round: 1}
   - kpi: business.loyalty_points_redeemed_per_min
-    factor: {uniform: [0.30, 0.60]}
+    value: {uniform: [15112.0, 17388.0]}
   - kpi: business.churn_risk_index_0_100
     factor: {uniform: [2.0, 4.0]}
-  - kpi: business.net_satisfaction_proxy_nps
-    factor: {uniform: [0.20, 0.50]}
+  - kpi: business.programmatic_fill_rate_pct
+    value: {uniform: [57.35, 65.98], round: 2}
+# dependents degrade after the component at fault, in dependency order
+service_lag_seconds: {packaging-fulfillment: 60, digital-marketplace: 120, auction-engine: 180}

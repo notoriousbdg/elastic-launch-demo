@@ -1,0 +1,37 @@
+name: "GT microsoft_sqlserver_otel: tempdb_space_low"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-MICROSOFTSQLSERVER-TEMPDB-SPACE-LOW
+sensor_type: impact_key_probe
+affected_services:
+  - gt-microsoftsqlserver-aws-svc-1
+cascade_services:
+  - gt-microsoftsqlserver-aws-svc-2
+description: "Tests impact_key tempdb_space_low on generator microsoft_sqlserver_otel."
+investigation_notes: |-
+  1. Verify microsoft_sqlserver_otel is active and reporting metrics.
+  2. Check that the tempdb_space_low metric has reached the trigger value (102400.0).
+  3. Confirm generator_impact for microsoft_sqlserver_otel.tempdb_space_low is set to 102400.0.
+  4. Look for correlated changes in service gt-microsoftsqlserver-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_tempdb_space_low_baseline
+error_message: "GT-PROBE: gen=microsoft_sqlserver_otel key=tempdb_space_low value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=microsoft_sqlserver_otel
+  impact_key: tempdb_space_low
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 102400.0
+  svc_name: gt-microsoftsqlserver-aws-svc-1
+rca_clues:
+  gt-microsoftsqlserver-aws-svc-1:
+    probe.generator: microsoft_sqlserver_otel
+    probe.impact_key: tempdb_space_low
+    probe.trigger_value: 102400.0
+  gt-microsoftsqlserver-aws-svc-2:
+    probe.upstream_generator: microsoft_sqlserver_otel
+    probe.upstream_key: tempdb_space_low
+generator_impact:
+  microsoft_sqlserver_otel:
+    tempdb_space_low: 102400.0

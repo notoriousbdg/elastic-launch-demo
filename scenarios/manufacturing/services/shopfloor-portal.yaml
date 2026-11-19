@@ -38,29 +38,101 @@ constants:
   - /api/scan
   - /api/work-orders
   - /api/inspections
-  - /api/issues
-  METHODS:
-  - GET
-  - POST
-  STATUS_CODES:
-  - 200
-  - 200
-  - 200
-  - 200
-  - 201
-  - 304
-  RESTART_CHOICES:
-  - 0
-  - 0
-  - 0
-  - 0
-  - 1
+  - /api/oee/lines
 state:
   _sessions_total:
     init: 0
-  _last_container_report:
-    init: now
+  # CrashLoopBackOff restarts seen so far (all incidents) and in the current incident.
+  _restart_total:
+    init: 0
+  _restart_seen:
+    init: 0
 steps:
+- sample:
+    # Per-channel fault intensity: ramps 0->1 once the fault reaches this service, drains 1->0 after its fix.
+    f1:
+      expr: "min(1.0, max(0.0, elapsed.get(1, 0) - lag.get(1, 0)) / 20.0) if 1 in all_active else (max(0.0, 1.0 - since_fix.get(1, 0) / 40.0) if 1 in fixed_channels else 0.0)"
+    f7:
+      expr: "min(1.0, max(0.0, elapsed.get(7, 0) - lag.get(7, 0)) / 10.0) if 7 in all_active else (max(0.0, 1.0 - since_fix.get(7, 0) / 20.0) if 7 in fixed_channels else 0.0)"
+    f13:
+      expr: "min(1.0, max(0.0, elapsed.get(13, 0) - lag.get(13, 0)) / 30.0) if 13 in all_active else (max(0.0, 1.0 - since_fix.get(13, 0) / 60.0) if 13 in fixed_channels else 0.0)"
+    f20:
+      expr: "min(1.0, max(0.0, elapsed.get(20, 0) - lag.get(20, 0)) / 20.0) if 20 in all_active else (max(0.0, 1.0 - since_fix.get(20, 0) / 120.0) if 20 in fixed_channels else 0.0)"
+    # Recreate strategy: no pod is ready from the 1.18.4 rollout until the rolled-back pods pass readiness (~35 s).
+    portal_down:
+      expr: "16 in all_active or (16 in fixed_channels and since_fix.get(16, 0) < 35)"
+- sample:
+    image_tag:
+      expr: "'1.18.4' if 16 in all_active else '1.18.3'"
+    ready_replicas:
+      expr: "0 if portal_down else 3"
+    http_5xx_pct:
+      expr: "round(rand.uniform(95.0, 100.0), 1) if portal_down else round(rand.uniform(0.02, 0.4), 2)"
+    e16:
+      expr: "elapsed.get(16, 0)"
+    restart_this_incident:
+      expr: "(e16 > 10) + (e16 > 30) + (e16 > 70) + (e16 > 150) + (e16 > 310) + (e16 > 610) + (e16 > 910) + (e16 > 1210) if 16 in all_active else 0"
+    req_latency_ms:
+      expr: "int(rand.uniform(2.0, 6.0)) if portal_down else int(rand.uniform(40.0, 220.0) + f20 * rand.uniform(600.0, 1400.0) + f13 * rand.uniform(200.0, 900.0))"
+    live_data:
+      expr: "'stale' if f1 > 0.5 or f7 > 0.5 else 'live'"
+- counter:
+    state_key: _restart_total
+    by:
+      expr: "max(0, restart_this_incident - _restart_seen)"
+- counter:
+    state_key: _restart_seen
+    by:
+      expr: "(max(_restart_seen, restart_this_incident) - _restart_seen) if 16 in all_active else -_restart_seen"
+- sample:
+    restarts:
+      expr: "_restart_total"
+    deploy_state:
+      expr: "'CrashLoopBackOff' if 16 in all_active else ('Progressing' if portal_down else 'Available')"
+- metric:
+    name: portal.ready_replicas
+    value:
+      var: ready_replicas
+    unit: replicas
+- metric:
+    name: portal.http_5xx_pct
+    value:
+      var: http_5xx_pct
+    unit: '%'
+- metric:
+    name: portal.container_restarts
+    value:
+      var: restarts
+    unit: restarts
+- metric:
+    name: portal.request_latency_ms
+    value:
+      var: req_latency_ms
+    unit: ms
+- metric:
+    name: portal.active_kiosks
+    value:
+      expr: "0 if portal_down else 4"
+    unit: kiosks
+- log:
+    level: INFO
+    message: '[PORTAL-K8S] deployment_status deployment=shopfloor-portal namespace=mfg image=registry.mfg.internal/shopfloor-portal:{image_tag} strategy=Recreate ready={ready_replicas}/3 state={deploy_state} restarts={restarts} http_5xx_pct={http_5xx_pct}'
+    attrs:
+      operation: deployment_status
+      k8s.deployment.name: shopfloor-portal
+      container.image.tag:
+        var: image_tag
+      k8s.deployment.ready_replicas:
+        var: ready_replicas
+- when: "not portal_down"
+  counter:
+    state_key: _sessions_total
+    by: 1
+- metric:
+    name: portal.sessions_total
+    value:
+      var: _sessions_total
+    unit: sessions
 - sample:
     kiosk:
       choice: KIOSKS
@@ -68,9 +140,14 @@ steps:
       expr: f'OP-{rand.randint(1000, 9999)}'
     action:
       choice: ACTIONS
-- log:
+    endpoint:
+      choice: ENDPOINTS
+    status:
+      expr: "rand.choice([502, 503]) if portal_down else rand.choice([200, 200, 200, 200, 201, 304])"
+- when: "not portal_down"
+  log:
     level: INFO
-    message: '[PORTAL] session kiosk={kiosk} operator={operator} action={action}'
+    message: '[PORTAL] session kiosk={kiosk} operator={operator} action={action} line_data={live_data}'
     attrs:
       operation: session_event
       portal.kiosk:
@@ -79,81 +156,14 @@ steps:
         var: operator
       portal.action:
         var: action
-- sample:
-    endpoint:
-      choice: ENDPOINTS
-    method:
-      choice: METHODS
-    status:
-      choice: STATUS_CODES
-    req_latency:
-      randint:
-      - 15
-      - 180
 - log:
-    level: DEBUG
-    message: '[PORTAL] http_request method={method} path={endpoint} status={status} latency_ms={req_latency}'
+    level: INFO
+    message: '[PORTAL] http_request kiosk={kiosk} path={endpoint} status={status} latency_ms={req_latency_ms}'
     attrs:
       operation: http_request
-      http.method:
-        var: method
       http.target:
         var: endpoint
-      http.status_code:
+      http.response.status_code:
         var: status
-- every:
-    seconds: 10
-    state_key: _last_container_report
-    steps:
-    - sample:
-        restarts:
-          choice: RESTART_CHOICES
-        container_mem:
-          randint:
-          - 180
-          - 600
-        container_cpu:
-          randint:
-          - 2
-          - 28
-    - log:
-        level: INFO
-        message: '[PORTAL-K8S] container=shopfloor-portal-7c8d9f4b6-xq8jt image=registry.mfg.internal/shopfloor-portal:1.18.3
-          restarts={restarts} memory_mb={container_mem} cpu_pct={container_cpu}'
-        attrs:
-          operation: container_status
-          k8s.pod.name: shopfloor-portal-7c8d9f4b6-xq8jt
-          container.image.name: registry.mfg.internal/shopfloor-portal:1.18.3
-          container.restart_count:
-            var: restarts
-- counter:
-    state_key: _sessions_total
-    by: 1
-- metric:
-    name: portal.sessions_total
-    value:
-      var: _sessions_total
-    unit: sessions
-- metric:
-    name: portal.active_kiosks
-    value: 4
-    unit: kiosks
-- metric:
-    name: portal.request_latency_ms
-    value:
-      if_active:
-        randint:
-        - 800
-        - 5500
-      else:
-        randint:
-        - 40
-        - 220
-    unit: ms
-- metric:
-    name: portal.container_memory_mb
-    value:
-      randint:
-      - 180
-      - 750
-    unit: MB
+      portal.kiosk:
+        var: kiosk

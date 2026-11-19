@@ -1,0 +1,61 @@
+service: kubelet
+sort_order: 5
+cloud_provider: aws
+cloud_region: us-east-1
+cloud_platform: aws_ec2
+cloud_availability_zone: us-east-1a
+subsystem: nodes
+language: go
+generates_traces: false
+
+# Node journald, shipped by fluent-bit: kubelet, containerd, kube-proxy, the VPC CNI
+# (aws-node / ipamd) and the kernel. Each record comes from one real node of the
+# pinned topology (log_identity: node) and may quote it ({self_node}, {self_node_ip}).
+log_identity: node
+topology: []
+
+emit_fault_logs: true
+kpi_emitter: false
+
+constants:
+  NAMESPACES: [tenant-edge, tenant-core, tenant-batch, kube-system, logging]
+  CONTAINERS: [gateway, billing-api, usage-api, fluent-bit, aws-node]
+
+steps:
+  - sample:
+      ns: {choice: NAMESPACES}
+      ctr: {choice: CONTAINERS}
+      pid: {randint: [2600, 3100]}
+      sync_s: {expr: "round(rand.uniform(38.0, 44.0), 3) if 15 in all_active else round(rand.uniform(0.7, 1.4), 3)"}
+      assigned: {randint: [14, 31]}
+      total_ips: {expr: "58 if 9 in all_active else rand.choice([34, 39, 44])"}
+      rules: {randint: [11800, 12600]}
+      rs: {expr: "'%010x' % rand.randint(0, 16 ** 10 - 1)"}
+      sfx: {expr: "rand.choice('bcdfghjklmnpqrstvwxz2456789') + rand.choice('bcdfghjklmnpqrstvwxz2456789') + rand.choice('bcdfghjklmnpqrstvwxz2456789') + rand.choice('bcdfghjklmnpqrstvwxz2456789') + rand.choice('bcdfghjklmnpqrstvwxz2456789')"}
+      uid: {expr: "'%08x-%04x-%04x-%04x-%012x' % (rand.randint(0, 0xffffffff), rand.randint(0, 0xffff), rand.randint(0, 0xffff), rand.randint(0, 0xffff), rand.randint(0, 0xffffffffffff))"}
+  - log:
+      level: INFO
+      message: 'I{klog_time}    {pid} kubelet.go:2464] "SyncLoop (PLEG): event for pod" pod="{ns}/{ctr}-{rs}-{sfx}" event={{"ID":"{uid}","Type":"ContainerStarted"}}'
+      attrs:
+        process.executable.name: kubelet
+        log.iostream: stderr
+  - every:
+      seconds: 30
+      state_key: _last_proxy
+      steps:
+        - log:
+            level: INFO
+            message: 'I{klog_time}       1 proxier.go:810] "SyncProxyRules complete" elapsed="{sync_s}s"'
+            attrs:
+              process.executable.name: kube-proxy
+              kubeproxy.sync_duration_s: {var: sync_s}
+              kubeproxy.iptables_rules: {var: rules}
+  - every:
+      seconds: 45
+      state_key: _last_ipamd
+      steps:
+        - log:
+            level: INFO
+            message: '{{"level":"info","ts":"{iso_now}","caller":"ipamd/ipamd.go:723","msg":"IP pool stats: Total IPs/Prefixes = {total_ips}/0, AssignedIPs/CidrIPs = {assigned}/0, c.maxIPsPerENI = 29"}}'
+            attrs:
+              process.executable.name: aws-k8s-agent

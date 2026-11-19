@@ -1,73 +1,125 @@
 name: CDR Processing Backlog
 subsystem: billing
 vehicle_section: cdr_pipeline
-error_type: BSS-CDR-BACKLOG
+error_type: lag increasing on
 sensor_type: cdr_processing
 affected_services:
 - bss-billing
-- subscriber-db
 cascade_services:
 - notification-service
-description: Call Detail Record mediation pipeline backlogged causing delayed billing and usage reporting
-investigation_notes: |
-  1. Check CDR ingestion vs processing rate — ingestion at high rate with processing bottlenecked creates a growing deficit. Backlog grows each minute the deficit persists.
-  2. CDR mediation involves: raw CDR ingestion → format normalization → rating → account posting → invoice generation. Identify which stage is the bottleneck.
-  3. Rating engine performance — complex tariff plans (Enterprise multi-APN, MVNO wholesale) take 10x longer to rate than Consumer plans. Check rating engine CPU utilization.
-  4. Subscriber-db writes for balance updates are queuing — CDR processing writes real-time usage data to subscriber profiles. Large backlog causes stale usage data visible to customers.
-  5. Enterprise SLA reporting depends on timely CDR processing — delays beyond 30min breach reporting SLAs. Notify enterprise account managers if backlog exceeds 15min.
-remediation_action: scale_cdr_workers
-error_message: '[BSS] BSS-CDR-BACKLOG: queue_depth={cdr_queue_depth} ingestion_rate={cdr_ingestion_rate}/min processing_rate={cdr_processing_rate}/min oldest_cdr_min={cdr_oldest_min} backlog_gb={cdr_backlog_gb}'
-stack_trace: |
-  === CDR PROCESSING PIPELINE ===
-  pipeline=meridian-cdr-mediation  mode=real-time
-  --- PIPELINE STAGES ---
-    STAGE                STATUS      RATE        QUEUE
-    raw_ingestion        OK          {cdr_ingestion_rate}/min   ---
-    format_normalize     OK          {cdr_ingestion_rate}/min   200
-    rating_engine        BACKLOGGED  {cdr_processing_rate}/min  {cdr_queue_depth}  <<< BOTTLENECK
-    account_posting      WAITING     ---         ---
-    invoice_generation   WAITING     ---         ---
-  --- BACKLOG ANALYSIS ---
-    deficit={cdr_deficit}/min  backlog_size={cdr_backlog_gb}GB
-    oldest_unprocessed={cdr_oldest_min}min  sla_threshold=30min
-    enterprise_reporting=DELAYED  mvno_wholesale=DELAYED
-  ACTION: scale_rating_workers=true  notify_enterprise=true  alert=BSS-CDR-BACKLOG
-infrastructure_events:
-- body: '[AzureMonitor] CDRProcessingBacklog: queue_depth=50000 processing_rate=200/min normal_rate=5000/min mediation_pipeline=STALLED region=westeurope'
-  severity: ERROR
-  event_name: azure.monitor.CDRProcessingBacklog
-  service: bss-billing
-  attributes:
-    cloud.provider: azure
-    cloud.service: monitor
-    azure.health.status: Critical
-    infrastructure.source: AzureMonitor
+description: a cost-reduction change cut the CDR rating consumers from 12 to 4 replicas and rating fell behind the CDR feed
+investigation_notes: |-
+  Root cause: a cost-reduction change about 30 seconds before the lag started to grow (CR-88052) set deployment cdr-rating-engine to 4 replicas (HPA min and max) instead of 12. Each replica rates about 3,000 CDRs per minute, so 4 replicas handle about 12,000/min while the network delivers about 18,000/min to topic cdr.raw (24 partitions). Consumer group cdr-rating falls behind by about 6,000 CDRs per minute on every partition; total lag is {cdr_lag} and growing. Prepaid balances and usage alerts lag behind real usage. The brokers, the CDR feed and the rating pods themselves are healthy (CPU about 70%, no restarts); there are simply not enough consumers.
+  Confirm:
+    - the bss-billing line "deployment cdr-rating-engine scaled 12 -> 4 (CR-88052)" comes before the lag started growing, and rating status lines carry attributes.billing.rating_replicas 4
+    - metric bss_billing.cdr_consumer_lag grows steadily on all 24 partitions and bss_billing.cdr_rating_rate_per_min sits near 12,000 while bss_billing.cdr_ingest_rate_per_min stays near 18,000
+    - the lag is spread evenly across partitions (no single stuck partition), which rules out a poison message or a dead consumer
+  Remediation: scale the rating engine back with opsctl patch deployment/cdr-rating-engine --replicas 12. The new pods join the group within about 30 seconds and the rebalance assigns 2 partitions each; rating runs at about 36,000/min, so lag falls by about 18,000 per minute and the "lag increasing" status clears as soon as it starts to fall. A backlog of 60,000 (ten minutes of the fault) drains in about 3.5 minutes.
+remediation_action: scale_cdr_rating_engine
+error_message: 'consumer-lag-monitor: group=cdr-rating topic=cdr.raw status=WARN lag increasing on {partitions_lagging}/24 partitions total_lag={cdr_lag} rate_in={ingest_per_min}/min rate_out={rating_per_min}/min consumers=4'
+stack_trace: |-
+  GROUP       TOPIC    PARTITION  CURRENT-OFFSET  LOG-END-OFFSET  LAG    CONSUMER-ID
+  cdr-rating  cdr.raw  0          884120931       884122402       1471   cdr-rating-engine-7d9f-0
+  cdr-rating  cdr.raw  1          882990114       882991720       1606   cdr-rating-engine-7d9f-0
+  cdr-rating  cdr.raw  2          883410877       883412190       1313   cdr-rating-engine-7d9f-0
+  ...
+  cdr-rating  cdr.raw  23         884002515       884003901       1386   cdr-rating-engine-7d9f-3
+  total_lag={cdr_lag}  partitions_lagging={partitions_lagging}/24  consumers=4
 correlation_attr:
-  key: billing.rating_engine_build
-  value: rating-v4.2.1-retrain
+  key: billing.rating_replicas
+  value: '4'
 fault_params:
-  cdr_queue_depth: {randint: [50000, 200000]}
-  cdr_ingestion_rate: {randint: [2000, 5000]}
-  cdr_processing_rate: {randint: [500, 1500]}
-  cdr_oldest_min: {randint: [15, 120]}
-  cdr_backlog_gb: {uniform: [2.0, 20.0], round: 1}
-  cdr_deficit: {randint: [500, 3500]}
+  partitions_lagging: 24
+  cdr_lag: {randint: [6000, 60000]}
+  ingest_per_min: {randint: [17400, 18600]}
+  rating_per_min: {randint: [11600, 12400]}
+  alert_delay_min: {randint: [2, 4]}
 rca_clues:
   bss-billing:
-    billing.cdr_queue_depth: {randint: [50000, 200000]}
-    billing.rating_engine_cpu_pct: {randint: [90, 99]}
-  subscriber-db:
-    db.balance_update_queue: {randint: [5000, 20000]}
-    db.stale_usage_data: true
+    billing.rating_replicas: 4
+    kafka.consumer_group: cdr-rating
+    kafka.total_lag: {randint: [6000, 60000]}
+    billing.cdr_rating_rate_per_min: {randint: [11600, 12400]}
   notification-service:
-    notification.usage_alert_delayed: true
-    notification.enterprise_reporting_blocked: true
+    notification.usage_alert_delay_min: {randint: [2, 4]}
+remediation_command: |-
+  opsctl patch deployment/cdr-rating-engine --replicas 12
+fault_scope:
+  cluster: meridian-aks-cluster
+  workloads: [bss-billing]
+cascade_messages:
+  notification-service:
+    - severity: WARN
+      message: 'usage alert batch late: newest rated usage is {alert_delay_min} min old (threshold 2 min); 80%/100% data quota SMS held'
+infrastructure_events:
+  - service: bss-billing
+    severity: INFO
+    offset_seconds: -30
+    event_name: k8s.scale
+    body: 'deployment cdr-rating-engine scaled 12 -> 4 by finops-rightsizer (CR-88052, HPA minReplicas 12 -> 4, maxReplicas 12 -> 4)'
+    attributes:
+      operation: scale
+      user.name: finops-rightsizer
+      change.request: CR-88052
+      billing.rating_replicas: 4
+      change.summary: 'cdr-rating-engine replicas 12 -> 4'
+remediation_effects:
+  log_events:
+    - service: bss-billing
+      severity: INFO
+      offset_seconds: 1
+      body: '[NOC-CHG] executed opsctl patch deployment/cdr-rating-engine --replicas 12 actor={actor}: replicas 4 -> 12'
+      attributes:
+        operation: change_executed
+        change.target: deployment/cdr-rating-engine
+        billing.rating_replicas: 12
+    - service: bss-billing
+      severity: INFO
+      offset_seconds: 30
+      body: 'consumer group cdr-rating rebalanced: generation 418, 12 members, 2 partitions each'
+      attributes:
+        operation: consumer_rebalance
+        billing.rating_replicas: 12
+  steady_attributes:
+    bss-billing:
+      billing.rating_replicas: 12
+  verification:
+    - signal: bss_billing.cdr_consumer_lag
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "bss-billing"'
+      field: 'metrics.bss_billing.cdr_consumer_lag'
+      expect: 'falling by about 18,000 per minute (was growing by about 6,000 per minute)'
+      within_seconds: 120
+    - signal: bss_billing.cdr_rating_rate_per_min
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "bss-billing"'
+      field: 'metrics.bss_billing.cdr_rating_rate_per_min'
+      expect: 'about 36,000 while the backlog drains (was about 12,000)'
+      within_seconds: 90
+    - signal: lag increasing lines
+      from: 'logs.otel.meridian'
+      where: 'body.text LIKE "*lag increasing on*"'
+      expect: '0 new lines once the rebalance completes'
+      within_seconds: 90
+    - signal: rating replicas
+      from: 'logs.otel.meridian'
+      where: 'resource.attributes.service.name == "bss-billing"'
+      field: 'attributes.billing.rating_replicas'
+      expect: '12 on every rating status line since the patch'
+      within_seconds: 90
 business_impact:
   - kpi: business.revenue_usd_per_min
-    factor: {uniform: [0.20, 0.50]}
+    factor: {uniform: [0.2, 0.5]}
   - kpi: business.data_overage_charges_usd_per_min
     factor: {uniform: [0.15, 0.45]}
   - kpi: business.trouble_to_billing_ratio_pct
     factor: {uniform: [2.5, 5.0]}
   - kpi: business.enterprise_arpu_usd
     factor: {uniform: [0.25, 0.55]}
+generator_impact:
+  kafka_otel:
+    high_consumer_lag_by_topic: 60000.0
+generator_hold_seconds:
+  kafka_otel: 240
+onset_delay_seconds: 60
+service_lag_seconds: {notification-service: 60}

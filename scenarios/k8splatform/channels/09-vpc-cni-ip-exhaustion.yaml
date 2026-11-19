@@ -1,0 +1,103 @@
+name: New pods in us-east-1b cannot get an IP address
+subsystem: nodes
+vehicle_section: kube-system/aws-node
+error_type: failed to assign an IP address to container
+sensor_type: pod_ip_allocation
+affected_services:
+  - kubelet
+cascade_services: []
+description: Pod sandboxes fail to start on nodes in us-east-1b because the subnet has no free IP addresses. Nodes in
+  us-east-1a and us-east-1c keep scheduling normally.
+investigation_notes: |-
+  Root cause: a GitOps sync of the aws-node DaemonSet (commit {commit_sha}) dropped WARM_IP_TARGET=5 and MINIMUM_IP_TARGET=20, so the VPC CNI fell back to its default WARM_ENI_TARGET=1. Every node now keeps a whole spare ENI (29 secondary IPs) attached. The per-AZ /23 subnets have 507 usable addresses; in us-east-1b ({subnet_id}, 10.42.36.0/23) the hoarded warm ENIs take all of them, so ipamd cannot attach new ENIs and new pods on 1b nodes cannot get an IP.
+  Confirm:
+    - kubelet on us-east-1b nodes only: Failed to create pod sandbox ... plugin type="aws-cni" ... add cmd: failed to assign an IP address to container
+    - ipamd: Failed to increase pool size due to not able to allocate ENI ... InsufficientFreeAddressesInSubnet
+    - attributes.subnet.available_ips is 0-3 for 10.42.36.0/23 while 1a and 1c still have headroom; ipamd pool stats show Total IPs ~58 per node instead of ~34-44
+    - kube-apiserver audit: daemonsets/aws-node patched by argocd-application-controller before the first failure
+    - aws ec2 describe-subnets --subnet-ids {subnet_id} --query 'Subnets[0].AvailableIpAddressCount'
+  Remediation: roll the aws-node DaemonSet back so WARM_IP_TARGET / MINIMUM_IP_TARGET return; ipamd on each node releases the spare ENI as aws-node pods restart (rolling, ~3 minutes).
+  Follow-up: revert commit 3d7a9c2 in Git, or pause auto-sync for the Argo CD application, before the next sync; otherwise Argo CD re-applies the change and the fault returns.
+remediation_action: rollback_daemonset
+remediation_command: |-
+  opsctl rollback daemonset/aws-node -n kube-system
+error_message: 'E{klog_time}    2817 log.go:32] "RunPodSandbox from runtime service failed" err="rpc error: code = Unknown desc
+  = failed to setup network for sandbox \"{sandbox_id}\": plugin type=\"aws-cni\" name=\"aws-cni\" failed (add): add cmd:
+  failed to assign an IP address to container"'
+stack_trace: ''
+fault_params:
+  sandbox_id: {format: '{a}{b}', a: {randint: [100000000000, 999999999999]}, b: {randint: [100000, 999999]}}
+  commit_sha: 3d7a9c2
+  subnet_id: subnet-0b7e4d21c9f3a6e58
+rca_clues:
+  kubelet:
+    subnet.id: subnet-0b7e4d21c9f3a6e58
+    subnet.cidr: 10.42.36.0/23
+    subnet.available_ips: {randint: [0, 3]}
+    vpc_cni.warm_eni_target: 1
+cascade_messages: {}
+fault_scope:
+  cluster: prod-use1
+  az: us-east-1b
+  workloads: [tenant-gateway, session-cache]
+onset_delay_seconds: 60
+generator_impact:
+  kubernetes_otel:
+    pods_stuck_in_pending_phase: 2
+infrastructure_events:
+  - service: kube-apiserver
+    severity: INFO
+    offset_seconds: -120
+    body: 'audit: level=RequestResponse stage=ResponseComplete verb=patch resource=daemonsets namespace=kube-system name=aws-node
+      user=system:serviceaccount:argocd:argocd-application-controller code=200 sync.revision=3d7a9c2 change="env: -WARM_IP_TARGET=5
+      -MINIMUM_IP_TARGET=20"'
+    attributes:
+      k8s.audit.verb: patch
+      k8s.audit.resource: daemonsets
+      user.name: system:serviceaccount:argocd:argocd-application-controller
+      vcs.revision: 3d7a9c2
+  - service: kubelet
+    severity: WARN
+    offset_seconds: 20
+    body: '{{"level":"error","ts":"{iso_now}","caller":"ipamd/ipamd.go:849","msg":"Failed to increase pool size due to not able
+      to allocate ENI AllocENI: error attaching ENI: attachENI: failed to create ENI: InsufficientFreeAddressesInSubnet: The
+      specified subnet does not have enough free addresses to satisfy the request."}}'
+k8s_events:
+  - type: Warning
+    reason: FailedCreatePodSandBox
+    object: {kind: Pod, namespace: tenant-edge}
+    message: 'Failed to create pod sandbox: rpc error: code = Unknown desc = failed to setup network for sandbox: plugin type="aws-cni"
+      failed (add): add cmd: failed to assign an IP address to container'
+    component: kubelet
+    every_seconds: 30
+remediation_effects:
+  # the old pods keep failing until the rolling update replaces them
+  log_taper_seconds: 90
+  transition_seconds: 180
+  log_events:
+    - service: kube-apiserver
+      severity: INFO
+      offset_seconds: 3
+      body: 'audit: level=Metadata verb=patch resource=daemonsets namespace=kube-system name=aws-node user={actor} code=200
+        change="rollback: env +WARM_IP_TARGET=5 +MINIMUM_IP_TARGET=20"'
+  steady_attributes:
+    kubelet:
+      vpc_cni.warm_ip_target: 5
+  verification:
+    - signal: sandbox IP failures
+      from: 'logs.otel.platform'
+      where: 'resource.attributes.service.name == "kubelet" AND body.text LIKE "*failed to assign an IP address*"'
+      expect: '0 new lines'
+      within_seconds: 240
+    - signal: ipamd pool stats
+      from: 'logs.otel.platform'
+      where: 'resource.attributes.service.name == "kubelet" AND body.text LIKE "*IP pool stats*"'
+      expect: 'Total IPs back to ~34-44 per node'
+      within_seconds: 240
+business_impact:
+  - kpi: business.pending_pods
+    value: {uniform: [10.0, 14.0], round: 0}
+  - kpi: business.pod_start_p95_s
+    value: {uniform: [100.0, 140.0], round: 1}
+  - kpi: business.deploy_success_rate_pct
+    value: {uniform: [96.2, 96.7], round: 1}

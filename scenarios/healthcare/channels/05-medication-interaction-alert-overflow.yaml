@@ -10,8 +10,12 @@ cascade_services:
 - clinical-alerts
 description: Drug interaction checking engine overwhelmed by excessive concurrent medication orders
 investigation_notes: |-
-  Root Cause: The CPOE drug-drug interaction (DDI) engine uses a real-time screening database (First Databank or Medi-Span) that becomes overloaded when discharge reconciliation generates bulk medication orders. Critical interactions (QT prolongation, renal contraindications) queue behind lower-severity checks.
-  Remediation: 1) Check the CPOE interaction queue: `cpoe-admin queue-depth --engine DDI`. 2) Reset the CPOE interface to clear stale sessions: `cpoe-admin reset-interface --service DDI-SCREENING`. 3) Restart the pharmacy queue processor: `systemctl restart pharmacy-order-queue`. 4) Verify the FDB/Medi-Span knowledge base subscription is active and the local cache is current. 5) For blocked CRITICAL interactions, escalate to attending physician for dual-sign override per pharmacy P&P. 6) Monitor the screening engine thread pool: `cpoe-admin thread-status --pool interaction-checker`.
+  Root cause: CPOE drug interaction config fdb-cache-aggressive-v2 was applied shortly before the first CPOE-DDI-CRITICAL. It caps the interaction-checker pool at 8 threads (was 32). Normal discharge medication reconciliation volume, 80-140 orders per minute and unchanged, now saturates it: the checker is 95-100% busy and {interaction_count} screenings are queued behind order {medication_id} for patient {patient_id}. The FDB knowledge base cache is current and order volume is normal. The engine lost capacity through the config change; this is not an order surge or stale data.
+  Confirm:
+    - pharmacy-system logs [PHARM] ddi_engine pool=interaction-checker busy=8/8 ... config=fdb-cache-aggressive-v2 status=SATURATED (attributes.deployment.cpoe_engine_config, attributes.cpoe.interaction_checker_max_threads = 8)
+    - metric pharmacy.interaction_queue_depth rises from 2-15 to 240-360 and pharmacy.ddi_checker_busy_pct to 95-100% after the config change, while discharge_orders_1m stays 80-140
+    - the pharmacy-system line "config ddi-screening updated to fdb-cache-aggressive-v2" comes before the first queue alarm
+  Remediation: roll the config back with opsctl rollback config/ddi-screening --to-revision previous (fdb-cache-standard-v1, 32 threads). The queue drains over about 2 minutes and checker utilization is back to 25-55% within about 90 seconds. Bypassing interaction screening or raising the order-entry timeout is wrong: unscreened orders are a patient safety risk.
 remediation_action: reset_cpoe_interface
 error_message: '[PHARM] CPOE-DDI-CRITICAL: patient={patient_id} med={medication_id} interactions_queued={interaction_count}
   severity={severity_level}'
@@ -39,18 +43,85 @@ fault_params:
   medication_id:
     format: "MED-{n}"
     n: {randint: [10000, 99999]}
-  interaction_count: {randint: [50, 500]}
-  severity_level: {choice: [critical, major, moderate]}
+  interaction_count: {randint: [240, 360]}
+  severity_level: critical
 rca_clues:
   pharmacy-system:
-    cpoe.ddi_queue_depth: {randint: [100, 500]}
-    cpoe.fdb_cache_stale: true
+    cpoe.ddi_queue_depth: {randint: [240, 360]}
+    cpoe.fdb_cache_status: current
+    cpoe.interaction_checker_busy_pct: {uniform: [95, 100], round: 0}
+    cpoe.discharge_reconciliation_orders_per_min: {randint: [80, 140]}
   ehr-system:
     ehr.medication_orders_held: {randint: [10, 50]}
     ehr.cpoe_screening_lag_s: {randint: [30, 180]}
   clinical-alerts:
     alerts.drug_interaction_backlog: {randint: [20, 80]}
     alerts.critical_block_pending: {randint: [2, 8]}
+remediation_command: |-
+  opsctl rollback config/ddi-screening --to-revision previous
+error_services: [pharmacy-system]
+service_lag_seconds:
+  ehr-system: 20
+  clinical-alerts: 30
+cascade_messages:
+  ehr-system:
+    - severity: WARN
+      message: '[EHR] cpoe_order_held patient={patient_id} med={medication_id} reason=DDI_SCREENING_PENDING queue={interaction_count}'
+  clinical-alerts:
+    - severity: WARN
+      message: '[CDS] drug_interaction_check_delayed patient={patient_id} med={medication_id} queued={interaction_count}; critical interaction alerts pending'
+fault_scope:
+  workloads: [pharmacy-system]
+infrastructure_events:
+  - service: pharmacy-system
+    severity: INFO
+    offset_seconds: -120
+    body: '[PHARM] config ddi-screening updated to fdb-cache-aggressive-v2 (was fdb-cache-standard-v1): interaction_checker_max_threads 32 -> 8, fdb_cache_mode aggressive by pharmacy-informatics (CHG0032011)'
+    attributes:
+      user.name: pharmacy-informatics
+      change.request: CHG0032011
+      operation: config_change
+      deployment.cpoe_engine_config: fdb-cache-aggressive-v2
+      cpoe.interaction_checker_max_threads: 8
+      change.summary: 'ddi-screening: fdb-cache-standard-v1 -> fdb-cache-aggressive-v2'
+remediation_effects:
+  log_events:
+    - service: pharmacy-system
+      severity: INFO
+      offset_seconds: 1
+      body: '[CHG] CHANGE IMPLEMENTED opsctl rollback config/ddi-screening --to-revision previous by {actor}: fdb-cache-aggressive-v2 -> fdb-cache-standard-v1, interaction checker 8 -> 32 threads'
+      attributes:
+        operation: change_implemented
+        change.target: config/ddi-screening
+    - service: pharmacy-system
+      severity: INFO
+      offset_seconds: 5
+      body: '[PHARM] ddi_engine pool=interaction-checker resized max_threads=32 config=fdb-cache-standard-v1; draining queue'
+      attributes:
+        operation: ddi_engine_status
+        deployment.cpoe_engine_config: fdb-cache-standard-v1
+        cpoe.interaction_checker_max_threads: 32
+  steady_attributes:
+    pharmacy-system:
+      deployment.cpoe_engine_config: fdb-cache-standard-v1
+  verification:
+    - signal: pharmacy.interaction_queue_depth
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "pharmacy-system"'
+      field: 'metrics.pharmacy.interaction_queue_depth'
+      expect: 'back under 15 queued screenings (was 240-360) within about 2 minutes'
+      within_seconds: 180
+    - signal: CPOE-DDI-CRITICAL lines
+      from: 'logs.otel.healthcare'
+      where: 'body.text LIKE "*CPOE-DDI-CRITICAL*"'
+      expect: '0 new lines'
+      within_seconds: 180
+    - signal: deployment.cpoe_engine_config
+      from: 'logs.otel.healthcare'
+      where: 'resource.attributes.service.name == "pharmacy-system"'
+      field: 'attributes.deployment.cpoe_engine_config'
+      expect: 'fdb-cache-standard-v1 on every ddi_engine line since the fix; fdb-cache-aggressive-v2 stops appearing'
+      within_seconds: 120
 business_impact:
   - kpi: business.medication_reconciliation_rate_pct
     factor: {uniform: [0.20, 0.45]}

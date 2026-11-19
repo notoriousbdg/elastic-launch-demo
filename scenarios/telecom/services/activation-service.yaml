@@ -27,86 +27,80 @@ state:
   _last_summary:
     init: now
 steps:
+# ActivationScheduler: one queue, with an enterprise priority lane behind feature flag
+# enterprise-priority-lane. Today's consumer promotion keeps the queue ~2,400 deep in every phase.
+#   ch 15 lane off ~10 min before the trigger: enterprise p95 already ~115s; after the flag is back
+#         queued enterprise orders jump ahead and p95 falls under 30s within ~75s.
 - sample:
-    activation_type:
-      choice:
-      - new_sim
-      - sim_swap
-      - plan_upgrade
-      - 5g_activation
-      - esim_activation
-    segment:
-      choice:
-      - Consumer
-      - Enterprise
-      - MVNO
+    r15:
+      expr: "min(1.0, elapsed.get(15, 0) / 20.0) if 15 in all_active else (max(0.0, 1.0 - since_fix.get(15, 0) / 90.0) if 15 in fixed_channels else 0.0)"
+    ent_p95_s:
+      expr: "round(max(4.0, 12.0 + 103.0 * r15 + rand.gauss(0, 0.8 + 4.0 * r15)), 1)"
+    consumer_p95_s:
+      expr: "round(25.0 + rand.gauss(0, 1.5), 1)"
+    queue_depth:
+      expr: "int(2400 + rand.gauss(0, 150))"
+    priority_lane:
+      expr: "'disabled' if 15 in all_active else 'enabled'"
+    sched_status:
+      expr: "'ANOMALY' if 15 in all_active or ent_p95_s > 30.0 else 'NORMAL'"
+- metric:
+    name: activation_service.enterprise_activation_p95_s
+    value: {var: ent_p95_s}
+    unit: s
+- metric:
+    name: activation_service.consumer_activation_p95_s
+    value: {var: consumer_p95_s}
+    unit: s
+- metric:
+    name: activation_service.queue_depth
+    value: {var: queue_depth}
+    unit: orders
+- log:
+    level: INFO
+    message: 'ActivationScheduler queue_depth={queue_depth} enterprise_lane={priority_lane} p95_s enterprise={ent_p95_s} consumer={consumer_p95_s} status={sched_status}'
+    attrs:
+      operation: scheduler_status
+      activation.priority_lane: {var: priority_lane}
+      activation.queue_depth: {var: queue_depth}
+      activation.enterprise_p95_s: {var: ent_p95_s}
+      activation.consumer_p95_s: {var: consumer_p95_s}
+      activation.status: {var: sched_status}
+- sample:
+    failing:
+      expr: "len(active_channels) - (1 if 15 in active_channels else 0)"
+    success_rate:
+      expr: "round(min(99.9, 99.2 - min(45.0, 14.0 * failing) + rand.gauss(0, 0.2)), 1)"
+    workflow_latency_ms:
+      expr: "round((14000.0 + 9000.0 * min(failing, 3)) * (1.0 + rand.gauss(0, 0.05)), 1)"
+    active_workflows:
+      expr: "int(420 + 160 * min(failing, 3) + rand.gauss(0, 15))"
+    plan_tier:
+      choice: [5G Basic, 5G Plus, 5G Max, Business M]
 - counter:
     state_key: _activation_count
     by: 1
-- log:
-    level: INFO
-    message: '[ACTIVATE] activation_request type={activation_type} segment={segment} step=4/6 status=IN_PROGRESS'
-    attrs:
-      operation: activation_request
-      activation.type:
-        var: activation_type
-      activation.segment:
-        var: segment
-      activation.step: 4/6
-- sample:
-    active_workflows:
-      randint:
-      - 20
-      - 100
-- log:
-    level: INFO
-    message: '[ACTIVATE] workflow_health active_workflows={active_workflows} avg_duration_ms=1200 retry_rate=0.5% status=NORMAL'
-    attrs:
-      operation: workflow_health
-      workflow.active:
-        var: active_workflows
-      workflow.avg_duration_ms: 1200
+- metric:
+    name: activation_service.success_rate
+    value: {var: success_rate}
+    unit: '%'
+- metric:
+    name: activation_service.workflow_latency_ms
+    value: {var: workflow_latency_ms}
+    unit: ms
+- metric:
+    name: activation_service.active_workflows
+    value: {var: active_workflows}
+    unit: workflows
 - every:
     seconds: 10
     state_key: _last_summary
     steps:
     - log:
         level: INFO
-        message: '[ACTIVATE] activation_summary total={_activation_count} success_rate=99.2% avg_latency_ms=1200 status=NORMAL'
+        message: 'activation summary total={_activation_count} success_rate={success_rate}% workflow_ms={workflow_latency_ms} in_flight={active_workflows} last_plan="{plan_tier}"'
         attrs:
           operation: activation_summary
-          activation.total:
-            var: _activation_count
-          activation.success_rate: 99.2
-- sample:
-    workflow_latency_ms:
-      if_active:
-        uniform:
-        - 5000.0
-        - 30000.0
-        round: 1
-      else:
-        uniform:
-        - 200.0
-        - 2000.0
-        round: 1
-- metric:
-    name: activation_service.workflow_latency_ms
-    value:
-      var: workflow_latency_ms
-    unit: ms
-- metric:
-    name: activation_service.active_workflows
-    value:
-      randint:
-      - 20
-      - 100
-    unit: workflows
-- metric:
-    name: activation_service.success_rate
-    value:
-      uniform:
-      - 98.0
-      - 99.9
-      round: 2
-    unit: '%'
+          activation.total: {var: _activation_count}
+          activation.success_rate: {var: success_rate}
+          activation.workflow_latency_ms: {var: workflow_latency_ms}

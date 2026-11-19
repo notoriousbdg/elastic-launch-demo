@@ -41,27 +41,42 @@ db_operations:
   - UPDATE inventory SET quantity = quantity - ? WHERE sku = ? AND quantity >= ?
 emit_fault_logs: true
 kpi_emitter: true
+state:
+  cat_backlog:
+    init: 0
+  cat_t:
+    init: now
 steps:
 - sample:
+    dt:
+      expr: "min(10.0, max(0.0, time.time() - cat_t))"
+- counter:
+    state_key: cat_t
+    by:
+      expr: "dt"
+# Ch 13: the bad SDK reaches pods one at a time as the rollout proceeds (6 pods, ~10s apart),
+# and the rollback replaces them the same way, so both directions pass through a mixed window.
+- sample:
+    pods_bad:
+      expr: "min(6, int(elapsed.get(13, 0) / 10) + 1) if 13 in all_active else (max(0, 5 - int(since_fix.get(13, 0) / 10)) if 13 in fixed_channels else 0)"
+    bad_frac:
+      expr: "pods_bad / 6.0"
+    pay_timeout_pct:
+      expr: "round(max(0.05, 0.25 + rand.gauss(0, 0.04)) + bad_frac * 36.0 * (1.0 + rand.gauss(0, 0.03)), 2)"
+    pay_provider_ms:
+      expr: "round(240.0 + rand.gauss(0, 10.0) + (10000.0 - 240.0) * min(1.0, max(0.0, (pay_timeout_pct - 4.0) / 2.0)) * (1.0 + rand.gauss(0, 0.02)))"
+    pay_status:
+      expr: "'ANOMALY' if pay_timeout_pct > 2.0 else 'NOMINAL'"
+    pay_sdk:
+      expr: "'stripe-sdk-v14.2.0-beta3' if rand.random() < bad_frac else 'stripe-sdk-v13.9.2'"
     active_users:
-      randint:
-      - 800
-      - 3500
+      expr: "round(2200.0 + rand.gauss(0, 35.0))"
     transactions_per_sec:
-      uniform:
-      - 45.0
-      - 120.0
-      round: 1
+      expr: "round((82.0 + rand.gauss(0, 2.0)) * (1.0 - pay_timeout_pct / 100.0), 1)"
     cart_conversion:
-      uniform:
-      - 2.5
-      - 6.8
-      round: 2
+      expr: "round((4.3 + rand.gauss(0, 0.08)) * (1.0 - min(1.0, pay_timeout_pct / 100.0 * 1.2)), 2)"
     avg_response_ms:
-      uniform:
-      - 35.0
-      - 120.0
-      round: 1
+      expr: "round(78.0 + rand.gauss(0, 3.0) + pay_timeout_pct / 100.0 * 10000.0, 1)"
 - metric:
     name: marketplace.active_users
     value:
@@ -96,15 +111,75 @@ steps:
         var: cart_conversion
       marketplace.response_ms:
         var: avg_response_ms
-- sample:
-    catalog_items:
-      randint:
-      - 120000
-      - 180000
+- metric:
+    name: marketplace.payment_timeout_pct
+    value:
+      var: pay_timeout_pct
+    unit: '%'
+- metric:
+    name: marketplace.payment_provider_response_ms
+    value:
+      var: pay_provider_ms
+    unit: ms
 - log:
     level: INFO
-    message: marketplace.catalog_sync status=nominal items_indexed={catalog_items}
+    message: "message='Payment gateway health' provider=stripe sdk={pay_sdk} timeout_pct={pay_timeout_pct} p95_ms={pay_provider_ms}
+      read_timeout_ms=10000 status={pay_status}"
+    attrs:
+      operation: payment_gateway_health
+      payment.provider: Stripe
+      payment.timeout_pct:
+        var: pay_timeout_pct
+      payment.p95_ms:
+        var: pay_provider_ms
+      payment.status:
+        var: pay_status
+      infra.payment_gateway_sdk:
+        var: pay_sdk
+# Ch 14: the replica rejects every replicated record until the v5.3.0 migration runs. Records
+# queue up at the source change rate (4/s), so lag grows linearly (lag = backlog / 4). After the
+# migration the replica replays at 14/s, draining the backlog at a net 10/s.
+- sample:
+    cat_delta:
+      expr: "(4.0 * dt + (440.0 if cat_backlog < 1.0 else 0.0)) if 14 in all_active else (4.0 * dt if (14 in fixed_channels and since_fix.get(14, 0) < 30) else (-min(cat_backlog, 10.0 * dt) if 14 in fixed_channels else -cat_backlog))"
+- counter:
+    state_key: cat_backlog
+    by:
+      expr: "cat_delta"
+- sample:
+    catalog_items:
+      expr: "round(152000.0 + rand.gauss(0, 120.0))"
+    catalog_sync_lag_s:
+      expr: "round(max(0.5, 2.5 + rand.gauss(0, 0.4)) + cat_backlog / 4.0)"
+    catalog_backlog_records:
+      expr: "round(cat_backlog)"
+    catalog_sync_status:
+      expr: "'ANOMALY' if catalog_sync_lag_s > 30 else 'NOMINAL'"
+    catalog_schema_ver:
+      expr: "'schema-v5.3.0-migration-pending' if (14 in all_active or (14 in fixed_channels and since_fix.get(14, 0) < 30)) else ('schema-v5.3.0' if 14 in fixed_channels else 'schema-v5.2.4')"
+- metric:
+    name: marketplace.catalog_sync_lag_s
+    value:
+      var: catalog_sync_lag_s
+    unit: s
+- metric:
+    name: marketplace.catalog_sync_backlog_records
+    value:
+      var: catalog_backlog_records
+    unit: records
+- log:
+    level: INFO
+    message: marketplace.catalog_sync status={catalog_sync_status} items_indexed={catalog_items} lag_s={catalog_sync_lag_s}
+      backlog_records={catalog_backlog_records} schema={catalog_schema_ver}
     attrs:
       operation: catalog_sync
       catalog.item_count:
         var: catalog_items
+      catalog.sync_lag_s:
+        var: catalog_sync_lag_s
+      catalog.backlog_records:
+        var: catalog_backlog_records
+      catalog.sync_status:
+        var: catalog_sync_status
+      deployment.catalog_schema_ver:
+        var: catalog_schema_ver

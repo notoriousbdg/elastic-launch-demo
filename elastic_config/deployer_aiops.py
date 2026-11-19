@@ -9,8 +9,8 @@ managed deploy):
   |----------------------------------------|---------------------------------------|
   | Log rate analysis                      | `{ns}-log_entry_rate`                 |
   | Log categorization & anomaly detection | `{ns}-log_entry_categories_count`     |
-  | Metrics anomaly detection              | (future) host CPU/mem ML job          |
-  | Multi-signal anomaly detection         | emergent — shared `o11y-demo` group   |
+  | Host CPU/mem metrics anomaly           | `{ns}-host-cpu` / `{ns}-host-memory`  |
+  | K8s pod CPU/mem metrics anomaly        | `k8s-{ns}-pod-cpu` / `k8s-{ns}-pod-memory` |
   | Trace analysis                         | exists: `apm-{ns}-transaction-metrics`|
 
 Datafeeds target the per-scenario wired-stream partition `logs.ecs.{ns}` (and
@@ -53,9 +53,11 @@ _CATEGORIZATION_ANALYZER = {
     ],
 }
 
-# Indices_options copied verbatim from the managed Logs UI jobs.
+# Prefer ignore_unavailable so transient backing-index deletes (sticky-mapping
+# heals, package stream resets) do not error the datafeed. Managed Logs UI
+# jobs use False; our generators intentionally recreate streams.
 _INDICES_OPTIONS = {
-    "ignore_unavailable": False,
+    "ignore_unavailable": True,
     "expand_wildcards": ["open"],
     "allow_no_indices": True,
     "ignore_throttled": True,
@@ -65,17 +67,27 @@ _INDICES_OPTIONS = {
 class AiopsMixin:
 
     def _deploy_logs_ml_jobs(self, client: httpx.Client, notify: ProgressCallback):
-        """Create both Logs UI ML jobs (volume + categorization) and start their
-        datafeeds from the earliest backfilled timestamp."""
+        """Create Logs UI ML jobs + host/pod metrics ML jobs; start datafeeds
+        from backfilled timestamps."""
         step = self._step(StepIdx.LOGS_ML_JOBS)
         step.status = "running"
         notify(self.progress)
 
         try:
             ns = self.scenario.namespace
+            # Healthy host/k8s util history so metrics ML has a baseline before
+            # chaos sliders create mid/high anomalies.
+            if hasattr(self, "_deploy_metrics_ml_backfill"):
+                self._deploy_metrics_ml_backfill()
+
             start_ts = (
                 self._get_ecs_log_min_ts(client)
                 if hasattr(self, "_get_ecs_log_min_ts")
+                else None
+            )
+            metrics_start_ts = (
+                self._get_metrics_ml_min_ts(client)
+                if hasattr(self, "_get_metrics_ml_min_ts")
                 else None
             )
 
@@ -186,16 +198,142 @@ class AiopsMixin:
             self._recreate_ml_job(client, cat_job_id, cat_job_cfg, cat_datafeed_cfg, start_ts)
             created.append(cat_job_id)
 
+            # ── Host + pod metrics ML (chaos UI host/pod CPU & memory spikes) ─
+            created.extend(
+                self._deploy_host_pod_metrics_ml_jobs(client, ns, metrics_start_ts)
+            )
+
             step.status = "ok"
             step.detail = (
                 f"Started {len(created)} ML jobs: {', '.join(created)}"
-                + (f" (from {start_ts})" if start_ts else "")
+                + (f" (logs from {start_ts})" if start_ts else "")
+                + (f" (metrics from {metrics_start_ts})" if metrics_start_ts else "")
             )
         except Exception as exc:
             step.status = "failed"
             step.detail = str(exc)
-            logger.warning("Logs ML setup failed (non-fatal): %s", exc)
+            logger.warning("Logs/metrics ML setup failed (non-fatal): %s", exc)
         notify(self.progress)
+
+    def _deploy_host_pod_metrics_ml_jobs(
+        self,
+        client: httpx.Client,
+        ns: str,
+        start_ts: str | None,
+    ) -> list[str]:
+        """Create hostmetrics + k8s pod CPU/memory anomaly jobs for chaos sliders."""
+        created: list[str] = []
+
+        def _metric_job(
+            job_id: str,
+            *,
+            groups: list[str],
+            description: str,
+            field_name: str,
+            partition_field: str,
+            influencers: list[str],
+            indices: list[str],
+            extra_filters: list[dict] | None = None,
+        ) -> None:
+            filters = [{"exists": {"field": field_name}}]
+            if extra_filters:
+                filters.extend(extra_filters)
+            job_cfg = {
+                "job_id": job_id,
+                "groups": groups,
+                "description": description,
+                "analysis_config": {
+                    "bucket_span": "1m",
+                    "detectors": [
+                        {
+                            "detector_description": (
+                                f"high_mean({field_name}) partitionfield=\"{partition_field}\""
+                            ),
+                            "function": "high_mean",
+                            "field_name": field_name,
+                            "partition_field_name": partition_field,
+                            "detector_index": 0,
+                        }
+                    ],
+                    "influencers": influencers,
+                },
+                "analysis_limits": {"model_memory_limit": "12mb"},
+                "data_description": {"time_field": "@timestamp", "time_format": "epoch_ms"},
+                "model_plot_config": {"enabled": False, "annotations_enabled": False},
+                "model_snapshot_retention_days": 10,
+                "daily_model_snapshot_retention_after_days": 1,
+                "results_index_name": "shared",
+                "allow_lazy_open": True,
+            }
+            datafeed_cfg = {
+                "job_id": job_id,
+                "indices": indices,
+                "query": {"bool": {"filter": filters}},
+                "indices_options": _INDICES_OPTIONS,
+                "chunking_config": {"mode": "auto"},
+                "query_delay": "3m",
+                "delayed_data_check_config": {"enabled": True},
+                "scroll_size": 1000,
+            }
+            self._recreate_ml_job(client, job_id, job_cfg, datafeed_cfg, start_ts)
+            created.append(job_id)
+
+        # Prefer mapped OTel `metrics.*` paths; also accept bare names via exists
+        # on the primary field the live bulk/OTLP path writes.
+        _metric_job(
+            f"{ns}-host-cpu",
+            groups=["metrics", "hosts", "o11y-demo"],
+            description=f"Detects anomalies in host CPU utilization for {ns} (chaos Host CPU spike).",
+            field_name="metrics.system.cpu.utilization",
+            partition_field="resource.attributes.host.name",
+            influencers=["resource.attributes.host.name"],
+            indices=["metrics-hostmetricsreceiver.otel-*"],
+        )
+        _metric_job(
+            f"{ns}-host-memory",
+            groups=["metrics", "hosts", "o11y-demo"],
+            description=f"Detects anomalies in host memory utilization for {ns} (chaos Host Memory spike).",
+            field_name="metrics.system.memory.utilization",
+            partition_field="resource.attributes.host.name",
+            influencers=["resource.attributes.host.name"],
+            indices=["metrics-hostmetricsreceiver.otel-*"],
+        )
+        ns_filter = {
+            "term": {"resource.attributes.k8s.namespace.name": ns},
+        }
+        _metric_job(
+            f"k8s-{ns}-pod-cpu",
+            groups=["metrics", "k8s", "o11y-demo"],
+            description=(
+                f"Detects anomalies in pod CPU utilization for {ns} "
+                "(chaos Pod CPU spike / Anomaly Explorer)."
+            ),
+            field_name="metrics.k8s.pod.cpu.node.utilization",
+            partition_field="resource.attributes.k8s.pod.name",
+            influencers=[
+                "resource.attributes.k8s.pod.name",
+                "resource.attributes.k8s.container.name",
+            ],
+            indices=["metrics-kubeletstatsreceiver.otel-*"],
+            extra_filters=[ns_filter],
+        )
+        _metric_job(
+            f"k8s-{ns}-pod-memory",
+            groups=["metrics", "k8s", "o11y-demo"],
+            description=(
+                f"Detects anomalies in pod memory working set for {ns} "
+                "(chaos Pod Memory spike / Anomaly Explorer)."
+            ),
+            field_name="metrics.k8s.pod.memory.working_set",
+            partition_field="resource.attributes.k8s.pod.name",
+            influencers=[
+                "resource.attributes.k8s.pod.name",
+                "resource.attributes.k8s.container.name",
+            ],
+            indices=["metrics-kubeletstatsreceiver.otel-*"],
+            extra_filters=[ns_filter],
+        )
+        return created
 
     def _recreate_ml_job(
         self,
@@ -261,15 +399,16 @@ class AiopsMixin:
         if resp.status_code >= 300:
             raise RuntimeError(f"ML datafeed for {job_id} start failed: {resp.text[:500]}")
 
-    def _cleanup_aiops_ml(self, client: httpx.Client, namespace: str | None = None) -> None:
-        """Stop and delete AIOps ML jobs for the given namespace (or self.ns)."""
-        ns = namespace or self.ns
+    def _cleanup_aiops_ml(self, client: httpx.Client) -> None:
+        """Stop and delete this scenario's AIOps ML jobs."""
+        ns = self.ns
         job_ids = [
             f"{ns}-log_entry_rate",
             f"{ns}-log_entry_categories_count",
-            # Legacy job ID from a prior iteration — cleaned up so re-deploys
-            # don't leave orphans.
-            f"logs-{ns}-categorization",
+            f"{ns}-host-cpu",
+            f"{ns}-host-memory",
+            f"k8s-{ns}-pod-cpu",
+            f"k8s-{ns}-pod-memory",
         ]
         for job_id in job_ids:
             try:

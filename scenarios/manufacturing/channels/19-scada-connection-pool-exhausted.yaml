@@ -7,41 +7,109 @@ affected_services:
 - scada-gateway
 cascade_services:
 - mes-controller
-description: SCADA gateway client connection pool fully utilized; auto-restart pool eligible
+description: A session pool change disabled the idle timeout; sessions abandoned by a dashboard client are never reclaimed and the gateway's OPC UA server refuses new sessions
 investigation_notes: |-
-  Root Cause: A leaked client session — typically a cancelled subscription that didn't release its channel — accumulates over hours until the pool is exhausted. New downstream consumers (MES, historian, dashboards) get connection refused.
-  Remediation (auto-remediate eligible): 1) Restart the pool: `scada-admin restart-pool --pool client-sessions`. 2) Confirm pool free count returns to ≥ 10. 3) Open a code issue if leak recurs within 24h — usually a missing `dispose()` on the consumer side.
-remediation_action: restart_session_pool
-error_message: '[SCADA] SCADA-CONNECTION-POOL-EXHAUST: pool=client-sessions used={pool_used} max=64 leaked_estimate={leaked_count}'
+  Root cause: the scada-gateway client-sessions pool was changed from idle_timeout_s=300 to idle_timeout_s=0 (no timeout) about 40 minutes before the first SCADA-CONNECTION-POOL-EXHAUST (by ot-integration, MOC-2624, to stop the MES sessions from being dropped during long idle periods). Since then the energy-dashboard client, which opens a new OPC UA session every minute and never calls CloseSession, has left one abandoned session behind per minute. Without the idle timeout the gateway never reclaims them: about {leaked_count} sessions owned by energy-dashboard have had no requests for 5 to 40 minutes, the pool is at {pool_used}/64, and new CreateSession calls get BadTooManySessions (0x80560000). mes-controller and ot-historian keep their existing sessions but cannot open new ones after a reconnect. Gateway CPU and memory are normal and the PLC side is unaffected.
+  Confirm:
+    - scada-gateway session_pool lines show idle_timeout_s=0 (attributes.scada.session_idle_timeout_s); metric scada.session_pool_used climbs from 18-26 to 58-64 and scada.session_refused_per_min rises from 0 to 4-20
+    - the scada-gateway session pool config line (MOC-2624) comes before the first SCADA-CONNECTION-POOL-EXHAUST, about 40 minutes earlier
+    - the pool breakdown shows energy-dashboard holding about 40 sessions with no activity, while mes-controller and ot-historian hold their usual 12 and 8
+  Remediation: restore the idle timeout with opsctl patch session-pool/client-sessions --idle-timeout-s 300. The gateway applies the setting at once and closes every session idle for more than 300 s, which reclaims the abandoned energy-dashboard sessions; the pool drops back to 18-26 in use and new sessions succeed within about 30 s. Fixing the dashboard client to close its sessions is a follow-up; the MES idle-drop issue should be solved with keep-alive publishing rather than disabling the timeout.
+remediation_action: restore_session_idle_timeout
+remediation_command: |-
+  opsctl patch session-pool/client-sessions --idle-timeout-s 300
+error_message: '[SCADA] SCADA-CONNECTION-POOL-EXHAUST: pool=client-sessions used={pool_used}/64 idle_timeout_s=0 CreateSession -> BadTooManySessions (0x80560000) idle_sessions={leaked_count} top_owner=energy-dashboard'
 stack_trace: |-
   === SCADA CLIENT SESSION POOL ===
-  Pool: client-sessions | Used: {pool_used}/64 | Idle: 0
+  Pool: client-sessions | Used: {pool_used}/64 | Idle timeout: 0 (disabled)
   ------------------------------------------------------------------------
-  CONSUMER             | SESSIONS | OLDEST (h) | STATUS
+  CLIENT               | SESSIONS | LAST REQUEST (oldest) | STATUS
   ------------------------------------------------------------------------
-  mes-controller        | 12       | 0.5        | active
-  ot-historian          | 8        | 0.3        | active
-  (orphaned)            | {leaked_count}       | 14.2       | leaked
+  mes-controller        | 12       | 2 s                   | active
+  ot-historian          | 8        | 1 s                   | active
+  energy-dashboard      | {leaked_count}       | 39 min                | idle (no CloseSession)
   ------------------------------------------------------------------------
-  SCADA-CONNECTION-POOL-EXHAUST: restart pool — leaked sessions reclaimed
+  CreateSession from mes-controller -> BadTooManySessions (0x80560000)
+  SCADA-CONNECTION-POOL-EXHAUST: idle sessions are not being reclaimed
 correlation_attr:
-  key: infra.scada_session_pool_config
-  value: session-pool-v3.1-leak
+  key: scada.session_idle_timeout_s
+  value: '0'
 fault_params:
   pool_used: {randint: [58, 64]}
-  leaked_count: {randint: [15, 45]}
+  leaked_count: {randint: [38, 44]}
 rca_clues:
   scada-gateway:
-    scada.session_pool_used: {randint: [58, 64]}
-    scada.leaked_session_count: {randint: [15, 45]}
+    scada.session_owner_top: energy-dashboard
+    opcua.status_code: BadTooManySessions
   mes-controller:
     mes.scada_connection_refused_count: {randint: [3, 25]}
+cascade_messages:
+  mes-controller:
+    - severity: WARN
+      message: '[MES] scada_session CreateSession to opc.tcp://scada-gateway:4840 failed: BadTooManySessions (0x80560000); retrying in 10 s, equipment-state subscription for LINE-02 not restored'
+fault_scope:
+  cluster: mfg-eks-cluster
+  workloads: [scada-gateway]
+infrastructure_events:
+  - service: scada-gateway
+    severity: INFO
+    offset_seconds: -2400
+    body: '[SCADA] session pool config client-sessions idle_timeout_s 300 -> 0 (disabled), max_sessions 64; changed by ot-integration (MOC-2624, "stop MES sessions dropping during idle shifts")'
+    attributes:
+      operation: config_change
+      user.name: ot-integration
+      change.request: MOC-2624
+      scada.session_idle_timeout_s: 0
+      change.summary: 'client-sessions idle timeout: 300 s -> disabled'
+service_lag_seconds:
+  mes-controller: 15
+remediation_effects:
+  log_events:
+    - service: scada-gateway
+      severity: INFO
+      offset_seconds: 1
+      body: '[CHG] CHANGE APPLIED opsctl patch session-pool/client-sessions --idle-timeout-s 300 by {actor}: idle_timeout_s 0 -> 300'
+      attributes:
+        operation: change_applied
+        change.target: session-pool/client-sessions
+    - service: scada-gateway
+      severity: INFO
+      offset_seconds: 5
+      body: '[SCADA] session pool client-sessions reclaimed 40 idle sessions (owner energy-dashboard); used 22/64'
+      attributes:
+        operation: session_reclaim
+  steady_attributes:
+    scada-gateway:
+      scada.session_idle_timeout_s: 300
+  log_taper_seconds: 15
+  verification:
+    - signal: scada.session_pool_used
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "scada-gateway"'
+      field: 'metrics.scada.session_pool_used'
+      expect: 'back to 18-26 (was 58-64)'
+      within_seconds: 30
+    - signal: scada.session_refused_per_min
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "scada-gateway"'
+      field: 'metrics.scada.session_refused_per_min'
+      expect: '0 (was 4-20)'
+      within_seconds: 60
+    - signal: SCADA-CONNECTION-POOL-EXHAUST lines
+      from: 'logs.otel.mfg'
+      where: 'body.text LIKE "*SCADA-CONNECTION-POOL-EXHAUST*"'
+      expect: '0 new lines'
+      within_seconds: 60
+    - signal: session idle timeout
+      from: 'logs.otel.mfg'
+      where: 'resource.attributes.service.name == "scada-gateway" AND body.text LIKE "*session_pool pool=client-sessions*"'
+      field: 'attributes.scada.session_idle_timeout_s'
+      expect: '300 on every line logged since the fix; 0 stops appearing'
+      within_seconds: 60
 business_impact:
   - kpi: business.oee_overall_pct
-    factor: {uniform: [0.30, 0.60]}
-  - kpi: business.oee_availability_pct
-    factor: {uniform: [0.30, 0.60]}
+    factor: {uniform: [0.65, 0.85]}
   - kpi: business.throughput_units_per_hour
-    factor: {uniform: [0.25, 0.55]}
-  - kpi: business.unplanned_downtime_min_per_shift
-    factor: {uniform: [2.0, 4.5]}
+    factor: {uniform: [0.70, 0.88]}
+  - kpi: business.oee_availability_pct
+    factor: {uniform: [0.80, 0.88]}

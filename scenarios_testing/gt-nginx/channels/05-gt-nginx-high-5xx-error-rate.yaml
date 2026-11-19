@@ -1,0 +1,37 @@
+name: "GT nginx_otel: high_5xx_error_rate"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-NGINX-HIGH-5XX-ERROR-RATE
+sensor_type: impact_key_probe
+affected_services:
+  - gt-nginx-aws-svc-1
+cascade_services:
+  - gt-nginx-aws-svc-2
+description: "Tests impact_key high_5xx_error_rate on generator nginx_otel."
+investigation_notes: |-
+  1. Verify nginx_otel is active and reporting metrics.
+  2. Check that the high_5xx_error_rate metric has reached the trigger value (3750.0).
+  3. Confirm generator_impact for nginx_otel.high_5xx_error_rate is set to 3750.0.
+  4. Look for correlated changes in service gt-nginx-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_high_5xx_error_rate_baseline
+error_message: "GT-PROBE: gen=nginx_otel key=high_5xx_error_rate value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=nginx_otel
+  impact_key: high_5xx_error_rate
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 3750.0
+  svc_name: gt-nginx-aws-svc-1
+rca_clues:
+  gt-nginx-aws-svc-1:
+    probe.generator: nginx_otel
+    probe.impact_key: high_5xx_error_rate
+    probe.trigger_value: 3750.0
+  gt-nginx-aws-svc-2:
+    probe.upstream_generator: nginx_otel
+    probe.upstream_key: high_5xx_error_rate
+generator_impact:
+  nginx_otel:
+    high_5xx_error_rate: 3750.0

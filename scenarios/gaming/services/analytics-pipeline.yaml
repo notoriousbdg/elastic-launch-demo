@@ -27,14 +27,39 @@ state:
     init: 0
   _last_pipeline_report:
     init: now
+  _lag15_peak:
+    init: 0
 steps:
-- counter:
-    state_key: _events_ingested
-    by:
-      randint:
-      - 50
-      - 500
+# Channel 16: game-telemetry-sampling takes player_move from 1/5 to 1/1. player_move is ~42% of
+# the ingest volume at 1/5, so total volume rises ~2.7x, past the buffer's ~8000 events/s flush
+# rate; the buffer fills within ~20 s and drops the overflow. After the rollback the game
+# servers reload the sampling config within ~30 s; the buffer stays full ~20 s, then drains
+# back to its normal 20-45% over ~100 s (~120 s in total).
 - sample:
+    tb_fixed:
+      expr: "16 in fixed_channels and 16 not in all_active"
+    tb_ramp:
+      expr: "min(1.0, max(0.0, elapsed.get(16, 0) - lag.get(16, 0)) / 20.0) if 16 in all_active else 0.0"
+    tb_since:
+      expr: "since_fix.get(16, 0) if tb_fixed else 0"
+    tb_mult:
+      expr: "1.0 + 1.68 * tb_ramp if 16 in all_active else (1.0 + 1.68 * max(0.0, 1.0 - tb_since / 30.0) if tb_fixed else 1.0)"
+    received:
+      expr: "round(rand.uniform(5000, 7000) * tb_mult)"
+    flushed:
+      expr: "min(received, round(rand.uniform(7800, 8000)))"
+    buf_base:
+      expr: "round(rand.uniform(20.0, 45.0), 1)"
+    buf_full:
+      expr: "round(rand.uniform(95.0, 100.0), 1)"
+    buffer_pct:
+      expr: "round(buf_base + (buf_full - buf_base) * tb_ramp, 1) if 16 in all_active else (round(buf_full + (buf_base - buf_full) * min(1.0, max(0.0, tb_since - 20.0) / 100.0), 1) if tb_fixed else buf_base)"
+    dropped:
+      expr: "received - flushed if buffer_pct >= 95.0 else 0"
+    sample_rate:
+      expr: "'1/1' if 16 in all_active else '1/5'"
+    tb_degraded:
+      expr: "dropped > 0 or buffer_pct > 80.0"
     pipeline:
       choice: PIPELINES
     event_type:
@@ -44,10 +69,11 @@ steps:
       - 100
       - 1000
     ingest_latency_ms:
-      uniform:
-      - 5.0
-      - 50.0
-      round: 1
+      expr: "round(rand.uniform(180.0, 650.0), 1) if buffer_pct >= 95.0 else round(rand.uniform(5.0, 50.0), 1)"
+- counter:
+    state_key: _events_ingested
+    by:
+      expr: "round(flushed / 20)"
 - log:
     level: INFO
     message: '[Analytics] ingest pipeline={pipeline} event_type={event_type} batch={batch_size} latency={ingest_latency_ms}ms
@@ -62,89 +88,211 @@ steps:
         var: batch_size
       analytics.latency_ms:
         var: ingest_latency_ms
-- sample:
-    health_pipeline:
-      choice: PIPELINES
-    consumer_lag:
-      randint:
-      - 0
-      - 500
-    partitions:
-      randint:
-      - 8
-      - 32
-- log:
+- metric:
+    name: analytics.events_received_per_s
+    value:
+      var: received
+    unit: events/s
+- metric:
+    name: analytics.throughput
+    value:
+      var: flushed
+    unit: events/s
+- metric:
+    name: analytics.events_dropped_per_s
+    value:
+      var: dropped
+    unit: events/s
+- metric:
+    name: analytics.buffer_usage_pct
+    value:
+      var: buffer_pct
+    unit: '%'
+- metric:
+    name: analytics.events_ingested
+    value:
+      var: _events_ingested
+    unit: events
+- when: "not tb_degraded"
+  log:
     level: INFO
-    message: '[Analytics] pipeline_health name={health_pipeline} consumer_lag={consumer_lag} partitions={partitions} throughput=4201/s'
+    message: '[Analytics] ingest-buffer buffer=buf-player-events usage={buffer_pct}% capacity=100000 received={received}/s
+      flushed={flushed}/s dropped={dropped}/s player_move_sample_rate={sample_rate} status=HEALTHY'
+    attrs:
+      operation: buffer_status
+      analytics.buffer: buf-player-events
+      analytics.buffer_usage_pct:
+        var: buffer_pct
+      analytics.events_received_per_s:
+        var: received
+      analytics.events_dropped_per_s:
+        var: dropped
+      analytics.buffer_status: HEALTHY
+      config.player_move_sample_rate:
+        var: sample_rate
+- when: "tb_degraded"
+  log:
+    level: WARN
+    message: '[Analytics] ingest-buffer buffer=buf-player-events usage={buffer_pct}% capacity=100000 received={received}/s
+      flushed={flushed}/s dropped={dropped}/s player_move_sample_rate={sample_rate} status=DEGRADED'
+    attrs:
+      operation: buffer_status
+      analytics.buffer: buf-player-events
+      analytics.buffer_usage_pct:
+        var: buffer_pct
+      analytics.events_received_per_s:
+        var: received
+      analytics.events_dropped_per_s:
+        var: dropped
+      analytics.buffer_status: DEGRADED
+      config.player_move_sample_rate:
+        var: sample_rate
+# Channel 15: the analytics-consumer ConfigMap (events-primary consumer group on game-events)
+# raises max.poll.records 500 -> 5000. A 5000-record batch takes longer than
+# max.poll.interval.ms (300 s), so members are evicted before they commit; the oldest
+# uncommitted event ages ~1 s per second from the sync (logged 240 s before the first
+# evictions). After the rollback the pods roll (~30 s) and 8 stable members drain the backlog
+# back to 1-5 s over ~300 s.
+- sample:
+    cg_fixed:
+      expr: "15 in fixed_channels and 15 not in all_active"
+    cg_t:
+      expr: "max(0.0, elapsed.get(15, 0) - lag.get(15, 0)) if 15 in all_active else 0.0"
+    cg_on:
+      expr: "15 in all_active and cg_t > 0"
+    cg_ramp:
+      expr: "min(1.0, cg_t / 60.0)"
+    cg_since:
+      expr: "since_fix.get(15, 0) if cg_fixed else 0"
+    cg_base:
+      expr: "round(rand.uniform(1.0, 5.0), 1)"
+    cg_from:
+      expr: "_lag15_peak if _lag15_peak > 0 else 900.0"
+    lag_s:
+      expr: "round(cg_base + (240.0 + cg_t) * cg_ramp, 1) if 15 in all_active else (round(cg_from + (cg_base - cg_from) * min(1.0, cg_since / 300.0), 1) if cg_fixed else cg_base)"
+    lag_records:
+      expr: "round(lag_s * 380)"
+    members:
+      expr: "round(8 - (8 - rand.randint(2, 5)) * cg_ramp) if 15 in all_active else ((rand.randint(5, 7) if cg_since < 30 else 8) if cg_fixed else 8)"
+    rebalances:
+      expr: "round(rand.uniform(6.0, 15.0) * cg_ramp) if 15 in all_active else ((rand.randint(1, 2) if cg_since < 30 else 0) if cg_fixed else 0)"
+    batch_s:
+      expr: "rand.randint(310, 420) if cg_on else rand.randint(18, 40)"
+    max_poll_records:
+      expr: "5000 if 15 in all_active else 500"
+    cg_degraded:
+      expr: "cg_on or members < 8 or lag_s > 30.0"
+- when: "15 in all_active"
+  counter:
+    state_key: _lag15_peak
+    by:
+      expr: "lag_s - _lag15_peak"
+- metric:
+    name: analytics.pipeline_lag_s
+    value:
+      var: lag_s
+    unit: s
+    attrs:
+      analytics.pipeline: events-primary
+- metric:
+    name: analytics.consumer.active_members
+    value:
+      var: members
+    unit: members
+    attrs:
+      analytics.pipeline: events-primary
+- metric:
+    name: analytics.consumer.rebalances_per_min
+    value:
+      var: rebalances
+    unit: rebalances
+    attrs:
+      analytics.pipeline: events-primary
+- when: "not cg_degraded"
+  log:
+    level: INFO
+    message: '[Analytics] consumer-group group=events-primary-cg topic=game-events members={members}/8 lag_s={lag_s}
+      lag_records={lag_records} rebalances_1m={rebalances} batch_processing_s={batch_s} max.poll.records={max_poll_records}
+      max.poll.interval.ms=300000 status=HEALTHY'
     attrs:
       operation: pipeline_health
-      pipeline.name:
-        var: health_pipeline
+      pipeline.name: events-primary
+      kafka.consumer_group: events-primary-cg
       pipeline.consumer_lag:
-        var: consumer_lag
-      pipeline.partitions:
-        var: partitions
+        var: lag_records
+      analytics.pipeline_lag_s:
+        var: lag_s
+      analytics.consumer.active_members:
+        var: members
+      analytics.consumer_status: HEALTHY
+      config.max_poll_records:
+        var: max_poll_records
+- when: "cg_degraded"
+  log:
+    level: WARN
+    message: '[Analytics] consumer-group group=events-primary-cg topic=game-events members={members}/8 lag_s={lag_s}
+      lag_records={lag_records} rebalances_1m={rebalances} batch_processing_s={batch_s} max.poll.records={max_poll_records}
+      max.poll.interval.ms=300000 status=DEGRADED'
+    attrs:
+      operation: pipeline_health
+      pipeline.name: events-primary
+      kafka.consumer_group: events-primary-cg
+      pipeline.consumer_lag:
+        var: lag_records
+      analytics.pipeline_lag_s:
+        var: lag_s
+      analytics.consumer.active_members:
+        var: members
+      analytics.consumer_status: DEGRADED
+      config.max_poll_records:
+        var: max_poll_records
+- when: "cg_on"
+  log:
+    level: WARN
+    message: 'kafka.coordinator.consumer: Commit cannot be completed since the group events-primary-cg has already rebalanced
+      and assigned the partitions to another member: time between poll() calls ({batch_s}s for {max_poll_records} records)
+      exceeded max.poll.interval.ms=300000'
+    attrs:
+      operation: consumer_commit_failed
+      kafka.consumer_group: events-primary-cg
+      config.max_poll_records:
+        var: max_poll_records
+- sample:
+    secondary_lag:
+      expr: "rand.randint(0, 400)"
+    replay_lag:
+      expr: "rand.randint(0, 900)"
+- log:
+    level: INFO
+    message: '[Analytics] consumer-group group=events-secondary-cg topic=player-telemetry members=6/6 lag_records={secondary_lag}
+      rebalances_1m=0 max.poll.records=500 max.poll.interval.ms=300000 status=HEALTHY'
+    attrs:
+      operation: pipeline_health
+      pipeline.name: events-secondary
+      kafka.consumer_group: events-secondary-cg
+      pipeline.consumer_lag:
+        var: secondary_lag
+      analytics.consumer_status: HEALTHY
+- log:
+    level: INFO
+    message: '[Analytics] consumer-group group=replay-pipeline-cg topic=game-events-replay members=4/4 lag_records={replay_lag}
+      rebalances_1m=0 max.poll.records=500 max.poll.interval.ms=300000 status=HEALTHY'
+    attrs:
+      operation: pipeline_health
+      pipeline.name: replay-pipeline
+      kafka.consumer_group: replay-pipeline-cg
+      pipeline.consumer_lag:
+        var: replay_lag
+      analytics.consumer_status: HEALTHY
 - every:
     seconds: 10
     state_key: _last_pipeline_report
     steps:
     - log:
         level: INFO
-        message: '[Analytics] summary events_ingested={_events_ingested} pipelines=3 buffer_pct=32.1% lag_s=0.4'
+        message: '[Analytics] summary events_ingested={_events_ingested} pipelines=3 buffer_pct={buffer_pct}% lag_s={lag_s}'
         attrs:
           operation: pipeline_summary
           summary.events_ingested:
             var: _events_ingested
           summary.pipeline_count: 3
-- sample:
-    throughput:
-      if_active:
-        randint:
-        - 100
-        - 2000
-      else:
-        randint:
-        - 3000
-        - 8000
-    lag_s:
-      if_active:
-        uniform:
-        - 30.0
-        - 600.0
-        round: 1
-      else:
-        uniform:
-        - 0.1
-        - 3.0
-        round: 1
-    buffer_pct:
-      if_active:
-        uniform:
-        - 85.0
-        - 100.0
-        round: 1
-      else:
-        uniform:
-        - 10.0
-        - 60.0
-        round: 1
-- metric:
-    name: analytics.throughput
-    value:
-      var: throughput
-    unit: events/s
-- metric:
-    name: analytics.pipeline_lag_s
-    value:
-      var: lag_s
-    unit: s
-- metric:
-    name: analytics.events_ingested
-    value:
-      var: _events_ingested
-    unit: events
-- metric:
-    name: analytics.buffer_usage_pct
-    value:
-      var: buffer_pct
-    unit: '%'

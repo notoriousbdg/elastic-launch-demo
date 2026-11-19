@@ -10,48 +10,122 @@ cascade_services:
 - ehr-system
 description: Real-time insurance eligibility verification via X12 270/271 transaction times out
 investigation_notes: |-
-  Root Cause: X12 270 eligibility inquiries timeout when the payer clearinghouse connection is degraded or the payer's adjudication system is overloaded. Common during open enrollment periods or when a payer's real-time eligibility API is undergoing maintenance. The ISA/GS envelope must match the payer's expected format.
-  Remediation: 1) Test payer connectivity: `x12-admin ping --payer {payer_id} --transaction 270`. 2) Check the clearinghouse status page for the payer (Availity, Change Healthcare, or Trizetto). 3) Reset the X12 gateway connection pool: `systemctl restart x12-eligibility-gateway`. 4) For timed-out requests, resubmit in batch mode: `x12-admin resubmit --insurance {insurance_id} --mode batch`. 5) Verify the ISA qualifier (ZZ) and receiver ID match the payer's enrollment records. 6) Fall back to manual eligibility verification via payer portal if real-time remains unavailable.
+  Root cause: Availity, the clearinghouse for real-time eligibility, posted a degraded-service incident shortly before the first X12-271-TIMEOUT. 270 requests to the four commercial payers routed through Availity now hit the 5000 ms gateway timeout: payer {payer_id} took {elapsed_ms}ms against a {timeout_ms}ms limit (insurance {insurance_id}, patient {patient_id}). Medicare and Medicaid answer through their own connections and stay normal, and ISA envelope validation passes. Nothing changed on the hospital side: this is an upstream provider outage.
+  Confirm:
+    - billing-processor logs [CLAIMS] x12_270_route clearinghouse=availity p95_ms=~5000 timeouts_pct=62-72% payers_timing_out=4/6 ... status=DEGRADED (attributes.x12.clearinghouse)
+    - metric billing.eligibility_p95_ms rises from 700-1400 ms to about 5000 ms; billing.eligibility_timeout_pct to 62-72%
+    - the billing-processor line "clearinghouse_status provider=availity ... status=DEGRADED" comes before the first timeout; MDCR-005 and MDCD-006 keep answering
+  Remediation: fail the 270 route over to the secondary clearinghouse with opsctl patch route/eligibility-270 --clearinghouse trizetto. p95 is back under 1500 ms within about 30 seconds. Raising the gateway timeout only makes registration wait longer, and retrying against Availity adds load to a degraded provider. Switch the route back after Availity closes its incident.
 remediation_action: reset_x12_gateway
 error_message: '[CLAIMS] X12-271-TIMEOUT: payer={payer_id} insurance={insurance_id} patient={patient_id} elapsed={elapsed_ms}ms
   timeout={timeout_ms}ms'
 stack_trace: |-
   --- X12 270/271 TRANSACTION TRACE ---
   >>> 270 Eligibility Inquiry
-  ISA*00*          *00*          *ZZ*FACILITY-01    *ZZ*{payer_id}        *20260217143052*^*00501*000000001*0*P*:
-  GS*HS*FACILITY-01*{payer_id}*20260217143052*0001*X*005010X279A1
+  ISA*00*          *00*          *ZZ*FACILITY-01    *ZZ*{payer_id:15s}*260217*1430*^*00501*000000001*0*P*:
+  GS*HS*FACILITY-01*{payer_id}*20260217*1430*0001*X*005010X279A1
   ST*270*0001*005010X279A1
-  BHT*0022*13*{insurance_id}*20260217143052
+  BHT*0022*13*{insurance_id}*20260217*1430
   HL*1**20*1
   NM1*PR*2*{payer_id}*****PI*{payer_id}
   HL*2*1*21*1
+  NM1*1P*2*FACILITY-01*****XX*1234567893
+  HL*3*2*22*0
   NM1*IL*1*DOE*JANE****MI*{insurance_id}
-  SE*9*0001
+  DMG*D8*19650315
+  DTP*291*D8*20260217
+  EQ*30
+  SE*12*0001
   <<< 271 Response — TIMEOUT
-  X12-271-TIMEOUT: No response from {payer_id} after {elapsed_ms}ms (limit: {timeout_ms}ms)
+  X12-271-TIMEOUT: No response from {payer_id} via clearinghouse availity after {elapsed_ms}ms (limit: {timeout_ms}ms)
   Patient: {patient_id} | Insurance: {insurance_id} | Queued for retry
 correlation_attr:
-  key: infra.x12_gateway_config
-  value: availity-adapter-v4.3.0-rc2
+  key: x12.clearinghouse
+  value: availity
 fault_params:
-  payer_id: {choice: [BCBS-001, AETNA-002, UHC-003, CIGNA-004, MDCR-005, MDCD-006]}
+  payer_id: {choice: [BCBS-001, AETNA-002, UHC-003, CIGNA-004]}
   insurance_id:
     format: "INS-{n}"
     n: {randint: [100000, 999999]}
   patient_id:
     format: "PT-{n}"
     n: {randint: [100000, 999999]}
-  elapsed_ms: {randint: [5000, 30000]}
+  elapsed_ms: {randint: [5001, 5050]}
   timeout_ms: 5000
 rca_clues:
   billing-processor:
     x12.clearinghouse_status: degraded
-    x12.payer_response_ms: {randint: [5000, 30000]}
+    x12.payer_response_ms: {randint: [5500, 30000]}
+    x12.payers_timing_out: 4
+    x12.isa_envelope_validation: pass
   scheduling-api:
     sched.eligibility_check_pending: {randint: [10, 40]}
     sched.self_pay_fallback: true
   ehr-system:
     ehr.unverified_insurance_count: {randint: [5, 25]}
+remediation_command: |-
+  opsctl patch route/eligibility-270 --clearinghouse trizetto
+error_services: [billing-processor]
+service_lag_seconds:
+  scheduling-api: 15
+  ehr-system: 30
+cascade_messages:
+  scheduling-api:
+    - severity: WARN
+      message: '[SCHED] eligibility_pending patient={patient_id} payer={payer_id} insurance={insurance_id}; registration continues as self-pay pending verification'
+  ehr-system:
+    - severity: WARN
+      message: '[EHR] insurance_unverified patient={patient_id} payer={payer_id} insurance={insurance_id}'
+fault_scope:
+  workloads: [billing-processor]
+infrastructure_events:
+  - service: billing-processor
+    severity: WARN
+    offset_seconds: -120
+    body: '[CLAIMS] clearinghouse_status provider=availity service=realtime-eligibility-270 status=DEGRADED incident=AV-INC-58213 summary="Elevated response times for real-time eligibility" source=status.availity.com'
+    attributes:
+      operation: provider_status
+      x12.clearinghouse: availity
+      provider.incident_id: AV-INC-58213
+      provider.status: DEGRADED
+      change.summary: 'Availity real-time eligibility: operational -> degraded'
+remediation_effects:
+  log_events:
+    - service: billing-processor
+      severity: INFO
+      offset_seconds: 1
+      body: '[CHG] CHANGE IMPLEMENTED opsctl patch route/eligibility-270 --clearinghouse trizetto by {actor}: real-time 270 route availity -> trizetto'
+      attributes:
+        operation: change_implemented
+        change.target: route/eligibility-270
+    - service: billing-processor
+      severity: INFO
+      offset_seconds: 5
+      body: '[CLAIMS] x12_270_route clearinghouse=trizetto failover active; first 271 responses received from BCBS-001 and AETNA-002'
+      attributes:
+        operation: eligibility_route_status
+        x12.clearinghouse: trizetto
+  steady_attributes:
+    billing-processor:
+      x12.clearinghouse: trizetto
+  verification:
+    - signal: billing.eligibility_p95_ms
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "billing-processor"'
+      field: 'metrics.billing.eligibility_p95_ms'
+      expect: 'back under 1500 ms (was about 5000 ms) within about 30 seconds'
+      within_seconds: 90
+    - signal: X12-271-TIMEOUT lines
+      from: 'logs.otel.healthcare'
+      where: 'body.text LIKE "*X12-271-TIMEOUT*"'
+      expect: '0 new lines'
+      within_seconds: 90
+    - signal: x12.clearinghouse
+      from: 'logs.otel.healthcare'
+      where: 'resource.attributes.service.name == "billing-processor"'
+      field: 'attributes.x12.clearinghouse'
+      expect: 'trizetto on every x12_270_route line since the fix; availity stops appearing'
+      within_seconds: 90
 business_impact:
   - kpi: business.clean_claim_rate_pct
     factor: {uniform: [0.20, 0.50]}

@@ -7,7 +7,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&family=Space+Mono:wght@400;700&family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/chaos/static/style.css?v=13">
+    <link rel="stylesheet" href="/chaos/static/style.css?v=16">
     <!--THEME_CSS-->
 </head>
 <body>
@@ -62,23 +62,6 @@
                 <div class="info-description" id="info-description"></div>
             </div>
 
-            <!-- Fault Mode -->
-            <div class="mode-selector">
-                <div class="panel-title">FAULT MODE</div>
-                <label class="mode-option">
-                    <input type="radio" name="fault-mode" value="calibration" checked>
-                    <span>Calibration Drift</span>
-                </label>
-                <label class="mode-option">
-                    <input type="radio" name="fault-mode" value="cascade">
-                    <span>Cascading Failure</span>
-                </label>
-                <label class="mode-option">
-                    <input type="radio" name="fault-mode" value="intermittent">
-                    <span>Intermittent</span>
-                </label>
-            </div>
-
             <!-- Notification Settings -->
             <div class="notification-settings">
                 <div class="panel-title">NOTIFICATION</div>
@@ -119,38 +102,10 @@
         <!-- Infrastructure Spikes Panel -->
         <section class="spikes-panel">
         <div class="panel-title">INFRASTRUCTURE SPIKES</div>
-        <div class="spikes-grid">
-            <div class="spike-control">
-                <div class="spike-header">
-                    <span class="spike-label">CPU SPIKE</span>
-                    <span class="spike-value" id="spike-cpu-value">OFF</span>
-                </div>
-                <input type="range" id="spike-cpu" class="spike-slider" min="0" max="100" value="0" step="5">
-            </div>
-            <div class="spike-control">
-                <div class="spike-header">
-                    <span class="spike-label">MEMORY SPIKE</span>
-                    <span class="spike-value" id="spike-memory-value">OFF</span>
-                </div>
-                <input type="range" id="spike-memory" class="spike-slider" min="0" max="100" value="0" step="5">
-            </div>
-            <div class="spike-control">
-                <div class="spike-header">
-                    <span class="spike-label">K8S OOM EVENTS</span>
-                    <span class="spike-value" id="spike-oom-value">OFF</span>
-                </div>
-                <input type="range" id="spike-oom" class="spike-slider" min="0" max="100" value="0" step="5">
-            </div>
-            <div class="spike-control">
-                <div class="spike-header">
-                    <span class="spike-label">LATENCY MULTIPLIER</span>
-                    <span class="spike-value" id="spike-latency-value">1.0x</span>
-                </div>
-                <input type="range" id="spike-latency" class="spike-slider" min="10" max="100" value="10" step="5">
-            </div>
-        </div>
+        <div class="spikes-scope" id="spikes-scope">activate a channel to use these controls</div>
+        <div id="spikes-groups"></div>
         <div class="spikes-note">
-            Spikes target infrastructure of active fault channels. With no faults active, all hosts/clusters are affected.
+            Blast radius of the spikes are scoped to the active channel(s).
         </div>
         </section>
     </div>
@@ -161,6 +116,6 @@
         window.KIBANA_URL = 'KIBANA_URL_PLACEHOLDER';
         window.CHANNEL_TIMEOUT = CHANNEL_TIMEOUT_PLACEHOLDER;
     </script>
-    <script src="/chaos/static/app.js?v=4"></script>
+    <script src="/chaos/static/app.js?v=8"></script>
 </body>
 </html>

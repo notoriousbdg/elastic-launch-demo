@@ -1,0 +1,148 @@
+name: Ecs Autoscaling Lag
+subsystem: edge_api
+vehicle_section: edge_api_pipeline
+error_type: ORD-ECS-SCALING-LAG
+sensor_type: health_check
+affected_services: [orders-gateway]
+cascade_services: [storefront-web]
+
+description: >
+  The orders-gateway ECS service scales out too slowly during a burst because target tracking lags the load, so requests queue at the ALB and checkout slows.
+
+investigation_notes: |
+  1. Search body.text LIKE *ORD-ECS-SCALING-LAG* and confirm running_tasks={running_tasks} is below needed_tasks={needed_tasks} while cpu_pct={cpu_pct}% is above the {target_cpu_pct}% target.
+  2. In CloudWatch compare ECS CPUUtilization with ALB TargetResponseTime and RequestCountPerTarget; response time near {response_ms}ms (alert above 2s average) with per-target requests rising shows capacity is behind demand.
+  3. Review ECS service events and Application Auto Scaling activity: the AlarmHigh alarm needs 3 consecutive 1-minute datapoints above target (plus CloudWatch metric delay), so scale-out fires only after about {lag_s}s of breach, and each new Fargate task then needs roughly 60s to start and pass ALB health checks.
+  4. Confirm no task failures: stopped tasks are 0, health checks pass, and no deployment is in progress, so tasks are healthy but too few.
+  5. Check storefront-web rca_clues (storefront.checkout_queue_ms): checkout latency rises with the gateway queue and recovers when the task count catches up.
+  6. Confirm the setting on the gateway: attributes.aws.ecs.min_capacity on orders-gateway logs reads 4 and orders_gateway.running_tasks stays at 4 while orders_gateway.upstream_latency_ms climbs with the load.
+  7. Remediation: `opsctl patch scalable-target/orders-gateway --min-capacity {target_min_tasks}` raises the floor to {target_min_tasks} tasks (RegisterScalableTarget; Application Auto Scaling raises the service desired count to the new minimum without waiting for the alarm, and the existing maximum must already be at least {target_min_tasks}). {target_min_tasks} tasks hold CPU near the {target_cpu_pct}% target for the {needed_tasks} tasks of demand, and target tracking can still add more above it. Scale-in will not go below {target_min_tasks} until the minimum is lowered again after the campaign. New tasks need about 60 s to start and pass health checks, so latency converges over about 120 s.
+remediation_action: raise_ecs_min_capacity
+remediation_command: |-
+  opsctl patch scalable-target/orders-gateway --min-capacity 8
+
+error_message: |
+  ORD-ECS-SCALING-LAG: service=orders-gateway running_tasks={running_tasks} needed_tasks={needed_tasks} cpu_pct={cpu_pct} alb_response_ms={response_ms}
+
+stack_trace: |
+  === ECS AUTOSCALING LAG REPORT ===
+  cluster=awsorders  service=orders-gateway  launch_type=FARGATE  region=us-east-1
+  --- SCALING STATE ---
+    running_tasks={running_tasks}  desired_tasks={running_tasks}  needed_tasks={needed_tasks}
+    policy=TargetTrackingScaling  target_cpu={target_cpu_pct}%  breach_to_scale_out={lag_s}s
+  --- CLOUDWATCH METRICS ---
+    CPUUtilization={cpu_pct}%  ALB TargetResponseTime_p99={response_ms}ms  (baseline ~120ms)
+    stopped_tasks=0  unhealthy_targets=0
+  --- ASSESSMENT ---
+    cause=target_tracking_lag  deployment_in_progress=false
+  ACTION: raise_min_capacity=true  target_min_tasks={target_min_tasks}  alert=ORD-ECS-SCALING-LAG
+
+infrastructure_events:
+- body: '[ECS] Service orders-gateway: scheduled campaign flash-sale started, RequestCountPerTarget rising sharply while running count stays at 4 (min capacity 4)'
+  severity: WARN
+  offset_seconds: -60
+  event_name: aws.ecs.CampaignTrafficBurst
+  service: orders-gateway
+  attributes:
+    cloud.provider: aws
+    cloud.service: ecs
+    aws.ecs.cluster: awsorders
+    aws.ecs.service: orders-gateway
+    infrastructure.source: ECS
+- body: '[ECS] Service orders-gateway: Application Auto Scaling target tracking alarm TargetTracking-service/awsorders/orders-gateway-AlarmHigh in ALARM (CPUUtilization > {target_cpu_pct} for 3 datapoints within 3 minutes), scale-out in progress and new tasks still starting, running count 4 region=us-east-1'
+  offset_seconds: 180
+  severity: WARN
+  event_name: aws.ecs.ServiceScalingActivity
+  service: orders-gateway
+  attributes:
+    cloud.provider: aws
+    cloud.service: ecs
+    aws.ecs.cluster: awsorders
+    aws.ecs.service: orders-gateway
+    aws.autoscaling.policy_type: TargetTrackingScaling
+    infrastructure.source: ECS
+
+correlation_attr:
+  key: aws.ecs.service_min_capacity
+  value: orders-gateway-min-capacity-4
+
+fault_params:
+  running_tasks: 4
+  needed_tasks: {randint: [6, 8]}
+  cpu_pct: {randint: [88, 99]}
+  target_cpu_pct: 60
+  response_ms: {randint: [3200, 4500]}
+  lag_s: 300
+  target_min_tasks: 8
+
+rca_clues:
+  orders-gateway:
+    ecs.running_vs_needed_tasks: {uniform: [0.28, 0.44], round: 2}
+    ecs.scale_out_lag_s: 300
+    alb.request_count_per_target: {randint: [900, 2500]}
+  storefront-web:
+    storefront.checkout_queue_ms: {randint: [1500, 4000]}
+    storefront.upstream_slow_requests: {randint: [100, 900]}
+
+business_impact:
+  - kpi: business.latency_p99_ms
+    factor: {uniform: [2.0, 4.0]}
+  - kpi: business.throughput_rpm
+    factor: {uniform: [0.7, 0.9]}
+  - kpi: business.availability_pct
+    factor: {uniform: [0.99, 0.998]}
+
+generator_impact:
+  aws_ecs_otel:
+    cpu_utilization_high: 92.0
+  aws_elb_metrics_otel:
+    high_application_load_balancer_target_response_time_average: 3.0
+# the package streams keep the fault while the scenario's own metrics converge
+generator_hold_seconds: {aws_ecs_otel: 120, aws_elb_metrics_otel: 120}
+cascade_messages:
+  storefront-web:
+    - severity: WARN
+      message: '[storefront] checkout call to orders-gateway slow: upstream_ms={response_ms} (queued at the ALB), exceeds the 2000ms checkout budget'
+fault_scope:
+  cluster: awsorders-eks-use1
+  workloads: [orders-gateway]
+onset_delay_seconds: 0
+ramp_seconds: 90
+remediation_effects:
+  transition_seconds: 120
+  log_events:
+    - service: orders-gateway
+      severity: INFO
+      offset_seconds: 1
+      body: 'cloudtrail: eventSource=application-autoscaling.amazonaws.com eventName=RegisterScalableTarget userIdentity={actor} requestParameters.serviceNamespace=ecs requestParameters.resourceId=service/awsorders/orders-gateway requestParameters.minCapacity=8 errorCode=none'
+      attributes:
+        command.target: scalable-target/orders-gateway
+    - service: orders-gateway
+      severity: INFO
+      offset_seconds: 120
+      body: '[ECS] service orders-gateway has reached a steady state: runningCount=8 desiredCount=8 minCapacity=8'
+      attributes:
+        aws.ecs.min_capacity: 8
+  steady_attributes:
+    orders-gateway:
+      aws.ecs.min_capacity: 8
+  verification:
+    - signal: orders_gateway.upstream_latency_ms
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "orders-gateway"'
+      field: 'metrics.orders_gateway.upstream_latency_ms'
+      expect: 'back in 25-140 ms (was 3200-4500 ms)'
+      within_seconds: 180
+    - signal: ORD-ECS-SCALING-LAG lines
+      from: 'logs.otel.awsorders'
+      where: 'body.text LIKE "*ORD-ECS-SCALING-LAG*"'
+      expect: '0 new lines'
+      within_seconds: 180
+    - signal: ECS service minimum capacity
+      from: 'logs.otel.awsorders'
+      where: 'resource.attributes.service.name == "orders-gateway"'
+      field: 'attributes.aws.ecs.min_capacity'
+      expect: '8 on every line since the fix; 4 stops appearing'
+      within_seconds: 180
+service_lag_seconds:
+  storefront-web: 45

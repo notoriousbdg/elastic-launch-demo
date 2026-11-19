@@ -1,0 +1,37 @@
+name: "GT kafka_otel: high_consumer_lag_per_partition"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-KAFKA-HIGH-CONSUMER-LAG-PER-PARTITI
+sensor_type: impact_key_probe
+affected_services:
+  - gt-kafka-aws-svc-1
+cascade_services:
+  - gt-kafka-aws-svc-2
+description: "Tests impact_key high_consumer_lag_per_partition on generator kafka_otel."
+investigation_notes: |-
+  1. Verify kafka_otel is active and reporting metrics.
+  2. Check that the high_consumer_lag_per_partition metric has reached the trigger value (75000.0).
+  3. Confirm generator_impact for kafka_otel.high_consumer_lag_per_partition is set to 75000.0.
+  4. Look for correlated changes in service gt-kafka-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_high_consumer_lag_per_partition_baseline
+error_message: "GT-PROBE: gen=kafka_otel key=high_consumer_lag_per_partition value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=kafka_otel
+  impact_key: high_consumer_lag_per_partition
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 75000.0
+  svc_name: gt-kafka-aws-svc-1
+rca_clues:
+  gt-kafka-aws-svc-1:
+    probe.generator: kafka_otel
+    probe.impact_key: high_consumer_lag_per_partition
+    probe.trigger_value: 75000.0
+  gt-kafka-aws-svc-2:
+    probe.upstream_generator: kafka_otel
+    probe.upstream_key: high_consumer_lag_per_partition
+generator_impact:
+  kafka_otel:
+    high_consumer_lag_per_partition: 75000.0

@@ -1,0 +1,69 @@
+name: Orchestration Control Plane Instability
+subsystem: platform
+vehicle_section: platform_pipeline
+error_type: ORCH-CONTROLPLANE-INSTABILITY
+sensor_type: health_check
+affected_services:
+- data-platform
+cascade_services:
+- ml-inference
+description: "The synthetic Airflow scheduler and its etcd coordination backend are\
+  \ both unstable \u2014 DAG runs on {dag_id} are failing and etcd is churning through\
+  \ leader elections.\n"
+investigation_notes: "1. Search for body.text containing *ORCH-CONTROLPLANE-INSTABILITY*\
+  \ to find the affected DAG.\n2. Check data-platform orchestration.dag_failure_pct\
+  \ and control_plane_latency_ms for the spike.\n3. Confirm airflow_otel dag_failure_rate/scheduler_heartbeat_suppressed\
+  \ and etcd_otel\n   has_leader/proposal_failure_rate are both abnormal.\n4. Check\
+  \ ml-inference ml.model_load_failure_pct for cascading model-refresh DAG failures.\n\
+  5. Verify stability returns once the etcd quorum is restored and the scheduler heartbeat\
+  \ resumes.\n"
+remediation_action: restore_etcd_quorum
+error_message: 'ORCH-CONTROLPLANE-INSTABILITY: dag={dag_id} failure_rate={dag_failure_rate_pct}%
+  etcd_leader_elections={etcd_leader_election_count}
+
+  '
+stack_trace: "OrchestrationControlPlaneInstabilityError: dag={dag_id}\n  at DataPlatform.scheduleDagRun()\n\
+  \  failure_rate={dag_failure_rate_pct}% etcd_leader_elections={etcd_leader_election_count}\n"
+fault_params:
+  dag_id:
+    choice:
+    - generator_healthcheck_dag
+    - fault_schedule_dag
+    - coverage_report_dag
+  dag_failure_rate_pct:
+    uniform:
+    - 30.0
+    - 80.0
+    round: 1
+  etcd_leader_election_count:
+    randint:
+    - 3
+    - 15
+rca_clues:
+  data-platform:
+    orchestration.dag_failure_pct:
+      uniform:
+      - 30.0
+      - 80.0
+      round: 1
+    orchestration.scheduler_heartbeat_missed: true
+  ml-inference:
+    ml.model_load_failure_pct:
+      uniform:
+      - 15.0
+      - 55.0
+      round: 1
+    ml.stale_model_flag: true
+generator_impact:
+  airflow_otel:
+    task_failures_above_threshold:
+      uniform:
+      - 0.3
+      - 0.8
+    scheduler_heartbeats_critically_low: 1.0
+  etcd_otel:
+    no_leader: 1.0
+    proposal_failures:
+      uniform:
+      - 0.3
+      - 0.7

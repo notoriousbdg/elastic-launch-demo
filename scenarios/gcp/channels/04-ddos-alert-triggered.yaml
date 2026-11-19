@@ -11,14 +11,15 @@ cascade_services:
 - cloud-cdn-service
 description: Cloud Armor detecting and mitigating a volumetric DDoS attack
 investigation_notes: |-
-  Root cause: Volumetric DDoS attack targeting the backend service through the external load balancer. Cloud Armor Adaptive Protection has engaged but may not be fully mitigating. Check:
-    gcloud compute security-policies describe <policy> --format=json
-    gcloud compute security-policies rules list <policy>
-  Review Adaptive Protection events in Console > Network Security > Cloud Armor > Events tab.
-  Remediation: Enable Adaptive Protection auto-deploy if not active:
-    gcloud compute security-policies update <policy> --enable-layer7-ddos-defense
-  Add rate-limiting rules targeting source regions: gcloud compute security-policies rules create <priority> --security-policy=<policy> --expression='origin.region_code=="CN"' --action=throttle --rate-limit-threshold-count=100 --rate-limit-threshold-interval-sec=60. Escalate to Google Cloud Support for L3/L4 scrubbing if volume exceeds 100Gbps.
+  Root cause: Cloud Armor Adaptive Protection raised an HTTP flood alert against {armor_backend} (source regions {ddos_source_regions}, about {ddos_volume_gbps}Gbps), and the {armor_policy} policy has no rate limit: the ruleset owasp-crs-v33-canary only matches signatures, so a high-volume flood of well-formed requests passes it and only {ddos_mitigated_pct}% of the attack is mitigated. The flood saturates {armor_backend}. Quota, certificate and origin faults are ruled out: the load balancer shows a request spike (lb.request_spike_pct) with backends healthy but 5xx rising, and nothing was changed on the other policies (gcpnet-waf-policy and gcpnet-ddos-policy are unchanged).
+  Confirm:
+    - cloud-armor-waf metric armor.ddos_mitigated_pct is 55-70 (about 100 before the attack) and armor.backend_5xx_pct is 8-25 (0.1-0.5 before); armor.attack_volume_mbps is about 52000 (20000-90000 band; 0-50 before)
+    - cloud-armor-waf logs "ddos_mitigation_status" show attributes armor.policy={armor_policy}, armor.backend={armor_backend}, armor.rule.rate_limit_global=off, armor.status=ANOMALY
+    - the Adaptive Protection alert line on cloud-armor-waf (infra.armor_ruleset=owasp-crs-v33-canary) comes before the first drop in mitigation
+  Remediation: add the rate-based ban rule to the policy with opsctl apply security-policy/{armor_policy} --rule {armor_rule_name} --action rate_based_ban --threshold 100/60s. The attack keeps coming (armor.attack_volume_mbps stays elevated) but is absorbed: armor.ddos_mitigated_pct climbs back above 99 and armor.backend_5xx_pct returns to 0.1-0.5 over about 60 seconds; armor.rule.rate_limit_global becomes on.
 remediation_action: reset_security_policy
+remediation_command: |-
+  opsctl apply security-policy/gcpnet-edge-policy --rule rate-limit-global --action rate_based_ban --threshold 100/60s
 error_message: '[CloudArmor] ARMOR-DDOS-ALERT policy={armor_policy} attack_type={ddos_attack_type} volume={ddos_volume_gbps}Gbps
   source_regions={ddos_source_regions} mitigated={ddos_mitigated_pct}% backend={armor_backend} rule={armor_rule_name}'
 stack_trace: |-
@@ -32,21 +33,21 @@ stack_trace: |-
   Backend:        {armor_backend}
   Rule Matched:   {armor_rule_name}
   Duration:       ongoing
-  Action:         Adaptive protection engaged, monitoring escalation
+  Action:         Adaptive protection engaged, no rate limit rule on policy
 correlation_attr:
   key: infra.armor_ruleset
-  value: owasp-crs-v4.0.0-rc2
+  value: owasp-crs-v33-canary
 fault_params:
-  armor_policy: {choice: [gcpnet-waf-policy, gcpnet-ddos-policy, gcpnet-edge-policy]}
-  armor_backend: {choice: [backend-lb-central1, backend-lb-east1, backend-lb-europe1]}
-  armor_rule_name: {choice: [rate-limit-global, geo-block-sanctioned, sqli-detection, xss-prevention]}
-  ddos_attack_type: {choice: [SYN_FLOOD, UDP_AMPLIFICATION, HTTP_FLOOD, DNS_AMPLIFICATION]}
-  ddos_volume_gbps: {uniform: [5.0, 120.0], round: 1}
-  ddos_source_regions: {choice: ["CN,RU,BR", "RU,UA,KZ", "multiple (>20 countries)"]}
-  ddos_mitigated_pct: {uniform: [92.0, 99.9], round: 1}
+  armor_policy: gcpnet-edge-policy
+  armor_backend: backend-lb-central1
+  armor_rule_name: rate-limit-global
+  ddos_attack_type: HTTP_FLOOD
+  ddos_volume_gbps: 52.0
+  ddos_source_regions: "CN,RU,BR"
+  ddos_mitigated_pct: 62.0
 rca_clues:
   cloud-armor-waf:
-    armor.attack_vector: {choice: [SYN_FLOOD, HTTP_FLOOD]}
+    armor.attack_vector: HTTP_FLOOD
     armor.adaptive_protection_mode: engaged
   cloud-load-balancer:
     lb.request_spike_pct: {uniform: [400, 2000], round: 0}
@@ -60,8 +61,69 @@ business_impact:
   - kpi: business.cloud_armor_blocks_per_min
     factor: {uniform: [5.0, 20.0]}
   - kpi: business.requests_per_min
-    factor: {uniform: [0.30, 0.65]}
+    value: {uniform: [1041600.0, 1198400.0]}
   - kpi: business.cdn_cache_hit_rate_pct
     factor: {uniform: [0.45, 0.72]}
   - kpi: business.load_balancer_rps
-    factor: {uniform: [0.35, 0.70]}
+    value: {uniform: [16926.0, 19474.0]}
+fault_scope:
+  cluster: gcpnet-gke-east1
+  workloads: [cloud-armor-waf, cloud-load-balancer]
+infrastructure_events:
+  - service: cloud-armor-waf
+    severity: WARN
+    offset_seconds: -90
+    body: 'cloud-armor: Adaptive Protection alert policy=gcpnet-edge-policy backend=backend-lb-central1 attack_type=HTTP_FLOOD source_regions=CN,RU,BR ruleset=owasp-crs-v33-canary no rate-limit rule configured'
+    attributes:
+      operation: adaptive_protection_alert
+      user.name: adaptive-protection
+      change.request: armor-alert-ddos-edge
+      infra.armor_ruleset: owasp-crs-v33-canary
+      armor.policy: gcpnet-edge-policy
+      armor.backend: backend-lb-central1
+cascade_messages:
+  vpc-network-manager:
+    - severity: WARN
+      message: 'vpc: ingress bandwidth spike toward {armor_backend}; flow logs show HTTP flood from {ddos_source_regions}, Cloud Armor mitigated={ddos_mitigated_pct}%'
+  cloud-cdn-service:
+    - severity: WARN
+      message: 'cdn: cache bypass rising for origin {armor_backend}; flood requests carry unique query strings'
+remediation_effects:
+  log_events:
+    - service: vpc-network-manager
+      severity: INFO
+      offset_seconds: 1
+      body: 'gcp-audit: logName=cloudaudit.googleapis.com/activity serviceName=compute.googleapis.com methodName=v1.compute.securityPolicies.addRule resourceName=projects/gcpnet-prod-001/global/securityPolicies/gcpnet-edge-policy principalEmail={actor} status=OK'
+      attributes:
+        operation: audit
+        command.target: security-policy/gcpnet-edge-policy
+    - service: cloud-armor-waf
+      severity: INFO
+      offset_seconds: 10
+      body: 'cloud-armor: policy=gcpnet-edge-policy rule=rate-limit-global action=rate_based_ban threshold=100/60s applied; flood sources now banned'
+      attributes:
+        operation: rule_update
+        armor.rule.rate_limit_global: 'on'
+  steady_attributes:
+    cloud-armor-waf:
+      armor.rule.rate_limit_global: 'on'
+  verification:
+    - signal: armor.ddos_mitigated_pct
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "cloud-armor-waf"'
+      field: 'metrics.armor.ddos_mitigated_pct'
+      expect: 'above 99 (was 55-70)'
+      within_seconds: 120
+    - signal: armor.backend_5xx_pct
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "cloud-armor-waf"'
+      field: 'metrics.armor.backend_5xx_pct'
+      expect: 'back in 0.1-0.5 (was 8-25)'
+      within_seconds: 120
+    - signal: rate limit rule
+      from: 'logs.otel.gcpnet'
+      where: 'resource.attributes.service.name == "cloud-armor-waf"'
+      field: 'attributes.armor.rule.rate_limit_global'
+      expect: 'on on every line since the fix (was off)'
+      within_seconds: 120
+  log_taper_seconds: 60

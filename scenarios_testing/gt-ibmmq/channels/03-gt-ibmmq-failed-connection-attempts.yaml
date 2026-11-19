@@ -1,0 +1,37 @@
+name: "GT ibmmq_otel: failed_connection_attempts"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-IBMMQ-FAILED-CONNECTION-ATTEMPTS
+sensor_type: impact_key_probe
+affected_services:
+  - gt-ibmmq-aws-svc-1
+cascade_services:
+  - gt-ibmmq-aws-svc-2
+description: "Tests impact_key failed_connection_attempts on generator ibmmq_otel."
+investigation_notes: |-
+  1. Verify ibmmq_otel is active and reporting metrics.
+  2. Check that the failed_connection_attempts metric has reached the trigger value (50.0).
+  3. Confirm generator_impact for ibmmq_otel.failed_connection_attempts is set to 50.0.
+  4. Look for correlated changes in service gt-ibmmq-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_failed_connection_attempts_baseline
+error_message: "GT-PROBE: gen=ibmmq_otel key=failed_connection_attempts value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=ibmmq_otel
+  impact_key: failed_connection_attempts
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 50.0
+  svc_name: gt-ibmmq-aws-svc-1
+rca_clues:
+  gt-ibmmq-aws-svc-1:
+    probe.generator: ibmmq_otel
+    probe.impact_key: failed_connection_attempts
+    probe.trigger_value: 50.0
+  gt-ibmmq-aws-svc-2:
+    probe.upstream_generator: ibmmq_otel
+    probe.upstream_key: failed_connection_attempts
+generator_impact:
+  ibmmq_otel:
+    failed_connection_attempts: 50.0

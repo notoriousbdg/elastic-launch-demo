@@ -1,0 +1,42 @@
+service: cert-manager
+sort_order: 6
+cloud_provider: aws
+cloud_region: us-east-1
+cloud_platform: aws_eks
+cloud_availability_zone: us-east-1c
+subsystem: certificates
+language: go
+generates_traces: false
+
+# cert-manager controller. Tenant custom domains are issued through ACME DNS-01:
+# each tenant CNAMEs _acme-challenge.<domain> to the delegated acme.example-saas.io
+# zone, where cert-manager writes the TXT records with the cert-manager-route53 role.
+topology: []
+
+emit_fault_logs: true
+kpi_emitter: false
+
+constants:
+  CERTS:
+    - [tenant-edge, t-1182-custom-tls]
+    - [tenant-edge, t-2290-custom-tls]
+    - [tenant-edge, t-5523-custom-tls]
+    - [tenant-edge, t-7718-custom-tls]
+    - [tenant-edge, t-8812-custom-tls]
+    - [ingress-nginx, wildcard-api-tls]
+
+steps:
+  - sample:
+      cert: {choice: CERTS}
+      renewals_ok: {expr: "round(rand.uniform(99.4, 100.0), 1) if 3 not in all_active else round(rand.uniform(0.0, 6.0), 1)"}
+  - every:
+      seconds: 60
+      state_key: _last_trigger
+      steps:
+        - log:
+            level: INFO
+            message: 'I{klog_time}       1 trigger_controller.go:223] "Certificate does not need re-issuance" logger="cert-manager.controller" key="{cert[0]}/{cert[1]}"'
+            attrs:
+              k8s.namespace.name: {expr: "cert[0]"}
+              cert_manager.certificate: {expr: "cert[1]"}
+  - metric: {name: certmanager.certificate.renewal_success_pct, value: {var: renewals_ok}, unit: '%'}

@@ -1,0 +1,37 @@
+name: "GT gcp_audit_otel: records_per_cycle"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-GCPAUDIT-RECORDS-PER-CYCLE
+sensor_type: impact_key_probe
+affected_services:
+  - gt-gcpaudit-aws-svc-1
+cascade_services:
+  - gt-gcpaudit-aws-svc-2
+description: "Tests impact_key records_per_cycle on generator gcp_audit_otel."
+investigation_notes: |-
+  1. Verify gcp_audit_otel is active and reporting metrics.
+  2. Check that the records_per_cycle metric has reached the trigger value (250).
+  3. Confirm generator_impact for gcp_audit_otel.records_per_cycle is set to 250.
+  4. Look for correlated changes in service gt-gcpaudit-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_records_per_cycle_baseline
+error_message: "GT-PROBE: gen=gcp_audit_otel key=records_per_cycle value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=gcp_audit_otel
+  impact_key: records_per_cycle
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 250
+  svc_name: gt-gcpaudit-aws-svc-1
+rca_clues:
+  gt-gcpaudit-aws-svc-1:
+    probe.generator: gcp_audit_otel
+    probe.impact_key: records_per_cycle
+    probe.trigger_value: 250
+  gt-gcpaudit-aws-svc-2:
+    probe.upstream_generator: gcp_audit_otel
+    probe.upstream_key: records_per_cycle
+generator_impact:
+  gcp_audit_otel:
+    records_per_cycle: 250

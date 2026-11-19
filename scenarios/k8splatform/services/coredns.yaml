@@ -1,0 +1,58 @@
+service: coredns
+sort_order: 3
+cloud_provider: aws
+cloud_region: us-east-1
+cloud_platform: aws_eks
+cloud_availability_zone: us-east-1c
+subsystem: dns
+language: go
+generates_traces: false
+
+# CoreDNS (EKS add-on). The default Corefile has `errors` but no `log` plugin, so
+# CoreDNS only logs errors, reloads and warnings — the per-query picture lives in
+# its metrics. corp.internal is forwarded to the shared-services resolvers; every
+# other name goes to the VPC resolver (10.42.0.2).
+topology: []
+
+emit_fault_logs: true
+kpi_emitter: false
+
+constants:
+  CORP_UPSTREAM_OK: 10.20.0.53,10.20.1.53
+  CORP_UPSTREAM_BAD: 10.20.8.53,10.20.9.53
+
+steps:
+  - sample:
+      corp_bad: {expr: "1 in all_active"}
+      ndots: {expr: "14 in all_active"}
+      corp_upstream: {expr: "CORP_UPSTREAM_BAD if corp_bad else CORP_UPSTREAM_OK"}
+      cfg_sha: {expr: "'1f4d0bcf0a7c' if corp_bad else '9b2e6a51d3c8'"}
+      qps: {expr: "round(rand.uniform(2600, 3300) * (5.0 if ndots else 1.0))"}
+      nxdomain_ratio: {expr: "rand.uniform(0.76, 0.83) if ndots else rand.uniform(0.08, 0.12)"}
+      corp_share: {expr: "rand.uniform(0.07, 0.09)"}
+      servfail_ratio: {expr: "corp_share * rand.uniform(0.97, 1.0) if corp_bad else rand.uniform(0.0001, 0.0006)"}
+      fwd_corp_s: {expr: "round(rand.uniform(1.95, 2.0), 3) if corp_bad else round(rand.uniform(0.002, 0.006), 4)"}
+      fwd_vpc_s: {expr: "round(rand.uniform(0.9, 2.0), 3) if ndots else round(rand.uniform(0.001, 0.003), 4)"}
+  - metric: {name: coredns.dns.requests_per_s, value: {var: qps}, unit: '{query}/s', attrs: {server: 'dns://:53'}}
+  - metric: {name: coredns.dns.responses_per_s, value: {expr: "round(qps * (1 - nxdomain_ratio - servfail_ratio))"}, unit: '{response}/s', attrs: {rcode: NOERROR}}
+  - metric: {name: coredns.dns.responses_per_s, value: {expr: "round(qps * nxdomain_ratio)"}, unit: '{response}/s', attrs: {rcode: NXDOMAIN}}
+  - metric: {name: coredns.dns.responses_per_s, value: {expr: "round(qps * servfail_ratio, 1)"}, unit: '{response}/s', attrs: {rcode: SERVFAIL}}
+  - metric: {name: coredns.forward.request_duration_p99_s, value: {var: fwd_corp_s}, unit: s, attrs: {zone: corp.internal., to: {expr: "corp_upstream.split(',')[0] + ':53'"}}}
+  - metric: {name: coredns.forward.request_duration_p99_s, value: {var: fwd_vpc_s}, unit: s, attrs: {zone: ., to: '10.42.0.2:53'}}
+  # EKS add-on noise: the import glob in the Corefile has no custom files.
+  - every:
+      seconds: 300
+      state_key: _last_glob
+      steps:
+        - log:
+            level: WARN
+            message: '[WARNING] No files matching import glob pattern: custom/*.server'
+  - every:
+      seconds: 900
+      state_key: _last_ready
+      steps:
+        - log:
+            level: INFO
+            message: '[INFO] plugin/reload: Running configuration SHA512 = {cfg_sha}'
+            attrs:
+              dns.corp_upstream: {var: corp_upstream}

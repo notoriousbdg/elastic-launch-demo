@@ -3,11 +3,14 @@
 Use this as a generation checklist for `scenario.yaml`. Work top-to-bottom and verify every property is present and correctly shaped.
 
 The runtime reads scenario data from three sources:
-- `scenarios/<id>/scenario.yaml` — scenario-level properties (identity, infra, agent, KPIs, trace attrs)
+- `scenarios/<id>/scenario.yaml` — scenario-level properties (identity, infra, agent, KPIs, trace attrs, generators)
 - `scenarios/<id>/channels/NN-<slug>.yaml` — one file per fault channel
 - `scenarios/<id>/services/<svc>.yaml` — one file per service (identity, topology, telemetry DSL)
+- `scenarios/<id>/ops.yaml` — the scenario's opsctl profile (see §ops.yaml below)
 
 Reference implementation: [`scenario_engine/yaml_scenario.py`](scenario_engine/yaml_scenario.py)
+
+Reference scenarios: `scenarios/k8splatform/` (schema 1.3, pinned `k8s_topology`, infrastructure faults on one cloud) and `scenarios/space/` (business-impact and dashboard visibility for an application vertical).
 
 ---
 
@@ -22,12 +25,41 @@ Reference implementation: [`scenario_engine/yaml_scenario.py`](scenario_engine/y
 | `scenario_icon` | optional | `str` | Emoji. Default `"🔧"` |
 | `sort_order` | optional | `int` | Lower = earlier. Default 999. Use 10–99 for new scenarios. |
 | `nominal_label` | optional | `str` | Label for the "nominal" state. Default `"NORMAL"`. |
+| `schema_version` | ✅ | `str` | `"1.3"` for new scenarios (the scaffolder writes the current version from `scenario_engine/schema.yaml`). Checks 37-44 apply from 1.3. |
 
 ---
 
+## Generators
+
+Beyond the 9 services and 8 always-on `core` generators (traces, raw_access, host_metrics, kubernetes_otel, nginx_otel, aws_vpcflow_otel, gcp_vpcflow_otel, azure_vnetflow_otel), a scenario can opt in to any number of the 60+ generators registered in `generator_engine.registry.GENERATORS`. Selection happens in Phase 3 Step A.
+
+Enable a generator by adding it to a top-level `generators:` block in `scenario.yaml`:
+
+```yaml
+generators:
+  redis_otel: true               # enable with defaults
+  zookeeper_otel:                 # enable with config_fields overrides
+    node_names: [zk-node-1, zk-node-2, zk-node-3]
+```
+
+Inspect a generator before wiring it up — this is the source of truth for its `config_fields` and the impact keys/ranges its channels can drive:
+
+```bash
+python3 -m generator_engine.registry --describe <gen_id>
+```
+
+**Every selected generator must have exactly one chaos channel with a `generator_impact` block** — otherwise the generator is enabled but no channel ever breaches its alert threshold. See `contract/channels.md` §Generator impact for the channel-side schema.
+
+Two reference patterns already in the repo:
+- `scenarios/ecommerce/channels/10-catalog-redis-purge-storm.yaml` — one channel driving multiple impact keys on one generator, alongside a rich business-impact/RCA story.
+- `scenarios/gt-*/channels/*.yaml` — one channel per impact key, minimal (built for generator coverage testing, not vertical storytelling — don't copy their sparse style into a real scenario).
+
+---
+
+
 ## Infrastructure
 
-### `hosts` — 3 hosts, one per cloud
+### `hosts` — 3 hosts, one per cloud (or 3 nodes of one cloud for a single-cloud scenario such as `k8splatform`)
 
 ```yaml
 hosts:
@@ -86,6 +118,66 @@ k8s_clusters:
     services: [<azure-svc-1>, <azure-svc-2>, <azure-svc-3>]
 ```
 
+### `k8s_topology` — pinned platform (optional, schema 1.3)
+
+Without this block every cluster gets three generated nodes and one pod per service (`generator_engine/infra_topology.py`). That is enough for an application scenario. An infrastructure story needs the numbers to agree everywhere: a scheduler line that says `0/51 nodes are available` must match the node count in the metrics, and a CoreDNS line that reads from `10.42.33.12` must come from a pod with that IP. `k8s_topology` pins that model (`generator_engine/platform_topology.py`). When it is present:
+
+- `kubernetes_otel` reports these nodes, pools, workloads and pods (`generators/kubernetes_otel/pinned.py`), honours each channel's `fault_scope`, ramps, and applies `fault_state` / `remediation_effects.state`.
+- Every service log record takes the identity of a real pod of the workload mapped to it (`service:`), or of a node for `log_identity: node` services; the runtime placeholders (`{self_node}`, `{self_pod_ip}`, `{node_count}`, `{pool_<name>_count}`) read the same model.
+- `host_metrics` limits a scoped fault to the hosts inside the scope (matched by node name).
+
+Keep `k8s_clusters` alongside it: generators that predate `k8s_topology` still read it, and Check 8 still wants 3 hosts and 3 clusters. Pin the 3 `hosts` as real nodes of the topology (list them under `node_pools[].nodes`) so host and node identity agree.
+
+```yaml
+k8s_topology:
+  default_cluster: prod-use1           # cluster used when a scope or state names none
+  clusters:
+    - name: prod-use1
+      provider: aws
+      platform: aws_eks
+      region: us-east-1
+      vpc_cidr: 10.42.0.0/16
+      service_cidr: 172.20.0.0/16
+      kube_dns_ip: 172.20.0.10
+      node_name_format: 'ip-{ip_dashed}.ec2.internal'
+      subnets:                          # AZ -> CIDR; node and pod IPs come from these
+        us-east-1a: 10.42.32.0/23       # (or `zones: [...]` for a minimal comparison cluster)
+        us-east-1b: 10.42.36.0/23
+        us-east-1c: 10.42.40.0/23
+      node_pools:
+        - name: edge-c6i
+          count: 6
+          instance_types: [c6i.2xlarge]
+          cpu: 8
+          memory_gib: 16
+          os_image: Amazon Linux 2023.6.20250115
+          kubelet_version: v1.30.4-eks-a737599
+          nodes: [ip-10-42-33-51.ec2.internal]   # pinned names (a scenario host); the rest are generated
+          # optional: capacity_type: SPOT, arch: arm64, taints: [...], labels: {...}, zones: [...]
+        - name: arm-m7g
+          count: 0                        # added by a channel's fault_state (node_pools.<name>.add_nodes)
+          arch: arm64
+          instance_types: [m7g.2xlarge]
+      workloads:
+        - name: ingress-nginx-controller
+          kind: Deployment                # Deployment | DaemonSet | StatefulSet | Job
+          namespace: ingress-nginx
+          service: ingress-nginx          # the scenario service whose logs come from these pods
+          node_pool: edge-c6i
+          replicas: 6
+          image: registry.k8s.io/ingress-nginx/controller:v1.11.3
+          container: controller
+          cpu_request: 1
+          memory_request: 512Mi
+          memory_limit: 1Gi
+          cpu_util: [0.35, 0.50]          # baseline utilisation ranges
+          memory_util: [0.55, 0.65]
+          # optional: cpu_limit, hpa: {min, max, target_cpu}, pvc: {name, capacity, used},
+          # tolerations, placement: [pool, ...], arch_images, selector, labels
+```
+
+Pools that a change adds (a new node group) start at `count: 0`; the channel that adds them sets `fault_state`. Full example: `scenarios/k8splatform/scenario.yaml` (three EKS clusters; only `prod-use1` is fully pinned, the other two are smaller comparison clusters).
+
 ---
 
 ## Agent config
@@ -99,10 +191,11 @@ agent_config:
     You are the <Role> for a <description>.
     You help engineering teams investigate incidents and perform root cause analysis
     across 9 services spanning AWS, GCP, and Azure.
-    When investigating, search for these error identifiers in logs (field: body.text):
-    <subsystem 1>: ERROR-TYPE-1, ERROR-TYPE-2, ...
-    <subsystem 2>: ERROR-TYPE-3, ERROR-TYPE-4, ...
-    (list all 20 error_type values from channel files, grouped by subsystem)
+    When investigating, search for these error signatures in logs (field: body.text):
+      - <error_type 1>: <one-line meaning>
+      - <error_type 2>: <one-line meaning>
+    (list all 20 error_type values from the channel files; at 1.3 these are natural
+    substrings of the error lines, e.g. "nf_conntrack: table full, dropping packet")
     Log messages are in body.text — NEVER search the body field alone.
 
 assessment_tool_config:
@@ -138,11 +231,15 @@ executive_trend_charts:
 executive_kpi_emissions:
   - name: business.gmv_usd_per_min
     value: {uniform: [1000.0, 9000.0], round: 1}
+    better: higher            # lower | higher — drives tile colours; required if a channel impacts it
     unit: USD/min
   # one entry per metric; field name must match executive_kpi_sections specs
 ```
 
 `field` in `executive_kpi_sections.specs` must be `"metrics.business.<name>"` where `<name>` matches the `name:` in `executive_kpi_emissions` with `"business."` prefix stripped.
+
+Keep nominal ranges narrow and always set `better:` — the executive tile is green inside the nominal band and
+yellow/red outside it (see contract/channels.md §Dashboard visibility). Renaming or removing a KPI means retargeting every channel's `business_impact` (see contract/channels.md §Business impact); the verifier errors on stale names.
 
 ---
 
@@ -182,3 +279,74 @@ raw_log_profile:
     - /api/v1/products
   change_point_path: /api/v1/checkout   # highest-revenue path; spikes during faults
 ```
+
+---
+
+## ops.yaml (schema 1.3)
+
+`scenarios/<id>/ops.yaml` is the scenario's **ops profile**: what `opsctl` (the CLI Claude Code uses to apply a fix, backed by `app/ops.py`) looks like for this scenario. It lives in the scenario folder, so an exported scenario carries it. The engine holds no scenario knowledge. Contract: the `app/ops_profile.py` module docstring and AGENTS.MD "Ops profile". References: `scenarios/k8splatform/ops.yaml` (Kubernetes + AWS) and `scenarios/space/ops.yaml` (no Kubernetes).
+
+The profile is built from scenario-neutral presets in `app/ops_presets/` — `neutral` (always first), then `extends` in order (`kubernetes`, `aws-cloudtrail`, `gcp-audit`, `azure-activity`) — then this file. Mappings merge key by key (`null` removes a key), `side_effects` / `state_changes` concatenate, anything else replaces.
+
+| Key | What to write |
+|---|---|
+| `extends` | Presets for the platform the fixes are applied to; omit for `neutral` only. |
+| `banner` | One sentence for `opsctl --help`: what opsctl changes and where changes are logged. |
+| `actors` | `{default, auto}`: who a Chaos UI resolve and the auto-remediation workflow are, as `{actor}` in fix lines. opsctl itself is always `opsctl/claude-code`. |
+| `auto_remediate_channels` | Channels the workflow fixes without approval (default `[16, 17, 18, 19, 20]`). Drives the `(Auto-Remediate)` rule suffix and KB approval mode. |
+| `verbs` | `{verb: {summary, example, describe, plan, audit_verb}}`. Reuse preset verbs (rollback, restore, renew, rotate, sync, drain, replace, patch, apply, expand, run, delete, restart), overriding `summary` / `example` / `describe` in the scenario's terms. Add a verb only when no existing one reads naturally; remove unused ones with `null`. Every verb needs `summary` and `example`. |
+| `kinds` | Resource kinds the commands target, when they need `aliases`, an `audit` format, `plural`, `group`. |
+| `audit` | `service` (candidate services in order; default the first service), `default` (format name) and `formats.<name>` `{body, attributes, match: {prefix, tokens}}`. The body reads like the platform's own command log. `match` decides when a channel's `{actor}` line in `remediation_effects.log_events` stands in for the command's audit record. |
+| `side_effects`, `state_changes` | Optional extra records after a command; generator state a command sets (keys from that generator's `SPEC.state_keys`). |
+| `runbook` | `{scope_note, recovery_note, audit_label}` phrases the Wiki runbooks use. |
+| `guide` | Markdown shown by `opsctl guide`: where the logs, metrics and command records are, with one runnable ES\|QL example. |
+
+Templates use `{key}` / `{=expr}` over the command context (`command`, `verb`, `kind`, `name`, `target`, `namespace`, `flags`, `actor`, `change_id`, `flag(name)`, `vars`...).
+
+Minimal non-Kubernetes example (from `scenarios/space/ops.yaml`, shortened):
+
+```yaml
+extends: [neutral]
+actors: {default: flight-ops/fcr-console-3, auto: fdir/autonomy-manager}
+auto_remediate_channels: [16, 17, 18, 19, 20]
+verbs:
+  rollback:
+    summary: "Revert firmware, software or a configuration to an earlier revision (--to-revision N|previous)"
+    example: "opsctl rollback firmware/<unit> --to-revision previous"
+  renew: null                       # not used here
+audit:
+  service: [mission-control]
+  default: command_log
+  formats:
+    command_log:
+      body: '[MCC] CMD ACCEPTED opsctl {command} from {actor} change_id={change_id}'
+      attributes: {event.action: "{verb}", command.target: "{target}", user.name: "{actor}", change.id: "{change_id}"}
+      match: {tokens: ["{target}"]}  # a fix line naming {actor} and the target replaces the generic record
+guide:
+  scenario: |
+    ## Where telemetry is
+    - Logs: `FROM logs.otel.<ns>` ... Metrics: `FROM metrics-generic.otel-default` ...
+```
+
+A channel fixed with `opsctl rollback firmware/pms-reg-a --to-revision previous` then carries the log event `'[MCC] CMD ACCEPTED opsctl rollback firmware/pms-reg-a --to-revision previous from {actor}: ...'` on `mission-control`. The verifier validates the file (Check 45) and accepts only its verbs in `remediation_command` (Check 37).
+
+---
+
+## Library workflow inputs (optional)
+
+When the scenario enables generators whose data a Template Library investigation
+workflow reads (today the AWS RDS, ALB, Lambda and SQS generators), the deployer
+installs that workflow and wires it to the matching OOTB package alert rule. The
+generators supply the resource ids it needs (`load_balancer`, `db_instance_identifier`,
+`function_name`, `queue_name`). Add the scenario's own meaning with:
+
+```yaml
+workflow_template_inputs:
+  service_name: orders-gateway                       # every workflow with a service_name input
+  aws-rds-connection-exhaustion-investigation-otel:  # one workflow (slug) overrides
+    service_name: orders-service
+```
+
+Values become the manual-run defaults and the fallback alert-triggered runs use.
+Omit the block when the generic wording ("the backend service") is fine.
+

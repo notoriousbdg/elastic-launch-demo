@@ -5,69 +5,155 @@ error_type: SEASON-PASS-SYNC-FAIL
 sensor_type: sync_validator
 affected_services:
 - leaderboard-api
-- payment-processor
-cascade_services:
-- analytics-pipeline
-description: Season pass XP and tier progression fails to synchronize between game server events and the progression backend
+error_services:
+- leaderboard-api
+cascade_services: []
+description: leaderboard-api v4.8.0 turned on Kafka auto-commit for the xp-events consumer and needs more memory than its limit; OOMKilled pods rebalance the consumer group and XP events whose offsets were already committed are lost
+onset_delay_seconds: 15
+ramp_seconds: 30
 investigation_notes: |-
-  Root cause: the XP event pipeline uses at-most-once delivery from game servers to the progression backend — when the progression service is briefly unavailable or slow, XP events (kill_streak +350, weekly_bonus +2000) are dropped silently without retry.
-  1. Check event delivery: query `FROM logs WHERE body.text LIKE '*SEASON-PASS-SYNC-FAIL*'` and examine which XP event types are consistently marked as NOT APPLIED.
-  2. Verify progression backend health: check the leaderboard-api pods for OOMKilled or CrashLoopBackOff events that coincide with the missed XP window.
-  3. Audit the event bus: inspect Kafka consumer lag for the `xp-events` topic — if consumer group is rebalancing, events may be dropped during partition reassignment.
-  4. Remediate: issue `force_sync_season_pass` to replay missed XP events from the game server event log and recalculate tier placement for affected players.
-  5. Migrate XP event delivery from fire-and-forget HTTP to a durable message queue with at-least-once delivery guarantees and idempotent processing on the consumer side.
-remediation_action: force_sync_season_pass
+  Root cause: Argo CD rolled leaderboard-api from v4.7.3 to v4.8.0 (CHG0071210) about three minutes before the first SEASON-PASS-SYNC-FAIL line. v4.8.0 switched the xp-events consumer (group leaderboard-season-pass) to enable.auto.commit=true and added an in-memory tier cache that pushes the pods past their 512Mi memory limit. The pods are OOMKilled and restart, every restart rebalances the group, and records whose offsets auto-commit had already advanced are dropped with the dead pod, so XP such as the {xp_delta} XP of player {player_id} never lands and the player stays at tier {current_tier} instead of {expected_tier} in season {season_id}. Consumer lag looks healthy because offsets are committed before processing; v4.7.3 committed only after the XP write, which is the healthy comparison from before the rollout.
+  Confirm:
+    - leaderboard-api logs the Argo CD sync to v4.8.0 (attributes.change.request CHG0071210, change.summary enable.auto.commit false -> true) before the first SEASON-PASS-SYNC-FAIL line; its xp_consumer lines carry attributes.deployment.version v4.8.0 and attributes.kafka.enable_auto_commit true (v4.7.3 and false before)
+    - metrics.leaderboard.consumer.rebalances_per_min is 4-12 (baseline 0) and metrics.leaderboard.season_pass.xp_events_dropped_per_min 300-1200 (baseline 0); the Kubernetes OOMKilled and CrashLoopBackOff alerts fire for leaderboard-api in metrics-k8sclusterreceiver.otel-*
+    - attributes.kafka.consumer_group.lag on the xp_consumer lines is 0-40 (baseline 20-200): the records are committed, not waiting, so more consumers or partitions would not help
+  Remediation: run opsctl rollback deployment/leaderboard-api --to-revision previous, then opsctl run job/season-pass-xp-replay. The rollback restores v4.7.3 (commit after write, normal memory use); the pods roll over about 60 seconds and dropped XP and rebalances fall to 0. The replay job re-applies the XP lost behind the committed offsets from the game-server match event log, so metrics.leaderboard.season_pass.players_out_of_sync falls to 0 over about 300 seconds. Restarting the pods or adding replicas only causes more rebalances, and raising the memory limit alone leaves auto-commit on, so the next rebalance loses events again.
+remediation_action: rollback_leaderboard_api_and_replay_xp
+remediation_command: |-
+  opsctl rollback deployment/leaderboard-api --to-revision previous
+  opsctl run job/season-pass-xp-replay
 error_message: '[LB] SEASON-PASS-SYNC-FAIL: player={player_id} tier={current_tier} expected_tier={expected_tier} xp={xp_total}
-  delta={xp_delta}XP season={season_id}'
+  delta={xp_delta}XP season={season_id} consumer_group=leaderboard-season-pass'
 stack_trace: |-
   === SEASON PASS PROGRESSION STATE ===
   player={player_id}  season={season_id}
   ----------- current state -----------
     tier         = {current_tier}
     xp_total     = {xp_total}
-    xp_to_next   = 2,500
     premium      = true
   ----------- expected state ----------
     expected_tier = {expected_tier}
     xp_delta      = {xp_delta}XP (unaccounted)
-    tier_threshold = {xp_total} XP -> tier {expected_tier}
   ----------- recent xp events --------
-    match_complete  +1,200 XP  (2min ago)
-    daily_challenge +800 XP    (4min ago)
-    kill_streak     +350 XP    (5min ago)  <-- NOT APPLIED
-    weekly_bonus    +2,000 XP  (12min ago) <-- NOT APPLIED
-  ----------- action ------------------
-    FORCE_SYNC tier to {expected_tier}  REPLAY missed events
+    match_complete  +1,200 XP  applied
+    daily_challenge +800 XP    applied
+    kill_streak     +350 XP    offset committed (auto), not applied: consumer revoked
+    weekly_bonus    +2,000 XP  offset committed (auto), not applied: consumer revoked
   SEASON-PASS-SYNC-FAIL: player {player_id} stuck at tier {current_tier}, should be {expected_tier}
 correlation_attr:
-  key: runtime.kafka_consumer_config
-  value: consumer-v2.1.0-at-most-once
+  key: deployment.version
+  value: v4.8.0
 fault_params:
   player_id:
     format: "PLR-{n}"
     n: {randint: [100000, 999999]}
-  current_tier: {randint: [1, 50]}
-  expected_tier: {randint: [51, 100]}
+  current_tier: 49
+  expected_tier: 50
   xp_total: {randint: [50000, 500000]}
-  xp_delta: {randint: [1000, 50000]}
-  season_id:
-    format: "S{n}"
-    n: {randint: [1, 12]}
+  xp_delta: 2350
+  season_id: S14
 rca_clues:
   leaderboard-api:
-    leaderboard.xp_event_delivery: at-most-once
-    leaderboard.missed_xp_events: {randint: [100, 2000]}
-  payment-processor:
-    payment.premium_pass_affected: true
-    payment.refund_risk: {choice: [low, medium, high]}
-  analytics-pipeline:
-    analytics.xp_pipeline_lag_s: {randint: [30, 300]}
+    kafka.enable_auto_commit: 'true'
+    kafka.consumer_group.lag: {randint: [0, 40]}
+    leaderboard.xp_consumer_rebalances: {randint: [4, 12]}
+    leaderboard.pod_restarts: {randint: [3, 10]}
+fault_scope:
+  cluster: gaming-gke-cluster
+  workloads: [leaderboard-api]
+infrastructure_events:
+  - service: leaderboard-api
+    severity: INFO
+    offset_seconds: -200
+    body: 'time="{iso_now}" level=info msg="Sync operation to v4.8.0 succeeded" application=argocd/leaderboard-api dest-namespace=progression image=us-central1-docker.pkg.dev/gaming-prod/progression/leaderboard-api:v4.8.0 change=CHG0071210'
+    attributes:
+      operation: deployment_rollout
+      change.request: CHG0071210
+      user.name: progression-release
+      change.summary: 'leaderboard-api v4.7.3 -> v4.8.0 (xp consumer enable.auto.commit false -> true, in-memory tier cache on, memory limit unchanged at 512Mi)'
+      config.key: kafka.consumer.enable.auto.commit
+      deployment.version: v4.8.0
+  - service: leaderboard-api
+    severity: INFO
+    offset_seconds: -120
+    body: 'deployment "leaderboard-api" successfully rolled out (6/6 pods, image leaderboard-api:v4.8.0)'
+    attributes:
+      operation: deployment_rollout
+      deployment.version: v4.8.0
+remediation_effects:
+  transition_seconds: 300
+  log_taper_seconds: 45
+  log_events:
+    - service: leaderboard-api
+      severity: INFO
+      offset_seconds: 1
+      body: 'level=info logger=changelog msg="change applied" cmd="opsctl rollback deployment/leaderboard-api --to-revision previous" actor={actor} result="v4.8.0 -> v4.7.3, rollout started"'
+      attributes:
+        operation: change_applied
+        change.target: deployment/leaderboard-api
+        deployment.version: v4.7.3
+    - service: leaderboard-api
+      severity: INFO
+      offset_seconds: 2
+      body: 'level=info logger=changelog msg="change applied" cmd="opsctl run job/season-pass-xp-replay" actor={actor} result="started season=S14 topic=xp-events source=game-server match event log"'
+      attributes:
+        operation: change_applied
+        change.target: job/season-pass-xp-replay
+    - service: leaderboard-api
+      severity: INFO
+      offset_seconds: 60
+      body: 'deployment "leaderboard-api" successfully rolled out (6/6 pods, image leaderboard-api:v4.7.3, enable.auto.commit=false)'
+      attributes:
+        operation: deployment_rollout
+        deployment.version: v4.7.3
+    - service: leaderboard-api
+      severity: INFO
+      offset_seconds: 300
+      body: '[LB] job=season-pass-xp-replay finished season=S14 events_replayed=48210 players_corrected=11873 duplicates_skipped=0 duration=294s'
+      attributes:
+        operation: xp_replay
+  steady_attributes:
+    leaderboard-api:
+      deployment.version: v4.7.3
+      kafka.enable_auto_commit: 'false'
+  verification:
+    - signal: leaderboard.season_pass.xp_events_dropped_per_min
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "leaderboard-api"'
+      field: 'metrics.leaderboard.season_pass.xp_events_dropped_per_min'
+      expect: '0 (was 300-1200 per minute) once the v4.7.3 pods are all up, about 60 seconds after the rollback'
+      within_seconds: 120
+    - signal: leaderboard.season_pass.players_out_of_sync
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "leaderboard-api"'
+      field: 'metrics.leaderboard.season_pass.players_out_of_sync'
+      expect: '0 (was up to 15000), falling steadily over about 300 seconds as job/season-pass-xp-replay re-applies the missed XP'
+      within_seconds: 360
+    - signal: SEASON-PASS-SYNC-FAIL lines
+      from: 'logs.otel.gaming'
+      where: 'body.text LIKE "*SEASON-PASS-SYNC-FAIL*"'
+      expect: '0 new lines'
+      within_seconds: 120
+    - signal: leaderboard-api version
+      from: 'logs.otel.gaming'
+      where: 'resource.attributes.service.name == "leaderboard-api"'
+      field: 'attributes.deployment.version'
+      expect: 'v4.7.3 on every line since the fix (was v4.8.0)'
+      within_seconds: 120
 business_impact:
   - kpi: business.battle_pass_conversions_per_min
-    factor: {uniform: [0.20, 0.45]}
+    value: {uniform: [4.46, 5.14]}
   - kpi: business.revenue_usd_per_min
-    factor: {uniform: [0.25, 0.50]}
+    value: {uniform: [7254.0, 8346.0], round: 1}
   - kpi: business.churn_risk_index_0_100
     factor: {uniform: [1.8, 3.5]}
   - kpi: business.quests_completed_per_min
     factor: {uniform: [0.25, 0.55]}
+generator_impact:
+  kafka_otel:
+    empty_consumer_groups: 0.8
+  kubernetes_otel:
+    pod_crashloopbackoff: 0.5
+    oomkilled_containers: 1.0
+    container_memory_near_limit: 0.97
+generator_hold_seconds: {kafka_otel: 60, kubernetes_otel: 60}

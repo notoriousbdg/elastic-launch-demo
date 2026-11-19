@@ -10,14 +10,18 @@ cascade_services:
 - dns-dhcp-service
 - firewall-gateway
 description: Site-to-site VPN tunnels between cloud providers repeatedly going up and down
+onset_delay_seconds: 30
+ramp_seconds: 20
 investigation_notes: |-
-  1. Check IKE Phase status: Phase 1 FAILED means pre-shared key mismatch or proposal mismatch; Phase 2 FAILED means IPSec SA negotiation issue.
-  2. Verify DPD (Dead Peer Detection) settings match on both ends — mismatched DPD intervals cause one side to tear down the tunnel while the other thinks it is up.
-  3. For AWS VPN: check `aws ec2 describe-vpn-connections --vpn-connection-id <id>` for tunnel status and CloudWatch VPN metrics.
-  4. For Azure VPN Gateway: check `az network vpn-connection show` and look for IKE SA rekey failures in the diagnostic logs.
-  5. MTU issues cause tunnel flapping under load — set TCP MSS clamping to 1360 on both VPN endpoints and test with large transfers.
-  6. If the tunnel is flapping on rekey (SA_EXPIRED), increase the IKE lifetime and IPSec SA lifetime to reduce rekey frequency during peak traffic.
+  Root cause: the AWS-side VPN gateway vgw-aws-azure was restarted onto vgw-strongswan-5.9.14-rc2 (from 5.9.13) about two minutes before the first VPN-TUNNEL-FLAP. The tunnel came up, but the release candidate ignores the configured rekey margin, so the first child SA is rekeyed after it has already expired. Phase 2 fails with {vpn_ike_status}, the tunnel {vpn_tunnel_name} drops and re-establishes: {vpn_flap_count} flaps in {vpn_flap_window}s on {vpn_src_cloud}->{vpn_dst_cloud}, about 4 a minute. Only this tunnel is affected: aws-to-gcp-01 on vgw-aws-gcp stays ESTABLISHED on 5.9.13. Phase 1 completes, DPD is healthy and no MTU mismatch is detected, which rules out a key mismatch, a dead peer and fragmentation.
+  Confirm:
+    - vgw-aws-azure logs the package install (vgw-strongswan-5.9.14-rc2, CHG0048455) and the charon restart before the first VPN-TUNNEL-FLAP (attributes.network.vpn_gw_firmware)
+    - ipsec-status lines show state=REKEYING, child_sa_rekey_failures_1m about 4 and version=vgw-strongswan-5.9.14-rc2, with charon "CHILD_SA ... expired before rekey completed" lines; metrics network.vpn.tunnel_flaps_per_min and network.vpn.ike_rekey_failures are 3-5 (baseline 0) and network.vpn.tunnel_up flaps between 0 and 1
+    - firewall-gateway shows ESP drops while the tunnel is down but no DPD timeouts
+  Remediation: roll the gateway back with opsctl rollback firmware/vgw-aws-azure --to-revision previous. The gateway restarts (tunnel down for about 30 seconds), then IKE and IPsec renegotiate and the tunnel is ESTABLISHED again about 80 seconds after the fix; flaps drain to 0 by 60 seconds. Changing the Phase 2 lifetime would not fix a rekey-timing defect in the image.
 remediation_action: reset_vpn_tunnel
+remediation_command: |-
+  opsctl rollback firmware/vgw-aws-azure --to-revision previous
 error_message: cloud-networking VPN-TUNNEL-FLAP tunnel={vpn_tunnel_name} path={vpn_src_cloud}->{vpn_dst_cloud} flaps={vpn_flap_count}
   window={vpn_flap_window}s state={vpn_current_state} ike_phase={vpn_ike_phase} ike_status={vpn_ike_status} last_dpd={vpn_last_dpd_sec}s
 stack_trace: |-
@@ -30,43 +34,138 @@ stack_trace: |-
   IKE Phase:      {vpn_ike_phase}
   IKE Status:     {vpn_ike_status}
   Last DPD:       {vpn_last_dpd_sec}s ago
-  Local Gateway:  10.0.1.1
-  Remote Gateway: 10.2.0.1
+  Local Gateway:  3.215.48.17 (AWS tunnel outside IP)
+  Remote Gateway: 20.119.36.52 (Azure VPN GW public IP)
   MTU:            1400
   Rekey Interval: 3600s
+  Gateway Firmware: vgw-strongswan-5.9.14-rc2
   Action:         Check IPSec SA, verify gateway reachability
 correlation_attr:
   key: network.vpn_gw_firmware
   value: vgw-strongswan-5.9.14-rc2
 fault_params:
-  vpn_tunnel_name: {choice: [aws-to-azure-01, aws-to-gcp-01, gcp-to-azure-01]}
-  vpn_src_cloud: {choice: [aws, gcp]}
-  vpn_dst_cloud: {choice: [azure, gcp]}
-  vpn_flap_count: {randint: [5, 30]}
-  vpn_flap_window: {randint: [60, 600]}
-  vpn_current_state: {choice: [DOWN, NEGOTIATING, REKEYING]}
-  vpn_ike_phase: {choice: ["1", "2"]}
-  vpn_ike_status: {choice: [FAILED, TIMEOUT, SA_EXPIRED]}
+  vpn_tunnel_name: aws-to-azure-01
+  vpn_src_cloud: aws
+  vpn_dst_cloud: azure
+  vpn_flap_count: {randint: [18, 22]}
+  vpn_flap_window: 300
+  vpn_current_state: REKEYING
+  vpn_ike_phase: "2"
+  vpn_ike_status: SA_EXPIRED
   vpn_last_dpd_sec: {randint: [30, 300]}
 rca_clues:
   cloud-inventory-scanner:
     cloud_scan.vpn_dependent_services: {randint: [3, 9]}
     cloud_scan.cross_cloud_latency_ms: {randint: [200, 2000]}
   network-controller:
-    network.ike_rekey_failures: {randint: [3, 20]}
-    network.mtu_mismatch_detected: {choice: [true, false]}
+    network.ike_rekey_failures: {randint: [3, 5]}
+    network.mtu_mismatch_detected: false
+    network.vpn_gw_firmware: vgw-strongswan-5.9.14-rc2
   dns-dhcp-service:
     dns.cross_cloud_resolution_broken: true
-    dns.conditional_forwarder_down: {choice: [aws-to-azure, gcp-to-azure]}
+    dns.conditional_forwarder_down: aws-to-azure
   firewall-gateway:
     firewall.ipsec_esp_drops: {randint: [100, 5000]}
-    firewall.dpd_timeout_count: {randint: [5, 50]}
+    firewall.dpd_timeout_count: 0
+cascade_messages:
+  dns-dhcp-service:
+    - severity: ERROR
+      message: 'named[1823]: conditional forwarder aws-to-azure unreachable: no response from 10.2.0.53#53 while tunnel {vpn_tunnel_name} is {vpn_current_state}'
+  firewall-gateway:
+    - severity: WARN
+      message: '1,{iso_now},007200001234,SYSTEM,vpn,0,ipsec-esp-drop,ESP packets dropped for tunnel {vpn_tunnel_name} (ike_phase {vpn_ike_phase} {vpn_ike_status}); no DPD timeout recorded'
+fault_scope:
+  workloads: [cloud-inventory-scanner, network-controller]
+infrastructure_events:
+  - service: network-controller
+    severity: INFO
+    offset_seconds: -120
+    body: 'ipsec: vgw-aws-azure package vgw-strongswan-5.9.14-rc2 installed (was vgw-strongswan-5.9.13); installed by cloudnet-release (CHG0048455)'
+    attributes:
+      user.name: cloudnet-release
+      change.request: CHG0048455
+      operation: firmware_load
+      network.device: vgw-aws-azure
+      network.vpn_gw_firmware: vgw-strongswan-5.9.14-rc2
+      change.summary: 'vgw-aws-azure firmware: vgw-strongswan-5.9.13 -> vgw-strongswan-5.9.14-rc2'
+  - service: network-controller
+    severity: INFO
+    offset_seconds: -100
+    body: 'charon: 00[DMN] Starting IKE charon daemon (strongSwan 5.9.14rc2, Linux 6.1.0-aws, x86_64) [vgw-aws-azure]'
+    attributes:
+      operation: firmware_load
+      network.device: vgw-aws-azure
+      network.vpn_gw_firmware: vgw-strongswan-5.9.14-rc2
+  - service: network-controller
+    severity: INFO
+    offset_seconds: -90
+    body: 'charon: 12[IKE] CHILD_SA aws-to-azure-01{11} established with SPIs c1a2b3d4_i d4c3b2a1_o and TS 10.10.0.0/16 === 10.2.0.0/16 [vgw-aws-azure]'
+    attributes:
+      operation: vpn_check
+      network.device: vgw-aws-azure
+      network.vpn_gw_firmware: vgw-strongswan-5.9.14-rc2
+remediation_effects:
+  log_events:
+    - service: network-controller
+      severity: INFO
+      offset_seconds: 1
+      body: '[CHG] CHANGE APPLIED opsctl rollback firmware/vgw-aws-azure --to-revision previous by {actor}: vgw-aws-azure vgw-strongswan-5.9.14-rc2 -> vgw-strongswan-5.9.13, restarting'
+      attributes:
+        operation: firmware_load
+        change.target: firmware/vgw-aws-azure
+    - service: network-controller
+      severity: INFO
+      offset_seconds: 5
+      body: 'charon: 00[DMN] signal of type SIGTERM received. Shutting down [vgw-aws-azure]'
+      attributes:
+        operation: firmware_load
+        network.device: vgw-aws-azure
+    - service: network-controller
+      severity: INFO
+      offset_seconds: 30
+      body: 'charon: 00[DMN] Starting IKE charon daemon (strongSwan 5.9.13, Linux 6.1.0-aws, x86_64) [vgw-aws-azure]'
+      attributes:
+        operation: firmware_load
+        network.device: vgw-aws-azure
+        network.vpn_gw_firmware: vgw-strongswan-5.9.13
+    - service: network-controller
+      severity: INFO
+      offset_seconds: 80
+      body: 'charon: 14[IKE] CHILD_SA aws-to-azure-01{14} established with SPIs e5f6a7b8_i b8a7f6e5_o and TS 10.10.0.0/16 === 10.2.0.0/16 [vgw-aws-azure]'
+      attributes:
+        operation: vpn_check
+        network.device: vgw-aws-azure
+        network.vpn_gw_firmware: vgw-strongswan-5.9.13
+  steady_attributes:
+    network-controller:
+      network.vpn_gw_firmware: vgw-strongswan-5.9.13
+  verification:
+    - signal: network.vpn.tunnel_up
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "network-controller"'
+      field: 'metrics.network.vpn.tunnel_up'
+      expect: '0 while the gateway restarts and renegotiates, then a steady 1 from about 80 seconds after the fix (was flapping between 0 and 1)'
+      within_seconds: 180
+    - signal: network.vpn.tunnel_flaps_per_min
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "network-controller"'
+      field: 'metrics.network.vpn.tunnel_flaps_per_min'
+      expect: '0 within about 60 seconds of the fix (was 3-5)'
+      within_seconds: 180
+    - signal: VPN gateway firmware and tunnel state
+      from: 'logs.otel.fanatics'
+      where: 'resource.attributes.service.name == "network-controller"'
+      field: 'attributes.network.vpn_gw_firmware'
+      expect: 'vgw-strongswan-5.9.13 and attributes.vpn.tunnel_state ESTABLISHED on every ipsec-status line for aws-to-azure-01 from about 80 seconds after the fix (was vgw-strongswan-5.9.14-rc2 and REKEYING)'
+      within_seconds: 180
 business_impact:
   - kpi: business.app_sessions_per_min
-    factor: {uniform: [0.20, 0.50]}
+    value: {uniform: [334.8, 385.2]}
   - kpi: business.page_views_per_min
-    factor: {uniform: [0.20, 0.50]}
+    value: {uniform: [66960.0, 77040.0]}
   - kpi: business.betting_handle_usd_per_min
-    factor: {uniform: [0.25, 0.55]}
+    value: {uniform: [66960.0, 77040.0], round: 1}
   - kpi: business.api_data_partner_revenue_usd_per_min
-    factor: {uniform: [0.25, 0.55]}
+    value: {uniform: [3627.0, 4173.0], round: 1}
+# dependents degrade after the component at fault, in dependency order
+service_lag_seconds: {cloud-inventory-scanner: 15, dns-dhcp-service: 30, firewall-gateway: 45}

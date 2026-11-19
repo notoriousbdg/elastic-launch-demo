@@ -9,62 +9,132 @@ affected_services:
 cascade_services:
 - member-portal
 - claims-processor
-description: Underwriting rules engine producing inconsistent decisions on policy applications
+description: Eligible members are declined for auto coverage because a new underwriting rules change set makes two discount rules conflict.
 investigation_notes: |-
-  1. Identify the conflicting rule — check which specific rule in the 2,847-rule chain is producing inconsistent results. Cross-reference with change_set CS-4827 deployed on 2026-02-15.
-  2. Conflict rate 2.4% vs 0.5% threshold indicates a systematic issue, not isolated cases. Review the rule deployment diff: git diff CS-4826..CS-4827 -- rules/ to identify changed rules.
-  3. Check rule execution order dependencies — rules like military_discount_eligibility and multi_policy_bundle may have ordering conflicts when both conditions apply simultaneously.
-  4. Verify garaging_zip risk factors are using current ISO territory data — outdated territory mappings near military bases can cause incorrect risk classification (e.g., Fort Liberty zip codes).
-  5. For affected applications, route to manual underwriting queue with full rule execution trace. Flag applications where expected=APPROVE but actual=DECLINE for priority review — these represent members being incorrectly denied coverage.
-  6. Consider rules engine rollback if conflict rate doesn't stabilize within 1 hour. Rollback command: kubectl rollout undo deployment/rules-engine -n banking-underwriting.
-remediation_action: rollback_rules_engine
-error_message: '[UW] UW-RULES-ENGINE-ERR: application={app_id} product={insurance_product} rule={failed_rule} expected={expected_decision}
-  actual={actual_decision}'
+  1. Search logs.otel.banking for body.text containing UW-RULES-ENGINE-ERR on quote-engine: application={app_id} for {insurance_product} hits rule={failed_rule} with expected={expected_decision} and actual={actual_decision}. metrics.quote_engine.rule_conflict_rate_pct normally reads 0.05-0.3% and is now 1.8-3.2% against a 0.5% alert threshold; metrics.quote_engine.uw_decline_rate_pct went from 6-9% to 21-28%.
+  2. The engine is fast and healthy: quote_engine.response_time_ms stays in its normal 120-450 ms band, so this is a decision problem, not capacity (which separates it from a renewal batch overload).
+  3. Find the change: the ruleset_status line on quote-engine carries attributes.uw.ruleset_version. Change set CS-4827 for ruleset uw-auto-personal was published just before the first conflict; it reordered military_discount_eligibility after multi_policy_bundle, so members who qualify for both now fall through to the decline path.
+  4. Check the declines are wrong, not tighter by design: the declined applications pass eligibility, credit tier and driving record checks (stack dump), and the affected garaging ZIPs are near military installations, where both discounts are common.
+  5. Fix: opsctl rollback ruleset/uw-auto-personal -n underwriting --to-revision previous republishes CS-4826. The rules engine hot-loads the ruleset in a few seconds; conflict and decline rates fall back as new applications are evaluated (about a minute). Rolling back the rules engine deployment would not help: the code did not change, the rules did.
+  6. Recovery: uw.ruleset_version reads CS-4826, rule_conflict_rate_pct under 0.5%, uw_decline_rate_pct back in 6-9%, and no new UW-RULES-ENGINE-ERR lines. Re-evaluate applications declined during the window (policy-manager manual underwriting queue) and contact those members.
+remediation_action: rollback_uw_ruleset
+remediation_command: |-
+  opsctl rollback ruleset/uw-auto-personal -n underwriting --to-revision previous
+error_message: '[UW] UW-RULES-ENGINE-ERR: application={app_id} product={insurance_product} rule={failed_rule} expected={expected_decision} actual={actual_decision} ruleset=uw-auto-personal change_set=CS-4827'
 stack_trace: |-
   === UNDERWRITING RULES ENGINE ===
-  application={app_id}  product={insurance_product}
+  application={app_id}  product={insurance_product}  ruleset=uw-auto-personal  change_set=CS-4827
   --- RULE EXECUTION CHAIN ---
     RULE                     RESULT      DETAIL
     eligibility_check        PASS        member_since=2018, active_duty
     credit_score_tier        PASS        score=742, tier=PREFERRED
     driving_record           PASS        violations=0, accidents=0
     garaging_zip_risk        PASS        zip={garaging_zip}, risk=LOW
+    multi_policy_bundle      APPLIED     bundle=auto+renters
     {failed_rule}            CONFLICT    expected={expected_decision} got={actual_decision}
-    bundle_discount          SKIPPED     blocked by conflict
   --- RULE ENGINE HEALTH ---
-    version=RulesEngine-v7.4  rule_count=2,847
-    conflict_rate=2.4%  threshold=0.5%  <<< EXCEEDED
-    last_deployment=2026-02-15  change_set=CS-4827
-  ACTION: flag_manual_uw=true  rollback_rules=EVALUATE  alert=UW-RULES-ENGINE-ERR
+    rule_count=2,847  conflict_rate={conflict_rate}%  threshold=0.5%  <<< EXCEEDED
+  ACTION: flag_manual_uw=true  alert=UW-RULES-ENGINE-ERR
 correlation_attr:
-  key: runtime.underwriting_rule_chain
-  value: uw-rules-v7.4.1-canary
+  key: uw.ruleset_version
+  value: CS-4827
 fault_params:
   app_id: {format: "APP-{n}", n: {randint: [100000, 999999]}}
-  insurance_product: {choice: [AUTO_PERSONAL, AUTO_COMMERCIAL, HOMEOWNERS_HO3, RENTERS_HO4, UMBRELLA, VALUABLE_PERSONAL_PROPERTY]}
-  failed_rule: {choice: [military_discount_eligibility, multi_policy_bundle, garaging_risk_factor, vehicle_safety_rating, deployment_surcharge_waiver, good_driver_discount]}
-  expected_decision: {choice: [APPROVE, REFER]}
-  actual_decision: {choice: [DECLINE, APPROVE, REFER]}
-  garaging_zip: {choice: ["78209", "78216", "32225", "23452", "80917", "28307"]}
+  insurance_product: {choice: [AUTO_PERSONAL, AUTO_PERSONAL, AUTO_MULTI_CAR]}
+  failed_rule: military_discount_eligibility
+  expected_decision: APPROVE
+  actual_decision: DECLINE
+  garaging_zip: {choice: ["78234", "76544", "28310", "23511", "80913", "32212"]}
+  conflict_rate: {uniform: [1.8, 3.2], round: 1}
 rca_clues:
   quote-engine:
-    quote.rules_engine_conflict_rate_pct: {uniform: [1.5, 4.0], round: 1}
-    quote.change_set_version: CS-4827
+    uw.ruleset_version: CS-4827
+    quote.rules_engine_conflict_rate_pct: {uniform: [1.8, 3.2], round: 1}
   policy-manager:
     policy.manual_uw_queue_depth: {randint: [50, 300]}
     policy.incorrect_decline_count: {randint: [10, 80]}
   member-portal:
-    portal.application_status_display: UNDER_REVIEW
-    portal.member_callback_requested: {randint: [20, 100]}
+    portal.application_status_display: DECLINED
   claims-processor:
     claims.coverage_verification_delayed: true
-    claims.rule_conflict_flag: true
+error_services:
+- quote-engine
+service_lag_seconds:
+  member-portal: 30
+  claims-processor: 60
+cascade_messages:
+  policy-manager:
+  - severity: WARN
+    message: '[POLICY] manual_uw_queued application={app_id} reason=rule_conflict rule={failed_rule} status=QUEUED'
+  member-portal:
+  - severity: WARN
+    message: '[PORTAL] member_action action=START_QUOTE product={insurance_product} result=DECLINED status=COMPLETED'
+  claims-processor:
+  - severity: INFO
+    message: '[CLAIMS] coverage_check application={app_id} result=NO_ACTIVE_POLICY reason=application_declined status=PENDING'
+fault_scope:
+  cluster: banking-aks-cluster
+  workloads: [quote-engine]
+infrastructure_events:
+- service: quote-engine
+  severity: INFO
+  offset_seconds: -90
+  body: '[UW] ruleset_publish ruleset=uw-auto-personal change_set=CS-4826 -> CS-4827 rules_changed=14 published_by=uw-rules-release approval=CHG0048290 status=ACTIVE'
+  attributes:
+    operation: ruleset_publish
+    uw.ruleset_version: CS-4827
+    user.name: uw-rules-release
+remediation_effects:
+  transition_seconds: 60
+  log_events:
+  - service: quote-engine
+    severity: INFO
+    offset_seconds: 1
+    body: '[change-audit] change applied action=rollback target=ruleset/uw-auto-personal namespace=underwriting cmd="opsctl rollback ruleset/uw-auto-personal -n underwriting --to-revision previous" actor={actor} result="CS-4827 -> CS-4826"'
+    attributes:
+      operation: change_applied
+      change.target: ruleset/uw-auto-personal
+      uw.ruleset_version: CS-4826
+  - service: quote-engine
+    severity: INFO
+    offset_seconds: 4
+    body: '[UW] ruleset_publish ruleset=uw-auto-personal change_set=CS-4827 -> CS-4826 hot_reload=true status=ACTIVE'
+    attributes:
+      operation: ruleset_publish
+      uw.ruleset_version: CS-4826
+  steady_attributes:
+    quote-engine:
+      uw.ruleset_version: CS-4826
+  verification:
+  - signal: quote_engine.rule_conflict_rate_pct
+    from: metrics-generic.otel-default
+    where: resource.attributes.service.name == "quote-engine"
+    field: metrics.quote_engine.rule_conflict_rate_pct
+    expect: back under 0.5% (was 1.8-3.2%)
+    within_seconds: 120
+  - signal: quote_engine.uw_decline_rate_pct
+    from: metrics-generic.otel-default
+    where: resource.attributes.service.name == "quote-engine"
+    field: metrics.quote_engine.uw_decline_rate_pct
+    expect: back in 6-9% (was 21-28%)
+    within_seconds: 120
+  - signal: active underwriting ruleset
+    from: logs.otel.banking
+    where: resource.attributes.service.name == "quote-engine" AND attributes.operation == "ruleset_status"
+    field: attributes.uw.ruleset_version
+    expect: CS-4826 on every line logged since the fix; CS-4827 stops appearing
+    within_seconds: 60
+  - signal: UW-RULES-ENGINE-ERR lines
+    from: logs.otel.banking
+    where: body.text LIKE "*UW-RULES-ENGINE-ERR*"
+    expect: 0 new lines
+    within_seconds: 120
 business_impact:
   - kpi: business.loan_origination_usd_per_min
-    factor: {uniform: [0.30, 0.60]}
+    value: {uniform: [104160.0, 119840.0], round: 1}
   - kpi: business.account_openings_per_min
-    factor: {uniform: [0.25, 0.55]}
+    value: {uniform: [0.3, 0.34], round: 2}
   - kpi: business.net_satisfaction_proxy_nps
-    factor: {uniform: [0.40, 0.70]}
+    value: {uniform: [14.28, 16.42], round: 1}
   - kpi: business.complaint_tickets_per_min
     factor: {uniform: [2.0, 4.0]}

@@ -1,0 +1,37 @@
+name: "GT traefik_otel: stale_config_reload_success"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-TRAEFIK-STALE-CONFIG-RELOAD-SUCCESS
+sensor_type: impact_key_probe
+affected_services:
+  - gt-traefik-aws-svc-1
+cascade_services:
+  - gt-traefik-aws-svc-2
+description: "Tests impact_key stale_config_reload_success on generator traefik_otel."
+investigation_notes: |-
+  1. Verify traefik_otel is active and reporting metrics.
+  2. Check that the stale_config_reload_success metric has reached the trigger value (180.0).
+  3. Confirm generator_impact for traefik_otel.stale_config_reload_success is set to 180.0.
+  4. Look for correlated changes in service gt-traefik-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_stale_config_reload_success_baseline
+error_message: "GT-PROBE: gen=traefik_otel key=stale_config_reload_success value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=traefik_otel
+  impact_key: stale_config_reload_success
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 180.0
+  svc_name: gt-traefik-aws-svc-1
+rca_clues:
+  gt-traefik-aws-svc-1:
+    probe.generator: traefik_otel
+    probe.impact_key: stale_config_reload_success
+    probe.trigger_value: 180.0
+  gt-traefik-aws-svc-2:
+    probe.upstream_generator: traefik_otel
+    probe.upstream_key: stale_config_reload_success
+generator_impact:
+  traefik_otel:
+    stale_config_reload_success: 180.0

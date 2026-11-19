@@ -1,72 +1,125 @@
 name: S1-MME Interface Congestion
 subsystem: network
 vehicle_section: core_network
-error_type: NET-S1MME-CONGEST
+error_type: OVERLOAD START sent to
 sensor_type: signaling
 affected_services:
 - network-core
 - provisioning-service
 cascade_services:
 - notification-service
-description: S1-MME signaling interface congested causing attach/detach procedure delays across MME pool
-investigation_notes: |
-  1. Check MME signaling load — S1-MME SCTP association handling above 85% capacity causes queuing of NAS messages (Attach, TAU, Service Request). Monitor: mme.sctp_association_count and mme.nas_msg_queue.
-  2. Identify the source of signaling surge — mass TAU (Tracking Area Update) storms from moving subscribers (trains, highways) can spike signaling 10-20x above baseline.
-  3. Review MME pool load balancing — if one MME in the pool is receiving disproportionate signaling load, DNS-based S1-MME distribution may need rebalancing.
-  4. Check for paging storms — excessive paging for idle-mode subscribers (e.g., push notification bursts) consumes S1-MME capacity. Coordinate with notification-service to throttle.
-  5. Enable S1-MME overload control: send OVERLOAD START to eNodeBs to trigger reject-non-emergency procedures. This preserves capacity for emergency calls and critical activations.
-remediation_action: rebalance_mme_pool
-error_message: '[NET] NET-S1MME-CONGEST: mme_id={mme_id} sctp_load={sctp_load_pct}% nas_queue={nas_queue_depth} attach_delay_ms={attach_delay_ms} region={mme_region}'
-stack_trace: |
-  === S1-MME INTERFACE STATUS ===
-  mme_id={mme_id}  region={mme_region}  pool=MME-POOL-EU-CENTRAL
-  --- SIGNALING METRICS ---
-    METRIC               VALUE       CAPACITY    STATUS
-    sctp_associations     {sctp_load_pct}%       85%         CONGESTED
-    nas_msg_queue         {nas_queue_depth}       1000        OVERFLOW
-    attach_procedures     4,200/min   5,000/min   WARNING
-    tau_procedures        8,400/min   6,000/min   EXCEEDED  <<< SURGE
-  --- PROCEDURE DELAYS ---
-    attach_avg_ms={attach_delay_ms}  baseline=50ms  multiplier={attach_multiplier}x
-    tau_avg_ms=1,200    baseline=30ms
-    service_request_avg_ms=800  baseline=20ms
-  ACTION: overload_start=true  rebalance_pool=true  alert=NET-S1MME-CONGEST
-infrastructure_events:
-- body: '[GCP-Monitoring] SCTPAssociationDegraded: interface=S1-MME load_pct=95 nas_queue=500 region=europe-west3 cluster=network-core-gke'
-  severity: WARN
-  event_name: gcp.monitoring.SCTPAssociationDegraded
-  service: network-core
-  attributes:
-    cloud.provider: gcp
-    cloud.service: monitoring
-    gcp.resource_type: gke_container
-    infrastructure.source: GCP-Monitoring
+description: the MME pool's periodic TAU timer was cut from 54 to 12 minutes and the resulting signalling load pushed the MMEs into overload control
+investigation_notes: |-
+  Root cause: a packet core configuration change (CR-88177, meant for the IoT APN profile only) set T3412 (periodic tracking area update timer) to 12 minutes for the whole mme-pool-eu-central instead of 54 minutes. UEs pick up the new timer at their next TAU, so the periodic TAU rate climbs from the change on: TAU is now {tau_per_min}/min (normally about 11,000/min) and MME CPU is {mme_cpu_pct}%. Above 85% CPU the MMEs send S1AP OVERLOAD START to the eNBs, which then reject new non-emergency mobile-originated connections. Attach volume, paging and the S-GW/P-GW are normal; the extra load is periodic TAU only.
+  Confirm:
+    - the network-core line "config mme-pool-eu-central revision ... T3412 54min -> 12min" comes before the TAU rate starts to climb and before the first OVERLOAD START, and MME status lines carry attributes.mme.t3412_min 12 from the change on
+    - metric network_core.tau_per_min climbs from its normal 11,000/min to about 3x, and network_core.mme_cpu_pct crosses 85% about 2 minutes after the change
+    - metric network_core.attach_per_min stays near 900/min, which rules out an attach storm after an outage
+  Remediation: revert the pool configuration with opsctl rollback config/mme-pool-eu-central --to-revision previous. UEs get T3412=54 at their next TAU, so the TAU rate falls over several minutes rather than at once: MME CPU drops under 85% within about a minute (the MMEs stop sending OVERLOAD START), under 70% within about 3 minutes, and TAU is under 20,000/min within about 4 minutes. Adding MMEs to the pool or restarting them would trigger re-attaches and make the signalling load worse.
+remediation_action: revert_mme_pool_timers
+error_message: 'mme-fra-01 s1ap: OVERLOAD START sent to {enb_count} eNBs (OverloadAction=reject-non-emergency-mo-dt, cpu={mme_cpu_pct}%, tau_rate={tau_per_min}/min, pool=mme-pool-eu-central)'
+stack_trace: |-
+  S1AP OverloadStart
+    OverloadResponse: overloadAction (0) reject-non-emergency-mo-dt (0)
+    TrafficLoadReductionIndication: 50
+  mme-fra-01 cpu={mme_cpu_pct}% threshold=85% nas_queue=4812
+  mme-pool-eu-central T3412=12min (profile default) tau_rate={tau_per_min}/min
 correlation_attr:
-  key: network.mme_firmware
-  value: mme-v8.2.0-rc1
+  key: mme.t3412_min
+  value: '12'
 fault_params:
-  mme_id: {format: "MME-EU-{n:02d}", n: {randint: [1, 8]}}
-  sctp_load_pct: {randint: [85, 98]}
-  nas_queue_depth: {randint: [1000, 5000]}
-  attach_delay_ms: {randint: [500, 3000]}
-  mme_region: EU-CENTRAL
-  attach_multiplier: {randint: [5, 30]}
+  enb_count: {randint: [1180, 1260]}
+  mme_cpu_pct: {uniform: [88.0, 97.0], round: 1}
+  tau_per_min: {randint: [31000, 36000]}
+  delayed_sms: {randint: [400, 1200]}
 rca_clues:
   network-core:
-    network.sctp_load_pct: {randint: [85, 98]}
-    network.nas_queue_depth: {randint: [1000, 5000]}
+    mme.pool: mme-pool-eu-central
+    mme.t3412_min: 12
+    mme.cpu_pct: {uniform: [88.0, 97.0], round: 1}
+    mme.tau_per_min: {randint: [31000, 36000]}
   provisioning-service:
-    provisioning.attach_delay_ms: {randint: [500, 3000]}
-    provisioning.signaling_backpressure: true
+    upstream.degraded_subsystem: network
   notification-service:
-    notification.paging_storm_detected: true
-    notification.throttle_active: true
+    notification.sms_delivery_delay_s: {randint: [60, 300]}
+remediation_command: |-
+  opsctl rollback config/mme-pool-eu-central --to-revision previous
+fault_scope:
+  cluster: meridian-gke-cluster
+  workloads: [network-core]
+error_services: [network-core]
+cascade_messages:
+  provisioning-service:
+    - severity: WARN
+      message: 'network allocate returned ATTACH_REJECTED (congestion) for new subscriber; activation step network_attach retried in 60s'
+  notification-service:
+    - severity: WARN
+      message: 'SMSC delivery receipts delayed: {delayed_sms} SMS pending paging (MME congestion, T3346 back-off)'
+infrastructure_events:
+  - service: network-core
+    severity: INFO
+    offset_seconds: -30
+    event_name: oss.cm.change
+    body: 'oss-cm: config mme-pool-eu-central revision core-mme-r87 (was core-mme-r86) applied by core-netops/k.wagner CR-88177: T3412 54min -> 12min (scope=all-profiles)'
+    attributes:
+      operation: cm_change
+      user.name: core-netops/k.wagner
+      change.request: CR-88177
+      mme.t3412_min: 12
+      change.summary: 'mme-pool-eu-central T3412 54min -> 12min'
+remediation_effects:
+  log_taper_seconds: 60
+  log_events:
+    - service: network-core
+      severity: INFO
+      offset_seconds: 1
+      body: '[NOC-CHG] executed opsctl rollback config/mme-pool-eu-central --to-revision previous actor={actor}: revision core-mme-r87 -> core-mme-r86 (T3412 12min -> 54min)'
+      attributes:
+        operation: change_executed
+        change.target: config/mme-pool-eu-central
+        mme.t3412_min: 54
+    - service: network-core
+      severity: INFO
+      offset_seconds: 70
+      body: 'mme-fra-01 s1ap: OVERLOAD STOP sent to 1214 eNBs (cpu below 80% for 30s)'
+      attributes:
+        operation: overload_control
+        mme.t3412_min: 54
+  steady_attributes:
+    network-core:
+      mme.t3412_min: 54
+  verification:
+    - signal: network_core.mme_cpu_pct
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "network-core"'
+      field: 'metrics.network_core.mme_cpu_pct'
+      expect: 'under 70% (was 88-97%)'
+      within_seconds: 240
+    - signal: network_core.tau_per_min
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "network-core"'
+      field: 'metrics.network_core.tau_per_min'
+      expect: 'falling steadily; under 20,000 (was 31,000-36,000)'
+      within_seconds: 300
+    - signal: OVERLOAD START lines
+      from: 'logs.otel.meridian'
+      where: 'body.text LIKE "*OVERLOAD START sent to*"'
+      expect: '0 new lines after the OVERLOAD STOP'
+      within_seconds: 120
+    - signal: MME T3412 timer
+      from: 'logs.otel.meridian'
+      where: 'resource.attributes.service.name == "network-core"'
+      field: 'attributes.mme.t3412_min'
+      expect: '54 on every MME status line since the rollback'
+      within_seconds: 90
 business_impact:
   - kpi: business.activations_per_min
     factor: {uniform: [0.25, 0.55]}
   - kpi: business.handover_success_pct
-    factor: {uniform: [0.30, 0.60]}
+    factor: {uniform: [0.3, 0.6]}
   - kpi: business.ran_latency_p95_ms
     factor: {uniform: [3.0, 6.0]}
   - kpi: business.data_session_success_pct
-    factor: {uniform: [0.30, 0.60]}
+    factor: {uniform: [0.3, 0.6]}
+onset_delay_seconds: 120
+service_lag_seconds: {provisioning-service: 10, notification-service: 30}

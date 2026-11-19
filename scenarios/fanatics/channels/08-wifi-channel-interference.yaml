@@ -3,20 +3,20 @@ subsystem: network_access
 vehicle_section: wireless_lan
 error_type: INTERFERENCE_DETECTED
 sensor_type: rf_spectrum
-affected_services:
-- wifi-controller
-- network-controller
-cascade_services:
-- packaging-fulfillment
+affected_services: [wifi-controller, network-controller, packaging-fulfillment]
+cascade_services: []
 description: Co-channel and adjacent-channel interference degrading wireless performance
 investigation_notes: |-
-  1. Check the Mist RRM (Radio Resource Management) dashboard for channel utilization heatmaps and neighbor AP counts.
-  2. High co-channel interference with many neighbor APs indicates over-deployment — reduce AP transmit power or disable radios on overlapping APs.
-  3. Verify channel assignments: in dense warehouse environments, use only non-overlapping 5GHz channels (36, 40, 44, 48 for UNII-1; 149, 153, 157, 161 for UNII-3).
-  4. Check for non-WiFi interference sources (microwave ovens, Bluetooth, cordless phones) using a spectrum analyzer or Mist's built-in spectrum analysis.
-  5. Enable Mist Auto-RRM to dynamically adjust channel and power assignments based on real-time RF conditions.
-  6. For persistent interference in warehouse environments, consider deploying directional antennas to reduce signal bleed between aisles.
+  Root cause: the Mist RRM profile for the warehouse 5GHz radios was switched to auto-rrm-v3.1-aggressive shortly before the first INTERFERENCE_DETECTED. The aggressive profile raises transmit power to max and re-plans channels every few minutes, so the four warehouse-fleet APs (AP-WAREHOUSE-01, AP-WAREHOUSE-02, AP-PRINT-FLOOR-01, AP-SHIPPING-01) converge on channel {channel_number} and hear each other: co-channel interference climbs over about three minutes (one RRM cycle) to {interference_pct}% against a normal 6-10%, with retransmits at {retransmit_pct}%. The RF environment itself is unchanged: the noise floor stays below -85 dBm, which rules out non-WiFi sources, and no AP was added, which rules out over-deployment. The office APs (AP-OFFICE-01, AP-OFFICE-02) are on a separate profile, keep their own channels (40, 48) and stay nominal.
+  Confirm:
+    - wifi-controller RADIO_STATS lines show rrm_profile=auto-rrm-v3.1-aggressive status=ANOMALY; metric wifi.co_channel_interference_pct rises from about 8% to about 48%
+    - AP_CONFIG_CHANGED_BY_RRM events moving the fleet APs onto channel 149 follow the profile change, and AP_STATS for those APs reports channel=149
+    - rca attribute wifi.noise_floor_dbm stays below -85 on the fault lines
+  Downstream: packaging-fulfillment scanner retries rise after the interference does.
+  Remediation: set the RF profile back to balanced RRM with opsctl patch rf-profile/warehouse-5ghz --rrm-mode balanced. The APs re-plan channels over about two and a half minutes and co-channel interference falls back to 6-10%.
 remediation_action: optimize_channels
+remediation_command: |-
+  opsctl patch rf-profile/warehouse-5ghz --rrm-mode balanced
 error_message: 'INTERFERENCE_DETECTED event_id=mist-rf-{channel_number}: ap_name={ap_name} channel={channel_number} co_channel_interference={interference_pct}%
   noise_floor={noise_floor_dbm}dBm retransmit_rate={retransmit_pct}% neighbor_aps={neighbor_ap_count}'
 stack_trace: '{{"type": "INTERFERENCE_DETECTED", "event_id": "mist-rf-{channel_number}", "ap_name": "{ap_name}", "band": "5GHz",
@@ -27,33 +27,86 @@ correlation_attr:
   key: infra.rrm_algorithm
   value: auto-rrm-v3.1-aggressive
 fault_params:
-  channel_number: {choice: [1, 6, 11, 36, 40, 44, 48, 149, 153, 157, 161]}
+  channel_number: 149
   ap_name:
     choice:
     - AP-WAREHOUSE-01
     - AP-WAREHOUSE-02
     - AP-PRINT-FLOOR-01
-    - AP-OFFICE-01
     - AP-SHIPPING-01
-    - AP-DOCK-01
-  interference_pct: {uniform: [25.0, 75.0], round: 1}
-  noise_floor_dbm: {uniform: [-80.0, -60.0], round: 1}
-  retransmit_pct: {uniform: [10.0, 40.0], round: 1}
-  neighbor_ap_count: {randint: [5, 20]}
+  interference_pct: {uniform: [42.0, 54.0], round: 1}
+  noise_floor_dbm: {uniform: [-95.0, -87.0], round: 1}
+  retransmit_pct: {uniform: [20.0, 27.0], round: 1}
+  neighbor_ap_count: {randint: [3, 4]}
 rca_clues:
   wifi-controller:
-    wifi.co_channel_aps: {randint: [5, 15]}
-    wifi.rrm_auto_channel_change: {choice: [true, false]}
+    wifi.co_channel_aps: {randint: [3, 4]}
+    wifi.rrm_auto_channel_change: true
+    wifi.co_channel_interference_pct: {uniform: [42.0, 54.0], round: 1}
+    wifi.noise_floor_dbm: {uniform: [-95.0, -87.0], round: 1}
   network-controller:
-    network.wlan_vlan_util_pct: {uniform: [70, 95], round: 1}
-    network.broadcast_domain_size: {randint: [200, 800]}
+    network.wlan_vlan_util_pct: {uniform: [25, 45], round: 1}
   packaging-fulfillment:
-    warehouse.scanner_retry_rate_pct: {uniform: [15, 50], round: 1}
+    warehouse.scanner_retry_rate_pct: {uniform: [18, 30], round: 1}
     warehouse.throughput_degraded: true
+fault_scope:
+  workloads: [wifi-controller, packaging-fulfillment]
+infrastructure_events:
+  - service: wifi-controller
+    severity: INFO
+    offset_seconds: -90
+    body: '[MIST] RRM profile warehouse-5ghz changed: auto-rrm-v3.1-balanced -> auto-rrm-v3.1-aggressive (re-plan interval 3m, tx power max); applied by rf-engineering (CR-3142)'
+    attributes:
+      user.name: rf-engineering
+      change.request: CR-3142
+      operation: rrm_profile_change
+      infra.rrm_algorithm: auto-rrm-v3.1-aggressive
+      change.summary: 'RRM profile: auto-rrm-v3.1-balanced -> auto-rrm-v3.1-aggressive'
+remediation_effects:
+  log_events:
+    - service: wifi-controller
+      severity: INFO
+      offset_seconds: 1
+      body: '[CHG] CHANGE APPLIED opsctl patch rf-profile/warehouse-5ghz --rrm-mode balanced by {actor}: RRM profile auto-rrm-v3.1-aggressive -> auto-rrm-v3.1-balanced; APs re-planning channels'
+      attributes:
+        operation: change_applied
+        change.target: rf-profile/warehouse-5ghz
+    - service: wifi-controller
+      severity: INFO
+      offset_seconds: 150
+      body: 'mist-event type=RRM_CYCLE_COMPLETE profile=warehouse-5ghz rrm_profile=auto-rrm-v3.1-balanced channel plan stable; co-channel interference back to baseline'
+      attributes:
+        operation: rrm_profile_change
+        infra.rrm_algorithm: auto-rrm-v3.1-balanced
+  steady_attributes:
+    wifi-controller:
+      infra.rrm_algorithm: auto-rrm-v3.1-balanced
+  verification:
+    - signal: wifi.co_channel_interference_pct
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "wifi-controller"'
+      field: 'metrics.wifi.co_channel_interference_pct'
+      expect: 'back in 4-12% as the APs re-plan (was 42-54%)'
+      within_seconds: 240
+    - signal: INTERFERENCE_DETECTED lines
+      from: 'logs.otel.fanatics'
+      where: 'body.text LIKE "*INTERFERENCE_DETECTED*"'
+      expect: '0 new lines'
+      within_seconds: 240
+    - signal: RRM profile
+      from: 'logs.otel.fanatics'
+      where: 'resource.attributes.service.name == "wifi-controller"'
+      field: 'attributes.infra.rrm_algorithm'
+      expect: 'auto-rrm-v3.1-balanced on every line logged since the fix; auto-rrm-v3.1-aggressive stops appearing'
+      within_seconds: 120
 business_impact:
   - kpi: business.merch_gmv_usd_per_min
-    factor: {uniform: [0.35, 0.65]}
+    value: {uniform: [10416.0, 11984.0], round: 1}
   - kpi: business.app_sessions_per_min
-    factor: {uniform: [0.40, 0.70]}
+    value: {uniform: [544.05, 625.95]}
   - kpi: business.churn_risk_index_0_100
     factor: {uniform: [1.4, 2.8]}
+  - kpi: business.ad_revenue_usd_per_min
+    value: {uniform: [31620.0, 36380.0], round: 1}
+# dependents degrade after the component at fault, in dependency order
+service_lag_seconds: {network-controller: 30, packaging-fulfillment: 60}

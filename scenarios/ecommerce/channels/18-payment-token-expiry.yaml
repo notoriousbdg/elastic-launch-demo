@@ -7,47 +7,142 @@ affected_services:
 - payment-processor
 cascade_services:
 - order-management
-description: Stored payment tokens expiring for recurring subscribers — subscription renewals and auto-reorders failing silently
+description: Subscription renewals are declined by issuers as expired cards because the card-network Account Updater batch has failed since its SFTP credential expired, so stored cards were never refreshed.
+onset_delay_seconds: 10
 investigation_notes: |-
-  1. Check payment-processor logs for PAYMENT-TOKEN-EXPIRY — expired_tokens={expired_tokens} affecting {affected_subscriptions} subscriptions.
-  2. Identify the token age distribution: tokens older than {token_max_age_days} days are at highest risk — batch renew before they expire.
-  3. Check if the card network issued a mass BIN (Bank Identification Number) change — this can invalidate thousands of tokens simultaneously.
-  4. Trigger Account Updater API calls to the card networks — Visa and Mastercard provide automatic card number updates for expiring credentials.
-  5. For tokens that cannot be auto-renewed, send re-authorization emails to affected customers ({affected_subscriptions} contacts required).
-  6. Review token refresh policy: tokens should be refreshed 30 days before expiry, not on expiry — adjust the refresh scheduler interval.
+  Root cause: the account-updater-batch job (Visa Account Updater and Mastercard ABU response files over SFTP) has failed every daily run for 35 days because its SFTP credential account-updater-sftp expired: the server rejects the login with Permission denied. Last month's update files were never fetched, so cards that expired at month end still carry their old expiry dates in the token vault, and the issuers decline those subscription renewals with response code 54 (expired card). The batch's latest run failed again about two minutes before the declines climbed. Everything else in the payment path is healthy: first-time checkouts with freshly entered cards authorize at the usual rate, the gateways answer normally, and declines for other reasons (51 insufficient funds, 05 do not honor) stay at their usual level. No issuer reissued cards on a new BIN, and the token vault itself works: the cards are simply out of date.
+  Confirm:
+    - metrics.payments.renewal_decline_pct on payment-processor rises from about 3% to about 28% over 60s, and the "billing.renewals" line (attributes.operation recurring_billing_status) shows decline_code_54_share_pct around 90% (normally about 22%)
+    - metrics.payments.account_updater_last_success_h reads about 840 (35 days; normally under 24 because the batch runs daily) and attributes.payment.account_updater_status is AUTH_FAILED
+    - the payment-processor line "account-updater-batch run failed: SFTP authentication ... Permission denied ... credential account-updater-sftp expired" comes before the first PAYMENT-TOKEN-EXPIRY line, and every PAYMENT-TOKEN-EXPIRY line carries issuer_response=54 for a stored {card_brand} card
+    - order-management logs subscription renewal orders failing payment and moving to dunning
+  Remediation: rotate the SFTP credential, then run the batch: opsctl rotate secret/account-updater-sftp followed by opsctl run job/account-updater-batch. The batch logs in, fetches the pending Visa and Mastercard response files and refreshes the expiry dates and card numbers in the token vault within about a minute; account_updater_last_success_h drops to about 0 and account_updater_status reads OK. Dunning retries then approve the declined renewals on the refreshed cards, and renewal_decline_pct falls back to about 3% over about 180s. Re-authorization emails to customers are not needed for cards the updater refreshed; only closed accounts reported by the networks need customer action.
 remediation_action: refresh_payment_tokens
-error_message: '[PaymentProcessor] PAYMENT-TOKEN-EXPIRY: expired_tokens={expired_tokens} affected_subscriptions={affected_subscriptions}
-  revenue_at_risk_usd={subscription_revenue_usd} token_age_days={token_max_age_days}'
-stack_trace: |-
-  PaymentTokenException: PAYMENT-TOKEN-EXPIRY
-     at TokenVault.validateToken(token_id={token_id})
-     at PaymentProcessor.chargeSubscription(sub_id={subscription_id})
-  Expired tokens:       {expired_tokens}
-  Affected subs:        {affected_subscriptions}
-  Revenue at risk:      ${subscription_revenue_usd}
-  Token age (max):      {token_max_age_days} days
-  Account Updater:      NOT_CONFIGURED
+remediation_command: |-
+  opsctl rotate secret/account-updater-sftp
+  opsctl run job/account-updater-batch
+error_message: 'fail: Ecommerce.Payments.Billing.SubscriptionChargeService[4210] PAYMENT-TOKEN-EXPIRY subscription_id={subscription_id} token_id={token_id} card={card_brand}
+  ****{card_last4} amount_usd={amount_usd} issuer_response=54 issuer_message=expired_card dunning_attempt={dunning_attempt}/4'
+stack_trace: ''
 correlation_attr:
-  key: payment.tokens_expiring
-  value: true
+  key: payment.account_updater_status
+  value: AUTH_FAILED
 fault_params:
-  expired_tokens: {randint: [100, 10000]}
-  affected_subscriptions: {randint: [50, 5000]}
-  subscription_revenue_usd: {uniform: [5000, 500000], round: 2}
-  token_max_age_days: {randint: [90, 365]}
-  token_id: {format: "TOK-{n}", n: {randint: [100000, 999999]}}
   subscription_id: {format: "SUB-{n}", n: {randint: [100000, 999999]}}
+  token_id: {format: "tok_{n:X}", n: {randint: [100000000, 999999999]}}
+  card_brand: {choice: [visa, mastercard]}
+  card_last4: {randint: [1000, 9999]}
+  amount_usd: {choice: [9.99, 14.99, 19.99, 29.99, 49.99]}
+  dunning_attempt: {randint: [1, 3]}
 rca_clues:
   payment-processor:
-    payment.expired_token_count: {randint: [100, 10000]}
-    payment.subscription_failure_rate_pct: {uniform: [5, 40], round: 1}
+    payment.account_updater_status: AUTH_FAILED
+    payment.account_updater_last_success_h: {uniform: [840.0, 841.0], round: 1}
+    payment.issuer_response_code: '54'
+    payment.renewal_decline_54_share_pct: {uniform: [88.0, 94.0], round: 1}
+    payment.new_card_auth_success_pct: {uniform: [97.8, 98.9], round: 1}
   order-management:
-    order.subscription_renewal_failures: {randint: [50, 5000]}
-    order.churn_risk_count: {randint: [10, 1000]}
+    order.subscription_renewal_failure_pct: {uniform: [26.0, 30.0], round: 1}
+    order.subscription_renewal_failures: {randint: [300, 900]}
+cascade_messages:
+  order-management:
+    - severity: WARN
+      message: 'time={iso_now} level=WARN msg="subscription renewal order payment failed, scheduled dunning retry" component=subscriptions subscription_id={subscription_id} upstream=payment-processor decline_code=54 attempt={dunning_attempt}/4 retry_in=24h'
+fault_scope:
+  cluster: ecommerce-aks-cluster
+  workloads: [payment-processor]
+infrastructure_events:
+  - service: payment-processor
+    severity: ERROR
+    offset_seconds: -120
+    body: 'fail: Ecommerce.Payments.Tokens.AccountUpdaterJob[4401] account-updater-batch run failed: SFTP authentication to sftp.account-updater.internal:22 as ecomm-au-prod failed (Renci.SshNet.Common.SshAuthenticationException: Permission denied (password)); credential account-updater-sftp expired; consecutive_failures=35 last_success_h=840'
+    attributes:
+      operation: account_updater_batch
+      user.name: svc-account-updater
+      secret.name: account-updater-sftp
+      job.name: account-updater-batch
+      payment.account_updater_status: AUTH_FAILED
+      payment.account_updater_last_success_h: 840
+remediation_effects:
+  log_taper_seconds: 90
+  log_events:
+    - service: payment-processor
+      severity: INFO
+      offset_seconds: 1
+      body: '[CHG] CHANGE APPLIED opsctl rotate secret/account-updater-sftp by {actor}: new SFTP credential issued for ecomm-au-prod and rolled out to the account-updater job'
+      attributes:
+        operation: change_applied
+        change.target: secret/account-updater-sftp
+    - service: payment-processor
+      severity: INFO
+      offset_seconds: 2
+      body: '[CHG] CHANGE APPLIED opsctl run job/account-updater-batch by {actor}: account-updater-batch started with the rotated credential'
+      attributes:
+        operation: change_applied
+        change.target: job/account-updater-batch
+    - service: payment-processor
+      severity: INFO
+      offset_seconds: 15
+      body: 'info: Ecommerce.Payments.Tokens.AccountUpdaterJob[4402] account-updater-batch SFTP login ok as ecomm-au-prod; fetched 3 Visa Account Updater response files (18412 records) and 2 Mastercard ABU response files (9204 records)'
+      attributes:
+        operation: account_updater_batch
+        payment.account_updater_status: OK
+    - service: payment-processor
+      severity: INFO
+      offset_seconds: 50
+      body: 'info: Ecommerce.Payments.Tokens.AccountUpdaterJob[4403] account-updater-batch completed: 14876 expiry dates updated, 2311 card numbers replaced, 412 closed accounts flagged; last_success_h=0'
+      attributes:
+        operation: account_updater_batch
+        payment.account_updater_status: OK
+        payment.account_updater_last_success_h: 0
+    - service: payment-processor
+      severity: INFO
+      offset_seconds: 90
+      body: 'info: Ecommerce.Payments.Billing.DunningScheduler[4230] dunning retries for code 54 declines re-queued on refreshed cards: 1840 renewals retried, 1702 approved so far'
+      attributes:
+        operation: dunning_retry
+    - service: order-management
+      severity: INFO
+      offset_seconds: 120
+      body: 'time={iso_now} level=INFO msg="subscription renewal orders paid after dunning retry" component=subscriptions paid=1702 still_failing=138'
+      attributes:
+        operation: subscription_renewal
+    - service: payment-processor
+      severity: INFO
+      offset_seconds: 180
+      body: 'info: Ecommerce.Payments.Billing.DunningScheduler[4231] dunning retry pass complete: 3311 renewals approved on refreshed cards, 214 closed-account cards need customer action'
+      attributes:
+        operation: dunning_retry
+  verification:
+    - signal: payments.renewal_decline_pct
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "payment-processor"'
+      field: 'metrics.payments.renewal_decline_pct'
+      expect: 'falls back to about 3% over about 180s as dunning retries succeed (was about 28%)'
+      within_seconds: 300
+    - signal: payments.account_updater_last_success_h
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "payment-processor"'
+      field: 'metrics.payments.account_updater_last_success_h'
+      expect: 'drops to about 0 once the batch completes, then grows slowly (was about 840)'
+      within_seconds: 120
+    - signal: PAYMENT-TOKEN-EXPIRY lines
+      from: 'logs.otel.ecommerce'
+      where: 'body.text LIKE "*PAYMENT-TOKEN-EXPIRY*"'
+      expect: 'no new lines after about 90s, once the refreshed cards are in the token vault'
+      within_seconds: 300
+    - signal: account updater status
+      from: 'logs.otel.ecommerce'
+      where: 'resource.attributes.service.name == "payment-processor"'
+      field: 'attributes.payment.account_updater_status'
+      expect: 'OK on the billing.renewals line after the batch runs (was AUTH_FAILED)'
+      within_seconds: 120
 business_impact:
   - kpi: business.subscription_mrr_usd_per_min
-    factor: {uniform: [0.20, 0.45]}
+    value: {uniform: [7254.0, 8346.0], round: 1}
   - kpi: business.churn_risk_index_0_100
     factor: {uniform: [2.0, 4.5]}
   - kpi: business.gmv_usd_per_min
-    factor: {uniform: [0.30, 0.55]}
+    factor: {uniform: [0.3, 0.55]}
+# dependents degrade after the component at fault, in dependency order
+service_lag_seconds: {order-management: 30}

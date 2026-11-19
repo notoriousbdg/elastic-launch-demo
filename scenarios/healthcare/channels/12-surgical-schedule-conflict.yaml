@@ -11,8 +11,12 @@ cascade_services:
 - clinical-alerts
 description: Operating room scheduling conflict detected between overlapping surgical cases
 investigation_notes: |-
-  Root Cause: OR scheduling conflicts occur when the block schedule management system allows overlapping case bookings due to stale cache data, surgeon preference card changes, or emergency add-on cases that override the time-slot validation. Turnover time buffers may also be insufficient between consecutive cases.
-  Remediation: 1) Review the OR block schedule: `sched-admin or-blocks --room {or_number} --date today`. 2) Identify the conflict and reassign: `sched-admin or-reassign --case {case_id} --to-room NEXT-AVAILABLE`. 3) Verify surgeon block time ownership: `sched-admin surgeon-blocks --npi {surgeon_id}`. 4) Restart the OR scheduling engine: `systemctl restart or-scheduling-engine`. 5) Update turnover time buffers if consecutive cases are too tightly packed: `sched-admin set-turnover --room {or_number} --minutes 45`. 6) Notify the surgical coordinator and anesthesia scheduling of the change.
+  Root cause: OR scheduler config block-mgmt-v3.2.0-beta was applied about 15 minutes before the first SCHED-SURGICAL-CONFLICT. It raised the OR block schedule cache TTL from 60s to 3600s, so the scheduler stopped refreshing its block allocations. Nothing showed until the OR desk released and reassigned blocks: the scheduler still books against the old allocation, so case {case_id} for surgeon {surgeon_id} in {or_number} at {conflict_time} (patient {patient_id}) overlaps a case already in that room. The turnover buffer is the standard 45 minutes, there are no emergency add-on cases and no preference card changes. The cache is stale; demand did not change.
+  Confirm:
+    - scheduling-api logs [SCHED] or_block_cache rooms=12 entries=312 ttl=3600s age=...s ... status=STALE (attributes.infra.or_scheduler_config, attributes.sched.or_block_cache_age_s)
+    - metric scheduling.or_block_cache_age_seconds rises from 5-60s to 900s and keeps climbing
+    - the scheduling-api lines "config or-scheduler updated to block-mgmt-v3.2.0-beta" and the later block release both come before the first conflict
+  Remediation: two steps. opsctl rollback config/or-scheduler --to-revision previous restores block-mgmt-v3.1.4 (TTL 60s), and opsctl sync cache/or-block-schedule reloads the block allocations now. Cache age is back under 60 seconds right after the sync, and new conflicts stop. The rollback alone leaves the stale cache in place until it expires (up to an hour). The sync alone goes stale again under the 3600s TTL. Cases booked into conflicting slots during the incident are resolved by the OR desk.
 remediation_action: reassign_or_schedule
 error_message: '[SCHED] SCHED-SURGICAL-CONFLICT: or={or_number} case={case_id} surgeon={surgeon_id} conflict_time={conflict_time}
   patient={patient_id}'
@@ -41,10 +45,10 @@ fault_params:
     n: {randint: [10000, 99999]}
   surgeon_id:
     format: "NPI-{n}"
-    n: {randint: [1000000000, 9999999999]}
+    n: {randint: [1000000000, 2999999999]}
   conflict_time:
     format: "{hh:02d}:{mm}"
-    hh: {randint: [7, 17]}
+    hh: {randint: [11, 17]}
     mm: {choice: ["00", "30"]}
   patient_id:
     format: "PT-{n}"
@@ -52,20 +56,98 @@ fault_params:
 rca_clues:
   scheduling-api:
     sched.or_block_cache_stale: true
-    sched.turnover_buffer_min: {randint: [15, 30]}
+    sched.or_block_cache_age_s: {randint: [900, 1500]}
+    sched.turnover_buffer_min: 45
+    sched.emergency_addon_cases: 0
   ehr-system:
     ehr.surgical_consent_pending: {randint: [1, 5]}
-    ehr.or_preference_card_stale: true
+    ehr.or_preference_card_changes_24h: 0
   billing-processor:
     billing.surgical_pre_auth_pending: {randint: [1, 3]}
   clinical-alerts:
     alerts.or_schedule_conflict_count: {randint: [1, 4]}
+remediation_command: |-
+  opsctl rollback config/or-scheduler --to-revision previous
+  opsctl sync cache/or-block-schedule
+error_services: [scheduling-api]
+service_lag_seconds:
+  ehr-system: 15
+  billing-processor: 45
+  clinical-alerts: 30
+cascade_messages:
+  ehr-system:
+    - severity: WARN
+      message: '[EHR] surgical_case_conflict or={or_number} case={case_id} surgeon={surgeon_id} time={conflict_time} patient={patient_id}; pre-op checklist on hold'
+  billing-processor:
+    - severity: WARN
+      message: '[CLAIMS] surgical_preauth_hold case={case_id} patient={patient_id} reason=CASE_TIME_CONFLICT'
+  clinical-alerts:
+    - severity: WARN
+      message: '[CDS] or_schedule_conflict or={or_number} case={case_id} time={conflict_time}; charge nurse notified'
+fault_scope:
+  workloads: [scheduling-api]
+infrastructure_events:
+  - service: scheduling-api
+    severity: INFO
+    offset_seconds: -900
+    body: '[SCHED] config or-scheduler updated to block-mgmt-v3.2.0-beta (was block-mgmt-v3.1.4): or_block_cache_ttl_s 60 -> 3600 by periop-informatics (CHG0032215)'
+    attributes:
+      user.name: periop-informatics
+      change.request: CHG0032215
+      operation: config_change
+      infra.or_scheduler_config: block-mgmt-v3.2.0-beta
+      sched.or_block_cache_ttl_s: 3600
+      change.summary: 'or-scheduler: block-mgmt-v3.1.4 -> block-mgmt-v3.2.0-beta'
+  - service: scheduling-api
+    severity: INFO
+    offset_seconds: -120
+    body: '[SCHED] or_block_release rooms=OR-3,OR-7,OR-9 released by surgical services and reassigned to orthopedics and general surgery for today'
+    attributes:
+      operation: or_block_release
+      sched.or_blocks_released: 3
+remediation_effects:
+  log_events:
+    - service: scheduling-api
+      severity: INFO
+      offset_seconds: 1
+      body: '[CHG] CHANGE IMPLEMENTED opsctl rollback config/or-scheduler --to-revision previous by {actor}: block-mgmt-v3.2.0-beta -> block-mgmt-v3.1.4, block cache TTL 60s'
+      attributes:
+        operation: change_implemented
+        change.target: config/or-scheduler
+    - service: scheduling-api
+      severity: INFO
+      offset_seconds: 2
+      body: '[CHG] CHANGE IMPLEMENTED opsctl sync cache/or-block-schedule by {actor}: 312 block entries reloaded from the block schedule master'
+      attributes:
+        operation: change_implemented
+        change.target: cache/or-block-schedule
+  steady_attributes:
+    scheduling-api:
+      infra.or_scheduler_config: block-mgmt-v3.1.4
+  verification:
+    - signal: scheduling.or_block_cache_age_seconds
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "scheduling-api"'
+      field: 'metrics.scheduling.or_block_cache_age_seconds'
+      expect: 'back under 60 seconds (was 900s and climbing) right after the cache sync'
+      within_seconds: 60
+    - signal: SCHED-SURGICAL-CONFLICT lines
+      from: 'logs.otel.healthcare'
+      where: 'body.text LIKE "*SCHED-SURGICAL-CONFLICT*"'
+      expect: '0 new lines'
+      within_seconds: 60
+    - signal: infra.or_scheduler_config
+      from: 'logs.otel.healthcare'
+      where: 'resource.attributes.service.name == "scheduling-api"'
+      field: 'attributes.infra.or_scheduler_config'
+      expect: 'block-mgmt-v3.1.4 on every or_block_cache line since the fix; block-mgmt-v3.2.0-beta stops appearing'
+      within_seconds: 60
 business_impact:
   - kpi: business.or_utilization_pct
-    factor: {uniform: [0.20, 0.50]}
+    factor: {uniform: [0.2, 0.5]}
   - kpi: business.patient_satisfaction_nps
-    factor: {uniform: [0.25, 0.55]}
+    value: {uniform: [6.7, 7.7], round: 1}
   - kpi: business.collections_usd_per_min
-    factor: {uniform: [0.25, 0.55]}
+    value: {uniform: [10881.0, 12519.0], round: 1}
   - kpi: business.appointment_no_show_rate_pct
     factor: {uniform: [1.5, 3.0]}

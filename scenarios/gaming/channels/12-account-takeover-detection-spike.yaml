@@ -5,70 +5,145 @@ error_type: AUTH-TAKEOVER-DETECT
 sensor_type: anomaly_detector
 affected_services:
 - auth-gateway
-- payment-processor
+error_services:
+- auth-gateway
 cascade_services:
-- moderation-engine
-- analytics-pipeline
-description: Anomaly detection system flags a surge in credential stuffing attempts indicating a coordinated account takeover
-  campaign
+- payment-processor
+description: Credential-stuffing traffic reaches the login endpoint after the edge security policy stopped banning high-rate source IPs, and failed logins surge
+onset_delay_seconds: 15
+ramp_seconds: 30
+service_lag_seconds: {payment-processor: 30}
 investigation_notes: |-
-  Root cause: a leaked credential database from another service is being replayed against the gaming platform. 94.2% of attempts come through VPN/proxy with low user-agent entropy, confirming automated credential stuffing tooling.
-  1. Check the attack surface: 87% known-bad IP reputation with 12 Tor exit nodes — enable GeoIP blocking for the primary attack region via WAF rules.
-  2. Review 0.3% success rate: even this low rate means ~30 accounts may be compromised per 10,000 attempts — immediately force password resets for successfully authenticated IPs in the attack window.
-  3. Inspect request patterns: 0.8ms avg interval between requests is clearly automated; deploy progressive rate limiting (CAPTCHA after 3 failures, block after 10).
-  4. Remediate: issue `block_attack_ips` to immediately blacklist the {blocked_ips} flagged IPs and `enable_captcha_enforcement` globally for login endpoints.
-  5. Notify affected players, enable mandatory 2FA for accounts accessed from new IPs, and submit the attack IPs to threat intelligence feeds.
+  Root cause: a Terraform apply (CHG0052812) updated the Cloud Armor policy auth-edge-armor from revision 18 to 19 about three minutes before the first AUTH-TAKEOVER-DETECT line. Revision 19 disabled rule 1000, the rate-based ban on POST /oauth/token (20 requests per IP per minute, ban for 600s). That rule had been absorbing a steady credential-stuffing campaign; with it off, the traffic reaches the login endpoint: {ato_attempts} failed logins in {window_seconds}s from {source_ips} source IPs against {distinct_accounts} distinct accounts, about 30 attempts per IP per minute. The comparison is revision 18 shortly before: the same edge saw 20-80 rate-limited requests/s and only 2-10 failed logins/s. Login success for real players is unchanged, and auth-gateway itself is healthy.
+  Confirm:
+    - auth-gateway edge_policy lines carry attributes.security.armor_policy_revision 19 and attributes.security.ban_rule_state disabled (was 18 / enabled); the Terraform apply with change.request CHG0052812 comes before the first AUTH-TAKEOVER-DETECT line
+    - metrics.auth.login.failures_per_s rises from 2-10/s to 400-1500/s
+    - metrics.auth.edge.rate_limited_requests_per_s drops from 20-80/s to 0 at the moment of the policy change, before the failures rise
+  Remediation: roll the policy back with opsctl rollback security-policy/auth-edge-armor --to-revision previous. Rule 1000 needs one 60-second rate interval to ban the stuffing IPs: failed logins fall back to 2-10/s within about 90 seconds, and rate-limited requests jump to 600-900/s as the bans start, then fall back to 20-80/s over about 5 minutes as the bots back off. Blocking the {source_ips} IPs one by one would not help: the campaign rotates through residential proxies, and only the rate-based ban keeps up with it. Restarting auth-gateway does nothing, because the traffic is admitted at the edge.
 remediation_action: block_attack_ips
-error_message: '[Auth] AUTH-TAKEOVER-DETECT: attempts={ato_attempts} window={window_seconds}s blocked_ips={blocked_ips} risk={risk_score}
-  geo={geo_region}'
+remediation_command: |-
+  opsctl rollback security-policy/auth-edge-armor --to-revision previous
+error_message: '[Auth] AUTH-TAKEOVER-DETECT: failed_logins={ato_attempts} window={window_seconds}s source_ips={source_ips} accounts={distinct_accounts}
+  risk={risk_score} edge_policy=auth-edge-armor@{armor_revision} rule_1000={ban_rule_state}'
 stack_trace: |-
   === ATO DETECTION ANALYSIS ===
-  window={window_seconds}s  geo={geo_region}
+  window={window_seconds}s  endpoint=POST /oauth/token  edge_policy=auth-edge-armor@{armor_revision}
   ----------- attempt metrics ---------
-    total_attempts  = {ato_attempts}
-    unique_ips      = {blocked_ips}
-    credential_pairs = 12,401
-    success_rate    = 0.3% (credential stuffing pattern)
-    risk_score      = {risk_score}
-  ----------- geo analysis ------------
-    primary_region  = {geo_region}
-    ip_reputation   = 87% known-bad
-    vpn_pct         = 94.2%
-    tor_exit_nodes  = 12
-  ----------- attack pattern ----------
-    type            = CREDENTIAL_STUFFING
-    rate            = {ato_attempts} / {window_seconds}s
+    failed_logins    = {ato_attempts}
+    source_ips       = {source_ips}
+    distinct_accounts = {distinct_accounts} (no pair retried)
+    per_ip_rate      = ~30/min (ban threshold 20/min)
+    success_rate     = 0.3% (credential stuffing pattern)
+    risk_score       = {risk_score}
+  ----------- source analysis ---------
+    network_type     = residential proxies, {source_ips} ASNs rotating
     user_agent_entropy = LOW (bot signature)
-    request_interval   = 0.8ms avg (automated)
+  ----------- edge state --------------
+    rule_1000 rate_based_ban = {ban_rule_state}
+    rate_limited_requests    = 0/s
   ----------- action ------------------
-    BLOCK {blocked_ips} IPs  ENABLE captcha  NOTIFY security team
-  AUTH-TAKEOVER-DETECT: {ato_attempts} attempts from {blocked_ips} IPs, risk {risk_score}
+    STEP-UP auth on new-device logins  NOTIFY security team
+  AUTH-TAKEOVER-DETECT: {ato_attempts} failed logins from {source_ips} IPs, risk {risk_score}
 correlation_attr:
-  key: network.waf_ruleset
-  value: waf-rules-v8.1.0-permissive
+  key: security.armor_policy_revision
+  value: '19'
 fault_params:
-  ato_attempts: {randint: [500, 10000]}
-  window_seconds: {randint: [60, 300]}
-  blocked_ips: {randint: [50, 500]}
+  ato_attempts: {randint: [24000, 90000]}
+  window_seconds: 60
+  source_ips: {randint: [800, 3000]}
+  distinct_accounts: {randint: [20000, 85000]}
   risk_score: {uniform: [0.85, 0.99], round: 2}
-  geo_region: {choice: [Eastern Europe, Southeast Asia, South America, Unknown VPN]}
+  armor_revision: 19
+  ban_rule_state: disabled
 rca_clues:
   auth-gateway:
     auth.credential_stuffing_detected: true
-    auth.bad_ip_reputation_pct: {uniform: [70.0, 95.0], round: 1}
+    security.ban_rule_state: disabled
+    auth.failed_login_per_ip_per_min: {randint: [26, 34]}
   payment-processor:
-    payment.fraudulent_purchase_attempts: {randint: [10, 100]}
-    payment.wallet_freeze_count: {randint: [5, 50]}
-  moderation-engine:
-    moderation.ato_flagged_accounts: {randint: [20, 200]}
-  analytics-pipeline:
-    analytics.security_event_surge: true
+    payment.step_up_challenges_per_min: {randint: [40, 160]}
+cascade_messages:
+  payment-processor:
+    - severity: WARN
+      message: '[IAP] saved_card purchase requires step-up: auth-gateway risk_score={risk_score} for the session, 3DS challenge issued; step-up rate 12x baseline in the last 60s'
+fault_scope:
+  cluster: gaming-gke-cluster
+  workloads: [auth-gateway]
+infrastructure_events:
+  - service: auth-gateway
+    severity: INFO
+    offset_seconds: -200
+    body: 'terraform apply: google_compute_security_policy.auth_edge_armor will be updated in-place: rule[1000] (rate_based_ban, POST /oauth/token) preview false -> true (not enforced); Plan: 0 to add, 1 to change, 0 to destroy (CHG0052812)'
+    attributes:
+      operation: config_change
+      change.request: CHG0052812
+      user.name: secops-terraform
+      change.summary: 'auth-edge-armor revision 18 -> 19, rule 1000 rate_based_ban enabled -> disabled'
+      security.armor_policy: auth-edge-armor
+      security.armor_policy_revision: '19'
+  - service: auth-gateway
+    severity: INFO
+    offset_seconds: -190
+    body: 'google_compute_security_policy.auth_edge_armor: Modifications complete after 7s [id=projects/gaming-project/global/securityPolicies/auth-edge-armor] fingerprint revision=19'
+    attributes:
+      operation: config_change
+      change.request: CHG0052812
+      security.armor_policy: auth-edge-armor
+      security.armor_policy_revision: '19'
+remediation_effects:
+  log_events:
+    - service: auth-gateway
+      severity: INFO
+      offset_seconds: 1
+      body: 'level=info logger=changelog msg="change applied" cmd="opsctl rollback security-policy/auth-edge-armor --to-revision previous" actor={actor} result="security-policy/auth-edge-armor revision 19 -> 18, rule 1000 rate_based_ban enabled"'
+      attributes:
+        operation: change_applied
+        change.target: security-policy/auth-edge-armor
+        security.armor_policy_revision: '18'
+    - service: auth-gateway
+      severity: INFO
+      offset_seconds: 60
+      body: '[Auth] edge_policy auth-edge-armor rule 1000 banning source IPs: first rate interval complete, banned_ips=2140 ban_duration=600s'
+      attributes:
+        operation: edge_policy_status
+        security.armor_policy_revision: '18'
+        security.ban_rule_state: enabled
+  steady_attributes:
+    auth-gateway:
+      security.armor_policy_revision: '18'
+  verification:
+    - signal: auth.login.failures_per_s
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "auth-gateway"'
+      field: 'metrics.auth.login.failures_per_s'
+      expect: 'back in 2-10/s within about 90 seconds (was 400-1500/s)'
+      within_seconds: 150
+    - signal: auth.edge.rate_limited_requests_per_s
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "auth-gateway"'
+      field: 'metrics.auth.edge.rate_limited_requests_per_s'
+      expect: 'up from 0 to 600-900/s as the bans start, then back in 20-80/s after about 5 minutes'
+      within_seconds: 360
+    - signal: AUTH-TAKEOVER-DETECT lines
+      from: 'logs.otel.gaming'
+      where: 'body.text LIKE "*AUTH-TAKEOVER-DETECT*"'
+      expect: '0 new lines'
+      within_seconds: 150
+    - signal: edge policy revision
+      from: 'logs.otel.gaming'
+      where: 'resource.attributes.service.name == "auth-gateway" AND attributes.operation == "edge_policy_status"'
+      field: 'attributes.security.armor_policy_revision'
+      expect: '18 with attributes.security.ban_rule_state enabled on every edge_policy line since the fix (was 19 / disabled)'
+      within_seconds: 150
 business_impact:
   - kpi: business.revenue_usd_per_min
-    factor: {uniform: [0.25, 0.55]}
+    value: {uniform: [4464.0, 5136.0], round: 1}
   - kpi: business.in_app_purchases_per_min
-    factor: {uniform: [0.20, 0.50]}
+    value: {uniform: [31.62, 36.38]}
   - kpi: business.churn_risk_index_0_100
     factor: {uniform: [2.0, 4.5]}
   - kpi: business.new_registrations_per_min
-    factor: {uniform: [0.30, 0.60]}
+    value: {uniform: [7.25, 8.35]}
+generator_impact:
+  nginx_otel:
+    high_4xx_error_rate: 800.0

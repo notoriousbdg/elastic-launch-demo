@@ -1,38 +1,50 @@
 name: Settlement Timeout
 subsystem: settlement
 vehicle_section: settlement_engine
-error_type: SETTLE-T2-TIMEOUT
+error_type: SETTLE-T1-TIMEOUT
 sensor_type: settlement_timer
 affected_services:
 - settlement-processor
 - audit-logger
+error_services:
+- settlement-processor
 cascade_services:
 - risk-calculator
 - compliance-monitor
-description: Trade settlement fails to complete within T+2 SLA window
+description: Trade settlement fails to complete within T+1 SLA window (SEC Rule 15c6-1)
+onset_delay_seconds: 20
+service_lag_seconds:
+  audit-logger: 30
+  risk-calculator: 45
+  compliance-monitor: 60
 investigation_notes: |-
-  1. Check settlement-processor logs for SETTLE-T2-TIMEOUT — note trade_id, settlement_id, counterparty, and pending_hours vs sla_hours.
-  2. Query FROM logs.otel.financial.* | WHERE body.text LIKE "*SETTLE-T2-TIMEOUT*" | STATS count() BY counterparty to identify if one counterparty is blocking multiple settlements.
-  3. Inspect NSCC CNS match status — if NSCC_CNS_match=PENDING the instruction may have been rejected by the depository; check DTC delivery leg.
-  4. Check audit-logger for the full settlement lifecycle trail — confirm affirmation and netting completed before the DTCC submission cutoff.
-  5. Escalate to counterparty operations and file a SEC-15c6 exception report; if DTC delivery can be recycled, do so before the next business day cutoff.
-remediation_action: recycle_settlement_instruction
-error_message: '[SETTLE] SETTLE-T2-TIMEOUT: trade={trade_id} settlement={settlement_id} pending_hours={pending_hours}h sla={sla_hours}h
-  counterparty={counterparty}'
+  Root cause: refdata-ops loaded SSI revision 42 for Virtu Financial (ssi-virtu, CR-5182), which changed Virtu's DTC participant number from 7351 to 7315, a transposition. Every DVP delivery instruction settlement-processor has generated for Virtu since then names DTC participant 7315 as the contra party, so DTC cannot match it against Virtu's receive instruction (sent from 7351). The deliveries sit unmatched and trades due on T+1 breach the window. DTC, NSCC and Virtu are healthy: deliveries to Goldman Sachs, Morgan Stanley, JP Morgan and Citadel match and settle normally (their unmatched count stays 0-4), and Virtu's own instructions carry the correct participant 7351.
+  Confirm:
+    - settlement-processor lines with body.text LIKE "*SETTLE-T1-TIMEOUT*": every one has counterparty={counterparty} and contra_dtc={contra_dtc}, with pending_hours={pending_hours} past sla={sla_hours}h and cns_match=UNMATCHED
+    - metrics.settlement.cns_unmatched_instructions (attributes.settlement.counterparty Virtu Financial) on settlement-processor: 0-5 before, climbing by about 1 a second (over 5 is a break)
+    - settlement-processor "dtc_match_status" lines: attributes.ssi.virtu.dtc_participant = 7315 and attributes.ssi.revision = 42, while other_counterparties_unmatched stays 0-4
+    - the settlement-processor refdata_load line "ssi-virtu revision 42 ... DTC participant 7351 -> 7315" (attributes.change.request CR-5182) comes before the first timeout
+  Remediation: opsctl rollback refdata/ssi-virtu --to-revision previous restores participant 7351 (revision 41) for new instructions, then opsctl run job/dtc-reinstruct-virtu cancels Virtu's unmatched deliveries and resends them with the correct contra. DTC matches the resent instructions over about 2 minutes, and the unmatched count is back under 5 within about 150 s. Escalating to Virtu's operations first is the wrong move: the break is in our SSI, Virtu's side is correct, and recycling the same instructions without the rollback only resends participant 7315.
+remediation_action: rollback_ssi_and_reinstruct_deliveries
+remediation_command: |-
+  opsctl rollback refdata/ssi-virtu --to-revision previous
+  opsctl run job/dtc-reinstruct-virtu
+error_message: '[SETTLE] SETTLE-T1-TIMEOUT: trade={trade_id} settlement={settlement_id} pending_hours={pending_hours}h sla={sla_hours}h
+  counterparty={counterparty} contra_dtc={contra_dtc} cns_match=UNMATCHED'
 stack_trace: |-
   === SETTLEMENT LIFECYCLE ===
   trade={trade_id}  settlement={settlement_id}  counterparty={counterparty}
-  PHASE               STATUS      TIMESTAMP
-  trade_capture       COMPLETE    2026-02-14T14:32:07Z
-  affirmation         COMPLETE    2026-02-14T15:01:22Z
-  netting             COMPLETE    2026-02-14T18:00:00Z
-  DTCC_submission     COMPLETE    2026-02-14T20:15:33Z
-  NSCC_CNS_match      PENDING     ---  <<< STALLED
-  DTC_delivery        WAITING     ---
+  PHASE               STATUS      DETAIL
+  trade_capture       COMPLETE    booked
+  affirmation         COMPLETE    CTM matched
+  netting             COMPLETE    trade-for-trade (DVP)
+  dtc_instruction     SENT        deliver_to=DTC {contra_dtc}  ssi=ssi-virtu rev {ssi_revision}
+  dtc_match           UNMATCHED   no matching receive instruction from DTC {contra_dtc}  <<< STALLED
+  dtc_delivery        WAITING     ---
   funds_transfer      WAITING     ---
   elapsed={pending_hours}h  sla={sla_hours}h  breach=true
   depository=DTC  clearing=NSCC  method=DVP
-  ACTION: escalate_counterparty=true  reg_report=SEC-15c6  alert=SETTLE-T2-TIMEOUT
+  ACTION: escalate_counterparty=true  reg_obligation=REG-SHO-204  alert=SETTLE-T1-TIMEOUT
 correlation_attr: {}
 fault_params:
   trade_id:
@@ -41,22 +53,121 @@ fault_params:
   settlement_id:
     format: "STL-{n}"
     n: {randint: [100000, 999999]}
-  pending_hours: {uniform: [48.5, 96.0], round: 1}
-  sla_hours: 48
-  counterparty: {choice: [Goldman Sachs, Morgan Stanley, JP Morgan, Citadel Securities, Virtu Financial, Jane Street]}
+  pending_hours: {uniform: [24.2, 26.0], round: 1}
+  sla_hours: 24
+  counterparty: Virtu Financial
+  contra_dtc: 7315
+  ssi_revision: 42
 rca_clues:
   settlement-processor:
-    settlement.t2_breach_hours: {uniform: [0.5, 48.0], round: 1}
-    settlement.nscc_match_pending_count: {randint: [1, 50]}
+    settlement.t1_breach_hours: {uniform: [0.2, 2.0], round: 1}
+    settlement.dtc_unmatched_count: {randint: [20, 600]}
+    settlement.stalled_counterparty: Virtu Financial
+    ssi.virtu.dtc_participant: 7315
   audit-logger:
-    audit.settlement_lifecycle_gaps: {randint: [0, 5]}
-    audit.dtc_delivery_events_missing: {randint: [0, 3]}
+    audit.settlement_lifecycle_gaps: 0
+    audit.dtc_delivery_events_missing: {randint: [1, 3]}
   risk-calculator:
     risk.failed_settlement_exposure_usd: {randint: [500000, 20000000]}
-    risk.counterparty_credit_hold: true
+    risk.counterparty_credit_event: false
   compliance-monitor:
     compliance.sec15c6_exceptions: {randint: [1, 10]}
     compliance.settlement_breach_reports: {randint: [1, 5]}
+cascade_messages:
+  audit-logger:
+    - severity: INFO
+      message: '[AUDIT] event_logged stream=settlements type=SETTLEMENT_PENDING settlement={settlement_id} counterparty={counterparty}
+        stage=dtc_match status=UNMATCHED pending_hours={pending_hours}'
+  risk-calculator:
+    - severity: WARN
+      message: '[RISK] unsettled DVP exposure to {counterparty}: settlement={settlement_id} past T+1 ({pending_hours}h), replacement-cost
+        exposure added to the counterparty limit'
+  compliance-monitor:
+    - severity: WARN
+      message: '[COMPL] SEC 15c6-1 exception: settlement={settlement_id} counterparty={counterparty} not settled by T+1 (pending
+        {pending_hours}h)'
+fault_scope:
+  cluster: finserv-gke-cluster
+  workloads: [settlement-processor, audit-logger]
+infrastructure_events:
+  - service: settlement-processor
+    severity: INFO
+    offset_seconds: -120
+    body: '[SETTLE] refdata_load ssi-virtu revision 42 applied by refdata-ops (CR-5182): Virtu Financial DTC participant 7351 -> 7315;
+      1 counterparty changed, new DVP instructions use revision 42'
+    attributes:
+      user.name: refdata-ops
+      change.request: CR-5182
+      operation: refdata_load
+      change.summary: 'Virtu Financial DTC participant: 7351 -> 7315'
+      ssi.revision: 42
+      ssi.virtu.dtc_participant: 7315
+remediation_effects:
+  log_taper_seconds: 120
+  log_events:
+    - service: audit-logger
+      severity: INFO
+      offset_seconds: 1
+      body: '[AUDIT] event_logged stream=change-mgmt type=CHANGE_APPLIED cmd="opsctl rollback refdata/ssi-virtu --to-revision previous" actor={actor}: ssi-virtu revision 42 -> 41 (Virtu Financial DTC participant 7315 -> 7351)'
+      attributes:
+        operation: change_applied
+        audit.stream: change-mgmt
+        change.target: refdata/ssi-virtu
+    - service: settlement-processor
+      severity: INFO
+      offset_seconds: 2
+      body: '[SETTLE] refdata_load ssi-virtu rolled back to revision 41: Virtu Financial DTC participant 7315 -> 7351; new DVP instructions
+        use revision 41'
+      attributes:
+        operation: refdata_load
+        ssi.revision: 41
+        ssi.virtu.dtc_participant: 7351
+    - service: audit-logger
+      severity: INFO
+      offset_seconds: 3
+      body: '[AUDIT] event_logged stream=change-mgmt type=CHANGE_APPLIED cmd="opsctl run job/dtc-reinstruct-virtu" actor={actor}: unmatched Virtu Financial DVP deliveries cancelled and resent with contra DTC 7351'
+      attributes:
+        operation: change_applied
+        audit.stream: change-mgmt
+        change.target: job/dtc-reinstruct-virtu
+    - service: settlement-processor
+      severity: INFO
+      offset_seconds: 15
+      body: 'job dtc-reinstruct-virtu: unmatched DVP deliveries to Virtu Financial cancelled at DTC and resent with contra 7351 (ssi-virtu
+        rev 41); waiting for DTC match'
+      attributes:
+        operation: job_run
+        job.name: dtc-reinstruct-virtu
+    - service: settlement-processor
+      severity: INFO
+      offset_seconds: 135
+      body: 'job dtc-reinstruct-virtu completed: every resent delivery to Virtu Financial matched at DTC, released for settlement'
+      attributes:
+        operation: job_run
+        job.name: dtc-reinstruct-virtu
+        job.status: succeeded
+  steady_attributes:
+    settlement-processor:
+      ssi.revision: 41
+      ssi.virtu.dtc_participant: 7351
+  verification:
+    - signal: settlement.cns_unmatched_instructions (Virtu Financial)
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "settlement-processor"'
+      field: 'metrics.settlement.cns_unmatched_instructions'
+      expect: 'back under 5 (was climbing by about 1 a second)'
+      within_seconds: 180
+    - signal: SETTLE-T1-TIMEOUT lines
+      from: 'logs.otel.finserv'
+      where: 'body.text LIKE "*SETTLE-T1-TIMEOUT*"'
+      expect: '0 new lines'
+      within_seconds: 180
+    - signal: Virtu Financial DTC participant in the SSI
+      from: 'logs.otel.finserv'
+      where: 'resource.attributes.service.name == "settlement-processor" AND body.text LIKE "*dtc_match_status*"'
+      field: 'attributes.ssi.virtu.dtc_participant'
+      expect: '7351 on every line since the fix; 7315 stops appearing'
+      within_seconds: 180
 business_impact:
   - kpi: business.settlement_success_rate_pct
     factor: {uniform: [0.60, 0.85]}

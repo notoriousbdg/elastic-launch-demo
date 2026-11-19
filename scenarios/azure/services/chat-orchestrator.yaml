@@ -1,0 +1,172 @@
+service: chat-orchestrator
+sort_order: 2
+cloud_provider: azure
+cloud_region: eastus
+cloud_platform: azure_vm
+cloud_availability_zone: eastus-2
+subsystem: orchestration
+language: python
+
+# Topology: [downstream-service, endpoint, METHOD]
+topology:
+  - [identity-broker, /api/v1/token/validate, POST]
+  - [prompt-guard, /api/v1/guard/screen, POST]
+  - [retrieval-service, /api/v1/retrieve, POST]
+  - [model-router, /api/v1/route, POST]
+  - [conversation-store, /api/v1/conversations, PUT]
+  - [cost-guard, /api/v1/budget/check, POST]
+
+entry_endpoints:
+  - [/api/v1/chat, POST]
+
+db_operations: []
+
+emit_fault_logs: true
+kpi_emitter: true
+
+constants:
+  DEPLOYMENTS: [chat-gpt4o-eastus, gpt-4o-chat-prod, gpt-4.1-chat-prod]
+
+# Per-channel influence terms t<N>: 0 normally, ramps to 1 over 45 s while channel N is active,
+# then decays to 0 after its fix (secondary effects clear ~90 s after the fix; own channels
+# 4 / 15 / 2 / 16 / 18 use their stated recovery times). Channels that list chat-orchestrator as
+# affected or cascade add bounded latency, retries and degraded answers; baseline otherwise.
+steps:
+  - sample:
+      t1:
+        expr: "min(1.0, max(0.0, elapsed.get(1, 0) - lag.get(1, 0)) / 45.0) if (1 in all_active and elapsed.get(1, 0) >= lag.get(1, 0)) else (max(0.0, 1.0 - since_fix.get(1, 0) / 90.0) if 1 in fixed_channels else 0.0)"
+      t2:
+        expr: "min(1.0, elapsed.get(2, 0) / 45.0) if 2 in all_active else (max(0.0, 1.0 - since_fix.get(2, 0) / 60.0) if 2 in fixed_channels else 0.0)"
+      t3:
+        expr: "min(1.0, max(0.0, elapsed.get(3, 0) - lag.get(3, 0)) / 45.0) if (3 in all_active and elapsed.get(3, 0) >= lag.get(3, 0)) else (max(0.0, 1.0 - since_fix.get(3, 0) / 90.0) if 3 in fixed_channels else 0.0)"
+      t4:
+        expr: "min(1.0, max(0.0, elapsed.get(4, 0) - lag.get(4, 0)) / 45.0) if (4 in all_active and elapsed.get(4, 0) >= lag.get(4, 0)) else (max(0.0, 1.0 - since_fix.get(4, 0) / 60.0) if 4 in fixed_channels else 0.0)"
+      t5:
+        expr: "min(1.0, max(0.0, elapsed.get(5, 0) - lag.get(5, 0)) / 45.0) if (5 in all_active and elapsed.get(5, 0) >= lag.get(5, 0)) else (max(0.0, 1.0 - since_fix.get(5, 0) / 90.0) if 5 in fixed_channels else 0.0)"
+      t7:
+        expr: "min(1.0, max(0.0, elapsed.get(7, 0) - lag.get(7, 0)) / 45.0) if (7 in all_active and elapsed.get(7, 0) >= lag.get(7, 0)) else (max(0.0, 1.0 - since_fix.get(7, 0) / 90.0) if 7 in fixed_channels else 0.0)"
+      t8:
+        expr: "min(1.0, max(0.0, elapsed.get(8, 0) - lag.get(8, 0)) / 45.0) if (8 in all_active and elapsed.get(8, 0) >= lag.get(8, 0)) else (max(0.0, 1.0 - since_fix.get(8, 0) / 90.0) if 8 in fixed_channels else 0.0)"
+      t9:
+        expr: "min(1.0, max(0.0, elapsed.get(9, 0) - lag.get(9, 0)) / 45.0) if (9 in all_active and elapsed.get(9, 0) >= lag.get(9, 0)) else (max(0.0, 1.0 - since_fix.get(9, 0) / 90.0) if 9 in fixed_channels else 0.0)"
+      t11:
+        expr: "min(1.0, max(0.0, elapsed.get(11, 0) - lag.get(11, 0)) / 45.0) if (11 in all_active and elapsed.get(11, 0) >= lag.get(11, 0)) else (max(0.0, 1.0 - since_fix.get(11, 0) / 90.0) if 11 in fixed_channels else 0.0)"
+      t12:
+        expr: "min(1.0, max(0.0, elapsed.get(12, 0) - lag.get(12, 0)) / 45.0) if (12 in all_active and elapsed.get(12, 0) >= lag.get(12, 0)) else (max(0.0, 1.0 - since_fix.get(12, 0) / 90.0) if 12 in fixed_channels else 0.0)"
+      t15:
+        expr: "min(1.0, elapsed.get(15, 0) / 45.0) if 15 in all_active else (max(0.0, 1.0 - since_fix.get(15, 0) / 45.0) if 15 in fixed_channels else 0.0)"
+      t16:
+        expr: "min(1.0, elapsed.get(16, 0) / 45.0) if 16 in all_active else (max(0.0, 1.0 - since_fix.get(16, 0) / 90.0) if 16 in fixed_channels else 0.0)"
+      t18:
+        expr: "min(1.0, max(0.0, elapsed.get(18, 0) - lag.get(18, 0)) / 45.0) if (18 in all_active and elapsed.get(18, 0) >= lag.get(18, 0)) else (max(0.0, 1.0 - since_fix.get(18, 0) / 90.0) if 18 in fixed_channels else 0.0)"
+      t19:
+        expr: "min(1.0, max(0.0, elapsed.get(19, 0) - lag.get(19, 0)) / 45.0) if (19 in all_active and elapsed.get(19, 0) >= lag.get(19, 0)) else (max(0.0, 1.0 - since_fix.get(19, 0) / 90.0) if 19 in fixed_channels else 0.0)"
+      t20:
+        expr: "min(1.0, max(0.0, elapsed.get(20, 0) - lag.get(20, 0)) / 45.0) if (20 in all_active and elapsed.get(20, 0) >= lag.get(20, 0)) else (max(0.0, 1.0 - since_fix.get(20, 0) / 90.0) if 20 in fixed_channels else 0.0)"
+      conversations_per_min:
+        expr: "round(rand.uniform(180.0, 720.0) * max(0.15, 1.0 - 0.5 * t4 - 0.65 * t18), 1)"
+      resolution_rate:
+        expr: "round(max(35.0, rand.uniform(82.0, 93.0) - (10 * t1 + 4 * t2 + 2 * t3 + 8 * t5 + 9 * t7 + 18 * t8 + 3 * t9 + 6 * t11 + 12 * t12 + 12 * t15 + 14 * t16 + 9 * t19 + 6 * t20)), 2)"
+      prompt_tokens:
+        expr: "int(rand.randint(900, 5200) * (1.0 + 4.0 * t2 + 4.0 * t15))"
+      completion_tokens:
+        expr: "int(rand.randint(150, 1100) * (1.0 + 3.0 * t2 + 3.0 * t15))"
+      token_cost_usd:
+        expr: "round(rand.uniform(0.35, 1.1) * (1.0 + 10.5 * t2 + 6.0 * t15), 3)"
+      tool_calls_per_turn:
+        expr: "int(round(2 + (rand.uniform(25.0, 120.0) - 2) * min(1.0, elapsed.get(15, 0) / 45.0))) if 15 in all_active else (int(round(70 + (rand.uniform(0.0, 3.0) - 70) * min(1.0, since_fix.get(15, 0) / 45.0))) if 15 in fixed_channels else rand.randint(0, 3))"
+      turn_latency_ms:
+        expr: "round(rand.uniform(1100.0, 2800.0) + (3500 * t1 + 1800 * t2 + 250 * t3 + 2500 * t7 + 400 * t8 + 300 * t9 + 4500 * t11 + 700 * t12 + 2200 * t19 + 200 * t20 + 9000 * t15 + 6500 * t16) * rand.uniform(0.85, 1.15), 1)"
+      retries_per_conversation:
+        expr: "round(rand.uniform(0.02, 0.15) + 1.6 * t1 + 1.2 * t7 + 0.1 * t8 + 0.3 * t11 + 0.2 * t12 + 1.0 * t19 + 0.3 * t15 + 2.5 * t16, 2)"
+      degraded_turn_pct:
+        expr: "round(rand.uniform(0.3, 1.5) + 8 * t1 + 10 * t5 + 6 * t7 + 15 * t8 + 2 * t9 + 4 * t11 + 9 * t12 + 5 * t19 + 5 * t20 + 12 * t15 + 14 * t16, 2)"
+      deployment: {choice: DEPLOYMENTS}
+  - sample:
+      agent_config_version:
+        expr: "'agent-config-v42' if 15 in all_active else 'agent-config-v41'"
+      agent_status:
+        expr: "'ANOMALY' if 15 in all_active or tool_calls_per_turn > 5 else 'NOMINAL'"
+      quota_headroom_pct:
+        expr: "round(25.0 + (rand.uniform(0.0, 2.0) - 25.0) * min(1.0, elapsed.get(16, 0) / 45.0), 1) if 16 in all_active else (round(1.0 + (rand.uniform(22.0, 28.0) - 1.0) * min(1.0, since_fix.get(16, 0) / 90.0), 1) if 16 in fixed_channels else round(rand.uniform(22.0, 28.0), 1))"
+      openai_capacity_tpm:
+        expr: "450000 if 16 in all_active else 600000"
+  - sample:
+      quota_status:
+        expr: "'ANOMALY' if 16 in all_active or quota_headroom_pct < 10.0 else 'NOMINAL'"
+  - metric:
+      name: chat.conversations_per_minute
+      value: {var: conversations_per_min}
+      unit: conversations/min
+  - metric:
+      name: chat.resolution_rate_pct
+      value: {var: resolution_rate}
+      unit: '%'
+  - metric:
+      name: chat.prompt_tokens
+      value: {var: prompt_tokens}
+      unit: tokens
+  - metric:
+      name: chat.completion_tokens
+      value: {var: completion_tokens}
+      unit: tokens
+  - metric:
+      name: chat.token_cost_usd_per_conversation
+      value: {var: token_cost_usd}
+      unit: USD
+  - metric:
+      name: chat.openai_quota_headroom_pct
+      value: {var: quota_headroom_pct}
+      unit: '%'
+  - metric:
+      name: chat.tool_calls_per_turn
+      value: {var: tool_calls_per_turn}
+      unit: calls
+  - metric:
+      name: chat.turn_latency_ms
+      value: {var: turn_latency_ms}
+      unit: ms
+  - metric:
+      name: chat.retries_per_conversation
+      value: {var: retries_per_conversation}
+      unit: retries
+  - metric:
+      name: chat.degraded_turn_pct
+      value: {var: degraded_turn_pct}
+      unit: '%'
+  - log:
+      level: INFO
+      message: 'chat.orchestration_health conversations_per_min={conversations_per_min} resolution_rate={resolution_rate}% turn_latency_ms={turn_latency_ms} retries={retries_per_conversation} degraded_turns={degraded_turn_pct}%'
+      attrs:
+        operation: orchestration_health
+        chat.conversations_per_min: {var: conversations_per_min}
+        chat.resolution_rate_pct: {var: resolution_rate}
+        chat.turn_latency_ms: {var: turn_latency_ms}
+        chat.retries_per_conversation: {var: retries_per_conversation}
+        chat.degraded_turn_pct: {var: degraded_turn_pct}
+  - log:
+      level: INFO
+      message: 'chat.token_usage deployment={deployment} prompt_tokens={prompt_tokens} completion_tokens={completion_tokens} cost_usd={token_cost_usd}'
+      attrs:
+        operation: token_usage
+        gen_ai.deployment: {var: deployment}
+        gen_ai.usage.input_tokens: {var: prompt_tokens}
+        gen_ai.usage.output_tokens: {var: completion_tokens}
+        chat.token_cost_usd: {var: token_cost_usd}
+  - log:
+      level: INFO
+      message: 'chat.agent_status agent=chat-orchestrator agent_config={agent_config_version} tool_calls_per_turn={tool_calls_per_turn} max_iterations=5 status={agent_status}'
+      attrs:
+        operation: agent_status
+        agent.config_version: {var: agent_config_version}
+        chat.tool_calls_per_turn: {var: tool_calls_per_turn}
+        chat.status: {var: agent_status}
+  - log:
+      level: INFO
+      message: 'chat.quota_status deployment=chat-gpt4o-eastus capacity_tpm={openai_capacity_tpm} quota_headroom={quota_headroom_pct}% status={quota_status}'
+      attrs:
+        operation: quota_status
+        gen_ai.deployment: chat-gpt4o-eastus
+        openai.capacity_tpm: {var: openai_capacity_tpm}
+        chat.quota_headroom_pct: {var: quota_headroom_pct}
+        chat.status: {var: quota_status}

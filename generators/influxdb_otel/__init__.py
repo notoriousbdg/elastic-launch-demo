@@ -1,0 +1,96 @@
+"""GeneratorSpec for the ``influxdb_otel`` telemetry generator."""
+from generator_engine.spec import GeneratorSpec
+
+SPEC = GeneratorSpec(
+    id="influxdb_otel",
+    thread_name="gen-influxdb-otel",
+    module="generators.influxdb_otel.generator",
+    client="otlp",
+    signals=("metrics",),
+    datasets=("influxdb.otel",),
+    integrations=("influxdb_otel",),
+    always_install=False,
+    data_views=(),
+    wants_chaos=True,
+    default_enabled=False,
+    core=False,
+    chaos_mode="explicit",
+    family="database",
+        impact_keys={
+        "cache_write_errors": {
+            "type": "float",
+            "default": 0.0,
+            "range": [0.0, 100.0],
+            "doc": "Drive alert \"[InfluxDB OTel] Cache write errors\": set above 0.0 (error_increase) to breach; 0=healthy.",
+        },
+        "compaction_queue_backlog": {
+            "type": "float",
+            "default": 0.0,
+            "range": [0.0, 100.0],
+            "doc": "Drive alert \"[InfluxDB OTel] Compaction queue backlog\": set above 10.0 (storage_compactions_queued) to breach; 0=healthy.",
+        },
+        "dropped_writes": {
+            "type": "float",
+            "default": 0.0,
+            "range": [0.0, 100.0],
+            "doc": "Drive alert \"[InfluxDB OTel] Dropped writes\": set above 0.0 (shard_drop_increase) to breach; 0=healthy.",
+        },
+        "go_goroutine_leak_suspected": {
+            "type": "float",
+            "default": 0.0,
+            "range": [0.0, 100000.0],
+            "doc": "Drive alert \"[InfluxDB OTel] Go goroutine leak suspected\": set above 10000.0 (go_goroutines) to breach; 0=healthy.",
+        },
+        "http_api_high_error_rate": {
+            "type": "float",
+            "default": 0.0,
+            "range": [0.0, 1.0],
+            "doc": "Drive alert \"[InfluxDB OTel] HTTP API high error rate\": >0 activates breach emit for this rule; 0=healthy.",
+        },
+        "query_controller_saturated": {
+            "type": "float",
+            "default": 0.0,
+            "range": [0.0, 100.0],
+            "doc": "Drive alert \"[InfluxDB OTel] Query controller saturated\": set above 5.0 (qc_queueing_active) to breach; 0=healthy.",
+        },
+        "scrape_target_down": {
+            "type": "float",
+            "default": 0.0,
+            "range": [0.0, 1.0],
+            "doc": "Drive alert \"[InfluxDB OTel] Scrape target down\": >0 activates breach emit for this rule; 0=healthy.",
+        },
+        "shard_write_errors": {
+            "type": "float",
+            "default": 0.0,
+            "range": [0.0, 100.0],
+            "doc": "Drive alert \"[InfluxDB OTel] Shard write errors\": set above 0.0 (count_increase) to breach; 0=healthy.",
+        },
+        "task_execution_failures": {
+            "type": "float",
+            "default": 0.0,
+            "range": [0.0, 100.0],
+            "doc": "Drive alert \"[InfluxDB OTel] Task execution failures\": set above 0.0 (failure_increase) to breach; 0=healthy.",
+        },
+        "wal_write_errors": {
+            "type": "float",
+            "default": 0.0,
+            "range": [0.0, 100.0],
+            "doc": "Drive alert \"[InfluxDB OTel] WAL write errors\": set above 0.0 (error_increase) to breach; 0=healthy.",
+        },
+        "storage_writer_timeouts": {
+            "type": "float",
+            "default": 0.0,
+            "range": [0.0, 100.0],
+            "doc": "Drive alert \"[InfluxDB OTel] Storage writer timeouts\": set above 0.0 (timeout_increase) to breach; 0=healthy.",
+        },
+    },
+    config_fields={
+        "service_name": {"type": "str", "required": False, "default": "influxdb",
+                         "doc": "service.name for the InfluxDB Prometheus scrape target."},
+        "org_id": {"type": "str", "required": False, "default": None,
+                   "doc": "InfluxDB organization ID.  Defaults to <namespace>-org."},
+        "host_name": {"type": "str", "required": False, "default": None,
+                      "doc": "host.name resource attribute.  Defaults to <namespace>-influxdb."},
+    },
+    schema_version="1.0",
+)

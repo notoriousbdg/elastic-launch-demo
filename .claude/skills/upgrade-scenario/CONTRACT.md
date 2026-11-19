@@ -42,7 +42,7 @@ Computed by `scenario_engine/schema_version.py :: version_status(scenario_versio
 ## `scenario_engine/schema.yaml` format
 
 ```yaml
-current: "1.1"                 # engine's expected schema version
+current: "1.3"                 # engine's expected schema version
 default_unversioned: "1.0"    # version assumed when schema_version key is absent
 
 migrations:                   # ordered oldest → newest; DO NOT reorder
@@ -60,6 +60,16 @@ migrations:                   # ordered oldest → newest; DO NOT reorder
 - Each `to` version must be strictly greater than the previous entry's `to`.
 - `breaking: true` → bump MAJOR in `to`. `breaking: false` → bump MINOR only.
 - `current` must equal the `to` of the last entry in `migrations`.
+
+### Registered versions
+
+| Version | Breaking | Summary | `needs_input` |
+|---|---|---|---|
+| 1.1 | no | `schema_version` key in `scenario.yaml` | no |
+| 1.2 | no | `business_impact` on every channel | no |
+| 1.3 | no | Realism and verifiable remediation: `remediation_command` (opsctl), `fault_scope`, cause-before-effect `infrastructure_events` (`offset_seconds`), `cascade_messages`, `remediation_effects` (verification, state, log_events, steady_attributes), before/during/after signals in the service DSL (`all_active`, `elapsed`, `fixed_channels`, `since_fix`, `applied`), no demo wording, coherence; scenario-level `ops.yaml` (opsctl profile); optional `k8s_topology` | **yes** — per channel |
+
+The `guidance` text in `schema.yaml` is authoritative; this table is a summary. 1.3 is per-channel work: Mode B must ask the user for the remediation commands and realistic after-state values (see SKILL.md Mode B Step 2). Checks 37-44 in `scripts/verify_yaml_scenarios.py` run only for scenarios at >= 1.3. Check 45 validates `scenarios/<id>/ops.yaml` whenever the file exists; Check 37 accepts only verbs that profile defines, so write `ops.yaml` before the commands. `ops.yaml` is a scenario file and inside Mode B's `scenarios/<id>/` scope.
 
 ---
 
@@ -121,13 +131,16 @@ scenario_engine/
 app/
   main.py                ← /api/setup/launch guard (blocks upgrade_required)
   selector/static/index.html  ← UI: disabled Launch button, version pills
+  ops_profile.py         ← ops profile contract (module docstring); merges presets + ops.yaml
+  ops_presets/*.yaml     ← scenario-neutral presets: neutral, kubernetes, aws-cloudtrail, gcp-audit, azure-activity
 
 scripts/
   scaffold_scenario.py   ← emits schema_version: "<current>" in new scenarios
-  verify_yaml_scenarios.py    ← check 1b: validates schema_version
+  verify_yaml_scenarios.py    ← check 1b: validates schema_version; checks 37-44 for >= 1.3; check 45 (ops.yaml)
 
 scenarios/<id>/
-  scenario.yaml          ← has `schema_version: "1.1"` (or absent → 1.0)
+  scenario.yaml          ← has `schema_version: "1.3"` (or older; absent → 1.0)
+  ops.yaml               ← opsctl profile (1.3): extends, actors, auto_remediate_channels, audit, verbs, guide
 
 .claude/skills/upgrade-scenario/
   SKILL.md               ← skill instructions (3 modes)

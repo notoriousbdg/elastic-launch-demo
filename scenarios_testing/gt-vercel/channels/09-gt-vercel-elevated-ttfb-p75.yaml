@@ -1,0 +1,37 @@
+name: "GT vercel_otel: elevated_ttfb_p75"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-VERCEL-ELEVATED-TTFB-P75
+sensor_type: impact_key_probe
+affected_services:
+  - gt-vercel-aws-svc-1
+cascade_services:
+  - gt-vercel-aws-svc-2
+description: "Tests impact_key elevated_ttfb_p75 on generator vercel_otel."
+investigation_notes: |-
+  1. Verify vercel_otel is active and reporting metrics.
+  2. Check that the elevated_ttfb_p75 metric has reached the trigger value (3.0).
+  3. Confirm generator_impact for vercel_otel.elevated_ttfb_p75 is set to 3.0.
+  4. Look for correlated changes in service gt-vercel-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_elevated_ttfb_p75_baseline
+error_message: "GT-PROBE: gen=vercel_otel key=elevated_ttfb_p75 value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=vercel_otel
+  impact_key: elevated_ttfb_p75
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 3.0
+  svc_name: gt-vercel-aws-svc-1
+rca_clues:
+  gt-vercel-aws-svc-1:
+    probe.generator: vercel_otel
+    probe.impact_key: elevated_ttfb_p75
+    probe.trigger_value: 3.0
+  gt-vercel-aws-svc-2:
+    probe.upstream_generator: vercel_otel
+    probe.upstream_key: elevated_ttfb_p75
+generator_impact:
+  vercel_otel:
+    elevated_ttfb_p75: 3.0

@@ -3,34 +3,33 @@ subsystem: network_access
 vehicle_section: wireless_auth
 error_type: AUTH_FAILURE_STORM
 sensor_type: radius_auth
-affected_services:
-- wifi-controller
-- dns-dhcp-service
-cascade_services:
-- network-controller
+affected_services: [wifi-controller, dns-dhcp-service, card-printing-system]
+cascade_services: [network-controller]
 description: RADIUS authentication requests spiking beyond server capacity
 investigation_notes: |-
-  1. Check RADIUS server logs: `journalctl -u freeradius -f` or NPS Event Viewer — look for repeated Access-Reject with reason codes.
-  2. Identify the NAS (Network Access Server) generating the storm: the NAS IP in the logs points to a specific WLC or switch.
-  3. Common root cause: a certificate change on the RADIUS server breaks PEAP-MSCHAPv2 — all clients simultaneously retry authentication.
-  4. Check for a Group Policy update that changed supplicant settings: `netsh wlan show profiles` on affected Windows clients.
-  5. As immediate mitigation, enable RADIUS rate limiting on the WLC: set max auth requests per second per SSID.
-  6. If the RADIUS server is overloaded, temporarily switch the SSID to PSK or MAC-auth bypass for critical warehouse devices while investigating.
+  Root cause: NPS policy nps-policy-2025q1-draft was activated on radius-01 and radius-02 shortly before the first AUTH_FAILURE_STORM. The draft policy moved PEAP to a new server certificate chain that corporate clients do not trust, so supplicants abort at the TLS step (NPS reason code 265, tls_alert_unknown_ca) and keep retrying: denials jump to about {auth_failures} a minute and RADIUS requests to about {auth_requests_per_min} a minute against a normal 300-400. The storm starts as soon as the policy takes effect on the servers. RADIUS server load is a symptom of those retries. No supplicant or Group Policy change was pushed. Only the 802.1X SSID Fanatics-Corp is affected: Fanatics-Guest (captive portal) keeps authenticating normally, and warehouse devices on MAC-auth bypass keep their sessions.
+  Confirm:
+    - wifi-controller NAC_AUTH_SUMMARY lines for ssid=Fanatics-Corp show nps_policy=nps-policy-2025q1-draft reason=server_cert_untrusted status=ANOMALY; metric wifi.auth_failures_per_min jumps from under 15 to about 540 and wifi.radius_requests_per_min rises about three times per failure
+    - the wifi-controller line "[NPS] policy nps-wifi ... nps-policy-2025q1-draft activated" comes before the first AUTH_FAILURE_STORM; the Fanatics-Guest summary stays NOMINAL
+    - rca attributes network.supplicant_profile_changed=false and wifi.radius_server_cert_changed=true on the fault lines
+  Downstream, after clients stop authenticating: dns-dhcp-service sees fewer new leases, then card-printing-system line controllers on Fanatics-Corp lose their sessions.
+  Remediation: roll the NPS policy back with opsctl rollback config/nps-wifi-policy --to-revision previous. NPS reloads the policy within about 15 seconds and presents the old certificate chain again; the retry traffic decays over about a minute.
 remediation_action: reset_radius_service
-error_message: 'AUTH_FAILURE_STORM event_id=mist-auth-storm: rate={auth_requests_per_sec}/s (threshold {auth_threshold}/s),
-  failures={auth_failures} timeouts={auth_timeouts} nas={radius_nas_ip} server={radius_server}'
+remediation_command: |-
+  opsctl rollback config/nps-wifi-policy --to-revision previous
+error_message: 'AUTH_FAILURE_STORM event_id=mist-auth-storm: rate={auth_requests_per_min}/min (threshold {auth_threshold}/min),
+  failures={auth_failures}/min timeouts={auth_timeouts} nas={radius_nas_ip} server={radius_server} reason=tls_alert_unknown_ca nps_reason_code=265'
 stack_trace: '{{"type": "AUTH_FAILURE_STORM", "event_id": "mist-auth-storm", "org_id": "fanatics-org-001", "nas_ip": "{radius_nas_ip}",
-  "radius_server": "{radius_server}", "auth_rate": {auth_requests_per_sec}, "threshold": {auth_threshold}, "failures": {auth_failures},
-  "timeouts": {auth_timeouts}, "eap_type": "PEAP-MSCHAPv2", "ssid": "Fanatics-Corp", "reason_codes": ["timeout", "reject",
-  "invalid_credential"]}}'
+  "radius_server": "{radius_server}", "auth_rate_per_min": {auth_requests_per_min}, "threshold_per_min": {auth_threshold}, "failures_per_min": {auth_failures},
+  "timeouts": {auth_timeouts}, "eap_type": "PEAP-MSCHAPv2", "ssid": "Fanatics-Corp", "reason_codes": ["tls_alert_unknown_ca", "nps_265"]}}'
 correlation_attr:
   key: deployment.radius_config
   value: nps-policy-2025q1-draft
 fault_params:
-  auth_requests_per_sec: {randint: [200, 1000]}
-  auth_threshold: 100
-  auth_failures: {randint: [50, 300]}
-  auth_timeouts: {randint: [20, 150]}
+  auth_requests_per_min: {randint: [1850, 2100]}
+  auth_threshold: 600
+  auth_failures: {randint: [500, 580]}
+  auth_timeouts: {randint: [40, 120]}
   radius_nas_ip:
     format: "10.1.{a}.{b}"
     a: {randint: [1, 10]}
@@ -38,20 +37,79 @@ fault_params:
   radius_server: {choice: [radius-01.fanatics.internal, radius-02.fanatics.internal]}
 rca_clues:
   wifi-controller:
-    wifi.radius_queue_depth: {randint: [200, 1000]}
     wifi.eap_type: PEAP-MSCHAPv2
+    wifi.radius_server_cert_changed: true
+    wifi.eap_failure_reason: server_cert_untrusted
+    wifi.nps_reason_code: 265
   dns-dhcp-service:
-    dhcp.new_lease_failures: {randint: [20, 200]}
+    dhcp.new_lease_failures: {randint: [10, 60]}
     dhcp.auth_dependent_scope: {choice: ["10.1.0.0/24", "10.2.0.0/24"]}
   network-controller:
-    network.dot1x_failures_per_sec: {randint: [50, 500]}
-    network.radius_server_load_pct: {uniform: [85, 100], round: 1}
+    network.dot1x_failures_per_sec: {uniform: [7.0, 10.0], round: 1}
+    network.radius_server_load_pct: {uniform: [45, 70], round: 1}
+    network.supplicant_profile_changed: false
+cascade_messages:
+  network-controller:
+    - severity: WARN
+      message: '%DOT1X-5-FAIL: Authentication failed for clients on nas {radius_nas_ip} (radius server {radius_server} rejected: tls_alert_unknown_ca); {auth_failures} failures/min'
+fault_scope:
+  workloads: [wifi-controller, dns-dhcp-service]
+infrastructure_events:
+  - service: wifi-controller
+    severity: INFO
+    offset_seconds: -30
+    body: '[NPS] policy nps-wifi revision nps-policy-2024q4 -> nps-policy-2025q1-draft activated on radius-01.fanatics.internal, radius-02.fanatics.internal; PEAP server certificate chain changed (CR-3155)'
+    attributes:
+      user.name: identity-engineering
+      change.request: CR-3155
+      operation: config_change
+      deployment.radius_config: nps-policy-2025q1-draft
+      change.summary: 'NPS policy: nps-policy-2024q4 -> nps-policy-2025q1-draft'
+remediation_effects:
+  log_events:
+    - service: wifi-controller
+      severity: INFO
+      offset_seconds: 1
+      body: '[CHG] CHANGE APPLIED opsctl rollback config/nps-wifi-policy --to-revision previous by {actor}: NPS policy nps-policy-2025q1-draft -> nps-policy-2024q4'
+      attributes:
+        operation: change_applied
+        change.target: config/nps-wifi-policy
+    - service: wifi-controller
+      severity: INFO
+      offset_seconds: 15
+      body: '[NPS] policy nps-wifi revision nps-policy-2024q4 active on radius-01.fanatics.internal, radius-02.fanatics.internal; PEAP certificate chain restored'
+      attributes:
+        operation: config_change
+        deployment.radius_config: nps-policy-2024q4
+  steady_attributes:
+    wifi-controller:
+      deployment.radius_config: nps-policy-2024q4
+  verification:
+    - signal: wifi.auth_failures_per_min
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "wifi-controller"'
+      field: 'metrics.wifi.auth_failures_per_min'
+      expect: 'back below 15 as the retries decay (was 500-580)'
+      within_seconds: 120
+    - signal: AUTH_FAILURE_STORM lines
+      from: 'logs.otel.fanatics'
+      where: 'body.text LIKE "*AUTH_FAILURE_STORM*"'
+      expect: '0 new lines'
+      within_seconds: 120
+    - signal: NPS policy revision
+      from: 'logs.otel.fanatics'
+      where: 'resource.attributes.service.name == "wifi-controller"'
+      field: 'attributes.deployment.radius_config'
+      expect: 'nps-policy-2024q4 on every line logged since the fix; nps-policy-2025q1-draft stops appearing'
+      within_seconds: 120
 business_impact:
   - kpi: business.app_sessions_per_min
-    factor: {uniform: [0.20, 0.50]}
+    value: {uniform: [334.8, 385.2]}
   - kpi: business.merch_gmv_usd_per_min
-    factor: {uniform: [0.25, 0.55]}
+    value: {uniform: [16926.0, 19474.0], round: 1}
   - kpi: business.churn_risk_index_0_100
     factor: {uniform: [2.0, 4.0]}
-  - kpi: business.net_satisfaction_proxy_nps
-    factor: {uniform: [0.25, 0.55]}
+  - kpi: business.ad_revenue_usd_per_min
+    value: {uniform: [31620.0, 36380.0], round: 1}
+# dependents degrade after the component at fault, in dependency order
+service_lag_seconds: {dns-dhcp-service: 20, card-printing-system: 45, network-controller: 60}

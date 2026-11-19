@@ -1,0 +1,40 @@
+service: gt-cockroachdb-aws-svc-1
+sort_order: 1
+cloud_provider: aws
+cloud_region: us-east-1
+cloud_platform: aws_ec2
+cloud_availability_zone: us-east-1a
+subsystem: platform
+language: go
+
+# Topology: [downstream-service, endpoint, METHOD]
+topology: []
+
+# Required: entry_endpoints for the sort_order:1 service
+# Format: [[/path, METHOD], ...]
+entry_endpoints:
+  - [/api/v1/gt-cockroachdb-aws-svc-1/health, GET]
+  - [/api/v1/gt-cockroachdb-aws-svc-1/process, POST]
+
+db_operations: []
+
+emit_fault_logs: true
+kpi_emitter: false
+
+constants: {}
+
+steps:
+  - sample:
+      latency_ms:
+        if_active: {uniform: [500.0, 3000.0], round: 1}
+        else: {uniform: [20.0, 150.0], round: 1}
+  - metric:
+      name: gt_cockroachdb_aws_svc_1.latency_ms
+      value: {var: latency_ms}
+      unit: ms
+  - log:
+      level: INFO
+      message: '[gt_cockroachdb_aws_svc_1] health_check latency={latency_ms}ms status=OK'
+      attrs:
+        operation: health_check
+        svc.latency_ms: {var: latency_ms}

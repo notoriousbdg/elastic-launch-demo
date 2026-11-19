@@ -9,63 +9,144 @@ affected_services:
 cascade_services:
 - member-portal
 - document-vault
-description: Automated policy renewal batch processing failing causing coverage gaps
+description: The nightly policy renewal batch fails premium calculation because it now runs eight times as many rating workers as the rating engine can serve.
 investigation_notes: |-
-  1. Check premium_calculation failure reason: RATING_ENGINE_TIMEOUT means the actuarial rating service is degraded — verify quote-engine health and response times in APM traces.
-  2. MVR_DATA_STALE indicates driving record pulls returned cached data beyond acceptable freshness. Check the LexisNexis/TransUnion MVR feed connectivity and last successful pull timestamp.
-  3. CLUE_SERVICE_UNAVAILABLE means loss history lookups failed — CLUE (Comprehensive Loss Underwriting Exchange) outages affect all carriers. Check A-PLUS/CLUE system status with LexisNexis.
-  4. Coverage gap risk is HIGH — policies that fail renewal before effective_date create uninsured periods. Extend grace period to 30 days and notify members. State insurance departments require reporting of lapsed auto policies.
-  5. Check SCRA-protected members — 12 policies with deployment_hold cannot be non-renewed under the Servicemembers Civil Relief Act. These must be manually renewed at the prior term premium.
-  6. Run manual renewal batch for failed policies: POST /api/v1/policy/batch-renew with override flags.
-remediation_action: restart_renewal_engine
-error_message: '[POLICY] POLICY-RENEWAL-FAIL: batch={renewal_batch_id} policies={renewal_count} failed={renewal_failed} reason={renewal_reason}
-  effective={renewal_date}'
+  1. Search logs.otel.banking for body.text containing POLICY-RENEWAL-FAIL on policy-manager: batch={renewal_batch_id} with {renewal_count} policies effective {renewal_date} has {renewal_failed} failures with reason={renewal_reason}. metrics.policy_manager.renewal_failed_per_min normally reads 0-1 and is now 40-120.
+  2. Follow the timeout to quote-engine: metrics.quote_engine.response_time_ms normally reads 120-450 ms and is now 14,000-22,000 ms, above the renewal client timeout of 15 s, and metrics.quote_engine.rating_pool_busy_pct is at 99-100%. Interactive quotes on member-portal slow down at the same time, so this is load on the rating engine, not one bad policy record.
+  3. Find the change: the renewal_batch_status line on policy-manager carries attributes.batch.parallelism. CronJob policy-renewal-batch (namespace policy) was changed from parallelism 4 to 32 to finish the batch sooner, and the run that started just before the first failure is the first one with 32 workers. The rating engine has a fixed pool of 64 threads; 32 workers each sending 4 concurrent re-rates saturate it.
+  4. Rule out the data feeds: MVR and CLUE pulls complete (mvr_pull and clue_check COMPLETE in the batch dump), and the rules engine is not in error (no UW-RULES-ENGINE-ERR lines), which separates this from an underwriting rules problem.
+  5. Fix: restore the CronJob, then re-run the policies that failed before their effective date: opsctl rollback cronjob/policy-renewal-batch -n policy --to-revision previous and opsctl run job/policy-renewal-batch -n policy. The 32-worker job is replaced by a 4-worker run; rating latency falls back within about a minute and the re-run renews the failed policies. Raising the client timeout only queues more work on the saturated pool.
+  6. Recovery: batch.parallelism reads 4, quote_engine.response_time_ms back under 450 ms, rating_pool_busy_pct back to 20-45%, renewal_failed_per_min back to 0-1, and no new POLICY-RENEWAL-FAIL lines. Route the {deployment_hold} failed policies with a military deployment hold to manual review so no deployed member lapses.
+remediation_action: restore_renewal_batch
+remediation_command: |-
+  opsctl rollback cronjob/policy-renewal-batch -n policy --to-revision previous
+  opsctl run job/policy-renewal-batch -n policy
+error_message: '[POLICY] POLICY-RENEWAL-FAIL: batch={renewal_batch_id} policies={renewal_count} failed={renewal_failed} reason={renewal_reason} effective={renewal_date} parallelism=32 rating_ms={rating_ms}'
 stack_trace: |-
   === POLICY RENEWAL BATCH STATUS ===
-  batch={renewal_batch_id}  effective_date={renewal_date}
+  batch={renewal_batch_id}  effective_date={renewal_date}  cronjob=policy-renewal-batch  parallelism=32
   --- BATCH METRICS ---
-    total_policies={renewal_count}  processed=0  failed={renewal_failed}
+    total_policies={renewal_count}  failed={renewal_failed}
     STEP                    STATUS      DETAIL
     rating_refresh          COMPLETE    new_rates_applied
     mvr_pull                COMPLETE    driving_records_updated
     clue_check              COMPLETE    loss_history_verified
-    premium_calculation     FAILED      {renewal_reason}  <<< BLOCKED
+    premium_calculation     FAILED      {renewal_reason} after 15000ms (quote-engine p95={rating_ms}ms)  <<< BLOCKED
     dec_page_generate       SKIPPED     ---
-    payment_schedule        SKIPPED     ---
   --- COVERAGE RISK ---
-    lapse_risk=HIGH  grace_period=30_days  state_reporting=REQUIRED
-    military_deployment_hold={deployment_hold}
-    scra_protected_members=12
-  ACTION: manual_renewal=true  extend_grace=true  alert=POLICY-RENEWAL-FAIL
+    lapse_risk=HIGH  military_deployment_hold={deployment_hold}
+  ACTION: manual_renewal=true  alert=POLICY-RENEWAL-FAIL
 correlation_attr:
-  key: deployment.rating_engine_rules
-  value: actuarial-rules-CS-4827
+  key: batch.parallelism
+  value: '32'
 fault_params:
   renewal_batch_id: {format: "RNW-{n}", n: {randint: [1000, 9999]}}
-  renewal_count: {randint: [500, 5000]}
-  renewal_failed: {randint: [50, 500]}
-  renewal_reason: {choice: [RATING_ENGINE_TIMEOUT, MVR_DATA_STALE, CLUE_SERVICE_UNAVAILABLE, PREMIUM_CALC_OVERFLOW]}
-  renewal_date: "2026-03-01"
-  deployment_hold: {choice: [true, false]}
+  renewal_count: {randint: [3000, 5000]}
+  renewal_failed: {randint: [400, 1500]}
+  renewal_reason: RATING_ENGINE_TIMEOUT
+  renewal_date: "2026-12-01"
+  deployment_hold: {choice: [12, 14, 17]}
+  rating_ms: {randint: [14000, 22000]}
 rca_clues:
   policy-manager:
-    policy.renewal_batch_failure_reason: {choice: [RATING_ENGINE_TIMEOUT, MVR_DATA_STALE, CLUE_SERVICE_UNAVAILABLE]}
-    policy.scra_protected_count: {randint: [5, 20]}
+    batch.parallelism: 32
+    policy.renewal_batch_failure_reason: RATING_ENGINE_TIMEOUT
   quote-engine:
-    quote.rating_engine_response_ms: {randint: [8000, 30000]}
-    quote.actuarial_model_status: DEGRADED
+    quote.rating_engine_response_ms: {randint: [14000, 22000]}
+    quote.rating_pool_busy_pct: {randint: [99, 100]}
   member-portal:
-    portal.renewal_notice_generation: BLOCKED
-    portal.coverage_gap_risk_count: {randint: [100, 500]}
+    portal.quote_page_load_ms: {randint: [6000, 15000]}
   document-vault:
-    document.dec_page_generation: QUEUED
     document.renewal_docs_pending: {randint: [200, 800]}
+error_services:
+- policy-manager
+service_lag_seconds:
+  member-portal: 60
+  document-vault: 90
+cascade_messages:
+  quote-engine:
+  - severity: WARN
+    message: '[UW] rating_pool saturated busy_threads=64/64 queued={renewal_failed} p95_ms={rating_ms} caller=policy-renewal-batch status=SATURATED'
+  member-portal:
+  - severity: WARN
+    message: '[PORTAL] page_view page=/insurance/auto quote_wait_ms={rating_ms} status=200'
+  document-vault:
+  - severity: INFO
+    message: '[DOC] dec_page_generation batch={renewal_batch_id} reason=renewal_not_rated status=QUEUED'
+fault_scope:
+  cluster: banking-gke-cluster
+  workloads: [policy-manager, quote-engine]
+infrastructure_events:
+- service: policy-manager
+  severity: INFO
+  offset_seconds: -150
+  body: '[POLICY] cronjob_update cronjob=policy/policy-renewal-batch spec.parallelism 4 -> 32 reason="finish renewal window earlier" applied_by=argocd/policy change=CHG0048102 status=APPLIED'
+  attributes:
+    operation: cronjob_update
+    batch.parallelism: 32
+    user.name: argocd/policy
+- service: policy-manager
+  severity: INFO
+  offset_seconds: -60
+  body: '[POLICY] renewal_batch started job=policy-renewal-batch-29371440 parallelism=32 policies=4120 effective=2026-12-01'
+  attributes:
+    operation: renewal_batch_start
+    batch.parallelism: 32
+remediation_effects:
+  transition_seconds: 90
+  log_events:
+  - service: policy-manager
+    severity: INFO
+    offset_seconds: 1
+    body: '[change-audit] change applied action=rollback target=cronjob/policy-renewal-batch namespace=policy cmd="opsctl rollback cronjob/policy-renewal-batch -n policy --to-revision previous" actor={actor} result="parallelism 32 -> 4"'
+    attributes:
+      operation: change_applied
+      change.target: cronjob/policy-renewal-batch
+      batch.parallelism: 4
+  - service: policy-manager
+    severity: INFO
+    offset_seconds: 2
+    body: '[change-audit] change applied action=run target=job/policy-renewal-batch namespace=policy cmd="opsctl run job/policy-renewal-batch -n policy" actor={actor} result="re-run of failed renewals started (parallelism 4)"'
+    attributes:
+      operation: change_applied
+      change.target: job/policy-renewal-batch
+  steady_attributes:
+    policy-manager:
+      batch.parallelism: 4
+  verification:
+  - signal: quote_engine.response_time_ms
+    from: metrics-generic.otel-default
+    where: resource.attributes.service.name == "quote-engine"
+    field: metrics.quote_engine.response_time_ms
+    expect: back in 120-450 ms (was 14,000-22,000 ms)
+    within_seconds: 150
+  - signal: policy_manager.renewal_failed_per_min
+    from: metrics-generic.otel-default
+    where: resource.attributes.service.name == "policy-manager"
+    field: metrics.policy_manager.renewal_failed_per_min
+    expect: back to 0-1 (was 40-120)
+    within_seconds: 150
+  - signal: renewal batch parallelism
+    from: logs.otel.banking
+    where: resource.attributes.service.name == "policy-manager" AND attributes.operation == "renewal_batch_status"
+    field: attributes.batch.parallelism
+    expect: 4 on every line logged since the fix
+    within_seconds: 60
+  - signal: POLICY-RENEWAL-FAIL lines
+    from: logs.otel.banking
+    where: body.text LIKE "*POLICY-RENEWAL-FAIL*"
+    expect: 0 new lines
+    within_seconds: 150
+generator_impact:
+  kubernetes_otel:
+    job_failures: 1.0
 business_impact:
   - kpi: business.fee_revenue_usd_per_min
-    factor: {uniform: [0.30, 0.60]}
+    value: {uniform: [4464.0, 5136.0], round: 1}
   - kpi: business.account_openings_per_min
-    factor: {uniform: [0.35, 0.65]}
+    value: {uniform: [0.48, 0.56], round: 2}
   - kpi: business.churn_risk_index_0_100
     factor: {uniform: [2.0, 4.0]}
   - kpi: business.complaint_tickets_per_min
     factor: {uniform: [2.0, 4.5]}
+

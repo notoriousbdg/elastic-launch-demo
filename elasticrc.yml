@@ -1,0 +1,11 @@
+current_context: demo
+contexts:
+  demo:
+    elasticsearch:
+      url: $(env:ELASTICSEARCH_URL)
+      auth:
+        api_key: $(env:ELASTICSEARCH_API_KEY)
+    kibana:
+      url: $(env:KIBANA_URL)
+      auth:
+        api_key: $(env:ELASTICSEARCH_API_KEY)

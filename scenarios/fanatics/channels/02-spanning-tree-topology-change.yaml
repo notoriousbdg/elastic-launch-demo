@@ -3,21 +3,21 @@ subsystem: network_core
 vehicle_section: switching_fabric
 error_type: SPANTREE-2-TOPO_CHANGE
 sensor_type: stp_state
-affected_services:
-- network-controller
-- firewall-gateway
-cascade_services:
-- dns-dhcp-service
-- wifi-controller
+affected_services: [network-controller, firewall-gateway, cloud-inventory-scanner]
+cascade_services: [dns-dhcp-service, wifi-controller]
 description: Rapid spanning tree topology changes destabilizing Layer 2 forwarding
+onset_delay_seconds: 10
+ramp_seconds: 8
 investigation_notes: |-
-  1. Run `show spanning-tree vlan <id> detail` to identify the port generating Topology Change Notifications (TCNs).
-  2. Check `show spanning-tree detail | include ieee|from|occur` across all switches to pinpoint the originating bridge.
-  3. Verify BPDU Guard and Root Guard are enabled on access ports: `show spanning-tree inconsistentports`.
-  4. A sudden burst of TCNs often indicates a flapping uplink or a new device plugged into a trunk port — correlate with interface up/down events.
-  5. Enable `spanning-tree portfast` on all edge/access ports to prevent end-host connections from triggering topology changes.
-  6. If the root bridge is shifting, set explicit root priority: `spanning-tree vlan <id> root primary` on the designated core switch.
+  Root cause: dist-sw-02 was reloaded onto ios-xe-17.9.4a-prerelease (from 17.9.3) about two minutes before the first SPANTREE-2-TOPO_CHANGE. The prerelease image restarts the RSTP handshake on the {interface} uplink every few seconds, and each restart floods a TCN: {tc_count} TCN BPDUs in {tc_window}s on VLAN {vlan_id}, bridge {bridge_id}. Only dist-sw-02 is affected: dist-sw-01 still runs 17.9.3 with no topology changes. On dist-sw-02 the uplink has no link up/down transitions, the root bridge has not moved, and BPDU Guard has no violations, which rules out a flapping link, a rogue switch and a new device on an edge port.
+  Confirm:
+    - dist-sw-02 logs %SYS-5-RELOAD and %SYS-5-RESTART (ios-xe-17.9.4a-prerelease, CHG0048377) before the first TOPO_CHANGE line (attributes.infra.stp_firmware)
+    - stp-poll lines for dist-sw-02 carry ios_xe=ios-xe-17.9.4a-prerelease and status=ANOMALY, with %SPANTREE-5-TOPOTRAP lines; metric network.stp.topology_changes is about 40 TCNs per 30s (baseline 0-1)
+    - network.interface.in_errors and CRC stay 0-2 and the BGP sessions stay Established, so the uplink and the routing plane are healthy
+  Remediation: roll dist-sw-02 back to the previous image with opsctl rollback firmware/dist-sw-02 --to-revision previous. The switch reloads, so its readings are missing for about 40 seconds. After it rejoins, RSTP resyncs with a short burst of TCNs that settles to 0-1 within about 25 seconds. Portfast on access ports would not help: the TCNs come from a trunk uplink.
 remediation_action: reset_spanning_tree
+remediation_command: |-
+  opsctl rollback firmware/dist-sw-02 --to-revision previous
 error_message: '%SPANTREE-2-TOPO_CHANGE: Topology Change received on VLAN {vlan_id} instance {stp_instance} from bridge {bridge_id}
   via port {interface}, {tc_count} TCN BPDUs in {tc_window}s'
 stack_trace: |-
@@ -25,7 +25,7 @@ stack_trace: |-
   VLAN{vlan_id} is executing the rstp compatible Spanning Tree protocol
     Bridge Identifier has priority 32768, address {bridge_id}
     Topology change flag set, detected flag set
-    Number of topology changes {tc_count}
+    Number of topology changes {tc_count} in the last {tc_window}s
     Last change occurred on port {interface}
     Times: hello 2, max age 20, forward delay 15, topology change {tc_window}
     Port {interface} of VLAN{vlan_id} is designated forwarding
@@ -35,8 +35,8 @@ correlation_attr:
   key: infra.stp_firmware
   value: ios-xe-17.9.4a-prerelease
 fault_params:
-  vlan_id: {choice: [100, 200, 300, 400, 500, 1000]}
-  stp_instance: {randint: [0, 15]}
+  vlan_id: 100
+  stp_instance: 0
   bridge_id:
     format: "8000.{a:02x}{b:02x}.{c:02x}{d:02x}.{e:02x}{f:02x}"
     a: {randint: [0, 255]}
@@ -45,28 +45,107 @@ fault_params:
     d: {randint: [0, 255]}
     e: {randint: [0, 255]}
     f: {randint: [0, 255]}
-  interface: {choice: [Gi0/0/1, Gi0/0/2, Te1/0/1, Te1/0/2, Po1]}
-  tc_count: {randint: [15, 80]}
-  tc_window: {randint: [10, 60]}
+  interface: Te1/0/1
+  tc_count: {randint: [36, 44]}
+  tc_window: 30
 rca_clues:
   network-controller:
-    stp.root_bridge_change: true
-    stp.tcn_source_port: {choice: [Gi0/0/2, Po1, Te1/0/1]}
+    stp.root_bridge_change: false
+    stp.tcn_source_port: Te1/0/1
+    stp.uplink_link_flaps: 0
+    stp.bpduguard_violations: 0
   firewall-gateway:
-    firewall.l2_loop_detected: true
-    firewall.broadcast_storm_pps: {randint: [5000, 50000]}
+    firewall.l2_loop_detected: false
+    firewall.broadcast_storm_pps: {randint: [50, 400]}
   dns-dhcp-service:
     dns.resolution_flapping: true
     dns.affected_zone: fanatics.internal
   wifi-controller:
     wifi.uplink_state: flapping
     wifi.ap_isolation_triggered: {randint: [2, 10]}
+cascade_messages:
+  dns-dhcp-service:
+    - severity: WARN
+      message: 'named[1823]: zone fanatics.internal/IN: refresh: retry limit for primary 10.10.1.53#53 exceeded; L2 reconvergence on VLAN {vlan_id}, {tc_count} TCN BPDUs in {tc_window}s'
+  wifi-controller:
+    - severity: WARN
+      message: 'ap=wh01-ap-09 uplink path via dist-sw-02 reconverging: MAC table flushed {tc_count} times in {tc_window}s on VLAN {vlan_id}; client sessions reset'
+fault_scope:
+  workloads: [network-controller, firewall-gateway, cloud-inventory-scanner]
+infrastructure_events:
+  - service: network-controller
+    severity: INFO
+    offset_seconds: -120
+    body: '%SYS-5-RELOAD: Reload requested by netops-release. Reload Reason: Reload Command. (ios-xe-17.9.4a-prerelease installed, was 17.9.3, CHG0048377) [dist-sw-02]'
+    attributes:
+      user.name: netops-release
+      change.request: CHG0048377
+      operation: firmware_load
+      network.device: dist-sw-02
+      infra.stp_firmware: ios-xe-17.9.4a-prerelease
+      change.summary: 'dist-sw-02 firmware: ios-xe-17.9.3 -> ios-xe-17.9.4a-prerelease'
+  - service: network-controller
+    severity: INFO
+    offset_seconds: -45
+    body: '%SYS-5-RESTART: System restarted -- Cisco IOS XE Software, Version 17.09.04a-prerelease [dist-sw-02]'
+    attributes:
+      operation: firmware_load
+      network.device: dist-sw-02
+      infra.stp_firmware: ios-xe-17.9.4a-prerelease
+remediation_effects:
+  log_events:
+    - service: network-controller
+      severity: INFO
+      offset_seconds: 1
+      body: '[CHG] CHANGE APPLIED opsctl rollback firmware/dist-sw-02 --to-revision previous by {actor}: dist-sw-02 ios-xe-17.9.4a-prerelease -> ios-xe-17.9.3, reload scheduled'
+      attributes:
+        operation: firmware_load
+        change.target: firmware/dist-sw-02
+    - service: network-controller
+      severity: INFO
+      offset_seconds: 3
+      body: '%SYS-5-RELOAD: Reload requested by {actor}. Reload Reason: Reload Command. [dist-sw-02]'
+      attributes:
+        operation: firmware_load
+        network.device: dist-sw-02
+        infra.stp_firmware: ios-xe-17.9.3
+    - service: network-controller
+      severity: INFO
+      offset_seconds: 42
+      body: '%SYS-5-RESTART: System restarted -- Cisco IOS XE Software, Version 17.09.03 [dist-sw-02]'
+      attributes:
+        operation: firmware_load
+        network.device: dist-sw-02
+        infra.stp_firmware: ios-xe-17.9.3
+  steady_attributes:
+    network-controller:
+      infra.stp_firmware: ios-xe-17.9.3
+  verification:
+    - signal: network.stp.topology_changes
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "network-controller"'
+      field: 'metrics.network.stp.topology_changes'
+      expect: 'no readings for about 40 seconds while dist-sw-02 reloads, then back to 0-1 TCNs per 30s (was about 40) within about 25 seconds'
+      within_seconds: 120
+    - signal: SPANTREE-2-TOPO_CHANGE lines
+      from: 'logs.otel.fanatics'
+      where: 'body.text LIKE "*SPANTREE-2-TOPO_CHANGE*"'
+      expect: '0 new lines'
+      within_seconds: 120
+    - signal: dist-sw-02 firmware
+      from: 'logs.otel.fanatics'
+      where: 'resource.attributes.service.name == "network-controller"'
+      field: 'attributes.infra.stp_firmware'
+      expect: 'ios-xe-17.9.3 on every stp-poll line since the reload (was ios-xe-17.9.4a-prerelease)'
+      within_seconds: 120
 business_impact:
   - kpi: business.app_sessions_per_min
-    factor: {uniform: [0.25, 0.55]}
+    value: {uniform: [334.8, 385.2]}
   - kpi: business.page_views_per_min
-    factor: {uniform: [0.25, 0.55]}
+    value: {uniform: [66960.0, 77040.0]}
   - kpi: business.live_concurrent_viewers
-    factor: {uniform: [0.30, 0.60]}
+    value: {uniform: [47151.0, 54249.0]}
   - kpi: business.churn_risk_index_0_100
     factor: {uniform: [1.8, 3.5]}
+# dependents degrade after the component at fault, in dependency order
+service_lag_seconds: {firewall-gateway: 15, dns-dhcp-service: 30, wifi-controller: 40, cloud-inventory-scanner: 45}

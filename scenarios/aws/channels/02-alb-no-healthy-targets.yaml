@@ -1,0 +1,142 @@
+name: ALB No Healthy Targets
+subsystem: edge_api
+vehicle_section: edge_api_pipeline
+error_type: ALB-NO-HEALTHY-TARGETS
+sensor_type: health_check
+affected_services: [orders-gateway]
+cascade_services: [storefront-web]
+
+description: >
+  A health-check path change leaves the orders-gateway target group with zero healthy targets, so the ALB returns 503 and rejects checkout traffic.
+
+investigation_notes: |
+  1. Search body.text containing *ALB-NO-HEALTHY-TARGETS* and confirm {unhealthy_targets} of {registered_targets} targets in target group {target_group} are unhealthy.
+  2. Check CloudWatch HealthyHostCount and UnHealthyHostCount for {target_group}: healthy drops to 0 at the same minute HTTPCode_ELB_503_Count starts climbing.
+  3. Read the target health reason code ({health_reason}): the ALB health check now probes {new_health_path} and receives HTTP {health_status_code} instead of 200. An ALB normally fails open when every target is unhealthy, but the orders-gateway ECS service replaces tasks that fail ELB health checks, so targets keep cycling through draining and initial (an unhealthy threshold of {unhealthy_threshold} failed checks at {health_interval_s} s means a target is marked unhealthy after about 30 s). With no target in service, the ALB returns 503.
+  4. Check CloudTrail for ModifyTargetGroup events by {changed_by}: the HealthCheckPath moved from /healthz to {new_health_path} shortly before the first 503.
+  5. Confirm the cascade in storefront-web logs: checkout calls to orders-gateway fail with 503 and {rejected_requests} requests were rejected in the window.
+  6. Confirm the setting on the gateway: attributes.aws.elb.health_check_path on orders-gateway logs reads {new_health_path} while orders_gateway.alb_healthy_targets sits at 0-1 of 4.
+  7. Remediation: `opsctl restore target-group/orders-gateway-tg --health-check-path /healthz`; each target must pass {healthy_threshold} consecutive checks at a {health_interval_s} s interval (30 s minimum) before the ALB routes to it, and replacement tasks also need about 30 s to start, so full recovery takes about 60 s.
+
+remediation_action: restore_target_group_health_check
+remediation_command: |-
+  opsctl restore target-group/orders-gateway-tg --health-check-path /healthz
+
+error_message: |
+  ALB-NO-HEALTHY-TARGETS: target_group={target_group} healthy=0/{registered_targets} reason={health_reason} health_check_path={new_health_path} status={health_status_code} rejected={rejected_requests}
+
+stack_trace: |
+  === ALB TARGET GROUP HEALTH REPORT ===
+  load_balancer=awsorders-public-alb  target_group={target_group}  region=us-east-1
+  --- CLOUDTRAIL EVENT ---
+    event_name=ModifyTargetGroup  source=elasticloadbalancing.amazonaws.com
+    user={changed_by}  HealthCheckPath: /healthz -> {new_health_path}
+  --- TARGET HEALTH ---
+    registered={registered_targets}  unhealthy={unhealthy_targets}  healthy=0
+    reason={health_reason}  probe_status={health_status_code}
+    healthy_threshold={healthy_threshold}
+  --- IMPACT ---
+    alb_response=503  rejected_requests={rejected_requests}
+    storefront-web checkout calls to orders-gateway failing
+  ACTION: restore_health_check_path=/healthz  alert=ALB-NO-HEALTHY-TARGETS
+
+infrastructure_events:
+- body: '[CloudTrail] ModifyTargetGroup: target_group=orders-gateway-tg attribute=HealthCheckPath old=/healthz new=/api/v2/health event_source=elasticloadbalancing.amazonaws.com region=us-east-1'
+  severity: WARN
+  offset_seconds: -90
+  event_name: aws.cloudtrail.ModifyTargetGroup
+  service: orders-gateway
+  attributes:
+    cloud.provider: aws
+    cloud.service: elasticloadbalancing
+    aws.cloudtrail.event_name: ModifyTargetGroup
+    aws.elb.target_group: orders-gateway-tg
+    infrastructure.source: CloudTrail
+
+correlation_attr:
+  key: infra.target_group_health_check_path
+  value: /api/v2/health
+
+fault_params:
+  target_group: orders-gateway-tg
+  registered_targets: 4
+  unhealthy_targets: 4
+  health_reason: Target.ResponseCodeMismatch
+  new_health_path: /api/v2/health
+  health_status_code: 404
+  changed_by: {choice: [arn:aws:iam::781386958653:role/deploy-pipeline, arn:aws:iam::781386958653:user/platform-admin]}
+  rejected_requests: {randint: [800, 6000]}
+  healthy_threshold: 2
+  unhealthy_threshold: 2
+  health_interval_s: 15
+
+rca_clues:
+  orders-gateway:
+    tg.healthy_host_count: 0
+    tg.health_check_path: /api/v2/health
+    tg.health_check_status_code: 404
+  storefront-web:
+    checkout.upstream_503_count: {randint: [300, 2500]}
+    checkout.alb_rejecting_traffic: true
+
+business_impact:
+  - kpi: business.throughput_rpm
+    factor: {uniform: [0.05, 0.25]}
+  - kpi: business.availability_pct
+    factor: {uniform: [0.40, 0.70]}
+  - kpi: business.error_rate_pct
+    factor: {uniform: [8.0, 12.0]}
+
+generator_impact:
+  aws_elb_metrics_otel:
+    # Every target in each target group unhealthy: the ALB has nowhere to route (ELB 503).
+    application_load_balancer_unhealthy_targets_detected: 4.0
+    high_application_load_balancer_5xx_error_rate: 300.0
+# the package streams keep the fault while the scenario's own metrics converge
+generator_hold_seconds: {aws_elb_metrics_otel: 60}
+cascade_messages:
+  storefront-web:
+    - severity: ERROR
+      message: '[storefront] checkout call to orders-gateway failed: upstream HTTP 503 from awsorders-public-alb (target group {target_group} has no healthy targets), order submit rejected'
+fault_scope:
+  cluster: awsorders-eks-use1
+  workloads: [orders-gateway]
+remediation_effects:
+  transition_seconds: 60
+  log_events:
+    - service: orders-gateway
+      severity: INFO
+      offset_seconds: 1
+      body: 'cloudtrail: eventSource=elasticloadbalancing.amazonaws.com eventName=ModifyTargetGroup userIdentity={actor} requestParameters.targetGroup=orders-gateway-tg requestParameters.healthCheckPath=/healthz errorCode=none'
+      attributes:
+        command.target: target-group/orders-gateway-tg
+    - service: orders-gateway
+      severity: INFO
+      offset_seconds: 60
+      body: '[ELB] target group orders-gateway-tg: 4 of 4 targets passed 2 consecutive health checks and are in service (health_check_path=/healthz)'
+      attributes:
+        aws.elb.health_check_path: /healthz
+        aws.elb.target_group: orders-gateway-tg
+  steady_attributes:
+    orders-gateway:
+      aws.elb.health_check_path: /healthz
+  verification:
+    - signal: orders_gateway.alb_healthy_targets
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "orders-gateway"'
+      field: 'metrics.orders_gateway.alb_healthy_targets'
+      expect: 'back to 4 (was 0-1)'
+      within_seconds: 90
+    - signal: ALB-NO-HEALTHY-TARGETS lines
+      from: 'logs.otel.awsorders'
+      where: 'body.text LIKE "*ALB-NO-HEALTHY-TARGETS*"'
+      expect: '0 new lines'
+      within_seconds: 90
+    - signal: target group health check path
+      from: 'logs.otel.awsorders'
+      where: 'resource.attributes.service.name == "orders-gateway"'
+      field: 'attributes.aws.elb.health_check_path'
+      expect: '/healthz on every line since the fix; /api/v2/health stops appearing'
+      within_seconds: 90
+service_lag_seconds:
+  storefront-web: 20

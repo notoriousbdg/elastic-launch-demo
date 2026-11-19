@@ -6,56 +6,148 @@ sensor_type: model_accuracy
 affected_services:
 - recommendation-engine
 - ad-platform
+error_services:
+- recommendation-engine
 cascade_services:
 - storefront-gateway
-description: Recommendation model experiencing feature drift — predictions degrading silently, reducing click-through and
-  conversion rates
+description: Recommendation hit rate and click-through fell by half after ranking model reco-ranker v9, trained on a feature snapshot that does not match live traffic, was promoted from a 5% canary to all traffic.
+onset_delay_seconds: 10
 investigation_notes: |-
-  1. Check recommendation-engine logs for RECO-MODEL-DRIFT — personalization_hit_rate_pct={hit_rate_pct}% below threshold {hit_rate_threshold_pct}%.
-  2. Review feature distribution shift: if the input feature distribution has diverged from training data distribution by >{drift_threshold_pct}%, the model is unreliable.
-  3. Check the model's online metrics (click-through rate, add-to-cart rate) against the A/B test baseline — a >10% degradation is a drift signal.
-  4. Inspect recent feature pipeline changes — a schema change in user behavior events can silently zero-out key features causing systematic errors.
-  5. Rollback to the previous stable model version (v{prev_model_version}) while retraining — degraded recommendations are worse than generic ones.
-  6. Ad-platform targeting also uses recommendation signals — notify the ads team that targeting quality is degraded until the model is retrained.
+  Root cause: ml-platform promoted model reco-ranker v{model_version} from a 5% canary to 100% of traffic (CR-4417), replacing v{prev_model_version}. v{model_version} was trained on a feature snapshot whose distribution differs from live traffic: the population stability index (PSI) between its training features and the live features is about 0.41, well above the 0.25 at which a model is no longer reliable (v{prev_model_version} sits at about 0.04). The model serves without errors but ranks the wrong items, so the online hit rate and click-through fall. The canary was judged on offline metrics, and at 5% of traffic the drop was lost in the blended online hit rate. The live features are healthy: reco.zero_valued_feature_count stays 0 and there was no feature pipeline change, so this is not a broken upstream schema. Memory and the Redis cache are healthy too (RSS about 6,150MB of the 10,240MB limit, no restarts, cache hit rate about 86%), which rules out an OOM fallback or a cold cache. Retraining takes days and a rolling restart reloads the same v{model_version} artifact; only moving production back to v{prev_model_version} helps now.
+  Confirm:
+    - the recommendation-engine line "[reco.model_registry] model reco-ranker promoted: v9 traffic 5% -> 100%" (attributes.change.request CR-4417) comes before the first RECO-MODEL-DRIFT line
+    - "reco.model_serving" status lines show attributes.reco.model_version reco-ranker-v9, attributes.reco.feature_psi about 0.41 (baseline about 0.04), attributes.reco.zero_valued_feature_count 0 and status=ANOMALY
+    - metrics.recommendations.personalization_hit_rate_pct slides from its 68% baseline (plus or minus 1.5) to about 32% over about 120s (a rolling 2-minute window); attributes.reco.ctr_pct falls from about 4.2% to about 3.1%
+    - metrics.recommendations.memory_rss_mb stays near 6,150 and metrics.recommendations.cache_hit_rate_pct near 86 (not memory, not cache)
+    - ad-platform logs an affinity match rate of {targeting_quality_pct}% and CPC up {cpc_increase_pct}% on personalized placements; storefront-gateway logs recommendation widget click-through of {storefront_ctr_pct}%
+  Remediation: opsctl rollback model/reco-ranker --to-revision previous moves the production alias back to v{prev_model_version}. The serving pods hot-reload v{prev_model_version} within about 30s (both versions in the logs meanwhile, then 6/6 on reco-ranker-v8), feature PSI drops back to about 0.04 at once, and the hit rate climbs back to about 68% over about 120s as the rolling window fills with v{prev_model_version} traffic. ad-platform targeting recovers with it; no ads-side change is needed.
 remediation_action: rollback_reco_model
-error_message: '[RecommendationEngine] RECO-MODEL-DRIFT: model_version=v{model_version} hit_rate={hit_rate_pct}% (threshold
-  {hit_rate_threshold_pct}%) feature_drift={drift_score:.2f} prev_stable_version=v{prev_model_version}'
-stack_trace: |-
-  ModelDriftException: RECO-MODEL-DRIFT
-    at ModelMonitor.checkDrift(model=v{model_version})
-    at RecommendationService.serve(user_id={user_id})
-  Model version:      v{model_version}
-  Hit rate:           {hit_rate_pct}% (threshold: {hit_rate_threshold_pct}%)
-  Feature drift score:{drift_score}
-  Prev stable:        v{prev_model_version}
-  Affected users/hr:  {affected_users_hr}
+remediation_command: |-
+  opsctl rollback model/reco-ranker --to-revision previous
+error_message: '[reco.monitoring.online_eval] RECO-MODEL-DRIFT model=reco-ranker-v{model_version} window=2m hit_rate={hit_rate_pct}%
+  threshold={hit_rate_threshold_pct}% ctr={ctr_pct}% feature_psi={drift_score} training_snapshot={training_snapshot} shadow=reco-ranker-v{prev_model_version}
+  context={reco_context} user={user_id}'
+stack_trace: ''
 correlation_attr:
-  key: reco.model_drifting
-  value: true
+  key: reco.model_version
+  value: reco-ranker-v9
 fault_params:
-  model_version: {randint: [8, 12]}
-  hit_rate_pct: {uniform: [20, 45], round: 1}
+  model_version: 9
+  prev_model_version: 8
+  hit_rate_pct: {uniform: [29.5, 35.0], round: 1}
   hit_rate_threshold_pct: 60.0
-  drift_score: {uniform: [0.3, 0.8], round: 2}
-  prev_model_version: {randint: [6, 9]}
+  ctr_pct: {uniform: [2.95, 3.25], round: 2}
+  drift_score: {uniform: [0.37, 0.45], round: 2}
+  training_snapshot: fs-snapshot-20260928
+  reco_context: {choice: [homepage, pdp_related, cart_upsell, post_purchase]}
   user_id: {format: "USR-{n}", n: {randint: [100000, 999999]}}
-  affected_users_hr: {randint: [10000, 500000]}
+  targeting_quality_pct: {uniform: [48, 58], round: 1}
+  cpc_increase_pct: {uniform: [15, 30], round: 1}
+  storefront_ctr_pct: {uniform: [2.9, 3.3], round: 2}
 rca_clues:
   recommendation-engine:
-    reco.feature_drift_score: {uniform: [0.3, 0.8], round: 2}
-    reco.ctr_delta_pct: {uniform: [-30, -10], round: 1}
+    reco.feature_psi: {uniform: [0.37, 0.45], round: 2}
+    reco.ctr_delta_pct: {uniform: [-30, -22], round: 1}
+    reco.zero_valued_feature_count: 0
+    reco.memory_utilization_pct: {uniform: [59.0, 61.0], round: 1}
   ad-platform:
-    ads.targeting_signal_quality_pct: {uniform: [40, 70], round: 1}
-    ads.cpc_increase_pct: {uniform: [10, 40], round: 1}
+    ads.targeting_signal_quality_pct: {uniform: [48, 58], round: 1}
+    ads.cpc_increase_pct: {uniform: [15, 30], round: 1}
   storefront-gateway:
-    storefront.reco_click_rate_drop_pct: {uniform: [15, 45], round: 1}
+    storefront.reco_click_rate_drop_pct: {uniform: [22, 30], round: 1}
     storefront.personalization_confidence: LOW
+cascade_messages:
+  ad-platform:
+    - severity: WARN
+      message: '[ads.targeting] audience signal quality degraded: affinity scores from recommendation-engine (model=reco-ranker-v{model_version})
+        match_rate={targeting_quality_pct}%; low-confidence segments falling back to contextual targeting'
+    - severity: WARN
+      message: '[ads.auction] effective CPC up {cpc_increase_pct}% over 15m on personalized placements: predicted CTR from affinity
+        features below floor, bids clearing at reserve'
+  storefront-gateway:
+    - severity: WARN
+      message: 'storefront.reco_widget engagement low: carousel={reco_context} ctr={storefront_ctr_pct}% over 15m, model=reco-ranker-v{model_version}
+        user={user_id}'
+fault_scope:
+  cluster: ecommerce-gke-cluster
+  workloads: [recommendation-engine]
+infrastructure_events:
+  - service: recommendation-engine
+    severity: INFO
+    offset_seconds: -120
+    body: '[reco.model_registry] model reco-ranker promoted: v9 traffic 5% -> 100% (stage=production, replaces v8, artifact gs://ecommerce-ml-models/reco-ranker/v9);
+      serving pods hot-reloading; promoted by ml-platform (CR-4417)'
+    attributes:
+      user.name: ml-platform
+      change.request: CR-4417
+      operation: model_promotion
+      reco.model_version: reco-ranker-v9
+      change.summary: 'reco-ranker: v8 -> v9 (canary 5% -> 100%)'
+remediation_effects:
+  log_taper_seconds: 30
+  log_events:
+    - service: recommendation-engine
+      severity: INFO
+      offset_seconds: 1
+      body: '[CHG] CHANGE APPLIED opsctl rollback model/reco-ranker --to-revision previous by {actor}: production alias reco-ranker moved from v9 back to v8; serving pods hot-reloading v8'
+      attributes:
+        operation: change_applied
+        change.target: model/reco-ranker
+    - service: recommendation-engine
+      severity: INFO
+      offset_seconds: 12
+      body: '[reco.model_loader] reco-ranker v8 loaded on 3/6 pods, 3/6 still serving v9'
+      attributes:
+        operation: model_reload
+        reco.model_version: reco-ranker-v8
+        reco.pods_reloaded: 3
+    - service: recommendation-engine
+      severity: INFO
+      offset_seconds: 30
+      body: '[reco.model_loader] reco-ranker v8 loaded on 6/6 pods; all traffic served by reco-ranker-v8'
+      attributes:
+        operation: model_reload
+        reco.model_version: reco-ranker-v8
+        reco.pods_reloaded: 6
+    - service: recommendation-engine
+      severity: INFO
+      offset_seconds: 125
+      body: '[reco.monitoring.online_eval] 2m evaluation window now covers only reco-ranker-v8 traffic; hit rate back above threshold'
+      attributes:
+        operation: online_eval
+        reco.model_version: reco-ranker-v8
+  verification:
+    - signal: recommendations.personalization_hit_rate_pct
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "recommendation-engine"'
+      field: 'metrics.recommendations.personalization_hit_rate_pct'
+      expect: 'climbs from about 32% back to its 68% baseline over about 120s as the rolling window fills with v8 traffic'
+      within_seconds: 240
+    - signal: serving model version
+      from: 'logs.otel.ecommerce'
+      where: 'resource.attributes.service.name == "recommendation-engine"'
+      field: 'attributes.reco.model_version'
+      expect: 'both versions while pods reload (about 30s), then only reco-ranker-v8 (was reco-ranker-v9)'
+      within_seconds: 120
+    - signal: feature PSI of the serving model
+      from: 'logs.otel.ecommerce'
+      where: 'resource.attributes.service.name == "recommendation-engine"'
+      field: 'attributes.reco.feature_psi'
+      expect: 'back to about 0.04 once the pods serve v8 (was about 0.41)'
+      within_seconds: 120
+    - signal: RECO-MODEL-DRIFT lines
+      from: 'logs.otel.ecommerce'
+      where: 'body.text LIKE "*RECO-MODEL-DRIFT*"'
+      expect: 'no new lines after the rollback (they fade out within about 30s)'
+      within_seconds: 120
 business_impact:
   - kpi: business.conversion_rate_pct
-    factor: {uniform: [0.30, 0.55]}
+    value: {uniform: [0.67, 0.77], round: 2}
   - kpi: business.ad_revenue_usd_per_min
-    factor: {uniform: [0.30, 0.55]}
+    value: {uniform: [10416.0, 11984.0], round: 1}
   - kpi: business.page_views_per_min
-    factor: {uniform: [0.35, 0.60]}
+    value: {uniform: [5138.0, 5912.0]}
   - kpi: business.cart_adds_per_min
-    factor: {uniform: [0.30, 0.55]}
+    factor: {uniform: [0.3, 0.55]}
+# dependents degrade after the component at fault, in dependency order
+service_lag_seconds: {ad-platform: 30, storefront-gateway: 40}

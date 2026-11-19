@@ -1,0 +1,121 @@
+name: Model Router Bad Canary
+subsystem: ml_inference
+vehicle_section: ml_inference_pipeline
+error_type: ROUTER-BAD-CANARY
+sensor_type: health_check
+affected_services: [model-router, assistant-web]
+cascade_services: []
+error_services: [model-router]
+
+description: >
+  The canary route weight of model-router was raised from 5% to 25% for a new model deployment that returns empty completions, degrading assistant-web answers.
+
+investigation_notes: |
+  Root cause: the model-router canary route weight was raised from 5 to 25 for {canary_deployment}, and that deployment ends the turn immediately: {empty_completion_pct}% of its completions are empty and {malformed_pct}% malformed with finish_reason={finish_reason} and about one completion token, while the stable deployment {stable_deployment} stays near zero. The prompt template is unchanged and there are no 429s, so this is the canary model version, not quota or prompt drift.
+  Confirm:
+    - model-router logs [MODEL_ROUTER] canary_health ... weight=25 canary_share={canary_share_pct}% empty_completions={empty_completion_pct}% status=ANOMALY (attributes.router.canary_weight); metrics model_router.canary_traffic_share_pct 25 (baseline 4-6) and model_router.empty_completion_pct 30-75 (baseline under 0.5)
+    - the config-service line for route/model-router (change.summary canary weight 5 -> 25) comes before the first ROUTER-BAD-CANARY
+    - route_selected lines to {canary_deployment} show finish_reason=stop with completion_tokens=1, while lines to {stable_deployment} have normal completion lengths; model_router.deployment_availability_pct and model_router.tpm_quota_used_pct stay in their baseline bands
+  Remediation: set the canary weight back to 0 with opsctl patch route/model-router --canary-weight 0 so all traffic stays on {stable_deployment}, then re-test the canary with a small shadow load. The share and empty-completion rate fall to 0 over about 30 seconds. Raising capacity or failing over does not help: the model output itself is bad.
+
+remediation_action: roll_back_model_canary
+remediation_command: |-
+  opsctl patch route/model-router --canary-weight 0
+
+error_message: |
+  [MODEL_ROUTER] ROUTER-BAD-CANARY: canary={canary_deployment} share={canary_share_pct}% empty_completions={empty_completion_pct}% malformed={malformed_pct}% finish_reason={finish_reason} stable={stable_deployment}
+
+stack_trace: |
+  InvalidCompletionError: ROUTER-BAD-CANARY
+    at ModelRouter.validate_completion(deployment={canary_deployment})
+    at ModelRouter.route(policy=canary_weighted)
+  Canary deployment:   {canary_deployment}
+  Stable deployment:   {stable_deployment}
+  Canary traffic:      {canary_share_pct}%
+  Empty completions:   {empty_completion_pct}%
+  Malformed output:    {malformed_pct}%
+  Finish reason:       {finish_reason}
+
+correlation_attr:
+  key: router.canary_deployment_version
+  value: gpt-4o-mini-2024-07-18-canary-r3
+
+fault_params:
+  canary_deployment: foundry-chat-canary-r3
+  stable_deployment: chat-gpt4o-stable
+  canary_share_pct: 25
+  empty_completion_pct: {uniform: [30.0, 75.0], round: 1}
+  malformed_pct: {uniform: [10.0, 40.0], round: 1}
+  finish_reason: stop
+
+rca_clues:
+  model-router:
+    router.canary_share_pct: 25
+    router.canary_empty_completion_pct: {uniform: [30.0, 75.0], round: 1}
+    router.canary_widened_min_ago: {randint: [10, 120]}
+    router.canary_finish_reason: stop
+    router.canary_completion_tokens_p50: 1
+    router.stable_empty_completion_pct: {uniform: [0.0, 0.5], round: 1}
+    router.prompt_template_changed: false
+  assistant-web:
+    web.blank_answer_rate_pct: {uniform: [5.0, 20.0], round: 1}
+    web.thumbs_down_spike: true
+
+cascade_messages:
+  assistant-web:
+    - severity: WARN
+      message: '[WEB] blank answer returned to user: model-router response from {canary_deployment} had finish_reason={finish_reason} and 1 completion token'
+service_lag_seconds: {assistant-web: 20}
+fault_scope:
+  workloads: [model-router]
+infrastructure_events:
+  - service: model-router
+    severity: INFO
+    offset_seconds: -120
+    body: 'config-service: change applied route/model-router cmd="release deploy model-router-routes" by=release-pipeline@contoso-demo.onmicrosoft.com : canary foundry-chat-canary-r3 weight 5 -> 25'
+    attributes:
+      user.name: release-pipeline@contoso-demo.onmicrosoft.com
+      operation: route_config_change
+      config.target: route/model-router
+      router.canary_weight: 25
+      change.summary: 'canary weight: 5 -> 25'
+remediation_effects:
+  log_events:
+    - service: model-router
+      severity: INFO
+      offset_seconds: 1
+      body: 'config-service: change applied route/model-router cmd="opsctl patch route/model-router --canary-weight 0" by={actor} : canary foundry-chat-canary-r3 weight 25 -> 0'
+      attributes:
+        operation: route_config_change
+        config.target: route/model-router
+        router.canary_weight: 0
+        change.summary: 'canary weight: 25 -> 0'
+  steady_attributes:
+    model-router:
+      router.canary_weight: 0
+  verification:
+    - signal: model_router.canary_traffic_share_pct
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "model-router"'
+      field: 'metrics.model_router.canary_traffic_share_pct'
+      expect: '0 (was 25)'
+      within_seconds: 45
+    - signal: model_router.empty_completion_pct
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "model-router"'
+      field: 'metrics.model_router.empty_completion_pct'
+      expect: 'under 0.5 (was 30-75)'
+      within_seconds: 45
+    - signal: canary route weight
+      from: 'logs.otel.azureai'
+      where: 'resource.attributes.service.name == "model-router"'
+      field: 'attributes.router.canary_weight'
+      expect: '0 on every line logged since the fix'
+      within_seconds: 45
+business_impact:
+  - kpi: business.conversations_per_min
+    value: {uniform: [120.9, 139.1], round: 0}
+  - kpi: business.error_rate_pct
+    factor: {uniform: [1.8, 3.5]}
+  - kpi: business.availability_pct
+    factor: {uniform: [0.96, 0.99]}

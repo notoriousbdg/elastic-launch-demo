@@ -11,8 +11,12 @@ cascade_services:
 - data-warehouse
 description: DICOM C-STORE or C-MOVE operation fails during modality-to-PACS image transfer
 investigation_notes: |-
-  Root Cause: DICOM association failures (status 0xA700/0xA900) indicate either AE title mismatch, transfer syntax negotiation failure, or storage commitment refusal. The PACS SCP rejects the C-STORE when the Presentation Context (Abstract Syntax + Transfer Syntax) is not in the accepted list.
-  Remediation: 1) Verify the DICOM association: `dcm4che-tool storescu --called PACS-SCP-01 --calling {modality}-SCU --connect pacs-host:11112 --cecho`. 2) Reset the DICOM association: `pacs-admin reset-association --ae-title {modality}-SCU`. 3) Check the PACS gateway connection pool: `pacs-admin gateway-status`. 4) If persistent, restart the PACS gateway service: `systemctl restart dcm4chee-arc`. 5) Verify transfer syntax compatibility — ensure Explicit VR Little Endian (1.2.840.10008.1.2.1) is configured. 6) For C-MOVE failures, verify the destination AE title is registered in the DICOM configuration.
+  Root cause: dcm4chee-gateway build dcm4chee-5.31.1-patch3 was rolled out shortly before the first DICOM-STORE-FAIL. Its association handler accepts only the CT Image Storage presentation context, so every C-STORE of another SOP class is rejected with status {dicom_error_code} (dataset does not match SOP class): {modality} study {dicom_study_uid}, operation {dicom_operation}. CT stores still succeed, associations are accepted and the transfer syntax is fine. The modalities are not at fault, and neither is the network.
+  Confirm:
+    - imaging-service logs [PACS] gateway_status called_ae=PACS-SCP-01 build=dcm4chee-5.31.1-patch3 ... status=DEGRADED (attributes.infra.pacs_gateway_build); per-modality cstore_assoc lines show CT succeeding while MR, US, MG, NM and DX fail
+    - metric imaging.cstore_failure_pct rises from 0-0.4% to 64-76% after the rollout
+    - the imaging-service line "dcm4chee-gateway rolled out dcm4chee-5.31.1-patch3" comes before the first store failure
+  Remediation: roll the gateway back with opsctl rollback deployment/dcm4chee-gateway --to-revision previous (patch2). The failure rate is back under 1% within about 45 seconds, and the modalities resend their queued studies on their own. Restarting the modalities or re-registering AE titles is wrong: the gateway is rejecting the SOP classes.
 remediation_action: restart_pacs_gateway
 error_message: '[PACS] DICOM-STORE-FAIL: study={dicom_study_uid} modality={modality} operation={dicom_operation} status={dicom_error_code}'
 stack_trace: |-
@@ -21,12 +25,12 @@ stack_trace: |-
     Calling AE Title: {modality}-SCU
     Application Context: 1.2.840.10008.3.1.1.1
     Presentation Context:
-      Abstract Syntax: 1.2.840.10008.5.1.4.1.1.2 ({modality} Image Storage)
+      Abstract Syntax: 1.2.840.10008.5.1.4.1.1.2 (CT Image Storage)
       Transfer Syntax: 1.2.840.10008.1.2.1 (Explicit VR Little Endian)
   A-ASSOCIATE-AC — Association accepted
   {dicom_operation}-RQ | Study: {dicom_study_uid} | Series: 1 of 3
   {dicom_operation}-RSP | Status: {dicom_error_code} | FAILURE
-    Error Comment: DICOM-STORE-FAIL — Storage commitment refused, dataset mismatch
+    Error Comment: DICOM-STORE-FAIL — Data Set does not match SOP Class ({modality} dataset on CT Image Storage context)
     Affected SOP Instance: {dicom_study_uid}.1.1
   A-RELEASE-RQ
   A-RELEASE-RP — Association released
@@ -39,21 +43,91 @@ fault_params:
     a: {randint: [10000, 99999]}
     b: {randint: [1, 999]}
     c: {randint: [1, 99]}
-  modality: {choice: [CT, MRI, XR, US, MG, NM]}
-  dicom_operation: {choice: [C-STORE, C-MOVE, C-FIND]}
-  dicom_error_code: {choice: ["0xA700", "0xA900", "0xC000", "0xA801"]}
+  modality: {choice: [MR, US, MG, NM, DX]}
+  dicom_operation: C-STORE
+  dicom_error_code: "0xA900"
 rca_clues:
   imaging-service:
-    dicom.ae_title_mismatch: true
+    dicom.association_result: accepted
+    dicom.cstore_status: "0xA900"
     dicom.transfer_syntax: 1.2.840.10008.1.2.1
+    dicom.negotiated_sop_class: CT Image Storage
+    dicom.dataset_sop_class_matches: false
   ehr-system:
     ehr.pending_imaging_results: {randint: [5, 30]}
-    ehr.pacs_link_status: disconnected
+    ehr.pacs_link_status: connected
   clinical-alerts:
     alerts.imaging_delay_count: {randint: [2, 10]}
   data-warehouse:
     etl.imaging_archive_stalled: true
     etl.pending_studies: {randint: [20, 100]}
+remediation_command: |-
+  opsctl rollback deployment/dcm4chee-gateway --to-revision previous
+error_services: [imaging-service]
+service_lag_seconds:
+  ehr-system: 20
+  clinical-alerts: 30
+  data-warehouse: 45
+cascade_messages:
+  ehr-system:
+    - severity: WARN
+      message: '[EHR] imaging_result_pending study={dicom_study_uid} modality={modality} reason=NOT_IN_PACS'
+  clinical-alerts:
+    - severity: WARN
+      message: '[CDS] imaging_delay study={dicom_study_uid} modality={modality}; radiologist worklist incomplete'
+  data-warehouse:
+    - severity: WARN
+      message: '[DW] imaging_archive_pending study={dicom_study_uid} modality={modality}'
+fault_scope:
+  workloads: [imaging-service]
+infrastructure_events:
+  - service: imaging-service
+    severity: INFO
+    offset_seconds: -120
+    body: '[PACS] deployment dcm4chee-gateway rolled out dcm4chee-5.31.1-patch3 (was dcm4chee-5.31.1-patch2): presentation context config regenerated by imaging-platform-release (CHG0032366)'
+    attributes:
+      user.name: imaging-platform-release
+      change.request: CHG0032366
+      operation: deployment
+      infra.pacs_gateway_build: dcm4chee-5.31.1-patch3
+      change.summary: 'dcm4chee-gateway: 5.31.1-patch2 -> 5.31.1-patch3'
+remediation_effects:
+  log_events:
+    - service: imaging-service
+      severity: INFO
+      offset_seconds: 1
+      body: '[CHG] CHANGE IMPLEMENTED opsctl rollback deployment/dcm4chee-gateway --to-revision previous by {actor}: dcm4chee-5.31.1-patch3 -> dcm4chee-5.31.1-patch2'
+      attributes:
+        operation: change_implemented
+        change.target: deployment/dcm4chee-gateway
+    - service: imaging-service
+      severity: INFO
+      offset_seconds: 15
+      body: '[PACS] gateway PACS-SCP-01 build=dcm4chee-5.31.1-patch2 started; presentation contexts accepted for CT, MR, CR, DX, US, MG, NM'
+      attributes:
+        operation: gateway_status
+        infra.pacs_gateway_build: dcm4chee-5.31.1-patch2
+  steady_attributes:
+    imaging-service:
+      infra.pacs_gateway_build: dcm4chee-5.31.1-patch2
+  verification:
+    - signal: imaging.cstore_failure_pct
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "imaging-service"'
+      field: 'metrics.imaging.cstore_failure_pct'
+      expect: 'back under 1% (was 64-76%) within about 45 seconds'
+      within_seconds: 90
+    - signal: DICOM-STORE-FAIL lines
+      from: 'logs.otel.healthcare'
+      where: 'body.text LIKE "*DICOM-STORE-FAIL*"'
+      expect: '0 new lines'
+      within_seconds: 90
+    - signal: infra.pacs_gateway_build
+      from: 'logs.otel.healthcare'
+      where: 'resource.attributes.service.name == "imaging-service"'
+      field: 'attributes.infra.pacs_gateway_build'
+      expect: 'dcm4chee-5.31.1-patch2 on every gateway_status line since the fix; patch3 stops appearing'
+      within_seconds: 90
 business_impact:
   - kpi: business.imaging_worklist_size
     factor: {uniform: [2.5, 5.5]}

@@ -6,41 +6,59 @@ sensor_type: feed_continuity
 affected_services:
 - market-data-feed
 - matching-engine
+error_services:
+- market-data-feed
 cascade_services:
 - risk-calculator
 - customer-portal
 description: Market data feed missing price ticks for one or more instruments
+onset_delay_seconds: 10
+service_lag_seconds:
+  matching-engine: 30
+  risk-calculator: 45
+  customer-portal: 60
 investigation_notes: |-
-  1. Check market-data-feed logs for MDF-PRICE-GAP — note symbol, exchange, gap_ms, and missing sequence range.
-  2. Query FROM logs.otel.financial.* | WHERE body.text LIKE "*MDF-PRICE-GAP*" | STATS max(gap_ms) BY symbol, exchange to find worst-affected instruments.
-  3. Inspect the multicast group for packet loss — if the retransmit channel shows no response within 500ms the feed handler must failover.
-  4. Check matching-engine for stale_instruments count — any book marked STALE must halt new orders until fresh ticks arrive.
-  5. If primary feed remains silent, trigger failover to backup feed and request retransmission from exchange for the missing sequence window.
-remediation_action: failover_to_backup_feed
-error_message: '[MDF] MDF-PRICE-GAP: symbol={symbol} gap_ms={gap_ms} exchange={exchange} seq_start={seq_start} seq_end={seq_end}'
+  Root cause: the GKE node pool mdf-c2-pool, which runs the CQS-SIP and OPRA feed handlers, was upgraded to a new node image shortly before the first MDF-PRICE-GAP, and the node system config of the new image no longer sets net.core.rmem_max=16777216, so the kernel default of 212992 applies. GCP VPCs do not carry exchange multicast: the exchange A/B multicast lines are bridged from the colo into the feed handler pods as UDP unicast. The handlers ask for a 16 MiB SO_RCVBUF but the kernel caps it at rmem_max (getsockopt reports {so_rcvbuf}, twice the {rmem_max} cap). At burst rates the socket buffer overflows and the kernel drops datagrams (UdpRcvbufErrors {rcvbuf_errors}/s per node). Line A and line B land in the same capped buffer on the same host and overflow in the same burst, so line arbitration has nothing to fill the gap with: {feed} misses {missing} messages from seq {seq_start} ({gap_ms}ms) and the handler sends retransmit requests. The network is healthy: the colo bridge reports no transmit drops (feed.bridge_tx_drops 0) and the exchange is publishing. CME-MDP3 on mdf-n2-pool and the TCP vendor feeds (Bloomberg-B-PIPE, Reuters-Elektron on mdf-vendor-pool) keep rmem_max 16777216, no rcvbuf errors and no gaps, so the fault is limited to the upgraded pool.
+  Confirm:
+    - market-data-feed [MDF] feed_health lines for pool=mdf-c2-pool show rmem_max=212992 and so_rcvbuf=425984 (attributes.host.sysctl.net_core_rmem_max, attributes.feed.socket_rcvbuf_bytes) and udp_rcvbuf_errors_1s in the hundreds per node; the mdf-n2-pool and mdf-vendor-pool lines show 16777216 and 0
+    - metric market_data.udp_rcvbuf_errors_per_s rises from 0 to 1,200-4,000/s and market_data.sequence_gaps_per_min from 0-1 to 20-80 together; body.text LIKE "*MDF-PRICE-GAP*" lines start at the same time
+    - the market-data-feed line "feed handler restarted after node pool upgrade ... rmem_max=212992" (attributes.operation nodepool_upgrade) comes before the first gap
+    - matching-engine marks books STALE and risk-calculator flags stale price calcs (metrics.risk_calculator.stale_price_calcs_per_min) after the gaps start
+  Remediation: opsctl patch nodepool/mdf-c2-pool --sysctl net.core.rmem_max=16777216. GKE applies the node system config by recreating the 3 nodes one at a time with surge (about 60 s each); the feed handlers reschedule onto each new node and get their full 16 MiB buffer, so UdpRcvbufErrors falls by about a third per node and reaches 0 after about 180 s, and the retransmit requests stop. Failing over to the backup feed is not the fix: the backup line and the standby handler run on the same pool, behind the same capped buffer, and lose the same bursts.
+remediation_action: restore_feed_node_rmem_max
+remediation_command: |-
+  opsctl patch nodepool/mdf-c2-pool --sysctl net.core.rmem_max=16777216
+error_message: '[MDF] MDF-PRICE-GAP: feed={feed} symbol={symbol} gap_ms={gap_ms} seq_start={seq_start} missing={missing} lines=A,B retransmit=REQUESTED'
 stack_trace: |-
   === FEED HANDLER SEQUENCE ANALYSIS ===
-  symbol={symbol}  exchange={exchange}  feed_id=MDF-PRIMARY-01
-  seq_expected={seq_start}  seq_received={seq_end}
-  gap_duration_ms={gap_ms}  max_allowed_ms=200
-  --- SEQUENCE WINDOW ---
-    seq {seq_start}  MISSING  (gap start)
-    ...  ({gap_ms}ms silence)
-    seq {seq_end}  RECEIVED  price=244.7200  qty=1500  ts=14:32:07.882
-  retransmit_requested=true  channel=FAST/FIX  multicast_grp=224.0.31.1:14310
-  handler_state=RECOVERING  stale_instruments=12  affected_books=3
+  feed={feed}  symbol={symbol}  node_pool=mdf-c2-pool  transport=udp-unicast
+  source=colo bridge (exchange A/B multicast lines bridged to GKE as UDP unicast)
+  seq_expected={seq_start}  missing={missing}  gap_duration_ms={gap_ms}  max_allowed_ms=200
+  --- LINE ARBITRATION ---
+    line A  seq {seq_start}  MISSING
+    line B  seq {seq_start}  MISSING   (no copy to fill the gap)
+  --- SOCKET ---
+    SO_RCVBUF requested=16777216  effective={so_rcvbuf}  net.core.rmem_max={rmem_max}
+    UdpRcvbufErrors rate={rcvbuf_errors}/s
+  retransmit_requested=true  range={seq_start}+{missing}  stale_instruments={stale_instruments}
   ACTION: mark_stale=true  request_retransmit=true  alert=MDF-PRICE-GAP
 correlation_attr: {}
 fault_params:
+  feed: {choice: [CQS-SIP, OPRA]}
   symbol: {choice: [AAPL, GOOGL, MSFT, AMZN, TSLA, JPM, GS, MS, BAC, C]}
   gap_ms: {randint: [500, 10000]}
-  exchange: {choice: [NYSE, NASDAQ, CBOE, CME, ICE, BATS, IEX]}
-  seq_start: {randint: [1000000, 9999999]}
-  seq_end: {randint: [1000000, 9999999]}
+  seq_start: {randint: [4400000, 4900000]}
+  missing: {randint: [40, 900]}
+  rmem_max: 212992
+  so_rcvbuf: 425984
+  rcvbuf_errors: {randint: [400, 1333]}
+  stale_instruments: {randint: [1, 50]}
 rca_clues:
   market-data-feed:
-    feed.gap_duration_ms: {randint: [500, 10000]}
-    feed.stale_instruments_count: {randint: [1, 50]}
+    host.sysctl.net_core_rmem_max: 212992
+    feed.socket_rcvbuf_bytes: 425984
+    feed.udp_rcvbuf_errors_per_s: {randint: [400, 1333]}
+    feed.bridge_tx_drops: 0
   matching-engine:
     engine.stale_book_count: {randint: [1, 20]}
     engine.halted_on_stale_feed: {randint: [1, 10]}
@@ -50,12 +68,105 @@ rca_clues:
   customer-portal:
     portal.indicative_price_views: {randint: [10, 500]}
     portal.feed_gap_alerts_shown: {randint: [1, 30]}
+cascade_messages:
+  matching-engine:
+    - severity: WARN
+      message: '[ME] book_status instrument={symbol} state=STALE reason=feed_gap feed={feed} gap_ms={gap_ms}; new orders held until the book is refreshed'
+  risk-calculator:
+    - severity: WARN
+      message: '[RISK] stale_price_calc symbol={symbol} price_age_ms={gap_ms} source={feed} result=INDICATIVE'
+  customer-portal:
+    - severity: WARN
+      message: '[PORTAL] quote_banner symbol={symbol} state=INDICATIVE reason=price_feed_gap age_ms={gap_ms}'
+fault_scope:
+  cluster: finserv-gke-cluster
+  workloads: [market-data-feed, matching-engine]
+infrastructure_events:
+  - service: market-data-feed
+    severity: WARN
+    offset_seconds: -150
+    body: '[MDF] feed handler restarted after node pool upgrade pool=mdf-c2-pool image=cos-121-18867-0-94 (was cos-117-18613-0-79) feeds=CQS-SIP,OPRA: SO_RCVBUF requested=16777216 got=425984 (net.core.rmem_max=212992); upgrade by gke-platform (CR-5118)'
+    attributes:
+      user.name: gke-platform
+      change.request: CR-5118
+      operation: nodepool_upgrade
+      k8s.node_pool: mdf-c2-pool
+      host.sysctl.net_core_rmem_max: 212992
+      feed.socket_rcvbuf_bytes: 425984
+      change.summary: 'mdf-c2-pool net.core.rmem_max: 16777216 -> 212992 (node image cos-117-18613-0-79 -> cos-121-18867-0-94)'
+remediation_effects:
+  log_taper_seconds: 180
+  log_events:
+    - service: audit-logger
+      severity: INFO
+      offset_seconds: 1
+      body: '[AUDIT] event_logged stream=change-mgmt type=CHANGE_APPLIED cmd="opsctl patch nodepool/mdf-c2-pool --sysctl net.core.rmem_max=16777216" actor={actor}: mdf-c2-pool linuxNodeConfig net.core.rmem_max 212992 -> 16777216'
+      attributes:
+        operation: change_applied
+        audit.stream: change-mgmt
+        change.target: nodepool/mdf-c2-pool
+    - service: market-data-feed
+      severity: INFO
+      offset_seconds: 5
+      body: '[MDF] node pool mdf-c2-pool update started: net.core.rmem_max=16777216, surge upgrade one node at a time (3 nodes)'
+      attributes:
+        operation: nodepool_upgrade
+        k8s.node_pool: mdf-c2-pool
+    - service: market-data-feed
+      severity: INFO
+      offset_seconds: 60
+      body: '[MDF] feed handler rescheduled on new node 1/3 pool=mdf-c2-pool: SO_RCVBUF requested=16777216 got=33554432 (net.core.rmem_max=16777216)'
+      attributes:
+        operation: nodepool_upgrade
+        k8s.node_pool: mdf-c2-pool
+        host.sysctl.net_core_rmem_max: 16777216
+    - service: market-data-feed
+      severity: INFO
+      offset_seconds: 120
+      body: '[MDF] feed handler rescheduled on new node 2/3 pool=mdf-c2-pool: SO_RCVBUF requested=16777216 got=33554432 (net.core.rmem_max=16777216)'
+      attributes:
+        operation: nodepool_upgrade
+        k8s.node_pool: mdf-c2-pool
+        host.sysctl.net_core_rmem_max: 16777216
+    - service: market-data-feed
+      severity: INFO
+      offset_seconds: 180
+      body: '[MDF] node pool mdf-c2-pool update complete: 3/3 nodes net.core.rmem_max=16777216; CQS-SIP and OPRA handlers UdpRcvbufErrors 0/s, retransmit queue empty'
+      attributes:
+        operation: nodepool_upgrade
+        k8s.node_pool: mdf-c2-pool
+        host.sysctl.net_core_rmem_max: 16777216
+        feed.socket_rcvbuf_bytes: 33554432
+  verification:
+    - signal: market_data.udp_rcvbuf_errors_per_s
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "market-data-feed"'
+      field: 'metrics.market_data.udp_rcvbuf_errors_per_s'
+      expect: 'falls by about a third as each node is replaced and is back to 0 (was 1,200-4,000/s)'
+      within_seconds: 240
+    - signal: market_data.sequence_gaps_per_min
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "market-data-feed"'
+      field: 'metrics.market_data.sequence_gaps_per_min'
+      expect: 'back to 0-1 per minute (was 20-80)'
+      within_seconds: 240
+    - signal: MDF-PRICE-GAP lines
+      from: 'logs.otel.finserv'
+      where: 'body.text LIKE "*MDF-PRICE-GAP*"'
+      expect: '0 new lines'
+      within_seconds: 240
+    - signal: mdf-c2-pool net.core.rmem_max
+      from: 'logs.otel.finserv'
+      where: 'resource.attributes.service.name == "market-data-feed" AND attributes.k8s.node_pool == "mdf-c2-pool"'
+      field: 'attributes.host.sysctl.net_core_rmem_max'
+      expect: '16777216 on every line once all 3 nodes are replaced (about 180 s); 212992 stops appearing'
+      within_seconds: 240
 business_impact:
   - kpi: business.order_flow_per_min
-    factor: {uniform: [0.35, 0.65]}
+    value: {uniform: [513.83, 591.18]}
   - kpi: business.fill_rate_pct
-    factor: {uniform: [0.30, 0.60]}
+    factor: {uniform: [0.3, 0.6]}
   - kpi: business.avg_spread_bps
     factor: {uniform: [2.5, 6.0]}
   - kpi: business.best_execution_pct
-    factor: {uniform: [0.70, 0.90]}
+    factor: {uniform: [0.7, 0.9]}

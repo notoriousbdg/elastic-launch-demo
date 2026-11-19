@@ -1,0 +1,71 @@
+name: Message Broker Depth Spike
+subsystem: platform
+vehicle_section: platform_pipeline
+error_type: BROKER-QUEUE-DEPTH-SPIKE
+sensor_type: health_check
+affected_services:
+- worker-pool
+cascade_services:
+- analytics-service
+description: 'The synthetic ActiveMQ and IBM MQ brokers feeding worker-pool briefly
+  spike in queue depth on {broker_queue} after a consumer drop; the platform auto-scales
+  consumers to drain it.
+
+  '
+investigation_notes: "1. Search for body.text containing *BROKER-QUEUE-DEPTH-SPIKE*\
+  \ to find the affected queue.\n2. Check worker-pool worker_pool.queue_depth for\
+  \ the spike and subsequent drain.\n3. Confirm activemq_otel queue_depth_multiplier/consumer_drop_rate\
+  \ and ibmmq_otel\n   queue_depth_multiplier/channel_status_error both spike for\
+  \ {broker_queue}.\n4. Check analytics-service analytics.rollup_lag_s for a brief\
+  \ cascading delay.\n5. Confirm auto-scaled consumers drain {broker_queue} back to\
+  \ baseline depth.\n"
+remediation_action: auto_scale_broker_consumers
+error_message: 'BROKER-QUEUE-DEPTH-SPIKE: queue={broker_queue} depth={queue_depth}
+  auto_scaled_consumers={consumers_added}
+
+  '
+stack_trace: "MessageBrokerDepthSpikeError: queue={broker_queue}\n  at WorkerPool.consumeQueue()\n\
+  \  depth={queue_depth} auto_scaled_consumers={consumers_added}\n"
+fault_params:
+  broker_queue:
+    choice:
+    - job-dispatch-queue
+    - coverage-rollup-queue
+  queue_depth:
+    randint:
+    - 2000
+    - 25000
+  consumers_added:
+    randint:
+    - 2
+    - 10
+rca_clues:
+  worker-pool:
+    worker_pool.queue_depth:
+      randint:
+      - 2000
+      - 25000
+    worker_pool.consumer_drop_flag: true
+  analytics-service:
+    analytics.rollup_lag_s:
+      uniform:
+      - 15.0
+      - 120.0
+      round: 1
+    analytics.brief_backlog_flag: true
+generator_impact:
+  activemq_otel:
+    queue_depth_high:
+      uniform:
+      - 6.0
+      - 18.0
+    blocked_sends_detected:
+      uniform:
+      - 0.2
+      - 0.7
+  ibmmq_otel:
+    messages_expiring_before_consumption:
+      uniform:
+      - 6.0
+      - 18.0
+    failed_connection_attempts: true

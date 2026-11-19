@@ -8,51 +8,113 @@ affected_services:
 cascade_services:
 - mes-controller
 - inventory-sync
-description: Windows service on the ERP bridge stopped unexpectedly; SAP IDoc transmission halted
+description: A new build of the IDoc bridge Windows service leaks RFC table buffers; it runs out of memory and crashes every few minutes, halting IDoc transfer to SAP
 investigation_notes: |-
-  Root Cause: A Windows service (e.g., SAPHostControl) terminating unexpectedly emits Event ID 7031 (Service Control Manager) in the System channel. Common causes: a Windows Update reboot during a live IDoc batch, a memory leak in a long-running RFC connection, or an expired domain service account credential.
-  Remediation: 1) Pull the System event log: `Get-WinEvent -LogName System -FilterHashtable @{ID=7031,7034} -MaxEvents 50` on `mfg-sap-bridge-01`. 2) Inspect the service account: `sc.exe qc {win_service_name}`. 3) Restart the service: `sc.exe start {win_service_name}`. 4) If credentials expired, rotate via the AD service-account workflow. 5) Replay the IDoc backlog: `sap-admin replay-idoc --since {failure_time}`. 6) Add a Watcher on Windows event log channel `System` for event ID 7031 / 7034 on this host.
-remediation_action: restart_windows_service
-error_message: '[ERP-WIN] ERP-WIN-SERVICE-CRASH: host=mfg-sap-bridge-01 service={win_service_name} event_id=7031 idoc_backlog={idoc_backlog}
-  elapsed_min={elapsed_min}'
+  Root cause: {win_service_name} on mfg-sap-bridge-01 was upgraded from build 2.7.4 to 2.8.0 shortly before the first ERP-WIN-SERVICE-CRASH (by erp-integration, CHG-7389). 2.8.0 switched the IDoc send path to a pooled RFC table API but does not release the IDoc data tables after each call, so the RFC worker's private bytes grow by about 25-40 MB per batch, from a steady 600-900 MB to over 3.5 GB in a few minutes. The worker then fails with System.OutOfMemoryException (.NET Runtime event 1026 in the Application log), the Service Control Manager logs event 7031 (terminated unexpectedly) in the System log, and the recovery action restarts the service after 60 s. Each crash drops the batch in flight and IDocs pile up. The host has not rebooted, the service account logs on normally, and the SAP gateway accepts connections; only the bridge build changed.
+  Confirm:
+    - erp-bridge service_status lines show build=2.8.0 (attributes.erp.bridge_build); metric erp.rfc_worker_private_mb climbs in a saw-tooth from 600-900 to about 3,600 before each crash, and erp.service_restarts increases
+    - the erp-bridge deployment line for {win_service_name} (CHG-7389) comes before the first ERP-WIN-SERVICE-CRASH
+    - metric erp.idoc_backlog rises from 0-15 to {idoc_backlog}+; winlog event 1026 precedes each 7031
+  Remediation: roll the service back with opsctl rollback windows-service/MfgIdocBridgeSvc --to-revision previous. The deployment tool stops the service, installs build 2.7.4 and starts it; memory holds at 600-900 MB and the queued IDocs are sent from the outbound queue on restart, so the backlog drains within about two minutes. No manual IDoc replay is needed because unsent IDocs stay in the outbound queue.
+remediation_action: rollback_windows_service
+remediation_command: |-
+  opsctl rollback windows-service/MfgIdocBridgeSvc --to-revision previous
+error_message: '[ERP-WIN] ERP-WIN-SERVICE-CRASH: host=mfg-sap-bridge-01 service={win_service_name} build=2.8.0 event_id=7031 crash_count={crash_count} last_error=System.OutOfMemoryException rfc_worker_private_mb={private_mb} idoc_backlog={idoc_backlog}'
 stack_trace: |-
-  === WINDOWS EVENT LOG — System ===
-  Source:           Service Control Manager
-  Event ID:         7031
-  Level:            Error
-  Computer:         mfg-sap-bridge-01
-  Channel:          System
+  === WINDOWS EVENT LOG — mfg-sap-bridge-01 ===
+  Application | Source: .NET Runtime | Event ID: 1026 | Level: Error
+    Application: MfgIdocBridgeSvc.exe (2.8.0)
+    Exception Info: System.OutOfMemoryException
+       at SAP.Middleware.Connector.RfcTable.Append()
+       at Mfg.IdocBridge.IdocSender.SendBatch(IdocBatch batch)
   ------------------------------------------------------------------------
-  The {win_service_name} service terminated unexpectedly. It has done this {crash_count} time(s).
-  The following corrective action will be taken in 60000 milliseconds: Restart the service.
+  System | Source: Service Control Manager | Event ID: 7031 | Level: Error
+    The MfgIdocBridgeSvc service terminated unexpectedly. It has done this {crash_count} time(s).
+    The following corrective action will be taken in 60000 milliseconds: Restart the service.
   ------------------------------------------------------------------------
-  Related Event ID 7034: The {win_service_name} service terminated unexpectedly.
-  Related Event ID 7036: The {win_service_name} service entered the stopped state.
-  ERP-WIN-SERVICE-CRASH: IDoc backlog={idoc_backlog}; SAP RFC unavailable for {elapsed_min}m; service stopped at {failure_time}
+  ERP-WIN-SERVICE-CRASH: IDoc backlog={idoc_backlog}; worker private bytes {private_mb} MB before crash
 correlation_attr:
-  key: infra.windows_patch_level
-  value: win2022-kb5034441-pending
+  key: erp.bridge_build
+  value: 2.8.0
 fault_params:
-  win_service_name: {choice: [SAPHostControl, SAPHostExec, MSSQLSERVER]}
-  idoc_backlog: {randint: [20, 250]}
-  elapsed_min: {randint: [5, 45]}
-  crash_count: {randint: [1, 5]}
-  failure_time: 2026-05-06T14:15:32Z
+  win_service_name: MfgIdocBridgeSvc
+  idoc_backlog: {randint: [80, 250]}
+  crash_count: {randint: [2, 6]}
+  private_mb: {randint: [3500, 3800]}
 rca_clues:
   erp-bridge:
     winlog.event_id: 7031
-    winlog.crash_count: {randint: [1, 5]}
-    erp.idoc_backlog: {randint: [20, 250]}
+    winlog.last_boot_hours_ago: {randint: [200, 900]}
+    winlog.service_logon_failures: 0
+    erp.sap_gateway_status: reachable
   mes-controller:
-    mes.erp_link_status: down
+    mes.erp_confirmation_backlog: {randint: [20, 200]}
   inventory-sync:
-    inventory.erp_master_sync_lag_s: {randint: [120, 900]}
+    inventory.erp_goods_movements_pending: {randint: [40, 300]}
+cascade_messages:
+  mes-controller:
+    - severity: WARN
+      message: '[MES] erp_confirm production confirmations to SAP queued (erp-bridge unavailable); backlog growing, work order closure delayed'
+  inventory-sync:
+    - severity: WARN
+      message: '[INV] goods movements (MB1A/261) not posted to SAP for over 5 min: erp-bridge not accepting IDocs'
+fault_scope:
+  workloads: [erp-bridge]
+infrastructure_events:
+  - service: erp-bridge
+    severity: INFO
+    offset_seconds: -150
+    body: '[ERP-WIN] deployment host=mfg-sap-bridge-01 service=MfgIdocBridgeSvc build 2.7.4 -> 2.8.0 installed and started (msi MfgIdocBridge-2.8.0.msi); deployed by erp-integration (CHG-7389)'
+    attributes:
+      operation: config_change
+      user.name: erp-integration
+      change.request: CHG-7389
+      erp.bridge_build: 2.8.0
+      change.summary: 'MfgIdocBridgeSvc: 2.7.4 -> 2.8.0'
+service_lag_seconds:
+  mes-controller: 30
+  inventory-sync: 45
+remediation_effects:
+  log_events:
+    - service: erp-bridge
+      severity: INFO
+      offset_seconds: 1
+      body: '[CHG] CHANGE APPLIED opsctl rollback windows-service/MfgIdocBridgeSvc --to-revision previous by {actor}: MfgIdocBridgeSvc 2.8.0 -> 2.7.4 on mfg-sap-bridge-01, service started'
+      attributes:
+        operation: change_applied
+        change.target: windows-service/MfgIdocBridgeSvc
+  steady_attributes:
+    erp-bridge:
+      erp.bridge_build: 2.7.4
+  log_taper_seconds: 20
+  verification:
+    - signal: erp.rfc_worker_private_mb
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "erp-bridge"'
+      field: 'metrics.erp.rfc_worker_private_mb'
+      expect: 'steady at 600-900 MB, no saw-tooth (was climbing to ~3,600)'
+      within_seconds: 120
+    - signal: erp.idoc_backlog
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "erp-bridge"'
+      field: 'metrics.erp.idoc_backlog'
+      expect: 'back under 15 (was 80-250)'
+      within_seconds: 180
+    - signal: ERP-WIN-SERVICE-CRASH lines
+      from: 'logs.otel.mfg'
+      where: 'body.text LIKE "*ERP-WIN-SERVICE-CRASH*"'
+      expect: '0 new lines'
+      within_seconds: 60
+    - signal: bridge build
+      from: 'logs.otel.mfg'
+      where: 'resource.attributes.service.name == "erp-bridge" AND body.text LIKE "*service_status service=MfgIdocBridgeSvc*"'
+      field: 'attributes.erp.bridge_build'
+      expect: '2.7.4 on every line logged since the fix; 2.8.0 stops appearing'
+      within_seconds: 60
 business_impact:
   - kpi: business.on_time_delivery_pct
-    factor: {uniform: [0.30, 0.60]}
-  - kpi: business.inventory_turns
-    factor: {uniform: [0.40, 0.70]}
+    factor: {uniform: [0.6, 0.8]}
   - kpi: business.material_variance_usd
-    factor: {uniform: [2.0, 4.5]}
-  - kpi: business.throughput_units_per_hour
-    factor: {uniform: [0.40, 0.70]}
+    value: {uniform: [14496.0, 16679.0], round: 1}
+  - kpi: business.inventory_turns
+    value: {uniform: [2.42, 2.78], round: 2}

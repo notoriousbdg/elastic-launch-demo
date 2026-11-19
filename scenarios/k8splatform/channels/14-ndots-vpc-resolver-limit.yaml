@@ -1,0 +1,95 @@
+name: External lookups timing out against the VPC resolver
+subsystem: dns
+vehicle_section: tenant-edge/dns-config
+error_type: '10.42.0.2:53: i/o timeout'
+sensor_type: dns_query_volume
+affected_services:
+  - coredns
+  - tenant-gateway
+error_services:
+  - coredns
+cascade_services: []
+description: tenant-gateway calls to external APIs (payment provider, email) fail with DNS timeouts. CoreDNS query volume
+  is five times normal and mostly NXDOMAIN; corp.internal and cluster-internal names resolve fine.
+investigation_notes: |-
+  Root cause: a tenant-gateway Helm chart bump (commit {commit_sha}) dropped the pod's dnsConfig option ndots:2. With the Kubernetes default ndots:5, a name like api.stripe.com (two dots) is first tried with every search domain (tenant-edge.svc.cluster.local, svc.cluster.local, cluster.local, ec2.internal), each as A and AAAA, before the bare name: roughly five times the queries, almost all NXDOMAIN. The *.ec2.internal attempts are forwarded to the VPC resolver (10.42.0.2), and the extra packets exceed the resolver's 1,024 packets/s per-ENI limit on the CoreDNS pods, so forwards time out.
+  Confirm:
+    - CoreDNS ERROR lines for search-suffixed names: plugin/errors: 2 {ext_host}.ec2.internal. AAAA: read udp <pod-ip>:<port>->10.42.0.2:53: i/o timeout (the upstream is 10.42.0.2, not a corp.internal resolver)
+    - coredns.dns.requests_per_s ~5x baseline; NXDOMAIN share ~80% (baseline ~10%); forward latency to 10.42.0.2 near the 2s timeout
+    - tenant-gateway: DNS resolution failed for {ext_host}
+    - the audit shows deployments/tenant-gateway patched (pod template dnsConfig removed) before the first timeout
+    - kubectl -n tenant-edge get deploy tenant-gateway -o jsonpath='{.spec.template.spec.dnsConfig}'
+  Remediation: put ndots:2 back on the tenant-gateway pod template; the rollout replaces the pods and query volume returns to normal.
+  Follow-up: revert commit d4b17a0 in Git, or pause auto-sync for the Argo CD application, before the next sync; otherwise Argo CD re-applies the change and the fault returns.
+remediation_action: restore_dns_ndots
+remediation_command: |-
+  opsctl patch deployment/tenant-gateway -n tenant-edge --dns-ndots 2
+error_message: '[ERROR] plugin/errors: 2 {ext_host}.ec2.internal. {qtype}: read udp {self_pod_ip}:{src_port}->10.42.0.2:53:
+  i/o timeout'
+stack_trace: ''
+fault_params:
+  ext_host: {choice: [api.stripe.com, api.sendgrid.com, hooks.slack.com, api.twilio.com]}
+  qtype: {choice: [A, AAAA]}
+  src_port: {randint: [32768, 60999]}
+  commit_sha: d4b17a0
+rca_clues:
+  coredns:
+    dns.upstream: 10.42.0.2
+    dns.query_rate_x: {uniform: [4.6, 5.3], round: 1}
+    dns.nxdomain_ratio: {uniform: [0.76, 0.83], round: 2}
+  tenant-gateway:
+    dns.ndots: 5
+cascade_messages:
+  tenant-gateway:
+    - severity: ERROR
+      message: 'upstream request failed: DNS resolution failed for {ext_host}: timeout while contacting DNS servers upstream_cluster={ext_host}
+        response_code=503'
+fault_scope:
+  cluster: prod-use1
+  workloads: [coredns]
+onset_delay_seconds: 60
+infrastructure_events:
+  - service: kube-apiserver
+    severity: INFO
+    offset_seconds: -90
+    body: 'audit: level=RequestResponse stage=ResponseComplete verb=patch resource=deployments namespace=tenant-edge name=tenant-gateway
+      user=system:serviceaccount:argocd:argocd-application-controller code=200 sync.revision=d4b17a0 change="chart tenant-gateway-4.8.0
+      -> 4.9.0; spec.template.spec.dnsConfig removed"'
+remediation_effects:
+  # the old pods keep failing until the rolling update replaces them
+  log_taper_seconds: 45
+  transition_seconds: 120
+  state:
+    kubernetes_otel:
+      workloads:
+        tenant-gateway: {dns_ndots: 2}
+  log_events:
+    - service: kube-apiserver
+      severity: INFO
+      offset_seconds: 2
+      body: 'audit: level=Metadata verb=patch resource=deployments namespace=tenant-edge name=tenant-gateway user={actor}
+        code=200 change="spec.template.spec.dnsConfig.options: ndots=2"'
+  steady_attributes:
+    tenant-gateway:
+      dns.ndots: 2
+  verification:
+    - signal: coredns.dns.requests_per_s
+      from: 'metrics-generic.otel-default'
+      field: 'metrics.coredns.dns.requests_per_s'
+      where: 'resource.attributes.service.name == "coredns"'
+      expect: 'back to ~1x baseline; NXDOMAIN share ~10%'
+      within_seconds: 180
+    - signal: VPC resolver timeouts
+      from: 'logs.otel.platform'
+      where: 'resource.attributes.service.name == "coredns" AND body.text LIKE "*10.42.0.2:53: i/o timeout*"'
+      expect: '0 new lines'
+      within_seconds: 180
+business_impact:
+  - kpi: business.dns_success_rate_pct
+    value: {uniform: [97.5, 98.5], round: 3}
+  - kpi: business.api_p99_latency_ms
+    value: {uniform: [2100.0, 2400.0], round: 0}
+  - kpi: business.api_5xx_rate_pct
+    value: {uniform: [1.5, 2.1], round: 3}
+  - kpi: business.api_availability_pct
+    value: {uniform: [98.0, 98.6], round: 3}

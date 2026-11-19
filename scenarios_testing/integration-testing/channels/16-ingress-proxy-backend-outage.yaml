@@ -1,0 +1,104 @@
+name: Ingress Proxy Backend Outage
+subsystem: platform
+vehicle_section: platform_pipeline
+error_type: INGRESS-PROXY-BACKEND-OUTAGE
+sensor_type: health_check
+affected_services:
+- edge-gateway
+cascade_services:
+- session-service
+description: 'The synthetic ingress proxy fleet (Envoy, HAProxy, NGINX ingress, Traefik)
+  fronting edge-gateway lost its backend {proxy_backend} briefly; the platform auto-recovers
+  by routing around the failed backend within seconds.
+
+  '
+investigation_notes: "1. Search for body.text containing *INGRESS-PROXY-BACKEND-OUTAGE*\
+  \ to find the affected backend.\n2. Check edge-gateway gateway.upstream_error_rate\
+  \ for the brief error spike.\n3. Confirm envoyproxy_otel upstream_error_rate/cx_overflow_rate,\
+  \ haproxy_otel\n   backend_down/server_down/upstream_5xx_rate, nginx_ingress_controller_otel\
+  \ error_rate, and\n   traefik_otel backend_error_rate all spike together on {proxy_backend}.\n\
+  4. Check session-service session.pool_exhaustion_pct for a brief cascading blip.\n\
+  5. Confirm auto-remediation re-registers {proxy_backend} and error rate returns\
+  \ to baseline.\n"
+remediation_action: auto_reroute_ingress_backend
+error_message: 'INGRESS-PROXY-BACKEND-OUTAGE: backend={proxy_backend} outage_seconds={outage_duration_s}
+  auto_remediated={auto_remediated}
+
+  '
+stack_trace: "IngressProxyBackendOutageError: backend={proxy_backend}\n  at EdgeGateway.proxyUpstream()\n\
+  \  outage_seconds={outage_duration_s} auto_remediated={auto_remediated}\n"
+fault_params:
+  proxy_backend:
+    choice:
+    - envoy-backend-1
+    - haproxy-backend-2
+    - nginx-ingress-backend-3
+    - traefik-backend-4
+  outage_duration_s:
+    randint:
+    - 5
+    - 60
+  auto_remediated:
+    choice:
+    - true
+rca_clues:
+  edge-gateway:
+    gateway.upstream_error_rate_pct:
+      uniform:
+      - 30.0
+      - 90.0
+      round: 1
+    gateway.auto_reroute_triggered: true
+  session-service:
+    session.pool_exhaustion_pct:
+      uniform:
+      - 20.0
+      - 50.0
+      round: 1
+    session.brief_outage_flag: true
+generator_impact:
+  envoyproxy_otel:
+    high_downstream_error_rate:
+      uniform:
+      - 0.3
+      - 0.9
+    high_memory_pressure:
+      uniform:
+      - 0.1
+      - 0.5
+  haproxy_otel:
+    backend_has_no_active_servers:
+      randint:
+      - 1
+      - 5
+    server_health_check_failures:
+      randint:
+      - 1
+      - 20
+    request_errors_spike:
+      uniform:
+      - 4.0
+      - 15.0
+    response_errors_spike:
+      uniform:
+      - 0.3
+      - 0.8
+    high_backend_connection_time: 1.0
+  nginx_ingress_controller_otel:
+    error_rate:
+      uniform:
+      - 0.3
+      - 0.8
+    records_per_cycle:
+      randint:
+      - 100
+      - 450
+  traefik_otel:
+    high_5xx_error_rate_by_service:
+      uniform:
+      - 0.3
+      - 0.8
+    high_open_connections:
+      uniform:
+      - 3.0
+      - 8.0

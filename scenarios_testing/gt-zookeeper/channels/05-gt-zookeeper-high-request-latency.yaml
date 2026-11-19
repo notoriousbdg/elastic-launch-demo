@@ -1,0 +1,37 @@
+name: "GT zookeeper_otel: high_request_latency"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-ZOOKEEPER-HIGH-REQUEST-LATENCY
+sensor_type: impact_key_probe
+affected_services:
+  - gt-zookeeper-aws-svc-1
+cascade_services:
+  - gt-zookeeper-aws-svc-2
+description: "Tests impact_key high_request_latency on generator zookeeper_otel."
+investigation_notes: |-
+  1. Verify zookeeper_otel is active and reporting metrics.
+  2. Check that the high_request_latency metric has reached the trigger value (3750.0).
+  3. Confirm generator_impact for zookeeper_otel.high_request_latency is set to 3750.0.
+  4. Look for correlated changes in service gt-zookeeper-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_high_request_latency_baseline
+error_message: "GT-PROBE: gen=zookeeper_otel key=high_request_latency value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=zookeeper_otel
+  impact_key: high_request_latency
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 3750.0
+  svc_name: gt-zookeeper-aws-svc-1
+rca_clues:
+  gt-zookeeper-aws-svc-1:
+    probe.generator: zookeeper_otel
+    probe.impact_key: high_request_latency
+    probe.trigger_value: 3750.0
+  gt-zookeeper-aws-svc-2:
+    probe.upstream_generator: zookeeper_otel
+    probe.upstream_key: high_request_latency
+generator_impact:
+  zookeeper_otel:
+    high_request_latency: 3750.0

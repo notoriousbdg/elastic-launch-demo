@@ -6,65 +6,161 @@ sensor_type: consistency_checker
 affected_services:
 - leaderboard-api
 - game-server
+error_services:
+- leaderboard-api
 cascade_services:
 - analytics-pipeline
-- moderation-engine
-description: Leaderboard sorted set becomes inconsistent due to concurrent score updates causing rank calculation errors
+description: A Terraform apply put the staging sizing on the production leaderboard Memorystore instance (4 GB, allkeys-lru), so season rank sorted sets are evicted and rebuilt partially and ranks drift from the rank history
+onset_delay_seconds: 15
+ramp_seconds: 45
+service_lag_seconds: {game-server: 10, analytics-pipeline: 30}
 investigation_notes: |-
-  Root cause: concurrent ZADD operations to the Redis sorted set during AOF rewrite cause race conditions — two game servers submit score updates for overlapping rank ranges without distributed locking, producing rank inversions and NaN entries.
-  1. Check Redis state: `redis-cli info persistence` — if `aof_rewrite_in_progress=1`, the rewrite is contending with writes; defer bulk score updates until rewrite completes.
-  2. Audit the corruption: rank 42018 score > rank 42017 score is a classic ZADD race; NaN at rank 42103 indicates a Lua script received non-numeric input from game server.
-  3. Verify ZSET cardinality: `ZCARD {leaderboard_id}` should match `total_entries` — any mismatch indicates phantom entries from incomplete transaction rollbacks.
-  4. Remediate: issue `freeze_leaderboard` to block new writes, then `rebuild_leaderboard` to reconstruct the sorted set from the transaction log source of truth.
-  5. Deploy Redlock-based distributed mutex for score update batches and add input validation to reject NaN/Infinity scores at the game server API boundary.
-remediation_action: rebuild_leaderboard
-error_message: '[LB] LB-DATA-CORRUPT: board={leaderboard_id} affected={corrupt_entries} checksum_fail=true season={season_id}'
+  Root cause: a Terraform apply in the gaming-prod-memorystore workspace (CHG0071209) used the staging tfvars and changed Memorystore instance lb-redis-prod from 16 GB to 4 GB and its maxmemory-policy from noeviction to allkeys-lru, about three minutes before the first LB-DATA-CORRUPT line. The season {season_id} rank sorted sets no longer fit: Redis evicts whole rank shards and score keys at 200-500 keys per second, and the next ZINCRBY recreates an evicted shard holding only the players who scored since, so ZCARD falls ({zset_card} of {expected_entries}) and {corrupt_entries} entries on {leaderboard_id} disagree with rank_history in Cloud SQL. Instance lb-redis-tournament (8 GB, noeviction, not part of that workspace) serves tournament-finals with 0 mismatches, which is the healthy comparison and rules out a leaderboard-api code or write-path fault.
+  Confirm:
+    - leaderboard-api logs the Terraform apply for lb-redis-prod (attributes.change.request CHG0071209, change.summary memory_size_gb 16 -> 4 and maxmemory-policy noeviction -> allkeys-lru) before the first LB-DATA-CORRUPT line; its redis_status lines for lb-redis-prod carry attributes.cache.maxmemory_policy allkeys-lru (noeviction before)
+    - metrics.leaderboard.redis.evicted_keys_per_s is 200-500 (baseline 0) and metrics.leaderboard.redis.memory_used_pct 97-100 (baseline 33-42); redis.keys.evicted climbs in metrics-redisreceiver.otel-*
+    - metrics.leaderboard.consistency.mismatched_entries grows from 0 to 5000-40000 while the lb-redis-tournament redis_status lines stay at mismatched_vs_txlog=0
+  Remediation: run opsctl rollback memorystore/lb-redis-prod --to-revision previous, then opsctl run job/leaderboard-rebuild. The rollback restores 16 GB and noeviction, and evictions fall to 0 within about 60 seconds. It does not bring back the evicted members, so the rebuild job reloads the season {season_id} boards from rank_history: mismatched entries fall steadily to 0 over about 240 seconds and memory settles back at 33-42%. Flushing or restarting Redis would drop every board, and running the rebuild without the rollback only gets evicted again while it runs.
+remediation_action: rollback_lb_redis_and_rebuild
+remediation_command: |-
+  opsctl rollback memorystore/lb-redis-prod --to-revision previous
+  opsctl run job/leaderboard-rebuild
+error_message: '[LB] LB-DATA-CORRUPT: board={leaderboard_id} season={season_id} mismatched={corrupt_entries} zcard={zset_card} expected={expected_entries}
+  redis=lb-redis-prod'
 stack_trace: |-
   === LEADERBOARD CONSISTENCY CHECK ===
   board={leaderboard_id}  season={season_id}
   ----------- sorted set audit --------
-    total_entries    = 1,284,301
-    corrupt_entries  = {corrupt_entries}
-    checksum_fail    = true
-    last_valid_rank  = 42,017
+    expected_entries = {expected_entries}  (rank_history)
+    zcard            = {zset_card}
+    mismatched       = {corrupt_entries}
   ----------- sample violations -------
-    rank 42018: score=8401 > rank 42017: score=8399  (INVERSION)
-    rank 42019: score=8401  (DUPLICATE score, different player)
-    rank 42103: score=NaN   (CORRUPT value)
+    PLR-582201: rank_history score=8399, not in ZSET (shard evicted)
+    PLR-110934: ZSET score=1200, rank_history score=8176 (shard recreated by ZINCRBY)
+    PLR-773120: ZSET rank 42018, rank_history rank 48311
   ----------- redis state -------------
-    zset_card    = 1,284,301
-    memory_used  = 142MB
-    last_write   = 2026-02-17T14:21:58.441Z
-    aof_rewrite  = IN_PROGRESS
-  ----------- action ------------------
-    FREEZE board  REBUILD from transaction log
-  LB-DATA-CORRUPT: board {leaderboard_id} has {corrupt_entries} invalid entries
+    instance         = lb-redis-prod
+    used_memory      = {used_memory_gb}GB / maxmemory 4GB
+    maxmemory_policy = allkeys-lru
+    evicted_keys/s   = {evicted_keys_per_s}
+  LB-DATA-CORRUPT: board {leaderboard_id} has {corrupt_entries} entries that disagree with rank_history
 correlation_attr:
-  key: deployment.redis_config
-  value: redis-7.2.4-aof-experimental
+  key: cache.maxmemory_policy
+  value: allkeys-lru
 fault_params:
-  leaderboard_id: {choice: [ranked-global, seasonal-solo, guild-wars, tournament-finals]}
-  corrupt_entries: {randint: [10, 500]}
-  season_id:
-    format: "S{n}"
-    n: {randint: [1, 12]}
+  leaderboard_id: {choice: [ranked-global, seasonal-solo, guild-wars]}
+  corrupt_entries: {randint: [5000, 40000]}
+  season_id: S14
+  zset_card: {randint: [1248301, 1279301]}
+  expected_entries: 1284301
+  used_memory_gb: {uniform: [3.88, 4.0], round: 2}
+  evicted_keys_per_s: {randint: [200, 500]}
+  rank_jumps: {randint: [400, 2500]}
+  lookup_failures: {randint: [3, 8]}
 rca_clues:
   leaderboard-api:
-    leaderboard.redis_aof_rewrite: true
-    leaderboard.zadd_race_detected: true
+    cache.maxmemory_policy: allkeys-lru
+    cache.memory_size_gb: 4
+    cache.evicted_keys_per_s: {randint: [200, 500]}
   game-server:
-    game.rank_display_stale: true
-    game.score_submit_retries: {randint: [3, 10]}
+    game.rank_lookup_failures: {randint: [50, 300]}
   analytics-pipeline:
-    analytics.rank_anomaly_events: {randint: [100, 500]}
-  moderation-engine:
-    moderation.rank_exploit_check: inconclusive
+    analytics.rank_anomaly_events: {randint: [400, 2500]}
+cascade_messages:
+  game-server:
+    - severity: WARN
+      message: 'level=warn msg="post-match rank lookup failed" board={leaderboard_id} season={season_id} missing={lookup_failures}/8 err="leaderboard-api: rank not found" fallback=placement_hidden'
+  analytics-pipeline:
+    - severity: WARN
+      message: '[Analytics] rank_change anomaly board={leaderboard_id} season={season_id} rank_jumps_gt_10000={rank_jumps} in last 60s source=leaderboard-api; rank-based quest rewards held'
+fault_scope:
+  cluster: gaming-gke-cluster
+  workloads: [leaderboard-api]
+infrastructure_events:
+  - service: leaderboard-api
+    severity: INFO
+    offset_seconds: -180
+    body: 'terraform apply (workspace gaming-prod-memorystore): module.leaderboard_redis.google_redis_instance.this: Modifications complete after 3m41s [id=projects/gaming-prod/locations/us-central1/instances/lb-redis-prod] memory_size_gb 16 -> 4, redis_configs.maxmemory-policy noeviction -> allkeys-lru (CHG0071209)'
+    attributes:
+      operation: config_change
+      change.request: CHG0071209
+      user.name: tf-cloud/gaming-infra
+      change.summary: 'lb-redis-prod memory_size_gb 16 -> 4, maxmemory-policy noeviction -> allkeys-lru (staging tfvars applied in the prod workspace)'
+      config.key: redis_configs.maxmemory-policy
+      cache.instance: lb-redis-prod
+      cache.maxmemory_policy: allkeys-lru
+remediation_effects:
+  transition_seconds: 240
+  log_events:
+    - service: leaderboard-api
+      severity: INFO
+      offset_seconds: 1
+      body: 'level=info logger=changelog msg="change applied" cmd="opsctl rollback memorystore/lb-redis-prod --to-revision previous" actor={actor} result="memory_size_gb 4 -> 16, maxmemory-policy allkeys-lru -> noeviction"'
+      attributes:
+        operation: change_applied
+        change.target: memorystore/lb-redis-prod
+        cache.maxmemory_policy: noeviction
+    - service: leaderboard-api
+      severity: INFO
+      offset_seconds: 2
+      body: 'level=info logger=changelog msg="change applied" cmd="opsctl run job/leaderboard-rebuild" actor={actor} result="started season=S14 boards=ranked-global,seasonal-solo,guild-wars source=rank_history"'
+      attributes:
+        operation: change_applied
+        change.target: job/leaderboard-rebuild
+    - service: leaderboard-api
+      severity: INFO
+      offset_seconds: 60
+      body: 'memorystore: operation UpdateInstance done instance=projects/gaming-prod/locations/us-central1/instances/lb-redis-prod memory_size_gb=16 maxmemory-policy=noeviction state=READY'
+      attributes:
+        operation: config_change
+        cache.instance: lb-redis-prod
+        cache.maxmemory_policy: noeviction
+    - service: leaderboard-api
+      severity: INFO
+      offset_seconds: 240
+      body: '[LB] job=leaderboard-rebuild finished season=S14 boards=3 entries_rebuilt=1284301 mismatched=0 source=rank_history duration=236s'
+      attributes:
+        operation: leaderboard_rebuild
+        leaderboard.mismatched_entries: 0
+  steady_attributes:
+    leaderboard-api:
+      cache.maxmemory_policy: noeviction
+  verification:
+    - signal: leaderboard.redis.evicted_keys_per_s
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "leaderboard-api"'
+      field: 'metrics.leaderboard.redis.evicted_keys_per_s'
+      expect: '0 (was 200-500 keys per second), falling to 0 within about 60 seconds of the rollback'
+      within_seconds: 120
+    - signal: leaderboard.consistency.mismatched_entries
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "leaderboard-api"'
+      field: 'metrics.leaderboard.consistency.mismatched_entries'
+      expect: '0 (was 5000-40000), falling steadily over about 240 seconds as job/leaderboard-rebuild reloads the boards'
+      within_seconds: 300
+    - signal: LB-DATA-CORRUPT lines
+      from: 'logs.otel.gaming'
+      where: 'body.text LIKE "*LB-DATA-CORRUPT*"'
+      expect: '0 new lines'
+      within_seconds: 120
+    - signal: lb-redis-prod maxmemory policy
+      from: 'logs.otel.gaming'
+      where: 'resource.attributes.service.name == "leaderboard-api" AND attributes.cache.instance == "lb-redis-prod"'
+      field: 'attributes.cache.maxmemory_policy'
+      expect: 'noeviction on every redis_status line since the fix (was allkeys-lru)'
+      within_seconds: 120
 business_impact:
   - kpi: business.daily_retention_rate_pct
-    factor: {uniform: [0.25, 0.55]}
+    value: {uniform: [11.9, 13.7], round: 2}
   - kpi: business.matches_played_per_min
-    factor: {uniform: [0.30, 0.55]}
+    value: {uniform: [229.71, 264.29]}
   - kpi: business.churn_risk_index_0_100
     factor: {uniform: [1.8, 3.5]}
   - kpi: business.net_satisfaction_proxy_nps
-    factor: {uniform: [0.20, 0.45]}
+    value: {uniform: [9.3, 10.7], round: 1}
+generator_impact:
+  redis_otel:
+    high_eviction_rate: 350.0
+    memory_approaching_maxmemory: 97.0
+# redis package metrics recover with the evictions, not with the rebuild
+generator_hold_seconds: {redis_otel: 60}

@@ -6,14 +6,19 @@ These rules are non-negotiable. Hold them for the entire session.
 
 ## 1. Scope: one scenario folder only
 
-**Only modify files under `scenarios/<id>/`** — specifically the channel YAML file and `scenario.yaml` (for the system_prompt update).
+**Only modify files under `scenarios/<id>/`** — specifically the channel YAML file and `scenario.yaml` (for the system_prompt update). At schema 1.3 two more edits are in scope:
+
+- the service file that emits the channel's signal metric, limited to the steps and expressions for this channel's number (its during-fault and after-fix branches);
+- `scenarios/<id>/ops.yaml`, only to add a verb (with `summary` and `example`) when no existing verb reads naturally for the fix. Never rename or remove a verb another channel uses.
 
 Never touch:
-- Any file in `log_generators/`, `app/`, `elastic_config/`, or `scenarios/base.py`
+- Any file in `generators/`, `generator_engine/`, `app/` (including `app/ops_presets/`), `elastic_config/`, or `scenario_engine/`
 - Any other scenario folder
-- Service files under `scenarios/<id>/services/`
+- Other steps in service files under `scenarios/<id>/services/`
 
 If you think a change elsewhere is needed, stop and ask the user.
+
+If the new fault needs a workload or node pool that `k8s_topology` in `scenario.yaml` does not have, stop and ask the user before adding it there.
 
 ---
 
@@ -57,7 +62,9 @@ Test: "Would a well-run SRE team add this to their auto-remediation runbook?" If
 
 Every `{placeholder}` name in `error_message` and `stack_trace` must be a key in `fault_params` in the same channel YAML file. Missing keys cause `KeyError` at runtime.
 
-Collect all placeholder names from both strings before writing `fault_params`.
+Collect all placeholder names from both strings before writing `fault_params`. The runtime placeholders the engine fills (`{self_node}`, `{self_pod}`, `{self_pod_ip}`, `{node_count}`, `{pool_<name>_count}`, `{klog_time}`, `{nginx_time}`, `{iso_now}`, `{epoch_now}`, ...) need no key.
+
+The same holds for `investigation_notes`: every `{placeholder}` there must be a `fault_params` key, or it is shown as literal text in the KB doc, Wiki runbook and channel runbook skill (verifier Check 35).
 
 ---
 
@@ -78,3 +85,19 @@ The agent will fail to find fault logs for any `error_type` not listed in its pr
 ## 7. No invented service names or subsystems
 
 Do not introduce a `subsystem` label that doesn't already exist in service files. Do not reference a service key that isn't a filename stem under `scenarios/<id>/services/`.
+
+---
+
+## 8. Telemetry must read like a real incident (schema 1.3)
+
+Follow the Realism checklist in [../add-scenario/BRIEF.md](../add-scenario/BRIEF.md). In particular:
+
+- `error_type` is a natural substring of `error_message`, contains no quote characters (Check 44), and is unique among the 20 channels.
+- `remediation_command` fixes the root cause (roll back the change, restore the policy), not the symptom (restart pods).
+- There is a `fault_scope`, a cause event with a negative `offset_seconds`, and `remediation_effects.verification`.
+- Every `remediation_command` verb exists in the scenario's ops profile (`ops.yaml` + its `extends` presets; Check 37), and `remediation_effects.log_events` has one `{actor}` line per command line that satisfies the audit format's `match`.
+- Every verification signal is emitted by something: a `metrics.<name>` by a service `metric` step, a log `attributes.<key>` by a service step, `steady_attributes`, `rca_clues` or a fix line. Treat Check 41 warnings as failures.
+- The signal service has a during-fault branch (`N in all_active`, ramped with `elapsed`) and an after-fix branch (`N in fixed_channels`, converging with `since_fix`), and shows the fix's configuration keyed on `fixed_channels` or `applied`.
+- Fault logs no longer carry `chaos.*` fields (or `ops.*`, `system.*`, `cascade.*`, an `event_name` blob). Never add such attributes in `rca_clues`, `infrastructure_events`, `remediation_effects` or anywhere else.
+- No "channel N", "chaos", "demo" or mission jargon in any text that becomes telemetry or a runbook.
+

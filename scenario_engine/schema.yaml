@@ -19,7 +19,7 @@
 #   needs_input (bool) — true → skill must AskUserQuestion to gather a value
 #                        before it can apply this migration
 
-current: "1.2"
+current: "1.3"
 default_unversioned: "1.0"
 
 migrations:
@@ -37,7 +37,7 @@ migrations:
     breaking: false
     summary: "Add business_impact blocks to all channel YAMLs so executive KPIs react to faults"
     guidance: |
-      For each file in `channels/NN-<slug>.yaml`, add an optional top-level
+      For each file in `channels/NN-<slug>.yaml`, add a top-level
       `business_impact:` list mapping this fault to 2–4 semantically related
       KPIs from `scenario.yaml`'s `executive_kpi_emissions:` list.
 
@@ -60,10 +60,85 @@ migrations:
         - Down-KPIs (factor < 1): revenue, gmv, conversion_rate, orders, sessions,
           page_views, fulfillment_sla, csat, nps, same_day_eligible.
         - Up-KPIs (factor > 1): cancel_rate, returns, churn_risk, error_* metrics.
-        - Use 2–4 impacts per channel for legibility. Not every KPI needs to move.
-        - Channels unrelated to business outcomes (infra/network-only) can omit
-          `business_impact:` entirely; the emitter treats absence as nominal.
+        - Scale the number of impacts with the fault's scope (2 x affected + cascade
+          services): minor >= 2 yellow/red tiles (1 red), moderate >= 3 (2 red),
+          major >= 4 (3 red). Prefer `value:` ranges inside the KPI's red/yellow band,
+          and set `better: lower|higher` on every impacted KPI in
+          `executive_kpi_emissions` (verifier checks 30 + 32).
+        - `affected_services` must include a trace entry service (a service with
+          `entry_endpoints`), not only a database, or the ops dashboard stays green
+          (verifier check 31).
+        - Every channel needs a `business_impact:` block, including infra/network-only
+          ones (map them to availability, error-rate and latency KPIs); a channel
+          without one leaves the executive dashboard green during its fault.
 
       Finally, bump `schema_version` in `scenario.yaml` from "1.1" to "1.2"
       (or add it as "1.2" if the field was absent).
     needs_input: false
+
+  - to: "1.3"
+    breaking: false
+    summary: "Realism and verifiable remediation: opsctl remediation, fault scope, cause-before-effect events, post-fix state and recovery signals"
+    guidance: |
+      Schema 1.3 adds optional fields; a 1.2 scenario still loads and launches. To
+      bring a scenario to 1.3, for EACH file in channels/NN-<slug>.yaml:
+
+      1. remediation_command: the exact fix, one `opsctl <verb> <target> [-n ns] [--flags]`
+         command per line (verbs: rollback, restore, renew, rotate, sync, drain, replace, restart,
+         patch, apply, expand, run, delete). It must fix the root cause, not the symptom.
+      2. fault_scope: where the fault lives — {cluster, node_pool, nodes, az, workloads,
+         namespaces}. Without a pinned k8s_topology use {cluster} and {workloads} only.
+      3. infrastructure_events: make sure one entry is the change or provider event that
+         caused the fault, with a negative offset_seconds (e.g. -90) so it is logged
+         before the symptoms; optionally set onset_delay_seconds / ramp_seconds.
+      4. cascade_messages: replace the generic cascade wording with per-service lines a
+         real dependent would log ({fault_params} and runtime {klog_time}, {nginx_time},
+         {iso_now}, {self_pod}... placeholders allowed). Optional error_services keeps
+         the error signature on the component at fault when the API gateway is also in
+         affected_services.
+      5. remediation_effects:
+           verification: 2-4 entries {signal, where, expect, within_seconds} naming the
+             signals that confirm recovery — rendered into the runbook's
+             "Recovery is confirmed when".
+           log_events / steady_attributes: the audit or reload lines the fix leaves.
+           state (+ transition_seconds): only when the fix changes a config value a
+             generator reports (memory limit, HPA max, instance types, PVC size...);
+             keys must be in that generator's SPEC.state_keys. Use fault_state for the
+             bad value while the fault is active.
+      5b. Before / during / after telemetry: in services/*.yaml make each channel's signal
+         metric read three ways, fault first: out of band while `N in all_active` (ramp in
+         with `elapsed`), converging back after the fix while `N in fixed_channels`
+         (`min(1, since_fix.get(N, 0) / <seconds>)`), baseline otherwise. The subsystem's
+         status log says ANOMALY during the fault and carries the configuration the fix
+         changes (active unit, firmware, mode) keyed on `fixed_channels` or `applied`.
+         Verification entries name that metric (`from: metrics-generic.otel-default`) and
+         attribute (`from: logs.otel.<ns>`); the verifier warns when nothing emits them.
+      6. Remove demo wording from error_message, investigation_notes and cascade lines
+         ("channel N", "chaos", mission jargon); error_type must contain no quotes.
+      7. Check coherence: co-moving signals both move (HPA at max with CPU, OOMKilled
+         with memory at the limit, Pending pods with a reason in k8s_events).
+
+      Scenario level: add scenarios/<id>/ops.yaml, the scenario's opsctl profile (contract in
+      app/ops_profile.py and AGENTS.MD "Ops profile"): `extends` presets (neutral,
+      kubernetes, aws-cloudtrail, gcp-audit, azure-activity), `actors` {default, auto},
+      `auto_remediate_channels`, `audit.service` and an audit format whose `match` lets each
+      fix's `{actor}` log line stand in for its command, help text for the verbs the
+      channels use (add a verb only when no existing one reads naturally), `runbook`
+      phrases and a `guide` saying where the scenario's telemetry is. Each fix's
+      remediation_effects.log_events then carries one `{actor}` line per command line.
+      References: scenarios/k8splatform/ops.yaml, scenarios/space/ops.yaml.
+
+      Optional per channel: generator_hold_seconds {generator_id: seconds} keeps a metric-style
+      generator's generator_impact applied after the fix so its package stream recovers with
+      the scenario's own metrics (leave out event-style generators).
+      Optional per channel: service_lag_seconds {service: seconds} delays one service's
+      symptoms on top of onset_delay_seconds, so dependents degrade after the component at
+      fault (a service's DSL metrics follow with `lag.get(N, 0)`).
+
+      Optional at scenario level: k8s_topology (pinned clusters, node pools, subnets,
+      workloads) so node names, IPs and counts in logs match the metrics.
+
+      Finally set schema_version: "1.3" in scenario.yaml and run
+      python3 scripts/verify_yaml_scenarios.py <id> (checks 37-44 apply from 1.3; check 45
+      validates ops.yaml).
+    needs_input: true

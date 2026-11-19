@@ -6,60 +6,172 @@ sensor_type: latency_monitor
 affected_services:
 - matching-engine
 - order-gateway
+error_services:
+- matching-engine
 cascade_services:
 - risk-calculator
 - settlement-processor
-description: Matching engine order processing latency exceeds SLA threshold
+description: Matching engine order processing latency on partition P-07 exceeds the 200 us SLA after its pod lost its pinned CPU cores
+onset_delay_seconds: 5
+service_lag_seconds: {order-gateway: 30, risk-calculator: 45, settlement-processor: 60}
 investigation_notes: |-
-  1. Check matching-engine logs for ME-LATENCY-SLA — note order_id, partition_id, latency_us vs sla_us, and which pipeline phase is the bottleneck.
-  2. Query FROM logs.otel.financial.* | WHERE body.text LIKE "*ME-LATENCY-SLA*" | STATS avg(latency_us), count() BY partition_id to identify hot partitions.
-  3. Inspect the price_time_match phase elapsed_us — if it exceeds 10000us the book has excessive queue_depth; check lock_contention_ns for spinlock contention.
-  4. Check order-gateway for order submission rate — a sudden burst (e.g. algorithmic wash trading) drives queue_depth > 10000 and locks the matching thread.
-  5. Throttle inbound order rate at order-gateway for the affected partition; if CPU affinity shows a single core saturated, re-balance partitions across cores.
-remediation_action: throttle_inbound_and_rebalance_partitions
-error_message: '[ME] ME-LATENCY-SLA: order={order_id} latency_us={latency_us} sla_us={sla_us} partition={partition_id}'
+  Root cause: a GitOps change (CR-5186) set resources.requests.cpu to 7.5 on statefulset matching-engine-p07 while limits.cpu stayed 8. With request != limit the pods restarted with QoS class Burstable instead of Guaranteed, so the kubelet static CPU manager no longer gives them exclusive cores: the {partition_id} matching thread now runs on the shared CPU pool (cpuset shared, exclusive_cores=0) and is preempted by other processes. Every preemption parks the single matching thread, orders queue behind it (queue_depth {queue_depth}) and p99 match latency rises to {latency_us}us against the {sla_us}us SLA. The time is spent waiting for a CPU, not matching: price_time_match itself takes about 20us. CPU throttling stays at {throttled_pct}% because usage is under the 8-core limit, and the order submission rate at order-gateway stays at its normal 160-180 orders/s, which rules out a CFS quota problem and the runaway-algo or quote-stuffing theory. The other partitions (P-01 to P-06, P-08) keep Guaranteed QoS with 8 pinned cores and stay at 40-90us p99.
+  Confirm:
+    - matching-engine "[ME] partition_health partition=P-07" lines show qos_class=Burstable exclusive_cores=0 status=ANOMALY (attributes.k8s.pod.qos_class, attributes.cpu.exclusive_cores), while the other partitions show Guaranteed and 8
+    - metrics.matching_engine.match_latency_p99_us for me.partition P-07 rises from 40-90 to 12,700-50,000; metrics.matching_engine.nonvoluntary_ctx_switches_per_s rises from under 50 to 8,000-20,000; metrics.matching_engine.cpu_throttled_pct stays 0-2%; metrics.order_gateway.orders_per_min stays about 10,200
+    - body.text "*ME-LATENCY-SLA*" lines name partition={partition_id} and nvcsw_per_s around {nvcsw}
+    - the matching-engine line "[ME] statefulset matching-engine-p07 updated by GitOps sync" (attributes.change.request CR-5186) comes before the first breach
+  Remediation: opsctl patch statefulset/matching-engine-p07 --cpu-request 8 --cpu-limit 8 restores request = limit. The statefulset rolls: the standby pod matching-engine-p07-1 is recreated as Guaranteed with 8 exclusive cores, P-07 fails over to it at about 20 s, the queued orders drain over about 30 s and p99 is back under 200us within about 90 s; matching-engine-p07-0 then restarts as the new standby. Throttling inbound orders or re-balancing partitions treats the symptom: the order rate is normal and the partition only needs its pinned cores back. Raising the CPU limit would keep the pod Burstable.
+remediation_action: restore_guaranteed_cpu_for_matching_engine
+remediation_command: |-
+  opsctl patch statefulset/matching-engine-p07 --cpu-request 8 --cpu-limit 8
+error_message: '[ME] ME-LATENCY-SLA: order={order_id} latency_us={latency_us} sla_us={sla_us} partition={partition_id} queue_depth={queue_depth}
+  nvcsw_per_s={nvcsw}'
 stack_trace: |-
   === MATCHING ENGINE PERF DUMP ===
-  order_id={order_id}  partition={partition_id}
-  phase              elapsed_us   pct
-  order_decode          12         0.1%
-  pre_trade_risk       340         2.7%
-  book_lookup           45         0.4%
-  price_time_match   11280        89.2%  <<< BOTTLENECK
-  fill_generation      310         2.5%
-  post_trade_pub       650         5.1%
+  order_id={order_id}  partition={partition_id}  pod=matching-engine-p07-0
+  phase              elapsed_us
+  order_decode          12
+  pre_trade_risk        38
+  book_lookup            9
+  price_time_match      21
+  fill_generation       14
+  post_trade_pub        30
+  run_queue_wait     remainder   <<< matching thread preempted, not on CPU
   TOTAL             {latency_us}us  SLA={sla_us}us  BREACH=true
-  queue_depth=14832  lock_contention_ns=8420  cpu_affinity=core-7
-  ACTION: throttle_inbound=true  alert=ME-LATENCY-SLA
+  queue_depth={queue_depth}
+  matching thread tid=4117  nonvoluntary_ctxt_switches/s={nvcsw}  voluntary_ctxt_switches/s=3
+  cgroup cpu.stat  nr_throttled=0  throttled_pct={throttled_pct}
+  pod qosClass=Burstable  requests.cpu=7500m  limits.cpu=8  cpu_manager_policy=static  cpuset=shared  exclusive_cores=0
 correlation_attr: {}
 fault_params:
   order_id:
     format: "ORD-{n}"
     n: {randint: [100000, 999999]}
-  latency_us: {randint: [500, 50000]}
+  latency_us: {randint: [12700, 50000]}
+  queue_depth: {randint: [10500, 30000]}
   sla_us: 200
-  partition_id:
-    format: "P-{n}"
-    n: {randint: [0, 15]}
+  partition_id: P-07
+  nvcsw: {randint: [8000, 20000]}
+  throttled_pct: {uniform: [0.0, 2.0], round: 1}
 rca_clues:
   matching-engine:
-    engine.match_latency_us: {randint: [500, 50000]}
-    engine.queue_depth: {randint: [5000, 30000]}
+    engine.match_latency_us: {randint: [12700, 50000]}
+    engine.queue_depth: {randint: [10500, 30000]}
+    engine.nonvoluntary_ctx_switches_per_s: {randint: [8000, 20000]}
+    engine.container_cpu_throttled_pct: {uniform: [0.0, 2.0], round: 1}
+    k8s.pod.qos_class: Burstable
+    cpu.exclusive_cores: 0
   order-gateway:
-    oms.order_submission_rate_per_s: {randint: [1000, 50000]}
-    oms.latency_sla_breach_pct: {uniform: [1.0, 25.0], round: 1}
+    oms.order_submission_rate_per_s: {randint: [160, 180]}
+    oms.ack_latency_p99_us: {randint: [12700, 50000]}
   risk-calculator:
     risk.latency_impacted_orders: {randint: [10, 1000]}
-    risk.pre_trade_check_delay_us: {randint: [100, 5000]}
+    risk.pre_trade_check_delay_us: {randint: [500, 5000]}
   settlement-processor:
-    settlement.fill_processing_backlog: {randint: [0, 500]}
-    settlement.late_fill_reports: {randint: [0, 100]}
+    settlement.fill_processing_backlog: {randint: [50, 500]}
+    settlement.late_fill_reports: {randint: [5, 100]}
+cascade_messages:
+  order-gateway:
+    - severity: WARN
+      message: '[OMS] order acks delayed on partition {partition_id}: ack_latency_us={latency_us} (sla {sla_us}us) order={order_id}; submission rate normal'
+  risk-calculator:
+    - severity: WARN
+      message: '[RISK] position updates from matching-engine partition {partition_id} arriving late (delay_us={latency_us}); intraday exposure for {partition_id} instruments lagging'
+  settlement-processor:
+    - severity: WARN
+      message: '[SETTLE] fill reports from partition {partition_id} delayed (engine queue_depth={queue_depth}); late fills batched for allocation'
+fault_scope:
+  cluster: finserv-eks-cluster
+  workloads: [matching-engine, order-gateway]
+infrastructure_events:
+  - service: matching-engine
+    severity: INFO
+    offset_seconds: -120
+    body: '[ME] statefulset matching-engine-p07 updated by GitOps sync (trading-infra PR 2291, CR-5186): resources.requests.cpu 8 -> 7.5, limits.cpu 8; pods recreated with qosClass=Burstable; cpu manager (static) assigned the shared pool, exclusive_cores 8 -> 0'
+    attributes:
+      user.name: trading-infra-gitops
+      change.request: CR-5186
+      operation: deployment_rollout
+      change.summary: 'matching-engine-p07 cpu request: 8 -> 7.5 (limit 8)'
+      me.partition: P-07
+      k8s.pod.qos_class: Burstable
+      cpu.exclusive_cores: 0
+remediation_effects:
+  log_taper_seconds: 45
+  log_events:
+    - service: audit-logger
+      severity: INFO
+      offset_seconds: 1
+      body: '[AUDIT] event_logged stream=change-mgmt type=CHANGE_APPLIED cmd="opsctl patch statefulset/matching-engine-p07 --cpu-request 8 --cpu-limit 8" actor={actor}: matching-engine-p07 cpu request 7.5 -> 8, limit 8'
+      attributes:
+        operation: change_applied
+        audit.stream: change-mgmt
+        change.target: statefulset/matching-engine-p07
+    - service: matching-engine
+      severity: INFO
+      offset_seconds: 3
+      body: '[ME] statefulset matching-engine-p07 patched (requests.cpu 7.5 -> 8, limits.cpu 8); rolling update: recreating standby matching-engine-p07-1'
+      attributes:
+        operation: deployment_rollout
+        me.partition: P-07
+    - service: matching-engine
+      severity: INFO
+      offset_seconds: 20
+      body: '[ME] matching-engine-p07-1 running qosClass=Guaranteed cpuset=8-15 exclusive_cores=8; standby in sync, P-07 failed over to matching-engine-p07-1'
+      attributes:
+        operation: failover
+        me.partition: P-07
+        k8s.pod.qos_class: Guaranteed
+        cpu.exclusive_cores: 8
+    - service: matching-engine
+      severity: INFO
+      offset_seconds: 50
+      body: '[ME] partition P-07 inbound queue drained, match p99 back under sla 200us; recreating matching-engine-p07-0 as standby'
+      attributes:
+        operation: partition_health
+        me.partition: P-07
+    - service: matching-engine
+      severity: INFO
+      offset_seconds: 75
+      body: '[ME] matching-engine-p07-0 running qosClass=Guaranteed exclusive_cores=8; P-07 standby in sync'
+      attributes:
+        operation: deployment_rollout
+        me.partition: P-07
+        k8s.pod.qos_class: Guaranteed
+  steady_attributes:
+    matching-engine:
+      k8s.pod.qos_class: Guaranteed
+  verification:
+    - signal: matching_engine.match_latency_p99_us
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "matching-engine"'
+      field: 'metrics.matching_engine.match_latency_p99_us'
+      expect: 'back under 200 us on P-07 (was 12,700-50,000 us)'
+      within_seconds: 120
+    - signal: matching_engine.nonvoluntary_ctx_switches_per_s
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "matching-engine"'
+      field: 'metrics.matching_engine.nonvoluntary_ctx_switches_per_s'
+      expect: 'back under 50 per second on P-07 (was 8,000-20,000)'
+      within_seconds: 120
+    - signal: ME-LATENCY-SLA lines
+      from: 'logs.otel.finserv'
+      where: 'body.text LIKE "*ME-LATENCY-SLA*"'
+      expect: '0 new lines'
+      within_seconds: 120
+    - signal: P-07 pod QoS class
+      from: 'logs.otel.finserv'
+      where: 'resource.attributes.service.name == "matching-engine"'
+      field: 'attributes.k8s.pod.qos_class'
+      expect: 'Guaranteed on every line since the failover; Burstable stops appearing'
+      within_seconds: 120
 business_impact:
   - kpi: business.latency_sla_breach_rate_pct
     factor: {uniform: [5.0, 15.0]}
   - kpi: business.executed_trades_per_min
-    factor: {uniform: [0.20, 0.50]}
+    value: {uniform: [374.79, 431.21]}
   - kpi: business.fill_rate_pct
-    factor: {uniform: [0.30, 0.60]}
+    factor: {uniform: [0.3, 0.6]}
   - kpi: business.best_execution_pct
     factor: {uniform: [0.65, 0.85]}

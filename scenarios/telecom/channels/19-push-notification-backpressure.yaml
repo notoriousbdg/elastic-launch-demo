@@ -1,73 +1,115 @@
 name: Push Notification Backpressure
 subsystem: notifications
 vehicle_section: push_channel
-error_type: NOTIF-PUSH-BACKPRESSURE
+error_type: Quota exceeded for quota metric
 sensor_type: push_delivery
 affected_services:
 - notification-service
-cascade_services:
 - activation-service
+cascade_services:
 - provisioning-service
-description: FCM/APNs push notification delivery backpressure causing activation confirmation delays
-investigation_notes: |
-  1. Check FCM/APNs rate limit status — Firebase Cloud Messaging and Apple Push Notification service have per-app rate limits. Exceeding limits causes 429 responses and message queuing.
-  2. Backpressure source: activation volume spike (e.g., marketing campaign, device launch event) driving notification volume above normal 200/min to elevated rates.
-  3. APNs priority channels: activation confirmations should use priority=10 (immediate). Background notifications (usage alerts, marketing) should use priority=5 to avoid quota competition.
-  4. Provisioning-service waits for notification-service acknowledgment before marking activation complete. Push backpressure delays this acknowledgment, causing provisioning timeout.
-  5. Decouple notification from activation flow — make notification async so provisioning-service doesn't block on notification delivery. Queue notifications for background delivery.
-remediation_action: throttle_push_notifications
-error_message: '[NOTIF] NOTIF-PUSH-BACKPRESSURE: platform={push_platform} rate={push_current_rate}/min limit={push_rate_limit}/min queue_depth={push_queue_depth} retry_backoff_ms={push_backoff_ms}'
-stack_trace: |
-  === PUSH NOTIFICATION BACKPRESSURE ===
-  platform={push_platform}  service=notification-service
-  --- DELIVERY STATUS ---
-    PLATFORM     RATE        LIMIT       QUEUE     STATUS
-    FCM          {push_current_rate}/min  {push_rate_limit}/min  {push_queue_depth}     THROTTLED
-    APNs         {push_current_rate}/min  {push_rate_limit}/min  {push_queue_depth}     THROTTLED
-  --- BACKPRESSURE ANALYSIS ---
-    retry_backoff={push_backoff_ms}ms  max_retries=5
-    activation_confirms_delayed={activation_confirms_delayed}
-    provisioning_timeout_risk=HIGH
-    priority_10_queued={priority_high_queued}  priority_5_queued={priority_low_queued}
-  ACTION: prioritize_activation=true  defer_marketing=true  alert=NOTIF-PUSH-BACKPRESSURE
-infrastructure_events:
-- body: '[GCP-Monitoring] PushNotificationThrottled: platform=FCM rate=800/min limit=500/min queue_depth=3500 429_responses=350 region=europe-west3'
-  severity: WARN
-  event_name: gcp.monitoring.PushNotificationThrottled
-  service: notification-service
-  attributes:
-    cloud.provider: gcp
-    cloud.service: monitoring
-    gcp.resource_type: gke_container
-    infrastructure.source: GCP-Monitoring
+description: a consumer quota override capped Firebase Cloud Messaging sends at 500 per minute and push notifications back up
+investigation_notes: |-
+  Root cause: a consumer quota override on the GCP project meridian-project about a minute before the first error (the time it took to propagate) capped fcm.googleapis.com send requests at 500 per minute (override created after a load test in the wrong project; the default limit is 600,000 per minute). notification-service sends about 2,400 push messages per minute at this hour, so FCM answers the rest with 429 RESOURCE_EXHAUSTED ({push_429_per_min}/min) and the push queue grows by about 1,900 per minute. App users miss activation confirmations and eSIM download prompts. SMS, email and webhooks are normal, and FCM itself is healthy (Firebase status).
+  Confirm:
+    - the gcp-audit record CreateConsumerOverride for fcm.googleapis.com (overrideValue 500) comes before the first "Quota exceeded for quota metric", and push status lines carry attributes.fcm.quota_per_min 500
+    - metric notification_service.push_429_per_min rises from 0 to about {push_429_per_min} and notification_service.push_delivered_per_min is pinned near 500 (normally about 2,400)
+    - metric notification_service.push_queue_depth grows steadily while notification_service.sms_delivered_per_min stays normal, which rules out a notification-service capacity problem
+  Remediation: delete the override with opsctl delete quota-override/fcm-send-per-minute. Quota changes take up to about a minute to apply; then 429s stop and the queue drains at FCM's normal rate within a few minutes. Throttling push on Meridian's side would only slow the backlog further.
+remediation_action: delete_fcm_quota_override
+error_message: 'push send failed: 429 RESOURCE_EXHAUSTED Quota exceeded for quota metric ''Send requests'' and limit ''Send requests per minute'' of service ''fcm.googleapis.com'' for consumer ''project_number:481516234211''. template={push_template} queue_depth={push_queue}'
+stack_trace: |-
+  Traceback (most recent call last):
+    File "/app/notify/push/fcm.py", line 71, in send
+      response = await self._session.post(FCM_SEND_URL, json=payload)
+    File "/app/notify/push/fcm.py", line 79, in send
+      raise FcmQuotaExceeded(response.status, body["error"]["message"])
+  notify.push.errors.FcmQuotaExceeded: 429 RESOURCE_EXHAUSTED Quota exceeded for quota metric 'Send requests' and limit 'Send requests per minute' of service 'fcm.googleapis.com'
 correlation_attr:
-  key: notification.push_sdk_version
-  value: fcm-sdk-v24.1.0-beta
+  key: fcm.quota_per_min
+  value: '500'
 fault_params:
-  push_platform: {choice: [FCM, APNs, HMS]}
-  push_current_rate: {randint: [500, 2000]}
-  push_rate_limit: 500
-  push_queue_depth: {randint: [1000, 10000]}
-  push_backoff_ms: {randint: [1000, 8000]}
-  activation_confirms_delayed: {randint: [200, 2000]}
-  priority_high_queued: {randint: [100, 500]}
-  priority_low_queued: {randint: [500, 5000]}
+  push_template: {choice: [activation_confirm, esim_download_ready, plan_change]}
+  push_queue: {randint: [2000, 19000]}
+  push_429_per_min: {randint: [1700, 2100]}
+  esim_wait_min: {randint: [5, 20]}
 rca_clues:
   notification-service:
-    notification.push_rate_limited: true
-    notification.fcm_429_count: {randint: [200, 2000]}
+    fcm.quota_per_min: 500
+    fcm.push_429_per_min: {randint: [1700, 2100]}
+    fcm.push_queue_depth: {randint: [2000, 19000]}
   activation-service:
-    activation.notification_ack_delayed: true
-    activation.completion_blocked: true
+    activation.confirmation_push_pending: {randint: [400, 1500]}
   provisioning-service:
-    provisioning.notification_dependency_timeout: true
-    provisioning.async_queue_building: true
+    provisioning.esim_download_prompt_wait_min: {randint: [5, 20]}
+remediation_command: |-
+  opsctl delete quota-override/fcm-send-per-minute
+fault_scope:
+  cluster: meridian-gke-cluster
+  workloads: [notification-service]
+error_services: [notification-service]
+cascade_messages:
+  activation-service:
+    - severity: WARN
+      message: 'activation_confirm push still queued at notification-service; customer app shows "activation in progress"'
+  provisioning-service:
+    - severity: INFO
+      message: 'eSIM profile ready but download prompt not delivered after {esim_wait_min} min (push queued); SM-DP+ reservation kept'
+infrastructure_events:
+  - service: notification-service
+    severity: INFO
+    offset_seconds: -60
+    event_name: gcp.audit.CreateConsumerOverride
+    body: 'gcp-audit: logName=cloudaudit.googleapis.com/activity serviceName=serviceusage.googleapis.com methodName=google.api.serviceusage.v1beta1.ServiceUsage.CreateConsumerOverride resourceName=projects/meridian-project/services/fcm.googleapis.com/consumerQuotaMetrics/send-requests/limits/per-minute/consumerOverrides/fcm-send-per-minute principalEmail=loadtest-runner@meridian-project.iam.gserviceaccount.com status=OK overrideValue=500'
+    attributes:
+      cloud.provider: gcp
+      gcp.audit.method_name: google.api.serviceusage.v1beta1.ServiceUsage.CreateConsumerOverride
+      user.name: loadtest-runner@meridian-project.iam.gserviceaccount.com
+      fcm.quota_per_min: 500
+remediation_effects:
+  log_taper_seconds: 45
+  log_events:
+    - service: notification-service
+      severity: INFO
+      offset_seconds: 1
+      body: 'gcp-audit: logName=cloudaudit.googleapis.com/activity serviceName=serviceusage.googleapis.com methodName=google.api.serviceusage.v1beta1.ServiceUsage.DeleteConsumerOverride resourceName=projects/meridian-project/services/fcm.googleapis.com/consumerQuotaMetrics/send-requests/limits/per-minute/consumerOverrides/fcm-send-per-minute principalEmail={actor} status=OK'
+      attributes:
+        cloud.provider: gcp
+        gcp.audit.method_name: google.api.serviceusage.v1beta1.ServiceUsage.DeleteConsumerOverride
+  steady_attributes:
+    notification-service:
+      fcm.quota_per_min: 600000
+  verification:
+    - signal: notification_service.push_429_per_min
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "notification-service"'
+      field: 'metrics.notification_service.push_429_per_min'
+      expect: '0 (was 1,700-2,100)'
+      within_seconds: 120
+    - signal: notification_service.push_queue_depth
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "notification-service"'
+      field: 'metrics.notification_service.push_queue_depth'
+      expect: 'falling quickly, back under 100'
+      within_seconds: 240
+    - signal: quota exceeded lines
+      from: 'logs.otel.meridian'
+      where: 'body.text LIKE "*Quota exceeded for quota metric*"'
+      expect: '0 new lines once the quota change has applied'
+      within_seconds: 120
+    - signal: FCM quota
+      from: 'logs.otel.meridian'
+      where: 'resource.attributes.service.name == "notification-service"'
+      field: 'attributes.fcm.quota_per_min'
+      expect: '600000 on every push status line since the override was deleted'
+      within_seconds: 120
 business_impact:
   - kpi: business.activations_per_min
-    factor: {uniform: [0.25, 0.55]}
+    value: {uniform: [230.87, 265.63]}
   - kpi: business.esim_provisions_per_min
     factor: {uniform: [0.25, 0.55]}
   - kpi: business.support_tickets_per_min
     factor: {uniform: [2.0, 4.0]}
   - kpi: business.nps
     factor: {uniform: [0.35, 0.65]}
+service_lag_seconds: {activation-service: 30, provisioning-service: 60}

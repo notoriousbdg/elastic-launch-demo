@@ -9,61 +9,144 @@ affected_services:
 cascade_services:
 - mobile-gateway
 - payment-engine
-description: Mass member session invalidation causing authentication storm and portal outage
+description: Every signed-in member is logged out at once after a scheduled rotation of the portal's session signing key, and the re-login wave overloads authentication.
 investigation_notes: |-
-  1. Redis cluster primary failure caused the session store to lose all active sessions. Check Redis sentinel logs: redis-cli -p 26379 SENTINEL get-master-addr-by-name banking-sessions.
-  2. Thundering herd problem: reauth rate exceeds auth-gateway capacity (rate vs 500/min). Implement token extension — issue new JWT tokens with extended TTL to surviving sessions without requiring full re-authentication.
-  3. Circuit breaker on auth-gateway opened at T+12s — this prevents total auth system collapse but blocks all new logins. Set circuit breaker to HALF_OPEN with 10% traffic sampling.
-  4. Redis cluster recovery: verify replicas 2/3 are healthy, promote a replica to primary. Command: redis-cli -p 26379 SENTINEL failover banking-sessions. Estimated recovery 5min.
-  5. Rate limit re-authentication attempts with exponential backoff on the client side — mobile app and portal should retry with jitter to prevent synchronized retry storms.
-  6. Post-incident: implement session persistence to a secondary store (DynamoDB/Elasticache Global) so Redis primary failure doesn't cascade to full session loss.
-remediation_action: reset_session_pool
-error_message: '[PORTAL] PORTAL-SESSION-CASCADE: invalidated={sessions_invalidated} active_before={sessions_active} trigger={session_trigger}
-  reauth_rate={reauth_rate}/min'
+  1. Search logs.otel.banking for body.text containing PORTAL-SESSION-CASCADE on member-portal: {sessions_invalidated} of {sessions_active} sessions were rejected with trigger={session_trigger}, and members re-authenticate at {reauth_rate}/min. metrics.member_portal.session_validation_failures_per_min normally reads 0-6 and is now 3,000-8,000; metrics.auth_gateway.logins_per_min rose from 400-900 to 6,000-12,000.
+  2. The session store is healthy: Redis answers, memory and evictions are normal, and the session records still exist. What fails is the signature check on the session cookie (BadSignature), so sessions are refused before Redis is consulted.
+  3. Find the change: the session_status line on member-portal carries attributes.portal.session_signing_key and attributes.portal.session_key_fallbacks. The scheduled 90-day rotation activated portal-session-key-v7 shortly before the first failure, and member-portal restarted with v7 as the signing key and no fallback keys, so every cookie signed with v6 is now invalid.
+  4. Do not roll the key back to v6: members who already signed in again hold v7 cookies, and a rollback would log them out a second time. Opening the auth-gateway circuit breaker or rate limiting logins only delays members further.
+  5. Fix: keep v7 for signing and accept v6 for verification: opsctl patch deployment/member-portal -n portal --session-key-fallbacks portal-session-key-v6. The pods roll in about 30 s; members still holding v6 cookies are signed in again on their next request and the login wave subsides within about two minutes.
+  6. Recovery: portal.session_key_fallbacks reads portal-session-key-v6 on the session_status lines, session_validation_failures_per_min back to 0-6, auth_gateway.logins_per_min back to 400-900, and no new PORTAL-SESSION-CASCADE lines. Remove the fallback after the 30-day session lifetime and add it to the rotation runbook.
+remediation_action: add_session_key_fallback
+remediation_command: |-
+  opsctl patch deployment/member-portal -n portal --session-key-fallbacks portal-session-key-v6
+error_message: '[PORTAL] PORTAL-SESSION-CASCADE: invalidated={sessions_invalidated} active_before={sessions_active} trigger={session_trigger} reauth_rate={reauth_rate}/min error=BadSignature signing_key=portal-session-key-v7 fallbacks=none'
 stack_trace: |-
   === SESSION CASCADE REPORT ===
   trigger={session_trigger}
   --- SESSION METRICS ---
-    active_before={sessions_active}  invalidated={sessions_invalidated}
-    reauth_attempts={reauth_rate}/min  auth_capacity=500/min
-    overflow={reauth_rate}/min vs 500/min capacity  <<< THUNDERING HERD
-  --- TIMELINE ---
-    T+0s    session_store_failover triggered
-    T+2s    redis_cluster primary failed
-    T+5s    {sessions_invalidated} sessions lost
-    T+8s    reauth storm begins ({reauth_rate}/min)
-    T+12s   auth-gateway circuit breaker OPEN
-  --- INFRASTRUCTURE ---
-    redis_cluster=DEGRADED  primary=DOWN  replicas=2/3
-    session_store=REBUILDING  estimated_recovery=5min
-  ACTION: rate_limit_auth=true  extend_tokens=true  alert=PORTAL-SESSION-CASCADE
+    active_before={sessions_active}  rejected={sessions_invalidated}  reason=BadSignature
+    reauth_attempts={reauth_rate}/min  auth_capacity=4000/min
+  --- SIGNING KEYS ---
+    signing_key=portal-session-key-v7 (activated by scheduled rotation)
+    fallback_keys=[]  cookies_signed_with=portal-session-key-v6
+  --- SESSION STORE ---
+    redis=OK  records_present=true  lookups_skipped=signature_invalid
+  ACTION: alert=PORTAL-SESSION-CASCADE
 correlation_attr:
-  key: infra.redis_cluster_config
-  value: redis-7.2.4-sentinel-patch
+  key: portal.session_signing_key
+  value: portal-session-key-v7
 fault_params:
-  sessions_invalidated: {randint: [5000, 50000]}
-  sessions_active: {randint: [50000, 200000]}
-  session_trigger: {choice: [redis_failover, session_store_corruption, config_push_error, cert_rotation_failure]}
-  reauth_rate: {randint: [1000, 5000]}
+  sessions_invalidated: {randint: [40000, 120000]}
+  sessions_active: {randint: [120000, 180000]}
+  session_trigger: signing_key_rotation
+  reauth_rate: {randint: [6000, 12000]}
 rca_clues:
   member-portal:
-    portal.sessions_lost: {randint: [10000, 50000]}
-    portal.redis_cluster_status: PRIMARY_DOWN
+    portal.session_signing_key: portal-session-key-v7
+    portal.session_key_fallbacks: none
+    portal.session_reject_reason: BadSignature
   auth-gateway:
-    auth.reauth_storm_rate_per_min: {randint: [2000, 8000]}
-    auth.circuit_breaker_state: OPEN
+    auth.logins_per_min: {randint: [6000, 12000]}
+    auth.login_queue_ms: {randint: [1500, 6000]}
   mobile-gateway:
-    gateway.session_recovery_attempts: {randint: [5000, 20000]}
-    gateway.jwt_extension_enabled: false
+    gateway.forced_relogin: true
   payment-engine:
-    payment.in_flight_txn_orphaned: {randint: [50, 300]}
-    payment.session_dependent_holds: {randint: [20, 100]}
+    payment.in_flight_txn_abandoned: {randint: [50, 300]}
+error_services:
+- member-portal
+service_lag_seconds:
+  auth-gateway: 10
+  mobile-gateway: 20
+  payment-engine: 40
+cascade_messages:
+  auth-gateway:
+  - severity: WARN
+    message: '[AUTH] login_queue depth=4800 wait_ms=3200 logins_per_min={reauth_rate} source=member-portal reason=session_rejected status=SATURATED'
+  mobile-gateway:
+  - severity: WARN
+    message: '[MOBILE] api_request endpoint=/api/v1/mobile/accounts session=rejected redirect=/login status=401'
+  payment-engine:
+  - severity: INFO
+    message: '[PAY] transfer_abandoned stage=confirm reason=session_expired status=CANCELLED'
+fault_scope:
+  cluster: banking-aks-cluster
+  workloads: [member-portal]
+infrastructure_events:
+- service: member-portal
+  severity: INFO
+  offset_seconds: -60
+  body: '[PORTAL] secret_rotation secret=portal-session-signing-key store=key-vault active portal-session-key-v6 -> portal-session-key-v7 schedule=90d rotated_by=secret-rotation-job status=ROTATED'
+  attributes:
+    operation: secret_rotation
+    portal.session_signing_key: portal-session-key-v7
+    user.name: secret-rotation-job
+- service: member-portal
+  severity: INFO
+  offset_seconds: -40
+  body: '[PORTAL] deploy member-portal restarted replicas=8/8 reason=secret_changed signing_key=portal-session-key-v7 session_key_fallbacks=none status=AVAILABLE'
+  attributes:
+    operation: deploy
+    portal.session_signing_key: portal-session-key-v7
+    portal.session_key_fallbacks: none
+remediation_effects:
+  transition_seconds: 120
+  log_events:
+  - service: member-portal
+    severity: INFO
+    offset_seconds: 1
+    body: '[change-audit] change applied action=patch target=deployment/member-portal namespace=portal cmd="opsctl patch deployment/member-portal -n portal --session-key-fallbacks portal-session-key-v6" actor={actor} result="SESSION_KEY_FALLBACKS=portal-session-key-v6"'
+    attributes:
+      operation: change_applied
+      change.target: deployment/member-portal
+      portal.session_key_fallbacks: portal-session-key-v6
+  - service: member-portal
+    severity: INFO
+    offset_seconds: 30
+    body: '[PORTAL] deploy member-portal rolled out replicas=8/8 signing_key=portal-session-key-v7 session_key_fallbacks=portal-session-key-v6 status=AVAILABLE'
+    attributes:
+      operation: deploy
+      portal.session_signing_key: portal-session-key-v7
+      portal.session_key_fallbacks: portal-session-key-v6
+  steady_attributes:
+    member-portal:
+      portal.session_key_fallbacks: portal-session-key-v6
+  verification:
+  - signal: member_portal.session_validation_failures_per_min
+    from: metrics-generic.otel-default
+    where: resource.attributes.service.name == "member-portal"
+    field: metrics.member_portal.session_validation_failures_per_min
+    expect: back to 0-6 (was 3,000-8,000)
+    within_seconds: 120
+  - signal: auth_gateway.logins_per_min
+    from: metrics-generic.otel-default
+    where: resource.attributes.service.name == "auth-gateway"
+    field: metrics.auth_gateway.logins_per_min
+    expect: back in 400-900 (was 6,000-12,000)
+    within_seconds: 180
+  - signal: portal session key fallbacks
+    from: logs.otel.banking
+    where: resource.attributes.service.name == "member-portal" AND attributes.operation == "session_status"
+    field: attributes.portal.session_key_fallbacks
+    expect: portal-session-key-v6 on every line logged since the fix
+    within_seconds: 90
+  - signal: PORTAL-SESSION-CASCADE lines
+    from: logs.otel.banking
+    where: body.text LIKE "*PORTAL-SESSION-CASCADE*"
+    expect: 0 new lines
+    within_seconds: 120
+generator_impact:
+  nginx_otel:
+    high_5xx_error_rate: 300.0
+generator_hold_seconds:
+  nginx_otel: 60
 business_impact:
   - kpi: business.active_digital_sessions
-    factor: {uniform: [0.10, 0.35]}
+    value: {uniform: [4464.0, 5136.0]}
   - kpi: business.mobile_logins_per_min
-    factor: {uniform: [0.15, 0.40]}
+    value: {uniform: [241.8, 278.2]}
   - kpi: business.digital_transaction_pct
-    factor: {uniform: [0.20, 0.50]}
+    factor: {uniform: [0.2, 0.5]}
   - kpi: business.net_satisfaction_proxy_nps
-    factor: {uniform: [0.25, 0.55]}
+    value: {uniform: [8.18, 9.42], round: 1}
+

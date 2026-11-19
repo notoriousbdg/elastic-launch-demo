@@ -1,0 +1,103 @@
+name: Harbor registry storage full
+subsystem: registry
+vehicle_section: harbor/registry-storage
+error_type: 'filesystem: no space left on device'
+sensor_type: registry_storage
+affected_services:
+  - harbor-registry
+cascade_services: []
+description: Image pushes to harbor.example-saas.io fail because the registry volume is full. Pulls of existing images still
+  work, so running workloads are fine but CI cannot publish.
+investigation_notes: |-
+  Root cause: the Harbor {harbor_version} upgrade three weeks ago migrated the configuration without the garbage-collection schedule, so GC has not run since {last_gc}. Deleted and untagged blobs accumulated until the 1Ti registry PVC filled.
+  Confirm:
+    - harbor-registry: err.message="filesystem: no space left on device" on blob uploads (PUT /v2/.../blobs/uploads/...)
+    - harbor jobservice: no GC schedule configured; last successful GC {last_gc}
+    - k8s.volume.available for PVC harbor-registry under 1% of k8s.volume.capacity (1Ti)
+    - pulls (GET manifests) still return 200
+  Remediation: expand the PVC to 2Ti (EBS online resize), run GC now to reclaim space, and restore the nightly GC schedule.
+remediation_action: expand_and_gc_registry
+remediation_command: |-
+  opsctl expand pvc/harbor-registry -n harbor --size 2Ti
+  opsctl run job/harbor-gc -n harbor
+  opsctl patch harbor/gc-schedule --cron "0 0 3 * * *"
+error_message: 'time="{iso_now}" level=error msg="response completed with error" auth.user.name="robot$ci-publisher" err.code=unknown
+  err.detail="filesystem: no space left on device" err.message="unknown error" go.version=go1.22.7 http.request.method=PUT
+  http.request.uri="/v2/{repo}/blobs/uploads/{upload_id}" http.response.status=500'
+stack_trace: ''
+fault_params:
+  repo: {choice: [tenant-core/billing-api, platform/tenant-gateway, tenant-batch/report-builder]}
+  upload_id: {format: '{a}-{b}-{c}', a: {randint: [10000000, 99999999]}, b: {randint: [1000, 9999]}, c: {randint: [100000000000, 999999999999]}}
+  harbor_version: v2.11.1
+  last_gc: '2026-10-22'
+rca_clues:
+  harbor-registry:
+    k8s.persistentvolumeclaim.name: harbor-registry
+    k8s.volume.available_pct: {uniform: [0.2, 0.8], round: 2}
+    harbor.gc.schedule: none
+cascade_messages: {}
+fault_scope:
+  cluster: prod-use1
+  workloads: [harbor-registry]
+onset_delay_seconds: 30
+# the volume fills before onset; once full, every push fails (no ramp)
+ramp_seconds: 0
+generator_impact:
+  kubernetes_otel:
+    persistent_volume_space_low: 0.4
+infrastructure_events:
+  - service: harbor-registry
+    severity: WARN
+    offset_seconds: -20
+    body: '{iso_now} [WARNING] [/jobservice/period/basic_scheduler.go:66]: no GC schedule configured; last successful GC 2026-10-22T03:00:12Z'
+remediation_effects:
+  # garbage collection finishes (and frees the space) at about +540s
+  transition_seconds: 540
+  state:
+    kubernetes_otel:
+      workloads:
+        harbor-registry: {pvc_capacity: 2Ti, pvc_used: [0.30, 0.32]}
+  log_events:
+    - service: kube-apiserver
+      severity: INFO
+      offset_seconds: 2
+      body: 'audit: level=Metadata verb=patch resource=persistentvolumeclaims namespace=harbor name=harbor-registry user={actor}
+        code=200 change="spec.resources.requests.storage: 1Ti -> 2Ti"'
+    - service: kube-apiserver
+      severity: INFO
+      offset_seconds: 45
+      body: 'I{klog_time}      11 event.go:389] "Event occurred" object="harbor/harbor-registry" kind="PersistentVolumeClaim" type="Normal"
+        reason="FileSystemResizeSuccessful" message="MountVolume.NodeExpandVolume succeeded for volume"'
+    - service: harbor-registry
+      severity: INFO
+      offset_seconds: 540
+      body: '{iso_now} [INFO] [/jobservice/job/impl/gc/garbage_collection.go:412]: GC completed: deleted 41822 blobs, freed 437.6GiB'
+    - service: harbor-registry
+      severity: INFO
+      offset_seconds: 6
+      body: '{iso_now} [INFO] [/core/controllers/gc/gc.go:118]: GC schedule updated by {actor}: type=Custom cron="0 0 3 * * *" next_run=+1d03:00'
+  steady_attributes:
+    harbor-registry:
+      harbor.gc.schedule: '0 0 3 * * *'
+  verification:
+    - signal: CI blob pushes succeed again
+      from: 'logs.otel.platform'
+      where: 'resource.attributes.service.name == "harbor-registry" AND attributes.http.request.method == "PUT" AND attributes.http.response.status_code == 201'
+      expect: 'present (robot$ci-publisher uploads return 201)'
+      within_seconds: 300
+    - signal: k8s.volume.capacity
+      from: 'metrics-kubeletstatsreceiver.otel-*'
+      field: 'metrics.k8s.volume.capacity'
+      where: 'resource.attributes.k8s.persistentvolumeclaim.name == "harbor-registry" AND resource.attributes.k8s.cluster.name == "prod-use1"'
+      expect: '2199023255552 (2Ti); available ~50% right away and ~70% once GC finishes'
+      within_seconds: 600
+    - signal: push failures
+      from: 'logs.otel.platform'
+      where: 'resource.attributes.service.name == "harbor-registry" AND body.text LIKE "*no space left on device*"'
+      expect: '0 new lines'
+      within_seconds: 90
+business_impact:
+  - kpi: business.registry_push_success_pct
+    value: {uniform: [0.0, 2.0], round: 2}
+  - kpi: business.deploy_success_rate_pct
+    value: {uniform: [62.0, 70.0], round: 1}

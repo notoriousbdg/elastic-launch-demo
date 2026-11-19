@@ -11,23 +11,32 @@ cascade_services:
 - billing-processor
 description: Electronic prescription transmission to external pharmacy via NCPDP SCRIPT fails
 investigation_notes: |-
-  Root Cause: NCPDP SCRIPT 10.6 NEWRX transmission failures are typically caused by pharmacy NPI validation errors at the Surescripts network, expired DEA registrations for controlled substances, or SCRIPT message formatting issues in the UIB/UIH envelope segments.
-  Remediation: 1) Verify the pharmacy NPI against the NPPES registry: `ncpdp-admin npi-lookup --npi {pharmacy_npi}`. 2) Check the Surescripts connection status: `ncpdp-admin connection-test --endpoint surescripts-prod`. 3) Restart the pharmacy transmission queue: `systemctl restart eprescribe-gateway`. 4) Review the NCPDP STATUS response codes — 000=accepted, 600=rejected, 900=system error. 5) For controlled substances (Schedule II-V), verify EPCS two-factor authentication tokens are valid. 6) Resubmit failed prescriptions: `ncpdp-admin resubmit --rx {prescription_id} --force-npi-refresh`.
+  Root cause: surescripts-adapter-v6.0.3-rc1 was rolled out shortly before the first NCPDP-SCRIPT-FAIL. It puts the pharmacy NPI in the NewRx To identifier instead of the NCPDPID, so Surescripts rejects each NewRx with status {ncpdp_status}: prescription {prescription_id} for patient {patient_id} to pharmacy {pharmacy_npi}. Renewals and cancels still use the old mapping, so about half of all transmissions fail (48-62%, normally 0.2-1%). The Surescripts link is connected, envelope validation passes and the DEA registration is active, which rules out a network, certificate or registration problem.
+  Confirm:
+    - pharmacy-system logs [PHARM] surescripts_link endpoint=surescripts-prod adapter=surescripts-adapter-v6.0.3-rc1 to_identifier=NPI ... status=DEGRADED (attributes.infra.ncpdp_gateway_version, attributes.ncpdp.to_identifier)
+    - metric pharmacy.erx_reject_pct rises from 0.2-1% to 48-62% after the rollout
+    - the pharmacy-system line "surescripts-adapter rolled out v6.0.3-rc1" comes before the first rejection
+  Remediation: roll the adapter back to v6.0.2 (NCPDPID mapping) with opsctl rollback deployment/surescripts-adapter --to-revision previous. The reject rate is back under 1% within about 60 seconds. Prescriptions rejected during the incident stay in the eRx error queue and must be resent. Restarting the adapter or re-registering with Surescripts does not change the identifier mapping.
 remediation_action: restart_pharmacy_queue
 error_message: '[PHARM] NCPDP-SCRIPT-FAIL: rx={prescription_id} patient={patient_id} pharmacy_npi={pharmacy_npi} ncpdp_status={ncpdp_status}'
 stack_trace: |-
-  --- NCPDP SCRIPT 10.6 MESSAGE TRACE ---
-  >>> NEWRX Request
-    UIB+UNOA:0++{prescription_id}+{pharmacy_npi}:D+20260217143052
-    UIH+SCRIPT:010:006:NEWRX+{prescription_id}:P
-    PVD+PC+{pharmacy_npi}:HPI+++COMMUNITY PHARMACY
-    PTT+1+{patient_id}+DOE:JANE+19650315:F
-    DRU+P:MEDICATION:{medication_id}+85+EA+++1
-    UIT+{prescription_id}+7
-    UIZ++1
-  <<< STATUS Response
-    STS+{ncpdp_status}:NCPDP-SCRIPT-FAIL
-    FreeText: Transmission rejected — pharmacy NPI {pharmacy_npi} validation failed
+  --- NCPDP SCRIPT 2017071 MESSAGE TRACE ---
+  >>> NewRx Request
+    <Message DatatypesVersion="2017071" TransportVersion="2017071" TransactionDomain="SCRIPT" TransactionVersion="2017071" StructuresVersion="2017071" ECLVersion="2017071">
+      <Header>
+        <To Qualifier="P">{pharmacy_npi}</To>
+        <MessageID>{prescription_id}</MessageID>
+        <SentTime>2026-02-17T14:30:52Z</SentTime>
+      </Header>
+      <Body><NewRx>
+        <Patient><HumanPatient><Identification><MedicalRecordIdentificationNumberEHR>{patient_id}</MedicalRecordIdentificationNumberEHR></Identification></HumanPatient></Patient>
+        <Pharmacy><Identification><NPI>{pharmacy_npi}</NPI></Identification><BusinessName>COMMUNITY PHARMACY</BusinessName></Pharmacy>
+        <MedicationPrescribed><DrugDescription>{medication_id}</DrugDescription><Quantity><Value>85</Value></Quantity></MedicationPrescribed>
+      </NewRx></Body>
+    </Message>
+  <<< Error Response
+    <Error><Code>{ncpdp_status}</Code>
+      <Description>Transaction rejected: pharmacy NPI {pharmacy_npi} validation failed</Description></Error>
     Rx {prescription_id} for patient {patient_id}: queued for retry
 correlation_attr:
   key: infra.ncpdp_gateway_version
@@ -39,29 +48,99 @@ fault_params:
   patient_id:
     format: "PT-{n}"
     n: {randint: [100000, 999999]}
-  pharmacy_npi: {randint: [1000000000, 9999999999]}
-  ncpdp_status: {choice: ["000", "600", "900", "510", "210"]}
+  pharmacy_npi: {randint: [1000000000, 2999999999]}
+  ncpdp_status: "900"
   medication_id:
     format: "MED-{n}"
     n: {randint: [10000, 99999]}
 rca_clues:
   pharmacy-system:
     ncpdp.npi_validation_status: failed
-    ncpdp.script_version: "10.6"
+    ncpdp.script_version: "2017071"
+    ncpdp.dea_registration_status: active
+    ncpdp.envelope_validation: pass
   ehr-system:
     ehr.pending_erx_count: {randint: [5, 30]}
-    ehr.surescripts_link: degraded
+    ehr.surescripts_link: connected
   clinical-alerts:
     alerts.erx_failure_count: {randint: [3, 15]}
   billing-processor:
     billing.rx_claim_pending: {randint: [5, 20]}
     billing.ncpdp_d0_queue: {randint: [10, 50]}
+remediation_command: |-
+  opsctl rollback deployment/surescripts-adapter --to-revision previous
+error_services: [pharmacy-system]
+service_lag_seconds:
+  ehr-system: 15
+  clinical-alerts: 30
+  billing-processor: 45
+cascade_messages:
+  ehr-system:
+    - severity: WARN
+      message: '[EHR] erx_status rx={prescription_id} patient={patient_id} status=TRANSMISSION_FAILED code={ncpdp_status}; prescriber notified'
+  clinical-alerts:
+    - severity: WARN
+      message: '[CDS] erx_failure rx={prescription_id} patient={patient_id} pharmacy_npi={pharmacy_npi} code={ncpdp_status}; discharge medications delayed'
+  billing-processor:
+    - severity: WARN
+      message: '[CLAIMS] ncpdp_claim_pending rx={prescription_id} patient={patient_id} reason=NO_PHARMACY_ACK'
+fault_scope:
+  workloads: [pharmacy-system]
+infrastructure_events:
+  - service: pharmacy-system
+    severity: INFO
+    offset_seconds: -120
+    body: '[PHARM] deployment surescripts-adapter rolled out surescripts-adapter-v6.0.3-rc1 (was surescripts-adapter-v6.0.2): NewRx To identifier mapping refactored by pharmacy-integration-release (CHG0032044)'
+    attributes:
+      user.name: pharmacy-integration-release
+      change.request: CHG0032044
+      operation: deployment
+      infra.ncpdp_gateway_version: surescripts-adapter-v6.0.3-rc1
+      change.summary: 'surescripts-adapter: v6.0.2 -> v6.0.3-rc1'
+remediation_effects:
+  log_events:
+    - service: pharmacy-system
+      severity: INFO
+      offset_seconds: 1
+      body: '[CHG] CHANGE IMPLEMENTED opsctl rollback deployment/surescripts-adapter --to-revision previous by {actor}: surescripts-adapter-v6.0.3-rc1 -> surescripts-adapter-v6.0.2'
+      attributes:
+        operation: change_implemented
+        change.target: deployment/surescripts-adapter
+    - service: pharmacy-system
+      severity: INFO
+      offset_seconds: 15
+      body: '[PHARM] surescripts_link adapter=surescripts-adapter-v6.0.2 to_identifier=NCPDPID started; NewRx accepted by surescripts-prod'
+      attributes:
+        operation: erx_link_status
+        infra.ncpdp_gateway_version: surescripts-adapter-v6.0.2
+        ncpdp.to_identifier: NCPDPID
+  steady_attributes:
+    pharmacy-system:
+      infra.ncpdp_gateway_version: surescripts-adapter-v6.0.2
+  verification:
+    - signal: pharmacy.erx_reject_pct
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "pharmacy-system"'
+      field: 'metrics.pharmacy.erx_reject_pct'
+      expect: 'back under 1% (was 48-62%) within about 60 seconds'
+      within_seconds: 120
+    - signal: NCPDP-SCRIPT-FAIL lines
+      from: 'logs.otel.healthcare'
+      where: 'body.text LIKE "*NCPDP-SCRIPT-FAIL*"'
+      expect: '0 new lines'
+      within_seconds: 120
+    - signal: infra.ncpdp_gateway_version
+      from: 'logs.otel.healthcare'
+      where: 'resource.attributes.service.name == "pharmacy-system"'
+      field: 'attributes.infra.ncpdp_gateway_version'
+      expect: 'surescripts-adapter-v6.0.2 on every surescripts_link line since the fix; v6.0.3-rc1 stops appearing'
+      within_seconds: 120
 business_impact:
   - kpi: business.medication_reconciliation_rate_pct
-    factor: {uniform: [0.20, 0.50]}
+    factor: {uniform: [0.2, 0.5]}
   - kpi: business.claims_submitted_per_min
-    factor: {uniform: [0.30, 0.60]}
+    value: {uniform: [4.46, 5.14]}
   - kpi: business.patient_safety_events_per_min
-    factor: {uniform: [1.5, 3.0]}
+    value: {uniform: [0.68, 0.79], round: 3}
   - kpi: business.collections_usd_per_min
-    factor: {uniform: [0.25, 0.55]}
+    value: {uniform: [10881.0, 12519.0], round: 1}

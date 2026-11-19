@@ -1,0 +1,155 @@
+name: Payment Lambda Error Spike
+subsystem: payments
+vehicle_section: payments_pipeline
+error_type: PAY-LAMBDA-ERROR-SPIKE
+sensor_type: error_rate
+affected_services: [payment-processor]
+cascade_services: [orders-service]
+
+description: >
+  A bad dependency-layer update makes the invocations that reach the new function version fail at import, so orders-service cannot confirm a share of charges at checkout.
+
+investigation_notes: |
+  1. Search body.text containing *PAY-LAMBDA-ERROR-SPIKE* and check the Lambda Errors metric for {function_name}: the error rate is about {error_rate_pct}% against a baseline under 1%; the failures are confined to version {bad_version}, which takes about a quarter of the traffic on alias {alias_name}.
+  2. Check Duration p99 for {function_name}: failing invocations return in about {tail_duration_ms}ms, well below the {timeout_ms}ms function timeout, because the failed import re-runs init inside every invoke and then errors out; they are not timeouts. The downstream card-network call p99 stays under 300ms, so a slow dependency is ruled out.
+  3. Read the CloudWatch Logs for the failing invocations: {exception} raised while importing {layer_package}, which appears only on version {bad_version} (INIT_REPORT shows Status: error).
+  4. Check CloudTrail for PublishLayerVersion, UpdateFunctionConfiguration and UpdateAlias events by {changed_by}: layer {layer_name} version {layer_version} was published and attached to function version {bad_version}, and alias {alias_name} started routing a share of traffic to it shortly before the first error.
+  5. Confirm the cascade in orders-service: charge calls to payment-processor fail with {failed_charges} errors and orders stay in state PAYMENT_PENDING.
+  6. Confirm the layer is the only change: code package, runtime and memory settings are unchanged, and downstream card-network latency is normal.
+  7. Remediation: `opsctl rollback lambda-function/awsorders-payment-processor --to-revision previous` puts the function back on layer payment-deps:41. Layer versions are immutable, so nothing is undone on the layer itself: the function's Layers list is repointed at the earlier version and alias {alias_name} stops routing to {bad_version}. Errors return to baseline within about 90s as warm environments of the bad version stop receiving traffic.
+
+remediation_action: rollback_lambda_version
+remediation_command: |-
+  opsctl rollback lambda-function/awsorders-payment-processor --to-revision previous
+
+error_message: |
+  PAY-LAMBDA-ERROR-SPIKE: function={function_name} version={bad_version} error_rate_pct={error_rate_pct} duration_p99_ms={tail_duration_ms} layer={layer_name}:{layer_version} exception={exception}
+
+stack_trace: |
+  === LAMBDA ERROR REPORT ===
+  function={function_name}  alias={alias_name}  runtime=python3.12  region=us-west-2
+  --- CLOUDTRAIL EVENT ---
+    event_name=UpdateFunctionConfiguration  source=lambda.amazonaws.com
+    user={changed_by}  layer={layer_name}:{layer_version}
+  --- INVOCATION FAILURE ---
+    [ERROR] {exception}: Unable to import module 'handler': /lib64/libc.so.6: version `GLIBC_2.38' not found (required by /opt/python/{layer_package}/hazmat/bindings/_rust.abi3.so)
+    INIT_REPORT Init Duration: 412.37 ms Phase: invoke Status: error Error Type: {exception}
+  --- IMPACT ---
+    error_rate_pct={error_rate_pct}  failed_charges={failed_charges}
+    orders-service orders stuck in PAYMENT_PENDING
+  ACTION: rollback_alias={alias_name}  alert=PAY-LAMBDA-ERROR-SPIKE
+
+infrastructure_events:
+- body: '[CloudTrail] UpdateFunctionConfiguration20150331v2: function=awsorders-payment-processor layer=payment-deps:42 published_version=58 alias=live routing_weight=0.25 initiated_by=deploy-pipeline region=us-west-2 event_source=lambda.amazonaws.com'
+  severity: WARN
+  event_name: aws.cloudtrail.UpdateFunctionConfiguration
+  offset_seconds: -100
+  service: payment-processor
+  attributes:
+    cloud.provider: aws
+    cloud.service: lambda
+    aws.cloudtrail.event_name: UpdateFunctionConfiguration
+    aws.lambda.function: awsorders-payment-processor
+    aws.lambda.layer_version: payment-deps:42
+    infrastructure.source: CloudTrail
+
+correlation_attr:
+  key: infra.lambda_layer_version
+  value: payment-deps:42
+
+fault_params:
+  function_name: awsorders-payment-processor
+  alias_name: live
+  bad_version: '58'
+  error_rate_pct: {randint: [22, 30]}
+  tail_duration_ms: {randint: [650, 1100]}
+  timeout_ms: 15000
+  layer_name: payment-deps
+  layer_version: '42'
+  layer_package: cryptography
+  exception: Runtime.ImportModuleError
+  changed_by: {choice: [arn:aws:iam::781386958653:role/deploy-pipeline, arn:aws:iam::781386958653:user/payments-dev]}
+  failed_charges: {randint: [60, 600]}
+
+rca_clues:
+  payment-processor:
+    lambda.error_rate_pct: {randint: [22, 30]}
+    lambda.duration_p99_ms: {randint: [650, 1100]}
+    lambda.downstream_call_p99_ms: {randint: [80, 250]}
+    lambda.layer_version: payment-deps:42
+  orders-service:
+    orders.pending_payment_count: {randint: [60, 600]}
+    orders.charge_failures: {randint: [60, 600]}
+
+business_impact:
+- kpi: business.payment_auth_rate_pct
+  factor:
+    uniform: [0.7, 0.88]
+    round: 2
+- kpi: business.throughput_rpm
+  factor:
+    uniform: [0.35, 0.6]
+- kpi: business.availability_pct
+  factor:
+    uniform: [0.75, 0.9]
+- kpi: business.error_rate_pct
+  factor:
+    uniform: [5.0, 9.0]
+generator_impact:
+  aws_lambda_otel:
+    high_error_rate: 25.0
+# the package streams keep the fault while the scenario's own metrics converge
+generator_hold_seconds: {aws_lambda_otel: 90}
+
+cascade_messages:
+  orders-service:
+    - severity: ERROR
+      message: 'charge call to payment-processor failed: status=502 function={function_name} error={exception}; order left in PAYMENT_PENDING failed_charges={failed_charges}'
+
+fault_scope:
+  cluster: awsorders-eks-usw2
+  workloads: [payment-processor]
+
+service_lag_seconds: {orders-service: 15}
+onset_delay_seconds: 20
+ramp_seconds: 30
+
+remediation_effects:
+  transition_seconds: 90
+  log_events:
+    - service: payment-processor
+      severity: INFO
+      offset_seconds: 1
+      body: 'cloudtrail: eventSource=lambda.amazonaws.com eventName=UpdateFunctionConfiguration20150331v2 userIdentity={actor} requestParameters.functionName=awsorders-payment-processor requestParameters.revision=previous errorCode=none'
+      attributes:
+        operation: lambda_config_update
+        command.target: lambda-function/awsorders-payment-processor
+        aws.cloudtrail.event_name: UpdateFunctionConfiguration20150331v2
+    - service: payment-processor
+      severity: INFO
+      offset_seconds: 35
+      body: 'lambda[awsorders-payment-processor]: function configuration updated, layer payment-deps:41 attached, alias live no longer routes to version 58, new execution environments initialised without import errors'
+      attributes:
+        operation: lambda_config_update
+        aws.lambda.layer_version: payment-deps:41
+  steady_attributes:
+    payment-processor:
+      aws.lambda.layer_version: payment-deps:41
+  verification:
+    - signal: aws.lambda.error_rate_pct
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "payment-processor"'
+      field: 'metrics.aws.lambda.error_rate_pct'
+      expect: 'back in 0.05-0.8 % (was 20-32 %); payments.capture_success_pct back above 98.5 %'
+      within_seconds: 150
+    - signal: PAY-LAMBDA-ERROR-SPIKE lines
+      from: 'logs.otel.awsorders'
+      where: 'body.text LIKE "*PAY-LAMBDA-ERROR-SPIKE*"'
+      expect: '0 new lines'
+      within_seconds: 150
+    - signal: dependency layer version
+      from: 'logs.otel.awsorders'
+      where: 'resource.attributes.service.name == "payment-processor"'
+      field: 'attributes.aws.lambda.layer_version'
+      expect: 'payment-deps:41 on every line since the fix; payment-deps:42 stops appearing'
+      within_seconds: 150

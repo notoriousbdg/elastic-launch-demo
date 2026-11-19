@@ -26,6 +26,7 @@ constants:
   - gcpnet-vpn-tunnel-01
   - gcpnet-vpn-tunnel-02
   - gcpnet-vpn-tunnel-03
+  - gcpnet-vpn-tunnel-04
   GATEWAYS:
   - gcpnet-vpn-gw-europe1
   - gcpnet-vpn-gw-central1
@@ -35,38 +36,161 @@ constants:
   - NO_INCOMING_PACKETS
 steps:
 - sample:
-    tunnel:
-      choice: TUNNELS
-    gateway:
-      choice: GATEWAYS
-    tunnel_status:
-      if_active:
-        choice: TUNNEL_FAULT_STATES
-      else: ESTABLISHED
-    peer_ip:
-      expr: f'203.0.113.{rand.randint(1,254)}'
+    t2_up:
+      expr: "0 if (18 in all_active and elapsed.get(18, 0) >= 15) or (18 in fixed_channels and since_fix.get(18, 0) < 45) else 1"
+    t2_auth_failures:
+      expr: "round(max(6.0, min(14.0, rand.gauss(10.0, 2.0))) * min(1.0, elapsed.get(18, 0) / 60.0)) if 18 in all_active
+        else (round(10.0 * (1.0 - min(1.0, since_fix.get(18, 0) / 45.0))) if 18 in fixed_channels else 0)"
+    t2_status:
+      expr: "'ESTABLISHED' if t2_up == 1 else ('FIRST_HANDSHAKE' if 18 in fixed_channels else 'AUTHORIZATION_ERROR')"
+    t2_health:
+      expr: "'ANOMALY' if 18 in all_active or t2_up == 0 or t2_auth_failures > 0 else 'NOMINAL'"
+    psk_version:
+      expr: "'psk-2026q4-b2' if 18 in fixed_channels else 'psk-2026q3-b1'"
+    t3_up:
+      expr: "0 if (19 in all_active and elapsed.get(19, 0) >= 15) or (19 in fixed_channels and since_fix.get(19, 0) < 40) else 1"
+    t3_ike_failures:
+      expr: "round(max(3.0, min(10.0, rand.gauss(6.5, 1.5))) * min(1.0, elapsed.get(19, 0) / 45.0)) if 19 in all_active
+        else (round(7.0 * (1.0 - min(1.0, since_fix.get(19, 0) / 30.0))) if 19 in fixed_channels else 0)"
+    t3_status:
+      expr: "'ESTABLISHED' if t3_up == 1 else ('FIRST_HANDSHAKE' if 19 in fixed_channels else 'NEGOTIATION_FAILURE')"
+    t3_health:
+      expr: "'ANOMALY' if 19 in all_active or t3_up == 0 or t3_ike_failures > 0 else 'NOMINAL'"
+    t3_ike_ver:
+      expr: "'2' if 19 in fixed_channels else '1'"
+    t3_detail:
+      expr: "'Tunnel is up and running.' if t3_up == 1 else ('First handshake in progress.' if 19 in fixed_channels else 'Negotiation failure: no response from peer for IKE phase 1 (main mode) message 1')"
+    ike_retransmit:
+      expr: "rand.randint(1, 5)"
+- metric:
+    name: vpn.tunnel_02_established
+    value:
+      var: t2_up
+    unit: '1'
+- metric:
+    name: vpn.tunnel_02_ike_auth_failures
+    value:
+      var: t2_auth_failures
+    unit: failures
+- metric:
+    name: vpn.tunnel_03_established
+    value:
+      var: t3_up
+    unit: '1'
+- metric:
+    name: vpn.tunnel_03_ike_negotiation_failures
+    value:
+      var: t3_ike_failures
+    unit: failures/min
 - log:
     level: INFO
-    message: 'cloud-vpn: tunnel={tunnel} gateway={gateway} status={tunnel_status} peer={peer_ip} ike_version=IKEv2'
+    message: 'cloud-vpn: tunnel=gcpnet-vpn-tunnel-01 gateway=gcpnet-vpn-gw-central1 status=ESTABLISHED peer=203.0.113.10 ike_version=IKEv2'
     attrs:
       operation: tunnel_status
-      vpn.tunnel:
-        var: tunnel
-      vpn.gateway:
-        var: gateway
+      vpn.tunnel: gcpnet-vpn-tunnel-01
+      vpn.gateway: gcpnet-vpn-gw-central1
+      vpn.status: ESTABLISHED
+      vpn.peer_ip: 203.0.113.10
+- when: "t2_health == 'NOMINAL'"
+  log: &t2_log
+    level: INFO
+    message: 'cloud-vpn: tunnel=gcpnet-vpn-tunnel-02 gateway=gcpnet-vpn-gw-europe1 region=europe-west1 status={t2_status} peer=203.0.113.42 ike_version=IKEv2 psk_version={psk_version} ike_auth_failures={t2_auth_failures} health={t2_health}'
+    attrs:
+      operation: tunnel_status
+      vpn.tunnel: gcpnet-vpn-tunnel-02
+      vpn.gateway: gcpnet-vpn-gw-europe1
       vpn.status:
-        var: tunnel_status
-      vpn.peer_ip:
-        var: peer_ip
+        var: t2_status
+      vpn.peer_ip: 203.0.113.42
+      vpn.psk_version:
+        var: psk_version
+      vpn.tunnel_established:
+        var: t2_up
+      vpn.ike_auth_failures:
+        var: t2_auth_failures
+      vpn.health:
+        var: t2_health
+- when: "t2_health != 'NOMINAL' and t2_up == 1"
+  log:
+    <<: *t2_log
+    level: WARN
+- when: "t2_up == 0"
+  log:
+    <<: *t2_log
+    level: ERROR
+- when: "t3_health == 'NOMINAL'"
+  log: &t3_log
+    level: INFO
+    message: 'cloud-vpn: tunnel=gcpnet-vpn-tunnel-03 gateway=gcpnet-vpn-gw-europe1 region=europe-west1 status={t3_status} detailedStatus="{t3_detail}" peer=203.0.113.77 ike_version=IKEv{t3_ike_ver} psk_version=psk-2026q3-c1 ike_negotiation_failures={t3_ike_failures}/min health={t3_health}'
+    attrs:
+      operation: tunnel_status
+      vpn.tunnel: gcpnet-vpn-tunnel-03
+      vpn.gateway: gcpnet-vpn-gw-europe1
+      vpn.status:
+        var: t3_status
+      vpn.peer_ip: 203.0.113.77
+      vpn.detailed_status:
+        var: t3_detail
+      vpn.psk_version: psk-2026q3-c1
+      vpn.ike_version:
+        var: t3_ike_ver
+      vpn.tunnel_established:
+        var: t3_up
+      vpn.ike_negotiation_failures:
+        var: t3_ike_failures
+      vpn.health:
+        var: t3_health
+- when: "t3_health != 'NOMINAL' and t3_up == 1"
+  log:
+    <<: *t3_log
+    level: WARN
+- when: "t3_up == 0"
+  log:
+    <<: *t3_log
+    level: ERROR
+- log:
+    level: INFO
+    message: 'cloud-vpn: tunnel=gcpnet-vpn-tunnel-04 gateway=gcpnet-vpn-gw-europe1 region=europe-west1 status=ESTABLISHED detailedStatus="Tunnel is up and running." peer=203.0.113.77 ike_version=IKEv2 psk_version=psk-2026q3-c1 health=NOMINAL'
+    attrs:
+      operation: tunnel_status
+      vpn.tunnel: gcpnet-vpn-tunnel-04
+      vpn.gateway: gcpnet-vpn-gw-europe1
+      vpn.status: ESTABLISHED
+      vpn.detailed_status: Tunnel is up and running.
+      vpn.peer_ip: 203.0.113.77
+      vpn.ike_version: '2'
+      vpn.psk_version: psk-2026q3-c1
+      vpn.tunnel_established: 1
+      vpn.health: NOMINAL
+- when: "t3_up == 0 and 19 in all_active"
+  log:
+    level: WARN
+    message: 'cloud-vpn: tunnel=gcpnet-vpn-tunnel-03 [IKE] retransmit {ike_retransmit} of request with message ID 0 to 203.0.113.77, no response from peer (phase 1 main mode message 1)'
+    attrs:
+      operation: ike_retransmit
+      vpn.tunnel: gcpnet-vpn-tunnel-03
+      vpn.peer_ip: 203.0.113.77
+      vpn.ike_version: '1'
+      vpn.ike_retransmit:
+        var: ike_retransmit
+- when: "t3_up == 0 and 19 in all_active and ike_retransmit == 5"
+  log:
+    level: ERROR
+    message: 'cloud-vpn: tunnel=gcpnet-vpn-tunnel-03 [IKE] giving up after 5 retransmits, peer not responding, trying again'
+    attrs:
+      operation: ike_retransmit
+      vpn.tunnel: gcpnet-vpn-tunnel-03
+      vpn.peer_ip: 203.0.113.77
+      vpn.ike_version: '1'
 - sample:
+    tunnel:
+      choice: TUNNELS
+    tunnel_down:
+      expr: "(tunnel == 'gcpnet-vpn-tunnel-02' and t2_up == 0) or (tunnel == 'gcpnet-vpn-tunnel-03' and t3_up == 0)"
     tx_bytes:
-      randint:
-      - 10000000
-      - 500000000
+      expr: "rand.randint(0, 2000) if tunnel_down else int(max(20000000.0, rand.gauss(180000000.0, 45000000.0)))"
     rx_bytes:
-      randint:
-      - 10000000
-      - 500000000
+      expr: "rand.randint(0, 2000) if tunnel_down else int(max(20000000.0, rand.gauss(150000000.0, 40000000.0)))"
 - metric:
     name: vpn.tx_bytes
     value:
@@ -89,20 +213,11 @@ steps:
       vpn.rx_bytes:
         var: rx_bytes
 - sample:
-    ike_sa_lifetime:
-      randint:
-      - 1800
-      - 36000
+    ike_sa_lifetime: 36000
     ike_rekey_in:
-      if_active: 0
-      else:
-        randint:
-        - 0
-        - 3600
+      expr: "0 if tunnel_down else rand.randint(0, 36000)"
     child_sa_count:
-      randint:
-      - 1
-      - 4
+      expr: "0 if tunnel_down else rand.randint(1, 4)"
 - metric:
     name: vpn.ike_sa_lifetime
     value:
@@ -127,14 +242,7 @@ steps:
         var: child_sa_count
 - sample:
     packets_dropped:
-      if_active:
-        randint:
-        - 100
-        - 2000
-      else:
-        randint:
-        - 0
-        - 5
+      expr: "rand.randint(100, 2000) if tunnel_down else rand.randint(0, 5)"
 - metric:
     name: vpn.packets_dropped
     value:

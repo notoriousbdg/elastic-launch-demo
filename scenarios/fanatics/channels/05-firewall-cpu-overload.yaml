@@ -3,63 +3,130 @@ subsystem: security
 vehicle_section: perimeter_defense
 error_type: SYSTEM-cpu-critical
 sensor_type: cpu_utilization
-affected_services:
-- firewall-gateway
-- network-controller
-cascade_services:
-- dns-dhcp-service
-- digital-marketplace
+affected_services: [firewall-gateway, network-controller, digital-marketplace]
+cascade_services: [dns-dhcp-service]
 description: Firewall data plane CPU exceeding safe operating threshold
 investigation_notes: |-
-  1. Run `show running resource-monitor` to see per-DP CPU, packet buffer, and session rate in real time.
-  2. Identify offending policy: `show rule-hit-count` — rules with high hit counts and complex App-ID or content inspection drive DP CPU.
-  3. Check threat prevention load: `show threat statistics` — if IPS/AV signature matching is spiking, a signature update or new attack pattern may be the cause.
-  4. Review decryption overhead: `show counter global filter aspect dp delta yes | match ssl` — SSL decryption is the #1 DP CPU consumer.
-  5. Consider bypassing decryption for trusted high-bandwidth flows (e.g., Windows Update, CDN traffic) with a no-decrypt rule.
-  6. If CPU remains critical, enable hardware offload for IPSec tunnels and reduce logging verbosity on high-traffic rules.
+  Root cause: threat content update content-8845-8432-experimental was installed on pa-5260-edge (PA-5260) about 15 seconds before the first SYSTEM-cpu-critical (previous content: content-8844-8431). The new signature set sends far more packets down the Content-ID slow path: data plane CPU is {fw_dp_cpu_pct}% against a {fw_cpu_threshold}% threshold and the packet buffer is at {fw_buffer_pct}%. Only flows that the new content inspects (web, TLS and file transfers) are slowed down; the session table (about 8M of 32M), the new-connection rate (about 19,000/s) and the other interfaces are normal.
+  Confirm:
+    - firewall-gateway resource-monitor lines show dp-cpu above 80 and content=content-8845-8432-experimental (attributes.deployment.threat_sig_ver); metric firewall.cpu_dataplane_pct rises from about 34% to about 93% within roughly 15 seconds of the install
+    - the firewall-gateway line "content-install ... content-8845-8432-experimental installed (was content-8844-8431)" comes before the first SYSTEM-cpu-critical
+    - firewall.ctd_pkt_slowpath_per_s (show counter global filter category ctd delta yes) jumps from about 4,000 to about 38,000 while firewall.session_utilization_pct and firewall.session_rate stay at their normal values, which rules out a traffic surge or a session flood
+  Remediation: downgrade the threat content to the previous version with opsctl rollback content/pa-5260-edge --to-revision previous. The commit and engine reload cause a short CPU blip (about 5 seconds), then data plane CPU falls back under {fw_cpu_threshold}% within about 45 seconds. Restarting the management plane is not needed.
 remediation_action: restart_management_plane
-error_message: 1,2025/01/15 14:32:01,007200001234,SYSTEM,general,0,SYSTEM-cpu-critical,Data plane CPU at {fw_dp_cpu_pct}%
-  (threshold {fw_cpu_threshold}%), management plane {fw_mgmt_cpu_pct}%, packet buffer {fw_buffer_pct}%, active rules {fw_policy_count}
+error_message: '1,{nginx_time},007200001234,SYSTEM,general,0,{nginx_time},,SYSTEM-cpu-critical,,0,0,general,critical,"Data plane CPU at {fw_dp_cpu_pct}% (threshold {fw_cpu_threshold}%), management plane {fw_mgmt_cpu_pct}%, packet buffer {fw_buffer_pct}%, active rules {fw_policy_count}"'
 stack_trace: |-
   > show running resource-monitor
-  Resource utilization (observed over last 60 seconds):
-    Data Plane CPU Utilization:
-      DP-0:  {fw_dp_cpu_pct}%  (threshold: {fw_cpu_threshold}%)
-      DP-1:  {fw_dp_cpu_pct}%
-    Management Plane CPU: {fw_mgmt_cpu_pct}%
-    Packet Buffer:        {fw_buffer_pct}%
-    Active Security Rules: {fw_policy_count}
-    Session Rate:          8,452 sessions/sec
-    Throughput:            4.2 Gbps
-    Packet Rate:           892,341 pps
+  DP dp0:
+  CPU load (%) during last 60 seconds:
+    average: {fw_dp_cpu_pct}   (threshold {fw_cpu_threshold})
+  Resource utilization (%) during last 60 seconds:
+    session:           25
+    packet buffer:     {fw_buffer_pct}
+    packet descriptor: 31
+  Management plane CPU: {fw_mgmt_cpu_pct}%
+  Active security rules: {fw_policy_count}
+  > show counter global filter category ctd delta yes
+  ctd_pkt_slowpath   elevated (content-8845-8432-experimental)
 correlation_attr:
   key: deployment.threat_sig_ver
   value: content-8845-8432-experimental
 fault_params:
-  fw_dp_cpu_pct: {uniform: [85.0, 99.0], round: 1}
+  fw_dp_cpu_pct: {uniform: [88.0, 98.0], round: 1}
   fw_cpu_threshold: 80
-  fw_mgmt_cpu_pct: {uniform: [60.0, 90.0], round: 1}
-  fw_buffer_pct: {uniform: [75.0, 98.0], round: 1}
+  fw_mgmt_cpu_pct: {uniform: [66.0, 74.0], round: 1}
+  fw_buffer_pct: {uniform: [74.0, 82.0], round: 1}
   fw_policy_count: {randint: [800, 2500]}
 rca_clues:
   firewall-gateway:
-    firewall.dp_cpu_offender: {choice: [ssl-decrypt, threat-prevention, url-filtering]}
-    firewall.packet_buffer_pct: {uniform: [80, 98], round: 1}
+    firewall.dp_cpu_offender: content-id
+    firewall.content_version: content-8845-8432-experimental
+    firewall.ctd_pkt_slowpath_per_s: {randint: [34000, 42000]}
+    firewall.packet_buffer_pct: {uniform: [74.0, 82.0], round: 1}
   network-controller:
-    network.throughput_degraded: true
-    network.latency_spike_ms: {randint: [50, 500]}
+    network.inspected_flow_latency_ms: {randint: [60, 240]}
   dns-dhcp-service:
-    dns.query_timeout_pct: {uniform: [15, 60], round: 1}
-    dns.upstream_latency_ms: {randint: [200, 2000]}
+    dns.upstream_latency_ms: {randint: [40, 120]}
   digital-marketplace:
-    marketplace.page_load_ms: {randint: [3000, 15000]}
-    marketplace.ssl_handshake_failures: {randint: [10, 100]}
+    marketplace.page_load_ms: {randint: [1800, 4200]}
+    marketplace.tls_handshake_ms: {randint: [900, 2400]}
+remediation_command: |-
+  opsctl rollback content/pa-5260-edge --to-revision previous
+fault_scope:
+  workloads: [firewall-gateway, network-controller, digital-marketplace]
+cascade_messages:
+  network-controller:
+    - severity: WARN
+      message: 'flow-collector: latency on flows inspected by pa-5260-edge above baseline (p95 {fw_dp_cpu_pct}% dp load); uninspected paths and link utilization normal'
+  digital-marketplace:
+    - severity: WARN
+      message: '{{"level":"warn","ts":"{iso_now}","msg":"slow upstream","dependency":"catalog-cdn","p99_ms":3100,"hint":"TLS handshake time up on flows through pa-5260-edge"}}'
+  dns-dhcp-service:
+    - severity: WARN
+      message: '{nginx_time} [named] resolver: forwarder response time above 100ms for queries via pa-5260-edge; no SERVFAIL'
+infrastructure_events:
+  - service: firewall-gateway
+    severity: INFO
+    offset_seconds: -15
+    body: '1,{nginx_time},007200001234,SYSTEM,general,0,{nginx_time},,content-install,,0,0,general,informational,"Dynamic update content-8845-8432-experimental installed (was content-8844-8431); Content-ID engine reloaded; installed by secops-content-sync (CR-4471)"'
+    attributes:
+      user.name: secops-content-sync
+      change.request: CR-4471
+      operation: content_update
+      deployment.threat_sig_ver: content-8845-8432-experimental
+      change.summary: 'threat content: content-8844-8431 -> content-8845-8432-experimental'
+remediation_effects:
+  log_events:
+    - service: firewall-gateway
+      severity: INFO
+      offset_seconds: 1
+      body: '1,{nginx_time},007200001234,SYSTEM,general,0,{nginx_time},,config-commit,,0,0,general,informational,"[CHG] CHANGE APPLIED opsctl rollback content/pa-5260-edge --to-revision previous by {actor}: threat content content-8845-8432-experimental -> content-8844-8431"'
+      attributes:
+        operation: change_applied
+        change.target: content/pa-5260-edge
+    - service: firewall-gateway
+      severity: INFO
+      offset_seconds: 10
+      body: '1,{nginx_time},007200001234,SYSTEM,general,0,{nginx_time},,content-install,,0,0,general,informational,"Content downgrade to content-8844-8431 complete; Content-ID engine reloaded"'
+      attributes:
+        operation: content_update
+        deployment.threat_sig_ver: content-8844-8431
+  steady_attributes:
+    firewall-gateway:
+      deployment.threat_sig_ver: content-8844-8431
+  verification:
+    - signal: firewall.cpu_dataplane_pct
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "firewall-gateway"'
+      field: 'metrics.firewall.cpu_dataplane_pct'
+      expect: 'back under 50% (was 86-99%)'
+      within_seconds: 90
+    - signal: firewall.ctd_pkt_slowpath_per_s
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "firewall-gateway"'
+      field: 'metrics.firewall.ctd_pkt_slowpath_per_s'
+      expect: 'back near 4,000 (was 34,000-42,000)'
+      within_seconds: 90
+    - signal: SYSTEM-cpu-critical lines
+      from: 'logs.otel.fanatics'
+      where: 'body.text LIKE "*SYSTEM-cpu-critical*"'
+      expect: '0 new lines'
+      within_seconds: 90
+    - signal: threat content version
+      from: 'logs.otel.fanatics'
+      where: 'resource.attributes.service.name == "firewall-gateway"'
+      field: 'attributes.deployment.threat_sig_ver'
+      expect: 'content-8844-8431 on every line logged since the fix; content-8845-8432-experimental stops appearing'
+      within_seconds: 90
+error_services: [firewall-gateway]
 business_impact:
   - kpi: business.app_sessions_per_min
-    factor: {uniform: [0.25, 0.55]}
+    value: {uniform: [334.8, 385.2]}
   - kpi: business.page_views_per_min
-    factor: {uniform: [0.25, 0.55]}
+    value: {uniform: [66960.0, 77040.0]}
   - kpi: business.merch_gmv_usd_per_min
-    factor: {uniform: [0.20, 0.50]}
+    value: {uniform: [10416.0, 11984.0], round: 1}
   - kpi: business.ad_revenue_usd_per_min
-    factor: {uniform: [0.25, 0.55]}
+    value: {uniform: [51382.0, 59118.0], round: 1}
+# dependents degrade after the component at fault, in dependency order
+service_lag_seconds: {network-controller: 15, digital-marketplace: 20, dns-dhcp-service: 40}

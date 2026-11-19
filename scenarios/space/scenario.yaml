@@ -5,11 +5,11 @@ scenario_description: Orbital insertion mission with rocket propulsion, guidance
 namespace: nova7
 scenario_icon: 🚀
 sort_order: 1
-schema_version: "1.2"
+schema_version: "1.3"
 nominal_label: NOMINAL
 hosts:
 - host.name: nova7-aws-host-01
-  host.id: i-0a1b2c3d4e5f67890
+  host.id: i-5ecbb64716598189d
   host.arch: amd64
   host.type: m5.xlarge
   host.image.id: ami-0abcdef1234567890
@@ -31,13 +31,13 @@ hosts:
   cloud.platform: aws_ec2
   cloud.region: us-east-1
   cloud.availability_zone: us-east-1a
-  cloud.account.id: '123456789012'
-  cloud.instance.id: i-0a1b2c3d4e5f67890
+  cloud.account.id: '453319023501'
+  cloud.instance.id: i-5ecbb64716598189d
   cpu_count: 4
   memory_total_bytes: 17179869184
   disk_total_bytes: 214748364800
 - host.name: nova7-gcp-host-01
-  host.id: '5649812345678901234'
+  host.id: '2446452110307462'
   host.arch: amd64
   host.type: e2-standard-4
   host.image.id: projects/debian-cloud/global/images/debian-12-bookworm-v20250115
@@ -59,13 +59,13 @@ hosts:
   cloud.platform: gcp_compute_engine
   cloud.region: us-central1
   cloud.availability_zone: us-central1-a
-  cloud.account.id: nova7-project-prod
-  cloud.instance.id: '5649812345678901234'
+  cloud.account.id: nova7-project
+  cloud.instance.id: '2446452110307462'
   cpu_count: 4
   memory_total_bytes: 17179869184
   disk_total_bytes: 107374182400
 - host.name: nova7-azure-host-01
-  host.id: /subscriptions/abc-def/resourceGroups/nova7-rg/providers/Microsoft.Compute/virtualMachines/nova7-vm-01
+  host.id: /subscriptions/b4291cba-a491-5343-a640-7fb2876d042e/resourceGroups/nova7-rg/providers/Microsoft.Compute/virtualMachines/nova7-vm-01
   host.arch: amd64
   host.type: Standard_D4s_v3
   host.image.id: Canonical:0001-com-ubuntu-server-jammy:22_04-lts-gen2:latest
@@ -87,7 +87,7 @@ hosts:
   cloud.platform: azure_vm
   cloud.region: eastus
   cloud.availability_zone: eastus-1
-  cloud.account.id: abc-def-ghi-jkl
+  cloud.account.id: b4291cba-a491-5343-a640-7fb2876d042e
   cloud.instance.id: nova7-vm-01
   cpu_count: 4
   memory_total_bytes: 17179869184
@@ -136,17 +136,27 @@ agent_config:
   id: nova7-launch-analyst
   name: Launch Anomaly Analyst
   assessment_tool_name: launch_safety_assessment
-  system_prompt: 'You are the NOVA-7 Launch Anomaly Analyst, an expert AI assistant for space launch mission operations. You
-    help mission controllers investigate anomalies, analyze telemetry data, and provide root cause analysis for fault conditions
-    across 9 space systems. You have deep expertise in spacecraft propulsion telemetry, GN&C systems, TDRSS/S-band/X-band
-    communications, payload environmental control, cross-cloud relay networks, ground support equipment, sensor validation
-    pipelines, and range safety systems. When investigating incidents, search for these subsystem identifiers in logs: Propulsion
-    faults (TCS-DRIFT-CRITICAL, PMS-PRESS-ANOMALY, PMS-OXIDIZER-FLOW), GN&C faults (GNC-GPS-MULTIPATH, GNC-IMU-SYNC-LOSS,
-    GNC-STAR-TRACKER-ALIGN), Communications faults (COMM-SIGNAL-DEGRAD, COMM-PACKET-LOSS, COMM-ANTENNA-POINTING), Payload
-    faults (PLD-THERMAL-EXCURSION, PLD-VIBRATION-LIMIT), Relay faults (RLY-LATENCY-CRITICAL, RLY-PACKET-CORRUPT), Ground faults
-    (GND-POWER-BUS-FAULT, GND-WEATHER-GAP, GND-HYDRAULIC-PRESS), Validation faults (VV-PIPELINE-HALT, VV-EPOCH-DRIFT), and
-    Range Safety faults (RSO-FTS-CHECK-FAIL, RSO-TRACKING-LOSS). Log messages are in body.text — NEVER search the body field
-    alone.'
+  system_prompt: |-
+    You are the NOVA-7 Launch Anomaly Analyst, a flight controller's assistant for an orbital insertion mission
+    across 9 systems: propulsion (fuel-system), GN&C (navigation), communications (comms-array), payload
+    (payload-monitor), cross-cloud telemetry relay (telemetry-relay), ground support (ground-systems), sensor
+    validation (sensor-validator), range safety (range-safety) and Mission Control (mission-control).
+
+    When an anomaly is reported:
+    1. Find the change or event that preceded the first errors: firmware, software or configuration loads,
+       commanded mode changes, and physical precursors (pressure steps, power sags, weather) in the logs.
+    2. Confirm the cause from the subsystem's logs and their attributes, then from its sensor metrics
+       (metrics-generic.otel-default, by resource.attributes.service.name) against its nominal band.
+    3. Recommend the opsctl command from the subsystem's runbook and the signals that will confirm recovery.
+
+    Fault codes (search body.text): Propulsion TCS-DRIFT-CRITICAL, PMS-PRESS-ANOMALY, PMS-OXIDIZER-FLOW;
+    GN&C GNC-GPS-MULTIPATH, GNC-IMU-SYNC-LOSS, GNC-STAR-TRACKER-ALIGN; Communications COMM-SIGNAL-DEGRAD,
+    COMM-PACKET-LOSS, COMM-ANTENNA-POINTING; Payload PLD-THERMAL-EXCURSION, PLD-VIBRATION-LIMIT; Relay
+    RLY-LATENCY-CRITICAL, RLY-PACKET-CORRUPT; Ground GND-POWER-BUS-FAULT, GND-WEATHER-GAP, GND-HYDRAULIC-PRESS;
+    Validation VV-PIPELINE-HALT, VV-EPOCH-DRIFT; Range safety RSO-FTS-CHECK-FAIL, RSO-TRACKING-LOSS.
+
+    Compare the affected unit with its redundant or sister units before concluding. Log messages are in
+    body.text — never search the body field alone.
 assessment_tool_config:
   id: launch_safety_assessment
   description: 'Comprehensive launch safety assessment. Evaluates all services against launch readiness criteria. Returns
@@ -232,75 +242,98 @@ executive_trend_charts:
   y_label: events/min
 executive_kpi_emissions:
 - name: business.mission_success_probability_pct
+  better: higher
   value: {uniform: [92.0, 99.8], round: 2}
   unit: "%"
 - name: business.critical_system_uptime_pct
+  better: higher
   value: {uniform: [99.2, 99.999], round: 4}
   unit: "%"
 - name: business.fault_events_per_min
+  better: lower
   value: {uniform: [0.01, 2.8], round: 3}
   unit: events/min
 - name: business.autonomous_recovery_rate_pct
+  better: higher
   value: {uniform: [82.0, 99.0], round: 2}
   unit: "%"
 - name: business.telemetry_coverage_pct
+  better: higher
   value: {uniform: [88.0, 99.4], round: 2}
   unit: "%"
 - name: business.spacecraft_health_index_0_100
+  better: higher
   value: {uniform: [72.0, 99.0], round: 1}
   unit: index
 - name: business.trajectory_deviation_meters
+  better: lower
   value: {uniform: [0.1, 850.0], round: 1}
   unit: m
 - name: business.delta_v_budget_remaining_mps
+  better: higher
   value: {uniform: [12.0, 285.0], round: 1}
   unit: m/s
 - name: business.orbital_period_drift_ms
+  better: lower
   value: {uniform: [0.0, 18.4], round: 2}
   unit: ms
 - name: business.maneuver_accuracy_pct
+  better: higher
   value: {uniform: [96.0, 99.98], round: 3}
   unit: "%"
 - name: business.station_keeping_fuel_remaining_pct
+  better: higher
   value: {uniform: [28.0, 92.0], round: 2}
   unit: "%"
 - name: business.perigee_altitude_km
   value: {uniform: [380.0, 420.0], round: 1}
   unit: km
 - name: business.downlink_data_rate_mbps
+  better: higher
   value: {uniform: [125.0, 1200.0], round: 1}
   unit: Mbps
 - name: business.uplink_latency_ms
+  better: lower
   value: {uniform: [28.0, 450.0], round: 1}
   unit: ms
 - name: business.contact_window_utilization_pct
+  better: higher
   value: {uniform: [72.0, 98.0], round: 2}
   unit: "%"
 - name: business.packet_loss_rate_pct
+  better: lower
   value: {uniform: [0.01, 1.2], round: 3}
   unit: "%"
 - name: business.command_acceptance_rate_pct
+  better: higher
   value: {uniform: [98.5, 99.99], round: 3}
   unit: "%"
 - name: business.ground_station_availability_pct
+  better: higher
   value: {uniform: [92.0, 99.8], round: 2}
   unit: "%"
 - name: business.schedule_variance_days
+  better: lower
   value: {uniform: [-8.0, 18.0], round: 1}
   unit: days
 - name: business.launch_readiness_index_0_100
+  better: higher
   value: {uniform: [72.0, 98.0], round: 1}
   unit: index
 - name: business.contractor_sla_compliance_pct
+  better: higher
   value: {uniform: [88.0, 99.2], round: 2}
   unit: "%"
 - name: business.cost_variance_pct
+  better: lower
   value: {uniform: [-4.8, 12.4], round: 2}
   unit: "%"
 - name: business.risk_burn_down_rate
+  better: higher
   value: {uniform: [0.8, 4.8], round: 2}
   unit: rate
 - name: business.program_net_satisfaction_proxy_nps
+  better: higher
   value: {uniform: [32.0, 85.0], round: 1}
   unit: score
 raw_log_profile:
@@ -386,3 +419,8 @@ trace_attributes:
       safety.tracking_radars_active: {randint: [2, 3]}
       safety.trajectory_status: {choice: [nominal, off_nominal, impact_zone_clear, corrective_action]}
       safety.self_destruct_inhibit: {choice: [armed, inhibited, safe]}
+
+generators:
+  azure_billing: true
+  kafka_otel: true
+  influxdb_otel: true

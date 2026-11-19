@@ -1,0 +1,37 @@
+name: "GT apache_tomcat_otel: old_generation_gc_activity"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-APACHETOMCAT-OLD-GENERATION-GC-ACTI
+sensor_type: impact_key_probe
+affected_services:
+  - gt-apachetomcat-aws-svc-1
+cascade_services:
+  - gt-apachetomcat-aws-svc-2
+description: "Tests impact_key old_generation_gc_activity on generator apache_tomcat_otel."
+investigation_notes: |-
+  1. Verify apache_tomcat_otel is active and reporting metrics.
+  2. Check that the old_generation_gc_activity metric has reached the trigger value (80.0).
+  3. Confirm generator_impact for apache_tomcat_otel.old_generation_gc_activity is set to 80.0.
+  4. Look for correlated changes in service gt-apachetomcat-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_old_generation_gc_activity_baseline
+error_message: "GT-PROBE: gen=apache_tomcat_otel key=old_generation_gc_activity value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=apache_tomcat_otel
+  impact_key: old_generation_gc_activity
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 80.0
+  svc_name: gt-apachetomcat-aws-svc-1
+rca_clues:
+  gt-apachetomcat-aws-svc-1:
+    probe.generator: apache_tomcat_otel
+    probe.impact_key: old_generation_gc_activity
+    probe.trigger_value: 80.0
+  gt-apachetomcat-aws-svc-2:
+    probe.upstream_generator: apache_tomcat_otel
+    probe.upstream_key: old_generation_gc_activity
+generator_impact:
+  apache_tomcat_otel:
+    old_generation_gc_activity: 80.0

@@ -1,0 +1,37 @@
+name: "GT docker_otel: pids_multiplier"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-DOCKER-PIDS-MULTIPLIER
+sensor_type: impact_key_probe
+affected_services:
+  - gt-docker-aws-svc-1
+cascade_services:
+  - gt-docker-aws-svc-2
+description: "Tests impact_key pids_multiplier on generator docker_otel."
+investigation_notes: |-
+  1. Verify docker_otel is active and reporting metrics.
+  2. Check that the pids_multiplier metric has reached the trigger value (15.0).
+  3. Confirm generator_impact for docker_otel.pids_multiplier is set to 15.0.
+  4. Look for correlated changes in service gt-docker-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_pids_multiplier_baseline
+error_message: "GT-PROBE: gen=docker_otel key=pids_multiplier value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=docker_otel
+  impact_key: pids_multiplier
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 15.0
+  svc_name: gt-docker-aws-svc-1
+rca_clues:
+  gt-docker-aws-svc-1:
+    probe.generator: docker_otel
+    probe.impact_key: pids_multiplier
+    probe.trigger_value: 15.0
+  gt-docker-aws-svc-2:
+    probe.upstream_generator: docker_otel
+    probe.upstream_key: pids_multiplier
+generator_impact:
+  docker_otel:
+    pids_multiplier: 15.0

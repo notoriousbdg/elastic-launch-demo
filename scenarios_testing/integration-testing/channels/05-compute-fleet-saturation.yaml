@@ -1,0 +1,90 @@
+name: Compute Fleet Saturation
+subsystem: platform
+vehicle_section: platform_pipeline
+error_type: FLEET-CPU-SATURATION
+sensor_type: health_check
+affected_services:
+- worker-pool
+cascade_services:
+- edge-gateway
+description: 'The synthetic EC2/ECS worker fleet backing worker-pool is CPU-saturated
+  on instance {instance_id}, causing queue depth to climb and status checks to fail
+  intermittently.
+
+  '
+investigation_notes: "1. Search for body.text containing *FLEET-CPU-SATURATION* to\
+  \ find the affected instance.\n2. Check worker-pool worker_pool.queue_depth for\
+  \ the growing backlog.\n3. Confirm aws_ec2_otel cpu_utilization_multiplier/status_check_failure_rate\
+  \ and aws_ecs_otel\n   cpu/memory multipliers rise together on {instance_id}.\n\
+  4. Check edge-gateway gateway.requests_per_sec for downstream throughput drop.\n\
+  5. Verify saturation clears after the instance is replaced or the ECS task is rescheduled.\n"
+remediation_action: replace_saturated_instance
+error_message: 'FLEET-CPU-SATURATION: instance={instance_id} cpu_pct={cpu_utilization_pct}%
+  status_check={status_check_result}
+
+  '
+stack_trace: "ComputeFleetSaturationError: instance={instance_id}\n  at WorkerPool.healthCheck()\n\
+  \  cpu_pct={cpu_utilization_pct}% status_check={status_check_result}\n"
+fault_params:
+  instance_id:
+    format: i-{hex}
+    hex:
+      randint:
+      - 100000
+      - 999999
+  cpu_utilization_pct:
+    uniform:
+    - 90.0
+    - 100.0
+    round: 1
+  status_check_result:
+    choice:
+    - FAILED
+    - IMPAIRED
+rca_clues:
+  worker-pool:
+    worker_pool.queue_depth:
+      randint:
+      - 500
+      - 5000
+    worker_pool.jobs_per_sec:
+      uniform:
+      - 1.0
+      - 15.0
+      round: 1
+  edge-gateway:
+    gateway.requests_per_sec:
+      uniform:
+      - 5.0
+      - 40.0
+      round: 1
+    gateway.upstream_timeout_flag: true
+generator_impact:
+  aws_ec2_otel:
+    high_cpu_utilization:
+      uniform:
+      - 4.0
+      - 9.0
+    instance_status_check_failed: &id001
+      uniform:
+      - 0.3
+      - 0.9
+    system_status_check_failed: *id001
+    high_ebs_read_throughput: &id002
+      uniform:
+      - 3.0
+      - 12.0
+    high_ebs_write_throughput: *id002
+  aws_ecs_otel:
+    cpu_utilization_high:
+      uniform:
+      - 4.0
+      - 9.0
+    memory_utilization_high:
+      uniform:
+      - 3.0
+      - 8.0
+    cpu_reservation_high:
+      uniform:
+      - 0.2
+      - 0.7

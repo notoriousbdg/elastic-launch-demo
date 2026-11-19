@@ -1,0 +1,37 @@
+name: "GT redis_otel: memory_fragmentation_indicates_swapping"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-REDIS-MEMORY-FRAGMENTATION-INDICATE
+sensor_type: impact_key_probe
+affected_services:
+  - gt-redis-aws-svc-1
+cascade_services:
+  - gt-redis-aws-svc-2
+description: "Tests impact_key memory_fragmentation_indicates_swapping on generator redis_otel."
+investigation_notes: |-
+  1. Verify redis_otel is active and reporting metrics.
+  2. Check that the memory_fragmentation_indicates_swapping metric has reached the trigger value (10.0).
+  3. Confirm generator_impact for redis_otel.memory_fragmentation_indicates_swapping is set to 10.0.
+  4. Look for correlated changes in service gt-redis-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_memory_fragmentation_indicates_swapping_baseline
+error_message: "GT-PROBE: gen=redis_otel key=memory_fragmentation_indicates_swapping value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=redis_otel
+  impact_key: memory_fragmentation_indicates_swapping
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 10.0
+  svc_name: gt-redis-aws-svc-1
+rca_clues:
+  gt-redis-aws-svc-1:
+    probe.generator: redis_otel
+    probe.impact_key: memory_fragmentation_indicates_swapping
+    probe.trigger_value: 10.0
+  gt-redis-aws-svc-2:
+    probe.upstream_generator: redis_otel
+    probe.upstream_key: memory_fragmentation_indicates_swapping
+generator_impact:
+  redis_otel:
+    memory_fragmentation_indicates_swapping: 10.0

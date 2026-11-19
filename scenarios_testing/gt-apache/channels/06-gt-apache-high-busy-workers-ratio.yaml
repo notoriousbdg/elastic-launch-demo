@@ -1,0 +1,37 @@
+name: "GT apache_otel: high_busy_workers_ratio"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-APACHE-HIGH-BUSY-WORKERS-RATIO
+sensor_type: impact_key_probe
+affected_services:
+  - gt-apache-aws-svc-1
+cascade_services:
+  - gt-apache-aws-svc-2
+description: "Tests impact_key high_busy_workers_ratio on generator apache_otel."
+investigation_notes: |-
+  1. Verify apache_otel is active and reporting metrics.
+  2. Check that the high_busy_workers_ratio metric has reached the trigger value (90.0).
+  3. Confirm generator_impact for apache_otel.high_busy_workers_ratio is set to 90.0.
+  4. Look for correlated changes in service gt-apache-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_high_busy_workers_ratio_baseline
+error_message: "GT-PROBE: gen=apache_otel key=high_busy_workers_ratio value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=apache_otel
+  impact_key: high_busy_workers_ratio
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 90.0
+  svc_name: gt-apache-aws-svc-1
+rca_clues:
+  gt-apache-aws-svc-1:
+    probe.generator: apache_otel
+    probe.impact_key: high_busy_workers_ratio
+    probe.trigger_value: 90.0
+  gt-apache-aws-svc-2:
+    probe.upstream_generator: apache_otel
+    probe.upstream_key: high_busy_workers_ratio
+generator_impact:
+  apache_otel:
+    high_busy_workers_ratio: 90.0

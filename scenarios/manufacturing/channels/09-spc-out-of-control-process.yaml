@@ -8,52 +8,125 @@ affected_services:
 cascade_services:
 - mes-controller
 - oee-analytics
-description: Process variation exceeds Cpk threshold on a critical-to-quality (CTQ) characteristic
+description: A new CMM probe calibration added a fixed offset to bore diameter measurements; the SPC chart shows a mean shift and Cpk collapses although the parts have not changed
 investigation_notes: |-
-  Root Cause: An out-of-control signal (Western Electric / Nelson rules) means the process mean or variance has shifted. Common causes: tooling wear, fixture loosening, raw-material lot change, or a temperature/humidity excursion in the work cell. A rule-2 (9 points on one side of mean) is more diagnostic than a rule-1 (single point beyond 3σ).
-  Remediation: 1) Pull the SPC chart: `qc-admin spc-chart --characteristic {characteristic} --window 8h`. 2) Identify the rule fired and the timestamp. 3) Cross-reference with raw-material lot changes (`mes-admin lot-history --line {line_id}`) and operator/tooling changes. 4) Pause auto-release and shift to 100% inspection until the cause is found and corrected: `qc-admin set-inspection-mode --line {line_id} --mode FULL`. 5) Document a CAPA per IATF 16949.
-remediation_action: tighten_inspection
-error_message: '[QC] SPC-OUT-OF-CONTROL: characteristic={characteristic} rule={spc_rule} cpk={cpk} target_cpk=1.33 line={line_id}'
+  Root cause: the probe qualification for CMM-01 was re-published as calibration revision r42 shortly before the first SPC-OUT-OF-CONTROL (by metrology, CAL-0419). r42 carries a stylus offset error of +0.022 mm on the Z-axis probe, so every {characteristic} measurement on {line_id} reads 0.022 mm high. With a tolerance of 25.400 ± 0.050 mm and a process sigma of about 0.010 mm, the mean shift drops Cpk from about 1.5 to {cpk} and fires Nelson rule 2 (nine points on one side of the centre line), with an occasional rule-1 point near the upper limit. It is a measurement fault, not a process shift: the daily golden-part check (ring gauge certified 25.4000 mm) now reads 25.4220 mm, and the other characteristics measured by the same CMM with the other styli are normal. Tool wear is at 20-40% of rated life, the fixture torque check passes and the cell temperature is within ±0.5 °C of setpoint. A raw-material lot change on {line_id} about 30 minutes before is a coincidence: the shift is exactly the calibration offset and appeared with the first measurement after r42 was loaded.
+  Confirm:
+    - quality-inspector spc_sample lines for {characteristic} show cmm_cal_rev=r42 (attributes.quality.cmm_cal_rev); metric quality.golden_part_dev_mm goes from about 0 to +0.022 and quality.cpk falls from 1.45-1.75 to 0.78-0.95
+    - the quality-inspector calibration load line (CAL-0419) comes before the first SPC-OUT-OF-CONTROL
+    - quality.defect_rate_pct rises because good parts near the upper limit are rejected (false rejects); quality.first_pass_yield_pct drops accordingly
+  Remediation: roll the CMM back to the previous qualification with opsctl rollback calibration/cmm-01 --to-revision previous. The next measurements read on nominal again; the golden-part deviation returns to about 0 at once, and Cpk on the rolling 25-sample window returns above 1.33 within about 90 s. Parts rejected while r42 was active should be re-measured, not scrapped; re-qualifying the stylus is a metrology follow-up.
+remediation_action: rollback_cmm_calibration
+remediation_command: |-
+  opsctl rollback calibration/cmm-01 --to-revision previous
+error_message: '[QC] SPC-OUT-OF-CONTROL: characteristic={characteristic} line={line_id} rule={spc_rule} mean=25.4240 nominal=25.4000 usl=25.4500 cpk={cpk} target_cpk=1.33 gauge=CMM-01 cal_rev=r42'
 stack_trace: |-
-  === SPC CONTROL CHART — {characteristic} ===
-  Line: {line_id} | Sample size: 30 | Cpk: {cpk} | Target: 1.33
+  === SPC CONTROL CHART — {characteristic} ({line_id}) ===
+  Gauge: CMM-01 cal r42 | Nominal 25.4000 ± 0.0500 mm | Subgroup n=5 | Cpk {cpk} (target 1.33)
   ------------------------------------------------------------------------
-  RULE FIRED: {spc_rule}
-    Western Electric Rule 1: 1 point beyond 3σ
-    Western Electric Rule 2: 9 consecutive points on one side of mean
-    Nelson Rule 5: 2 of 3 consecutive points beyond 2σ on same side
+  SAMPLE  | X-BAR    | RANGE   | STATUS
   ------------------------------------------------------------------------
-  SAMPLE  | VALUE   | STATUS
+  S-412   | 25.4018  | 0.021   | within limits   (cal r41)
+  S-413   | 25.4236  | 0.019   | above centre    (cal r42)
+  S-414   | 25.4251  | 0.024   | above centre
+  ...
+  S-421   | 25.4229  | 0.018   | above centre — NELSON RULE 2 (9 points)
   ------------------------------------------------------------------------
-  S-028   | 49.85   | within ±1σ
-  S-029   | 51.12   | beyond +2σ
-  S-030   | 51.48   | beyond +3σ — RULE 1 FIRED
-  ------------------------------------------------------------------------
-  SPC-OUT-OF-CONTROL: process shift detected on {characteristic}
+  Golden part (ring gauge 25.4000): measured 25.4220 (dev +0.0220)
+  SPC-OUT-OF-CONTROL: mean shift on {characteristic}
 correlation_attr:
-  key: deployment.spc_baseline_config
-  value: baseline-v2.3-tightened
+  key: quality.cmm_cal_rev
+  value: r42
 fault_params:
-  characteristic: {choice: [LENGTH_MM, DIAMETER_MM, TORQUE_NM, WEIGHT_G]}
-  spc_rule: {choice: [WE-1, WE-2, Nelson-5]}
-  cpk: {uniform: [0.65, 1.20], round: 3}
-  line_id: {choice: [LINE-01, LINE-02, LINE-03, LINE-04, LINE-05]}
+  characteristic: DIAMETER_MM
+  spc_rule: NELSON-2
+  cpk: {uniform: [0.78, 0.95], round: 2}
+  line_id: LINE-04
 rca_clues:
   quality-inspector:
-    quality.spc_rule_fired: {choice: [WE-1, WE-2, Nelson-5]}
-    quality.cpk: {uniform: [0.65, 1.20], round: 3}
+    quality.gauge: CMM-01
+    quality.tool_wear_pct: {uniform: [20, 40], round: 0}
+    quality.fixture_torque_check: PASS
+    quality.cell_temp_delta_c: {uniform: [-0.5, 0.5], round: 1}
   mes-controller:
-    mes.lot_under_quarantine: true
+    mes.raw_lot_changed_min_ago: {randint: [25, 40]}
   oee-analytics:
-    oee.quality_pct: {uniform: [82.0, 94.0], round: 1}
+    oee.quality_pct: {uniform: [96.0, 98.5], round: 1}
+cascade_messages:
+  mes-controller:
+    - severity: WARN
+      message: '[MES] quality_hold line=LINE-04 work order on hold: SPC rule NELSON-2 on DIAMETER_MM from quality-inspector; auto-release paused'
+  oee-analytics:
+    - severity: WARN
+      message: '[OEE] quality rate LINE-04 down to 97.2% (rejects from CMM-01 at the upper diameter limit)'
+fault_scope:
+  cluster: mfg-gke-cluster
+  workloads: [quality-inspector]
+infrastructure_events:
+  - service: quality-inspector
+    severity: INFO
+    offset_seconds: -90
+    body: '[QC] calibration load gauge=CMM-01 probe qualification r41 -> r42 (stylus T1 Z-offset updated); published by metrology (CAL-0419)'
+    attributes:
+      operation: config_change
+      user.name: metrology
+      change.request: CAL-0419
+      quality.cmm_cal_rev: r42
+      change.summary: 'CMM-01 probe qualification: r41 -> r42'
+service_lag_seconds:
+  mes-controller: 20
+  oee-analytics: 30
+remediation_effects:
+  log_events:
+    - service: quality-inspector
+      severity: INFO
+      offset_seconds: 1
+      body: '[CHG] CHANGE APPLIED opsctl rollback calibration/cmm-01 --to-revision previous by {actor}: CMM-01 probe qualification r42 -> r41'
+      attributes:
+        operation: change_applied
+        change.target: calibration/cmm-01
+    - service: quality-inspector
+      severity: INFO
+      offset_seconds: 20
+      body: '[QC] golden part check gauge=CMM-01 cal_rev=r41 ring gauge 25.4000 measured 25.4003 (dev +0.0003) PASS'
+      attributes:
+        operation: golden_part_check
+  steady_attributes:
+    quality-inspector:
+      quality.cmm_cal_rev: r41
+  log_taper_seconds: 30
+  verification:
+    - signal: quality.golden_part_dev_mm
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "quality-inspector"'
+      field: 'metrics.quality.golden_part_dev_mm'
+      expect: 'back within ±0.003 mm (was +0.022)'
+      within_seconds: 30
+    - signal: quality.cpk
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "quality-inspector"'
+      field: 'metrics.quality.cpk'
+      expect: 'back above 1.33 (was 0.78-0.95)'
+      within_seconds: 120
+    - signal: SPC-OUT-OF-CONTROL lines
+      from: 'logs.otel.mfg'
+      where: 'body.text LIKE "*SPC-OUT-OF-CONTROL*"'
+      expect: '0 new lines'
+      within_seconds: 120
+    - signal: CMM calibration revision
+      from: 'logs.otel.mfg'
+      where: 'resource.attributes.service.name == "quality-inspector" AND body.text LIKE "*spc_sample*"'
+      field: 'attributes.quality.cmm_cal_rev'
+      expect: 'r41 on every line logged since the fix; r42 stops appearing'
+      within_seconds: 60
 business_impact:
   - kpi: business.oee_quality_pct
-    factor: {uniform: [0.30, 0.60]}
+    factor: {uniform: [0.60, 0.85]}
   - kpi: business.first_pass_yield_pct
-    factor: {uniform: [0.35, 0.65]}
+    factor: {uniform: [0.55, 0.80]}
   - kpi: business.defect_ppm
-    factor: {uniform: [3.0, 6.0]}
+    factor: {uniform: [2.0, 4.0]}
   - kpi: business.scrap_rate_pct
-    factor: {uniform: [2.5, 5.0]}
+    factor: {uniform: [1.5, 3.0]}
   - kpi: business.cost_of_poor_quality_usd_per_min
-    factor: {uniform: [2.5, 5.0]}
+    factor: {uniform: [2.0, 4.0]}

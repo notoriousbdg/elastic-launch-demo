@@ -1,0 +1,128 @@
+name: CoreDNS upstream resolution failures for corp.internal
+subsystem: dns
+vehicle_section: kube-system/coredns
+error_type: '10.20.8.53:53: i/o timeout'
+sensor_type: dns_forward
+affected_services:
+  - coredns
+  - tenant-gateway
+error_services:
+  - coredns
+cascade_services: []
+description: Lookups for *.corp.internal fail across the cluster with SERVFAIL. Public names and cluster.local names still
+  resolve, so only routes that call internal services break.
+investigation_notes: |-
+  Root cause: the coredns ConfigMap in kube-system was changed by a GitOps sync and the corp.internal server block now forwards to {new_upstream_a} and {new_upstream_b}. Those resolvers are not reachable from the cluster VPC (no route from the EKS VPC to them yet), so every forwarded query times out after 2s and CoreDNS answers SERVFAIL. Only corp.internal is affected: other zones go to the VPC resolver (10.42.0.2) and cluster.local is answered by the kubernetes plugin.
+  Confirm:
+    - CoreDNS ERROR lines quote the new upstream: plugin/errors ... read udp <pod-ip>:<port>->{new_upstream_a}:53: i/o timeout
+    - attributes.dns.upstream on those lines is the new pair; the forward latency for zone corp.internal sits at the 2s timeout
+    - the kube-apiserver audit shows the configmaps/coredns update by system:serviceaccount:argocd:argocd-application-controller just before the first error (revision 43, commit {commit_sha})
+    - kubectl -n kube-system get configmap coredns -o yaml | grep -A3 corp.internal
+    - from a debug pod: dig @{new_upstream_a} payments.corp.internal +time=2  (times out); dig @10.20.0.53 payments.corp.internal  (answers)
+  Remediation: roll the ConfigMap back to the last good revision (42, upstreams 10.20.0.53 10.20.1.53); CoreDNS picks it up through the reload plugin within ~30s. Re-apply the new upstreams only after the network path is in place.
+  Follow-up: revert commit a1b2c3d in Git, or pause auto-sync for the Argo CD application, before the next sync; otherwise Argo CD re-applies the change and the fault returns.
+remediation_action: rollback_coredns_configmap
+remediation_command: |-
+  opsctl rollback configmap/coredns -n kube-system --to-revision 42
+error_message: '[ERROR] plugin/errors: 2 {internal_host}.corp.internal. {qtype}: read udp {self_pod_ip}:{src_port}->{new_upstream_a}:53:
+  i/o timeout'
+stack_trace: ''
+fault_params:
+  internal_host: {choice: [payments, ledger, auth, vault, tax-engine, crm]}
+  qtype: {choice: [A, AAAA]}
+  src_port: {randint: [32768, 60999]}
+  new_upstream_a: 10.20.8.53
+  new_upstream_b: 10.20.9.53
+  commit_sha: a1b2c3d
+rca_clues:
+  coredns:
+    dns.upstream: 10.20.8.53,10.20.9.53
+    dns.zone: corp.internal.
+    dns.forward.timeout_s: 2
+    dns.rcode: SERVFAIL
+  tenant-gateway:
+    dns.zone: corp.internal.
+cascade_messages:
+  tenant-gateway:
+    - severity: ERROR
+      message: 'upstream request failed: dial tcp: lookup {internal_host}.corp.internal on 172.20.0.10:53: server misbehaving
+        upstream_cluster={internal_host}.corp.internal response_code=502'
+fault_scope:
+  cluster: prod-use1
+  workloads: [coredns]
+onset_delay_seconds: 45
+infrastructure_events:
+  - service: kube-apiserver
+    severity: INFO
+    offset_seconds: -75
+    body: 'audit: level=RequestResponse stage=ResponseComplete verb=update resource=configmaps namespace=kube-system name=coredns
+      user=system:serviceaccount:argocd:argocd-application-controller code=200 annotations=argocd.argoproj.io/tracking-id=platform-dns:/ConfigMap:kube-system/coredns
+      sync.revision=a1b2c3d resourceVersion=43'
+    attributes:
+      k8s.audit.verb: update
+      k8s.audit.resource: configmaps
+      k8s.namespace.name: kube-system
+      user.name: system:serviceaccount:argocd:argocd-application-controller
+      vcs.revision: a1b2c3d
+      change.summary: 'corp.internal forward -> 10.20.8.53 10.20.9.53'
+  - service: coredns
+    severity: INFO
+    offset_seconds: -40
+    body: '[INFO] Reloading'
+  - service: coredns
+    severity: INFO
+    offset_seconds: -39
+    body: '[INFO] plugin/reload: Running configuration SHA512 = 1f4d0bcf0a7c'
+    attributes:
+      dns.corp_upstream: 10.20.8.53,10.20.9.53
+remediation_effects:
+  transition_seconds: 30
+  log_events:
+    - service: coredns
+      severity: INFO
+      offset_seconds: 20
+      body: '[INFO] Reloading'
+    - service: coredns
+      severity: INFO
+      offset_seconds: 21
+      body: '[INFO] plugin/reload: Running configuration SHA512 = 9b2e6a51d3c8'
+      attributes:
+        dns.corp_upstream: 10.20.0.53,10.20.1.53
+    - service: coredns
+      severity: INFO
+      offset_seconds: 22
+      body: '[INFO] Reloading complete'
+  steady_attributes:
+    coredns:
+      dns.corp_upstream: 10.20.0.53,10.20.1.53
+  verification:
+    - signal: coredns ERROR lines containing 10.20.8.53
+      from: 'logs.otel.platform'
+      where: 'resource.attributes.service.name == "coredns" AND body.text LIKE "*10.20.8.53*"'
+      expect: '0 new lines after the reload'
+      within_seconds: 60
+    - signal: coredns.dns.responses_per_s
+      from: 'metrics-generic.otel-default'
+      field: 'metrics.coredns.dns.responses_per_s'
+      where: 'attributes.rcode == "SERVFAIL"'
+      expect: 'back to the pre-incident level, under 2/s (was ~8% of queries)'
+      within_seconds: 90
+    - signal: coredns reload line
+      from: 'logs.otel.platform'
+      where: 'resource.attributes.service.name == "coredns" AND body.text LIKE "*Reloading complete*"'
+      expect: 'present, with attributes.dns.corp_upstream = 10.20.0.53,10.20.1.53'
+      within_seconds: 60
+    - signal: tenant-gateway errors for corp.internal hosts
+      from: 'logs.otel.platform'
+      where: 'resource.attributes.service.name == "tenant-gateway" AND body.text LIKE "*corp.internal*server misbehaving*"'
+      expect: '0'
+      within_seconds: 90
+business_impact:
+  - kpi: business.dns_success_rate_pct
+    value: {uniform: [91.5, 92.5], round: 3}
+  - kpi: business.api_5xx_rate_pct
+    value: {uniform: [2.2, 2.8], round: 3}
+  - kpi: business.api_availability_pct
+    value: {uniform: [97.2, 97.8], round: 3}
+  - kpi: business.error_budget_burn_rate
+    value: {uniform: [28.0, 34.0], round: 2}

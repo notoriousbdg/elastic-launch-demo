@@ -1,0 +1,121 @@
+name: Embedding Dimension Mismatch
+subsystem: embeddings
+vehicle_section: embeddings_pipeline
+error_type: EMB-DIMENSION-MISMATCH
+sensor_type: health_check
+affected_services: [embedding-service, retrieval-service]
+cascade_services: []
+
+description: >
+  A release changed the embed-prod-large deployment so it returns 3072-dimension vectors, but the Azure AI Search index schema is 1536 dimensions, so vector queries are rejected and retrieval returns empty results.
+
+investigation_notes: |
+  Root cause: a release changed embedding deployment {embedding_deployment} to text-embedding-3-large-1 without its dimensions=1536 setting, so it now returns {model_dimensions}-dimension vectors against an index {search_index} whose vector field is {index_dimensions} dimensions (fixed at index creation). Azure AI Search rejects the vectors ({rejected_vectors} so far) and vector queries fail with HTTP 400, so {empty_result_pct}% of queries return no passages and the assistant answers without grounding.
+  Confirm:
+    - embedding-service logs [EMBEDDING] embedding_config deployment={embedding_deployment} dimensions=3072 dimension_check=FAIL status=ANOMALY (attributes.embedding.dimensions); metric embedding_service.vector_dimension moves from 1536 to 3072
+    - the embedding-service line "config-service: change applied embedding-config/{embedding_deployment}" (dimensions 1536 -> 3072) comes before the first EMB-DIMENSION-MISMATCH
+    - retrieval-service logs retrieval.vector_query index={search_index} empty_result_pct 35-90 status=ANOMALY and metric retrieval.hits_returned is 0 on a large share of queries (5-8 hits otherwise); rca attributes embedding.index_schema_dimensions=1536 against embedding.model_dimensions=3072
+    - embedding_service.queue_depth, retrieval.index_freshness_minutes and retrieval.search_latency_ms stay in their baseline bands, which rules out a backlog, a stale index and a latency regression
+  Remediation: set the deployment back to 1536 dimensions with opsctl patch embedding-config/{embedding_deployment} --dimensions 1536. The workers roll over to the 1536-dimension output in about a minute and hits recover over about 90 seconds. Reindexing into a new 3072-dimension index is not needed: it would re-embed the whole corpus while the existing index is healthy.
+remediation_action: reindex_with_matching_dimensions
+remediation_command: |-
+  opsctl patch embedding-config/embed-prod-large --dimensions 1536
+
+error_message: |
+  [EMBEDDING] EMB-DIMENSION-MISMATCH: Azure AI Search rejected upload to index={search_index}: vector field 'contentVector' expects {index_dimensions} dimensions, deployment={embedding_deployment} returned {model_dimensions} (rejected_vectors={rejected_vectors})
+
+stack_trace: |
+  VectorDimensionMismatchError: EMB-DIMENSION-MISMATCH
+    at EmbeddingService.upsert_vectors(index={search_index})
+    at SearchClient.merge_or_upload_documents(batch_size=64)
+  Embedding deployment: {embedding_deployment}
+  Model dimensions:     {model_dimensions}
+  Index dimensions:     {index_dimensions}
+  Rejected vectors:     {rejected_vectors}
+  Empty result ratio:   {empty_result_pct}%
+
+correlation_attr:
+  key: deployment.embedding_model_version
+  value: text-embedding-3-large-1
+
+fault_params:
+  embedding_deployment: embed-prod-large
+  model_dimensions: 3072
+  index_dimensions: 1536
+  search_index: kb-passages-v4
+  rejected_vectors: {randint: [500, 40000]}
+  empty_result_pct: {uniform: [35.0, 90.0], round: 1}
+
+rca_clues:
+  embedding-service:
+    embedding.model_dimensions: 3072
+    embedding.index_schema_dimensions: 1536
+    embedding.deployment_changed_min_ago: {randint: [5, 90]}
+  retrieval-service:
+    retrieval.search_http_400_count: {randint: [200, 5000]}
+    retrieval.empty_result_ratio_pct: {uniform: [35.0, 90.0], round: 1}
+
+service_lag_seconds: {retrieval-service: 15}
+fault_scope:
+  workloads: [embedding-service, retrieval-service]
+
+infrastructure_events:
+  - service: embedding-service
+    severity: INFO
+    offset_seconds: -120
+    body: 'config-service: change applied embedding-config/embed-prod-large cmd="release-pipeline apply embedding-config/embed-prod-large --model=text-embedding-3-large-1" by=release-pipeline@contoso-demo.onmicrosoft.com : dimensions 1536 -> 3072 (model default)'
+    attributes:
+      user.name: release-pipeline@contoso-demo.onmicrosoft.com
+      operation: embedding_config_change
+      config.target: embedding-config/embed-prod-large
+      embedding.dimensions: 3072
+      deployment.embedding_model_version: text-embedding-3-large-1
+      change.summary: 'dimensions: 1536 -> 3072 (model default)'
+
+remediation_effects:
+  log_events:
+    - service: embedding-service
+      severity: INFO
+      offset_seconds: 1
+      body: 'config-service: change applied embedding-config/embed-prod-large cmd="opsctl patch embedding-config/embed-prod-large --dimensions 1536" by={actor} : dimensions 3072 -> 1536'
+      attributes:
+        operation: embedding_config_patch
+        embedding.dimensions: 1536
+        change.summary: 'dimensions: 3072 -> 1536'
+    - service: embedding-service
+      severity: INFO
+      offset_seconds: 60
+      body: '[EMBEDDING] embed-prod-large worker rollout complete: all workers return 1536 dimensions, dimension_check=PASS'
+      attributes:
+        operation: worker_rollout
+        embedding.dimensions: 1536
+  steady_attributes:
+    embedding-service:
+      embedding.dimensions: 1536
+  verification:
+    - signal: embedding_service.vector_dimension
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "embedding-service"'
+      field: 'metrics.embedding_service.vector_dimension'
+      expect: '1536 on every point (was 3072)'
+      within_seconds: 120
+    - signal: retrieval.hits_returned
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "retrieval-service"'
+      field: 'metrics.retrieval.hits_returned'
+      expect: '5-8 hits per query again (was 0 on 35-90% of queries)'
+      within_seconds: 120
+    - signal: embedding dimensions
+      from: 'logs.otel.azureai'
+      where: 'resource.attributes.service.name == "embedding-service"'
+      field: 'attributes.embedding.dimensions'
+      expect: '1536 on every line logged since the fix'
+      within_seconds: 60
+
+business_impact:
+  - kpi: business.conversations_per_min
+    value: {uniform: [74.4, 85.6], round: 0}
+  - kpi: business.error_rate_pct
+    factor: {uniform: [2.0, 4.0]}
+  - kpi: business.latency_p99_ms
+    value: {uniform: [538.24, 619.26], round: 0}

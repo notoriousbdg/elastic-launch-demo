@@ -16,13 +16,14 @@ import hashlib
 import json
 import logging
 import random
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
 
-from elastic_config.deployer_base import ConcurrentBulkIndexer
+from elastic_config.deployer_base import ConcurrentBulkIndexer, _es_headers
 from scenario_engine.base import BaseScenario
 
 logger = logging.getLogger("apm-rollup")
@@ -95,7 +96,7 @@ class ApmRollupGenerator:
         self._services = scenario.services
         self._namespace = scenario.namespace
 
-        from log_generators.infra_topology import build_topology as _build_infra_topology
+        from generator_engine.infra_topology import build_topology as _build_infra_topology
         self._infra_topology = _build_infra_topology({
             "hosts": scenario.hosts,
             "k8s_clusters": scenario.k8s_clusters,
@@ -458,8 +459,14 @@ class ApmRollupGenerator:
 
     # ── Generation ────────────────────────────────────────────────────
 
-    def generate_all(self, hours: int = 12, seed: int = 42) -> dict[str, int]:
+    def generate_all(self, hours: int = 24, seed: int = 42) -> dict[str, int]:
         """Generate and insert all three rollup types. Returns doc counts."""
+        # Ensure metrics.transaction.duration.summary is aggregate_metric_double
+        # (not dynamic float children) before any docs land — otherwise APM UI
+        # latency averages to 0 / N/A (ALERTS #116).
+        self._ensure_transaction_metrics_mapping()
+        self._reset_sticky_rollup_streams()
+
         # WORKAROUND: when a fresh data stream is created, the first bulk insert
         # of `aggregate_metric_double` fields (transaction.duration.summary, etc.)
         # hits a one-time mapping-initialization race where the parent field's
@@ -479,6 +486,131 @@ class ApmRollupGenerator:
         counts["service_summary_1m"] = self._generate_summary_rollups(hours, seed + 2)
         return counts
 
+    def _ensure_transaction_metrics_mapping(self) -> None:
+        """Map APM OTel rollup duration fields as aggregate_metric_double + histogram.
+
+        ``metrics`` is passthrough; without an explicit property, writing
+        ``{sum, value_count}`` dynamically creates float/long children and APM
+        latency charts show 0 ms / N/A.
+        """
+        url = f"{self.elastic_url}/_component_template/metrics-otel@custom"
+        headers = _es_headers(self.api_key)
+        existing: dict[str, Any] = {}
+        try:
+            resp = httpx.get(url, headers=headers, timeout=30)
+            if resp.status_code == 200:
+                existing = (
+                    resp.json()
+                    .get("component_templates", [{}])[0]
+                    .get("component_template", {})
+                    .get("template", {})
+                )
+        except Exception as exc:
+            logger.warning("Could not read metrics-otel@custom: %s", exc)
+
+        mappings = dict(existing.get("mappings") or {})
+        props = dict(mappings.get("properties") or {})
+        metrics = dict(props.get("metrics") or {})
+        metrics.setdefault("type", "passthrough")
+        metrics.setdefault("priority", 10)
+        metrics.setdefault("dynamic", True)
+        mprops = dict(metrics.get("properties") or {})
+        mprops["transaction.duration.summary"] = {
+            "type": "aggregate_metric_double",
+            "metrics": ["sum", "value_count"],
+            "default_metric": "sum",
+        }
+        mprops["transaction.duration.histogram"] = {"type": "histogram"}
+        mprops.setdefault(
+            "event.success_count",
+            {
+                "type": "aggregate_metric_double",
+                "metrics": ["sum", "value_count"],
+                "default_metric": "sum",
+            },
+        )
+        mprops.setdefault(
+            "span.destination.service.response_time.count", {"type": "long"},
+        )
+        mprops.setdefault(
+            "span.destination.service.response_time.sum.us", {"type": "double"},
+        )
+        metrics["properties"] = mprops
+        props["metrics"] = metrics
+        body: dict[str, Any] = {
+            "template": {"mappings": {**mappings, "properties": props}},
+        }
+        if existing.get("settings"):
+            body["template"]["settings"] = existing["settings"]
+        resp = httpx.put(url, headers=headers, json=body, timeout=30)
+        if resp.status_code >= 300:
+            raise RuntimeError(
+                f"put metrics-otel@custom failed ({resp.status_code}): "
+                f"{resp.text[:300]}"
+            )
+        logger.info("Ensured APM transaction duration aggregate_metric mapping")
+
+    def _reset_sticky_rollup_streams(self) -> None:
+        """Delete rollup streams when summary is not aggregate_metric_double."""
+        headers = _es_headers(self.api_key)
+        ds = "metrics-transaction.1m.otel-default"
+        resp = httpx.get(
+            f"{self.elastic_url}/{ds}/_mapping",
+            headers=headers,
+            timeout=30,
+        )
+        if resp.status_code == 404:
+            return
+        if resp.status_code >= 300:
+            logger.warning(
+                "Could not read %s mapping (%s): %s",
+                ds, resp.status_code, resp.text[:200],
+            )
+            return
+
+        mappings = resp.json()
+        summary_type = None
+        has_flat_sum = False
+        for idx_map in mappings.values():
+            metrics = (
+                idx_map.get("mappings", {})
+                .get("properties", {})
+                .get("metrics", {})
+            )
+            props = metrics.get("properties") or {}
+            summary = props.get("transaction.duration.summary") or {}
+            if summary:
+                summary_type = summary.get("type")
+            if props.get("transaction.duration.summary.sum"):
+                has_flat_sum = True
+            if summary_type or has_flat_sum:
+                break
+
+        # Healthy streams map the parent as aggregate_metric_double. Sticky
+        # bad streams only have dynamic float/long children (.sum / .value_count).
+        if summary_type == "aggregate_metric_double":
+            return
+        if summary_type is None and not has_flat_sum:
+            return
+
+        logger.warning(
+            "Sticky metrics.transaction.duration.summary type=%s flat_sum=%s; "
+            "resetting APM rollup streams",
+            summary_type,
+            has_flat_sum,
+        )
+        for name in (
+            "metrics-transaction.1m.otel-default",
+            "metrics-service_destination.1m.otel-default",
+            "metrics-service_summary.1m.otel-default",
+        ):
+            dresp = httpx.delete(
+                f"{self.elastic_url}/_data_stream/{name}",
+                headers=headers,
+                timeout=30,
+            )
+            if dresp.status_code < 300:
+                logger.info("Deleted data stream %s for remapping", name)
     def _seed_data_streams(self) -> None:
         """Write one disposable doc to each rollup data stream to force ES to
         materialise the aggregate_metric_double mapping before the real backfill
@@ -599,6 +731,66 @@ class ApmRollupGenerator:
             "service_summary.1m",
         )
 
+    def emit_live_minute(
+        self,
+        when: datetime | None = None,
+        *,
+        latency_multiplier: float = 1.0,
+        error_rate: float = 0.01,
+    ) -> int:
+        """Append one minute of rollup docs so APM ML datafeeds stay fed.
+
+        Deploy-time ``generate_all`` is a finite backfill; without this, the
+        managed ``apm-production_*`` job logs "retrieving no data for a while"
+        as soon as realtime advances past the backfill end (ALERTS #118).
+        """
+        rng = random.Random(int((when or datetime.now(timezone.utc)).timestamp()) // 60)
+        ts = (when or datetime.now(timezone.utc)).replace(second=0, microsecond=0)
+        base_rate = 5
+        docs_tx: list[dict] = []
+        docs_sd: list[dict] = []
+        docs_sum: list[dict] = []
+
+        for svc in self._instrumented:
+            for tx in self._tx_defs.get(svc, []):
+                count = max(1, int(base_rate * tx.rate_fraction))
+                fail_count = max(0, int(count * error_rate))
+                success_count = count - fail_count
+                latency = tx.baseline_us * rng.uniform(0.90, 1.10) * latency_multiplier
+                if success_count > 0:
+                    docs_tx.append(self._build_tx_doc(
+                        ts, svc, tx, "success", success_count, latency, rng,
+                    ))
+                if fail_count > 0:
+                    docs_tx.append(self._build_tx_doc(
+                        ts, svc, tx, "failure", fail_count, latency * 1.5, rng,
+                    ))
+            docs_sum.append(self._build_summary_doc(ts, svc, max(1, base_rate + rng.randint(-1, 1))))
+
+        for edge in self._sd_edges:
+            base_count = 3
+            latency = edge.baseline_us * rng.uniform(0.90, 1.10) * latency_multiplier
+            docs_sd.append(self._build_sd_doc(
+                ts, edge, "success", base_count, latency * base_count,
+            ))
+
+        total = 0
+        if docs_tx:
+            total += self._bulk_insert(
+                "metrics-transaction.1m.otel-default", docs_tx, "transaction.1m.live",
+            )
+        if docs_sd:
+            total += self._bulk_insert(
+                "metrics-service_destination.1m.otel-default", docs_sd,
+                "service_destination.1m.live",
+            )
+        if docs_sum:
+            total += self._bulk_insert(
+                "metrics-service_summary.1m.otel-default", docs_sum,
+                "service_summary.1m.live",
+            )
+        return total
+
     # ── Bulk insert ───────────────────────────────────────────────────
 
     def _bulk_insert(
@@ -617,6 +809,47 @@ class ApmRollupGenerator:
             inserted = idx.flush()
         logger.info("%s: %d/%d docs inserted", label, inserted, len(docs))
         return inserted
+
+
+def start_live_rollup_thread(
+    scenario: BaseScenario,
+    elastic_url: str,
+    api_key: str,
+    stop_event: threading.Event,
+    *,
+    interval_sec: float = 60.0,
+    get_latency_multiplier=None,
+    get_error_rate=None,
+) -> threading.Thread:
+    """Daemon thread: emit one rollup minute every ``interval_sec`` until stop.
+
+    ``get_latency_multiplier`` / ``get_error_rate`` are optional callables so
+    chaos UI spikes (e.g. latency 10x) land in ``metrics-transaction.1m.otel``
+    that APM ML reads — traces alone do not feed those jobs.
+    """
+    from typing import Callable
+
+    gen = ApmRollupGenerator(scenario, elastic_url, api_key)
+    _lat: Callable[[], float] = get_latency_multiplier or (lambda: 1.0)
+    _err: Callable[[], float] = get_error_rate or (lambda: 0.01)
+
+    def _loop() -> None:
+        logger.info("APM live rollup thread started (interval=%.0fs)", interval_sec)
+        while not stop_event.is_set():
+            try:
+                n = gen.emit_live_minute(
+                    latency_multiplier=float(_lat() or 1.0),
+                    error_rate=float(_err() or 0.01),
+                )
+                logger.debug("APM live rollup emitted %d docs", n)
+            except Exception:
+                logger.exception("APM live rollup emit failed")
+            stop_event.wait(interval_sec)
+        logger.info("APM live rollup thread stopped")
+
+    t = threading.Thread(target=_loop, name="apm-rollup-live", daemon=True)
+    t.start()
+    return t
 
 
 # ── Histogram helper ──────────────────────────────────────────────────────

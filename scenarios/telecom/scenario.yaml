@@ -5,12 +5,12 @@ scenario_description: 5G subscriber activation platform serving 45M subscribers 
 namespace: meridian
 scenario_icon: "🗼"
 sort_order: 5
-schema_version: "1.2"
+schema_version: "1.3"
 nominal_label: ONLINE
 apm_ml_bucket_span: 1m
 hosts:
 - host.name: meridian-aws-host-01
-  host.id: i-0e1f2a3b4c5d67890
+  host.id: i-bef4e82e54930e6dd
   host.arch: amd64
   host.type: m5.2xlarge
   host.image.id: ami-0abcdef1234567890
@@ -32,13 +32,13 @@ hosts:
   cloud.platform: aws_ec2
   cloud.region: eu-central-1
   cloud.availability_zone: eu-central-1a
-  cloud.account.id: '223344556677'
-  cloud.instance.id: i-0e1f2a3b4c5d67890
+  cloud.account.id: '946670923872'
+  cloud.instance.id: i-bef4e82e54930e6dd
   cpu_count: 8
   memory_total_bytes: 34359738368
   disk_total_bytes: 536870912000
 - host.name: meridian-gcp-host-01
-  host.id: '5678901234567890123'
+  host.id: '3495331398844651'
   host.arch: amd64
   host.type: n2-standard-8
   host.image.id: projects/debian-cloud/global/images/debian-12-bookworm-v20250115
@@ -60,13 +60,13 @@ hosts:
   cloud.platform: gcp_compute_engine
   cloud.region: europe-west3
   cloud.availability_zone: europe-west3-a
-  cloud.account.id: meridian-telecom-prod
-  cloud.instance.id: '5678901234567890123'
+  cloud.account.id: meridian-project
+  cloud.instance.id: '3495331398844651'
   cpu_count: 8
   memory_total_bytes: 34359738368
   disk_total_bytes: 274877906944
 - host.name: meridian-azure-host-01
-  host.id: /subscriptions/def-456/resourceGroups/meridian-rg/providers/Microsoft.Compute/virtualMachines/meridian-vm-01
+  host.id: /subscriptions/12d8df88-df58-5730-b296-0c3e02ec0ec3/resourceGroups/meridian-rg/providers/Microsoft.Compute/virtualMachines/meridian-vm-01
   host.arch: amd64
   host.type: Standard_D4s_v3
   host.image.id: Canonical:0001-com-ubuntu-server-jammy:22_04-lts-gen2:latest
@@ -88,7 +88,7 @@ hosts:
   cloud.platform: azure_vm
   cloud.region: westeurope
   cloud.availability_zone: westeurope-1
-  cloud.account.id: def-456-ghi-789
+  cloud.account.id: 12d8df88-df58-5730-b296-0c3e02ec0ec3
   cloud.instance.id: meridian-vm-01
   cpu_count: 4
   memory_total_bytes: 17179869184
@@ -136,7 +136,7 @@ agent_config:
   name: 5G Network Operations Analyst
   assessment_tool_name: network_health_assessment
   system_prompt: |
-    You are the 5G Network Operations Analyst, an expert AI assistant for the Meridian Telecom 5G activation platform. You help NOC engineers investigate incidents, analyze telemetry data, and provide root cause analysis across 9 services spanning AWS Frankfurt, GCP Frankfurt, and Azure Netherlands. You have deep expertise in 5G network architecture (bearers, S1-MME, GTP tunnels), subscriber database management (45M subscribers, connection pool sizing), BSS/billing systems (CDR processing, mediation, SLA monitoring), authentication infrastructure (Azure AD federation, OAuth, session management), and notification delivery (SMS, push, MVNO webhooks). The platform serves three customer segments: Consumer (70%), Enterprise (20%), and MVNO (10%). Enterprise customers have strict SLA commitments (99.5% activation success, 30s max activation time). MVNO partners (Lycamobile, Lebara) depend on webhook notifications for activation confirmations. When investigating incidents, search for these error identifiers in logs: Database faults (DB-CONNPOOL-EXHAUST, DB-RDS-MAINTENANCE, DB-REPLICATION-LAG), Network faults (NET-BEARER-TIMEOUT, NET-S1MME-CONGEST, NET-GTP-TUNNEL-FAIL), Auth faults (AUTH-TOKEN-INVALID, AUTH-FEDERATION-TIMEOUT, AUTH-SESSION-SATURATE), Provisioning faults (PROV-SIM-STALL, PROV-NP-TIMEOUT, PROV-TARIFF-MISMATCH), Billing faults (BSS-CDR-BACKLOG, BSS-MEDIATION-FAIL, BSS-SLA-BREACH), Gateway faults (GW-RATE-LIMIT-CASCADE, GW-MTLS-EXPIRY), Notification faults (NOTIF-SMS-FAIL, NOTIF-PUSH-BACKPRESSURE, NOTIF-MVNO-WEBHOOK-TIMEOUT). Log messages are in body.text — NEVER search the body field alone.
+    You are the 5G Network Operations Analyst, an expert AI assistant for the Meridian Telecom 5G activation platform. You help NOC engineers investigate incidents, analyze telemetry data, and provide root cause analysis across 9 services spanning AWS Frankfurt, GCP Frankfurt, and Azure Netherlands. You have deep expertise in 5G network architecture (bearers, S1-MME, GTP tunnels), subscriber database management (45M subscribers, connection pool sizing), BSS/billing systems (CDR processing, mediation, SLA monitoring), authentication infrastructure (Azure AD federation, OAuth, session management), and notification delivery (SMS, push, MVNO webhooks). The platform serves three customer segments: Consumer (70%), Enterprise (20%), and MVNO (10%). Enterprise customers have strict SLA commitments (99.5% activation success, 30s max activation time). MVNO partners (Lycamobile, Lebara) depend on webhook notifications for activation confirmations. Each component logs in its own format (Java/HikariCP, PostgreSQL, Python logfmt, NGINX, NGAP/S1AP/GTPv2, SMPP). Common error signatures: database (Connection is not available, request timed out after; canceling statement due to statement timeout; session lookup returned no row), network core and RAN (radio-resources-not-available; OVERLOAD START sent to; All dynamic addresses are occupied), authentication (Unable to find a signing key that matches; Connection to login.microsoftonline.com timed out; OOM command not allowed when used memory), provisioning (HLR registration timed out after; MNP lookup failed; No BSS product mapped for plan code), billing (lag increasing on; No space left on device; SLA breach contract=), gateway (limiting requests, excess:; remote error: tls: unknown certificate authority), notifications (ESME_RINVPASWD; Quota exceeded for quota metric; partner callback failed). Incidents here are usually caused by a change: look for Argo CD syncs, OSS configuration changes, config reloads, secret rotations and CloudTrail, Azure Activity or GCP audit records shortly before the first error, and check the running configuration on each component's status lines (attributes.*). Log messages are in body.text — NEVER search the body field alone.
 assessment_tool_config:
   id: network_health_assessment
   description: 'Comprehensive 5G platform health assessment. Evaluates all services against operational readiness criteria
@@ -223,75 +223,92 @@ executive_trend_charts:
   y_label: NPS
 executive_kpi_emissions:
 - name: business.activations_per_min
+  better: higher
   value: {randint: [380, 1850]}
   unit: activations/min
 - name: business.mvno_net_adds_per_min
+  better: higher
   value: {randint: [45, 280]}
   unit: net-adds/min
 - name: business.port_ins_per_min
+  better: higher
   value: {randint: [120, 420]}
   unit: port-ins/min
 - name: business.port_outs_per_min
   value: {randint: [90, 380]}
   unit: port-outs/min
 - name: business.esim_provisions_per_min
+  better: higher
   value: {randint: [200, 1100]}
   unit: provisions/min
 - name: business.active_subscribers_m
   value: {uniform: [18.4, 19.2], round: 3}
   unit: subscribers (M)
 - name: business.revenue_usd_per_min
+  better: higher
   value: {uniform: [82000.0, 145000.0], round: 1}
   unit: USD/min
 - name: business.consumer_arpu_usd
   value: {uniform: [38.2, 52.6], round: 2}
   unit: USD
 - name: business.enterprise_arpu_usd
+  better: higher
   value: {uniform: [285.0, 480.0], round: 2}
   unit: USD
 - name: business.mvno_partner_revenue_usd_per_min
+  better: higher
   value: {uniform: [4500.0, 12800.0], round: 1}
   unit: USD/min
 - name: business.data_overage_charges_usd_per_min
+  better: higher
   value: {uniform: [1800.0, 8500.0], round: 1}
   unit: USD/min
 - name: business.roaming_revenue_usd_per_min
   value: {uniform: [2200.0, 9400.0], round: 1}
   unit: USD/min
 - name: business.handover_success_pct
+  better: higher
   value: {uniform: [98.2, 99.8], round: 3}
   unit: '%'
 - name: business.ran_latency_p95_ms
+  better: lower
   value: {uniform: [18.0, 38.0], round: 1}
   unit: ms
 - name: business.voice_mos
   value: {uniform: [3.9, 4.4], round: 2}
   unit: MOS
 - name: business.data_session_success_pct
+  better: higher
   value: {uniform: [97.5, 99.6], round: 3}
   unit: '%'
 - name: business.volte_call_setup_success_pct
   value: {uniform: [98.1, 99.7], round: 3}
   unit: '%'
 - name: business.throughput_p50_mbps
+  better: higher
   value: {uniform: [85.0, 220.0], round: 1}
   unit: Mbps
 - name: business.voluntary_churn_rate_pct
+  better: lower
   value: {uniform: [0.8, 2.4], round: 3}
   unit: '%'
 - name: business.nps
+  better: higher
   value: {randint: [32, 58]}
   unit: NPS
 - name: business.support_tickets_per_min
+  better: lower
   value: {randint: [28, 180]}
   unit: tickets/min
 - name: business.avg_ticket_resolution_min
   value: {uniform: [8.0, 42.0], round: 1}
   unit: min
 - name: business.first_call_resolution_pct
+  better: higher
   value: {uniform: [62.0, 84.0], round: 2}
   unit: '%'
 - name: business.trouble_to_billing_ratio_pct
+  better: lower
   value: {uniform: [1.2, 4.8], round: 3}
   unit: '%'
 raw_log_profile:
@@ -389,3 +406,8 @@ theme:
   chaos_title: Incident Simulator
   service_label: Service
   channel_label: Incident
+
+generators:
+  redis_otel: true
+  aws_rds_otel: true
+  kafka_otel: true

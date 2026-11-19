@@ -1,0 +1,37 @@
+name: "GT gcp_cloudsql_mysql_otel: instance_unavailable"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-GCPCLOUDSQLMYSQL-INSTANCE-UNAVAILABLE
+sensor_type: impact_key_probe
+affected_services:
+  - gt-gcpcloudsqlmysql-aws-svc-1
+cascade_services:
+  - gt-gcpcloudsqlmysql-aws-svc-2
+description: "Tests impact_key instance_unavailable on generator gcp_cloudsql_mysql_otel."
+investigation_notes: |-
+  1. Verify gcp_cloudsql_mysql_otel is active and reporting metrics.
+  2. Check that the instance_unavailable metric has reached the trigger value (1.0).
+  3. Confirm generator_impact for gcp_cloudsql_mysql_otel.instance_unavailable is set to 1.0.
+  4. Look for correlated changes in service gt-gcpcloudsqlmysql-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_instance_unavailable_baseline
+error_message: "GT-PROBE: gen=gcp_cloudsql_mysql_otel key=instance_unavailable value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=gcp_cloudsql_mysql_otel
+  impact_key: instance_unavailable
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 1.0
+  svc_name: gt-gcpcloudsqlmysql-aws-svc-1
+rca_clues:
+  gt-gcpcloudsqlmysql-aws-svc-1:
+    probe.generator: gcp_cloudsql_mysql_otel
+    probe.impact_key: instance_unavailable
+    probe.trigger_value: 1.0
+  gt-gcpcloudsqlmysql-aws-svc-2:
+    probe.upstream_generator: gcp_cloudsql_mysql_otel
+    probe.upstream_key: instance_unavailable
+generator_impact:
+  gcp_cloudsql_mysql_otel:
+    instance_unavailable: 1.0

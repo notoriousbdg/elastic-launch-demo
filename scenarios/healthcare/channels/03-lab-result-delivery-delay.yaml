@@ -9,17 +9,21 @@ affected_services:
 cascade_services:
 - pharmacy-system
 - clinical-alerts
-description: Laboratory result delivery exceeds critical TAT threshold, delaying clinical decisions
+description: Laboratory result delivery exceeds critical TAT threshold as results stop arriving over the analyzer instrument interface, delaying clinical decisions
 investigation_notes: |-
-  Root Cause: TAT breaches stem from either LIS instrument interface backlogs, specimen processing delays, or the HL7 ORU^R01 result delivery queue being stalled. STAT orders should have a 30-minute TAT for critical tests (Troponin, BNP, Lactate) but queue congestion delays the OBX result segments.
-  Remediation: 1) Check the LIS outbound queue depth: `lis-admin queue-status --interface EHR-RESULTS`. 2) Verify the ASTM/LIS2-A2 instrument interface is connected: `netstat -an | grep 5562`. 3) For stuck results, force requeue: `lis-admin requeue --order {lab_order_id} --priority STAT`. 4) Review the analyzer worklist for instrument flags (QC lockout, reagent expiry). 5) If the HL7 result channel is down, restart: `systemctl restart lis-hl7-outbound`. 6) Notify lab supervisor and clinical staff of delayed critical results per CAP notification protocol.
+  Root cause: lis2a2-bridge-v2.8.1-beta was deployed to the COBAS-8000 chemistry analyzer interface shortly before the first LIS-RESULT-DELAY. The beta bridge does not answer the analyzer's ENQ with an ACK on port 5562, so the ASTM session never starts and the chemistry line delivers 0-1 results per minute (normally 20-40). {test_code} for order {lab_order_id} (patient {patient_id}) has waited {tat_minutes} min against a {max_tat} min target. The analyzer passes QC, the outbound ORU^R01 queue to the EHR is nearly empty and connected, and the SYSMEX-XN hematology line (bridge v2.8.0) keeps delivering. The stall is in the chemistry bridge, not in specimen processing or the outbound channel.
+  Confirm:
+    - lab-integration logs [LIS] astm_link instrument=COBAS-8000 line=chemistry port=5562 bridge=lis2a2-bridge-v2.8.1-beta ... status=STALLED (attributes.deployment.lis_interface_version); the SYSMEX-XN hematology line stays status=OK
+    - metric lab.astm_results_per_min drops from 20-40 to 0-1.5 after the deploy; lab.avg_turnaround_minutes climbs to 60-85
+    - the lab-integration line "bridge deployed lis2a2-bridge-v2.8.1-beta" comes before the first delay
+  Remediation: roll the bridge back to v2.8.0 with opsctl rollback deployment/lis2a2-bridge --to-revision previous. The analyzer re-opens the ASTM session and sends the results it held: results per minute burst to 70-90 for about 90 seconds and then settle at 20-40, and average turnaround is back under 40 minutes within about 3 minutes. Requeueing orders or restarting lis-hl7-outbound does not help, because the results never reached the LIS.
 remediation_action: restart_lis_interface
 error_message: '[LIS] LIS-RESULT-DELAY: order={lab_order_id} test={test_code} tat={tat_minutes}min sla={max_tat}min patient={patient_id}'
 stack_trace: |-
   H|\^&|||LIS-CORE^Lab Integration|||||LIS2-A2||P|1|20260217143052
   P|1||{patient_id}||DOE^JANE||19650315|F
-  OBR|1|{lab_order_id}||{test_code}|||20260217143052||||||||SERUM
-  OBX|1|NM|{test_code}^Result^^LIS||--PENDING--|mg/dL|3.5-5.0|N|||F
+  O|1|{lab_order_id}||^^^{test_code}|S|20260217143052|20260217143052||||||||SERUM
+  (no R result record received from analyzer for ^^^{test_code})
   --- TAT BREACH ---
   Order: {lab_order_id} | Test: {test_code} | Collected: 20260217143052
   TAT Elapsed: {tat_minutes} min | SLA Target: {max_tat} min | Status: BREACHED
@@ -33,25 +37,96 @@ fault_params:
   lab_order_id:
     format: "LAB-{n}"
     n: {randint: [100000, 999999]}
-  test_code: {choice: [CBC, BMP, CMP, "PT/INR", Troponin, BNP, Lipase, UA]}
-  tat_minutes: {randint: [60, 360]}
-  max_tat: {choice: [30, 45, 60]}
+  test_code: {choice: [BMP, CMP, Troponin, BNP, Lipase]}
+  tat_minutes: {randint: [60, 120]}
+  max_tat: {choice: [30, 45]}
   patient_id:
     format: "PT-{n}"
     n: {randint: [100000, 999999]}
 rca_clues:
   lab-integration:
-    lis.outbound_queue_depth: {randint: [500, 2000]}
     lis.instrument_interface: stalled
+    lis.astm_results_received_per_min: 0
+    lis.outbound_queue_depth: {randint: [0, 20]}
+    lis.analyzer_qc_status: PASS
   ehr-system:
     ehr.pending_results_count: {randint: [50, 200]}
-    ehr.oru_channel_status: backlogged
+    ehr.oru_channel_status: connected
   pharmacy-system:
     pharmacy.awaiting_lab_results: {randint: [10, 50]}
     pharmacy.dosing_hold: true
   clinical-alerts:
     alerts.critical_lab_pending: {randint: [3, 15]}
     alerts.tat_breach_count: {randint: [5, 25]}
+remediation_command: |-
+  opsctl rollback deployment/lis2a2-bridge --to-revision previous
+error_services: [lab-integration]
+service_lag_seconds:
+  ehr-system: 20
+  pharmacy-system: 40
+  clinical-alerts: 40
+cascade_messages:
+  ehr-system:
+    - severity: WARN
+      message: '[EHR] oru_result_pending order={lab_order_id} test={test_code} patient={patient_id} waiting={tat_minutes}min source=LIS'
+  pharmacy-system:
+    - severity: WARN
+      message: '[PHARM] dose_verification_hold patient={patient_id} reason=AWAITING_LAB test={test_code} order={lab_order_id}'
+  clinical-alerts:
+    - severity: WARN
+      message: '[CDS] critical_lab_pending order={lab_order_id} test={test_code} patient={patient_id} tat={tat_minutes}min sla={max_tat}min'
+fault_scope:
+  workloads: [lab-integration]
+infrastructure_events:
+  - service: lab-integration
+    severity: INFO
+    offset_seconds: -120
+    body: '[LIS] interface COBAS-8000 chemistry bridge deployed lis2a2-bridge-v2.8.1-beta (was lis2a2-bridge-v2.8.0) by lis-release (CHG0031907); ASTM listener 5562 restarted'
+    attributes:
+      user.name: lis-release
+      change.request: CHG0031907
+      operation: deployment
+      deployment.lis_interface_version: lis2a2-bridge-v2.8.1-beta
+      lis.instrument: COBAS-8000
+      change.summary: 'COBAS-8000 bridge: lis2a2-bridge-v2.8.0 -> lis2a2-bridge-v2.8.1-beta'
+remediation_effects:
+  log_events:
+    - service: lab-integration
+      severity: INFO
+      offset_seconds: 1
+      body: '[CHG] CHANGE IMPLEMENTED opsctl rollback deployment/lis2a2-bridge --to-revision previous by {actor}: COBAS-8000 bridge lis2a2-bridge-v2.8.1-beta -> lis2a2-bridge-v2.8.0'
+      attributes:
+        operation: change_implemented
+        change.target: deployment/lis2a2-bridge
+    - service: lab-integration
+      severity: INFO
+      offset_seconds: 20
+      body: '[LIS] astm_link instrument=COBAS-8000 ENQ/ACK session established bridge=lis2a2-bridge-v2.8.0; transmitting held results'
+      attributes:
+        operation: astm_session
+        lis.instrument: COBAS-8000
+        deployment.lis_interface_version: lis2a2-bridge-v2.8.0
+  steady_attributes:
+    lab-integration:
+      deployment.lis_interface_version: lis2a2-bridge-v2.8.0
+  verification:
+    - signal: lab.astm_results_per_min
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "lab-integration"'
+      field: 'metrics.lab.astm_results_per_min'
+      expect: 'back above 20 per minute (was 0-1.5); a 70-90 per minute burst comes first while held results transmit'
+      within_seconds: 180
+    - signal: LIS-RESULT-DELAY lines
+      from: 'logs.otel.healthcare'
+      where: 'body.text LIKE "*LIS-RESULT-DELAY*"'
+      expect: '0 new lines'
+      within_seconds: 180
+    - signal: deployment.lis_interface_version
+      from: 'logs.otel.healthcare'
+      where: 'resource.attributes.service.name == "lab-integration"'
+      field: 'attributes.deployment.lis_interface_version'
+      expect: 'lis2a2-bridge-v2.8.0 on the COBAS-8000 astm_link lines; v2.8.1-beta stops appearing'
+      within_seconds: 120
 business_impact:
   - kpi: business.lab_critical_notification_pct
     factor: {uniform: [0.15, 0.45]}

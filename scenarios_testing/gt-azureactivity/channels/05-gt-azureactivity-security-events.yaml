@@ -1,0 +1,37 @@
+name: "GT azure_activity_otel: security_events"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-AZUREACTIVITY-SECURITY-EVENTS
+sensor_type: impact_key_probe
+affected_services:
+  - gt-azureactivity-aws-svc-1
+cascade_services:
+  - gt-azureactivity-aws-svc-2
+description: "Tests impact_key security_events on generator azure_activity_otel."
+investigation_notes: |-
+  1. Verify azure_activity_otel is active and reporting metrics.
+  2. Check that the security_events metric has reached the trigger value (0.8).
+  3. Confirm generator_impact for azure_activity_otel.security_events is set to 0.8.
+  4. Look for correlated changes in service gt-azureactivity-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_security_events_baseline
+error_message: "GT-PROBE: gen=azure_activity_otel key=security_events value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=azure_activity_otel
+  impact_key: security_events
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 0.8
+  svc_name: gt-azureactivity-aws-svc-1
+rca_clues:
+  gt-azureactivity-aws-svc-1:
+    probe.generator: azure_activity_otel
+    probe.impact_key: security_events
+    probe.trigger_value: 0.8
+  gt-azureactivity-aws-svc-2:
+    probe.upstream_generator: azure_activity_otel
+    probe.upstream_key: security_events
+generator_impact:
+  azure_activity_otel:
+    security_events: 0.8

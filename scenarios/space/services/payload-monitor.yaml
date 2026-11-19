@@ -56,10 +56,15 @@ state:
 steps:
 - sample:
     bay_temperature_val:
-      uniform:
-      - -5.0
-      - 35.0
-      round: 2
+      expr: "round(22.5 + (53.4 - 22.5) * min(1.0, elapsed.get(10, 0) / 60.0) + rand.uniform(-0.4, 0.4), 2) if 10 in all_active
+        else (round(53.4 + (rand.uniform(21.0, 25.0) - 53.4) * min(1.0, since_fix.get(10, 0) / 180.0), 2) if 10 in fixed_channels
+        else round(rand.uniform(19.0, 26.0), 2))"
+    bay_temp_status:
+      expr: "'ANOMALY' if 10 in all_active or bay_temperature_val > 35.0 else 'NOMINAL'"
+    heater_state:
+      expr: "'STUCK_ON' if 10 in all_active else ('OFF' if 10 in fixed_channels else 'CYCLING')"
+    coolant_flow_lpm:
+      expr: "round(rand.uniform(3.1, 3.3), 1) if 10 in all_active else (round(rand.uniform(3.9, 4.1), 1) if 10 in fixed_channels else round(rand.uniform(3.1, 3.3), 1))"
 - metric:
     name: payload.bay_temperature
     value:
@@ -67,13 +72,19 @@ steps:
     unit: C
 - log:
     level: INFO
-    message: '[PLD] sensor=bay_temperature reading={bay_temperature_val}C nominal=-5.0-35.0C status=NOMINAL'
+    message: '[PLD] sensor=bay_temperature zone=A reading={bay_temperature_val}C nominal=-5.0-35.0C heater=HTR-A3:{heater_state} coolant_flow={coolant_flow_lpm}L/min status={bay_temp_status}'
     attrs:
       payload.sensor: bay_temperature
+      payload.zone: A
       payload.reading:
         var: bay_temperature_val
       payload.unit: C
-      payload.status: NOMINAL
+      payload.status:
+        var: bay_temp_status
+      payload.heater_state:
+        var: heater_state
+      payload.coolant_flow_lpm:
+        var: coolant_flow_lpm
       operation: payload_reading
 - sample:
     bay_humidity_val:
@@ -98,10 +109,15 @@ steps:
       operation: payload_reading
 - sample:
     vibration_x_val:
-      uniform:
-      - 0.0
-      - 0.8
-      round: 2
+      expr: "round(0.4 + (rand.uniform(2.5, 7.5) - 0.4) * min(1.0, elapsed.get(11, 0) / 60.0), 2) if 11 in all_active
+        else (round(4.5 + (rand.uniform(0.2, 0.8) - 4.5) * min(1.0, since_fix.get(11, 0) / 75.0), 2) if 11 in fixed_channels
+        else round(rand.uniform(0.1, 0.8), 2))"
+    vib_x_status:
+      expr: "'ANOMALY' if 11 in all_active or vibration_x_val > 0.8 else 'NOMINAL'"
+    damper_x_psi:
+      expr: "round(52.0 - (52.0 - rand.uniform(40.5, 41.5)) * min(1.0, elapsed.get(11, 0) / 60.0), 1) if 11 in all_active else round(rand.uniform(51.6, 52.4), 1)"
+    isolator_mode:
+      expr: "'PASSIVE' if 11 in all_active else ('ACTIVE' if 11 in fixed_channels else 'PASSIVE')"
 - metric:
     name: payload.vibration_x
     value:
@@ -109,13 +125,18 @@ steps:
     unit: g
 - log:
     level: INFO
-    message: '[PLD] sensor=vibration_x reading={vibration_x_val}g nominal=0.0-0.8g status=NOMINAL'
+    message: '[PLD] sensor=vibration_x reading={vibration_x_val}g nominal=0.0-0.8g limit=1.5g damper=ISO-X:{damper_x_psi}PSI isolator_mode={isolator_mode} status={vib_x_status}'
     attrs:
       payload.sensor: vibration_x
       payload.reading:
         var: vibration_x_val
       payload.unit: g
-      payload.status: NOMINAL
+      payload.status:
+        var: vib_x_status
+      payload.damper_pressure_psi:
+        var: damper_x_psi
+      payload.isolator_mode:
+        var: isolator_mode
       operation: payload_reading
 - sample:
     vibration_y_val:

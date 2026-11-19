@@ -1,0 +1,37 @@
+name: "GT haproxy_otel: high_backend_connection_time"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-HAPROXY-HIGH-BACKEND-CONNECTION-TIM
+sensor_type: impact_key_probe
+affected_services:
+  - gt-haproxy-aws-svc-1
+cascade_services:
+  - gt-haproxy-aws-svc-2
+description: "Tests impact_key high_backend_connection_time on generator haproxy_otel."
+investigation_notes: |-
+  1. Verify haproxy_otel is active and reporting metrics.
+  2. Check that the high_backend_connection_time metric has reached the trigger value (750.0).
+  3. Confirm generator_impact for haproxy_otel.high_backend_connection_time is set to 750.0.
+  4. Look for correlated changes in service gt-haproxy-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_high_backend_connection_time_baseline
+error_message: "GT-PROBE: gen=haproxy_otel key=high_backend_connection_time value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=haproxy_otel
+  impact_key: high_backend_connection_time
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 750.0
+  svc_name: gt-haproxy-aws-svc-1
+rca_clues:
+  gt-haproxy-aws-svc-1:
+    probe.generator: haproxy_otel
+    probe.impact_key: high_backend_connection_time
+    probe.trigger_value: 750.0
+  gt-haproxy-aws-svc-2:
+    probe.upstream_generator: haproxy_otel
+    probe.upstream_key: high_backend_connection_time
+generator_impact:
+  haproxy_otel:
+    high_backend_connection_time: 750.0

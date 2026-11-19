@@ -1,0 +1,37 @@
+name: "GT postgresql_otel: bgwriter_maxwritten_stops"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-POSTGRESQL-BGWRITER-MAXWRITTEN-STOP
+sensor_type: impact_key_probe
+affected_services:
+  - gt-postgresql-aws-svc-1
+cascade_services:
+  - gt-postgresql-aws-svc-2
+description: "Tests impact_key bgwriter_maxwritten_stops on generator postgresql_otel."
+investigation_notes: |-
+  1. Verify postgresql_otel is active and reporting metrics.
+  2. Check that the bgwriter_maxwritten_stops metric has reached the trigger value (75.0).
+  3. Confirm generator_impact for postgresql_otel.bgwriter_maxwritten_stops is set to 75.0.
+  4. Look for correlated changes in service gt-postgresql-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_bgwriter_maxwritten_stops_baseline
+error_message: "GT-PROBE: gen=postgresql_otel key=bgwriter_maxwritten_stops value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=postgresql_otel
+  impact_key: bgwriter_maxwritten_stops
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 75.0
+  svc_name: gt-postgresql-aws-svc-1
+rca_clues:
+  gt-postgresql-aws-svc-1:
+    probe.generator: postgresql_otel
+    probe.impact_key: bgwriter_maxwritten_stops
+    probe.trigger_value: 75.0
+  gt-postgresql-aws-svc-2:
+    probe.upstream_generator: postgresql_otel
+    probe.upstream_key: bgwriter_maxwritten_stops
+generator_impact:
+  postgresql_otel:
+    bgwriter_maxwritten_stops: 75.0

@@ -40,33 +40,43 @@ steps:
 - sample:
     backend:
       choice: BACKENDS
-    hit_ratio:
-      if_active:
-        uniform:
-        - 15.0
-        - 45.0
-        round: 1
-      else:
-        uniform:
-        - 80.0
-        - 98.0
-        round: 1
-    miss_rate:
-      if_active:
-        randint:
-        - 500
-        - 5000
-      else:
-        randint:
-        - 50
-        - 200
     cache_mode:
       choice: CACHE_MODES
+    s14:
+      expr: "min(1.0, elapsed.get(14, 0) / 45.0) if 14 in all_active else (1.0 - min(1.0, since_fix.get(14, 0) / 90.0) if 14 in fixed_channels else 0.0)"
+    base_hit:
+      expr: round(max(88.0, min(95.0, rand.gauss(91.5, 1.5))), 1)
+    fault_hit:
+      expr: round(max(15.0, min(45.0, rand.gauss(30.0, 5.0))), 1)
+    hit_ratio:
+      expr: round(base_hit + (fault_hit - base_hit) * s14, 1)
+    miss_base:
+      expr: rand.randint(50, 200)
+    miss_rate:
+      expr: round(miss_base + (rand.randint(500, 5000) - miss_base) * s14)
+    keys_base:
+      expr: rand.randint(8000, 15000)
+    unique_keys:
+      expr: round(keys_base + (rand.randint(50000, 200000) - keys_base) * s14)
+    cache_key_policy:
+      expr: "'include-all-query-params' if 14 in all_active else 'exclude-query-params'"
+    mc_status:
+      expr: "'ANOMALY' if 14 in all_active or hit_ratio < 80.0 else 'OK'"
 - metric:
     name: cdn.cache_hit_ratio
     value:
       var: hit_ratio
     unit: '%'
+- metric:
+    name: cdn.backend_hit_ratio_pct
+    value:
+      var: hit_ratio
+    unit: '%'
+- metric:
+    name: cdn.unique_cache_keys
+    value:
+      var: unique_keys
+    unit: keys
 - metric:
     name: cdn.cache_miss_rate
     value:
@@ -83,27 +93,45 @@ steps:
         var: hit_ratio
       cdn.miss_rate:
         var: miss_rate
+- when: "mc_status == 'OK'"
+  log:
+    level: INFO
+    message: 'cloud-cdn: cache_key backend=gcpnet-cdn-backend-01 hit_ratio={hit_ratio}% unique_keys={unique_keys} cache_key_policy={cache_key_policy} status={mc_status}'
+    attrs: &cache_key_attrs
+      operation: cache_key_stats
+      cdn.cache_backend: gcpnet-cdn-backend-01
+      cdn.hit_ratio:
+        var: hit_ratio
+      cdn.unique_keys:
+        var: unique_keys
+      cdn.cache_key_policy:
+        var: cache_key_policy
+      cdn.cache_status:
+        var: mc_status
+- when: "mc_status != 'OK'"
+  log:
+    level: WARN
+    message: 'cloud-cdn: cache_key backend=gcpnet-cdn-backend-01 hit_ratio={hit_ratio}% unique_keys={unique_keys} cache_key_policy={cache_key_policy} status={mc_status}'
+    attrs: *cache_key_attrs
 - sample:
+    s15:
+      expr: "min(1.0, elapsed.get(15, 0) / 20.0) if 15 in all_active else (1.0 - min(1.0, since_fix.get(15, 0) / 60.0) if 15 in fixed_channels else 0.0)"
+    base_lat:
+      expr: round(max(10.0, min(50.0, rand.gauss(28.0, 5.0))), 1)
     origin_latency:
-      if_active:
-        uniform:
-        - 200.0
-        - 2000.0
-        round: 1
-      else:
-        uniform:
-        - 10.0
-        - 50.0
-        round: 1
+      expr: round(base_lat + (max(200.0, min(2000.0, rand.gauss(900.0, 300.0))) - base_lat) * s14, 1)
+    err_base:
+      expr: rand.randint(0, 2)
     origin_errors:
-      if_active:
-        randint:
-        - 50
-        - 500
-      else:
-        randint:
-        - 0
-        - 2
+      expr: round(err_base + (rand.randint(50, 500) - err_base) * s15)
+    stale_base:
+      expr: rand.uniform(0.0, 2.0)
+    stale_pct:
+      expr: round(stale_base + (rand.uniform(20.0, 80.0) - stale_base) * s15, 1)
+    origin_status:
+      expr: "403 if 15 in all_active else 200"
+    origin_health:
+      expr: "'ANOMALY' if 15 in all_active or origin_errors > 10 or stale_pct > 5.0 else 'OK'"
 - metric:
     name: cdn.origin_latency_ms
     value:
@@ -114,6 +142,16 @@ steps:
     value:
       var: origin_errors
     unit: errors
+- metric:
+    name: cdn.origin_fetch_errors
+    value:
+      var: origin_errors
+    unit: req/s
+- metric:
+    name: cdn.stale_served_pct
+    value:
+      var: stale_pct
+    unit: '%'
 - log:
     level: INFO
     message: 'cloud-cdn: origin_latency={origin_latency}ms origin_errors={origin_errors} backend={backend} interval=60s'
@@ -123,16 +161,31 @@ steps:
         var: origin_latency
       cdn.origin_errors:
         var: origin_errors
+- when: "origin_health == 'OK'"
+  log:
+    level: INFO
+    message: 'cloud-cdn: backend_bucket=media-assets origin=gcpnet-media-assets.storage.googleapis.com origin_status={origin_status} fetch_errors={origin_errors}/s stale_served={stale_pct}% status={origin_health}'
+    attrs: &origin_fetch_attrs
+      operation: origin_fetch
+      cdn.backend_bucket: media-assets
+      cdn.origin_status:
+        var: origin_status
+      cdn.origin_fetch_errors:
+        var: origin_errors
+      cdn.stale_served_pct:
+        var: stale_pct
+      cdn.origin_health:
+        var: origin_health
+- when: "origin_health != 'OK'"
+  log:
+    level: WARN
+    message: 'cloud-cdn: backend_bucket=media-assets origin=gcpnet-media-assets.storage.googleapis.com origin_status={origin_status} fetch_errors={origin_errors}/s stale_served={stale_pct}% status={origin_health}'
+    attrs: *origin_fetch_attrs
 - sample:
     egress_gbps:
-      uniform:
-      - 1.0
-      - 10.0
-      round: 2
+      expr: round(max(1.0, rand.gauss(4.5, 0.4)) * (1.0 + 0.8 * s14), 2)
     requests_total:
-      randint:
-      - 100000
-      - 500000
+      expr: round(max(100000, rand.gauss(300000, 15000)))
     served_from_cache:
       expr: round(hit_ratio * requests_total / 100)
 - metric:
@@ -156,9 +209,8 @@ steps:
         var: requests_total
 - sample:
     cache_fill_pct:
-      uniform:
-      - 60.0
-      - 90.0
+      gauss: [74.0, 2.5]
+      clamp: [60.0, 90.0]
       round: 1
 - metric:
     name: cdn.cache_fill_pct

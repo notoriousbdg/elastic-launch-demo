@@ -1,0 +1,37 @@
+name: "GT aws_rds_otel: freeable_memory_low"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-AWSRDS-FREEABLE-MEMORY-LOW
+sensor_type: impact_key_probe
+affected_services:
+  - gt-awsrds-aws-svc-1
+cascade_services:
+  - gt-awsrds-aws-svc-2
+description: "Tests impact_key freeable_memory_low on generator aws_rds_otel."
+investigation_notes: |-
+  1. Verify aws_rds_otel is active and reporting metrics.
+  2. Check that the freeable_memory_low metric has reached the trigger value (268435456.0).
+  3. Confirm generator_impact for aws_rds_otel.freeable_memory_low is set to 268435456.0.
+  4. Look for correlated changes in service gt-awsrds-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_freeable_memory_low_baseline
+error_message: "GT-PROBE: gen=aws_rds_otel key=freeable_memory_low value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=aws_rds_otel
+  impact_key: freeable_memory_low
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 268435456.0
+  svc_name: gt-awsrds-aws-svc-1
+rca_clues:
+  gt-awsrds-aws-svc-1:
+    probe.generator: aws_rds_otel
+    probe.impact_key: freeable_memory_low
+    probe.trigger_value: 268435456.0
+  gt-awsrds-aws-svc-2:
+    probe.upstream_generator: aws_rds_otel
+    probe.upstream_key: freeable_memory_low
+generator_impact:
+  aws_rds_otel:
+    freeable_memory_low: 268435456.0

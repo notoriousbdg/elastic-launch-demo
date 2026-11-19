@@ -1,0 +1,48 @@
+name: Identity Store Pool Exhaustion
+subsystem: platform
+vehicle_section: platform_pipeline
+error_type: IDENTITYSTORE-POOL-EXHAUSTION
+sensor_type: connection_pool
+affected_services: [session-service]
+cascade_services: [edge-gateway]
+
+description: >
+  The synthetic Supabase-backed identity store used by session-service has exhausted its
+  connection pool for project {supabase_project}, causing slow queries and failed identity lookups.
+
+investigation_notes: |
+  1. Search for body.text containing *IDENTITYSTORE-POOL-EXHAUSTION* to find the affected project.
+  2. Check session-service session.pool_exhaustion_pct for the exhaustion spike.
+  3. Confirm supabase_otel supavisor_pool_exhausted, postgrest_database_pool_timeouts and
+     long_running_transaction are elevated for {supabase_project}.
+  4. Check edge-gateway gateway.request_latency_ms for cascading auth-lookup slowdowns.
+  5. Verify pool exhaustion clears once idle connections are reaped for {supabase_project}.
+
+remediation_action: reap_idle_connections
+
+error_message: |
+  IDENTITYSTORE-POOL-EXHAUSTION: project={supabase_project} pool_exhaustion={pool_exhaustion_pct}% slow_queries={slow_query_count}
+
+stack_trace: |
+  IdentityStorePoolExhaustionError: project={supabase_project}
+    at SessionService.lookupIdentity()
+    pool_exhaustion={pool_exhaustion_pct}% slow_queries={slow_query_count}
+
+fault_params:
+  supabase_project: {choice: [inttest-identity-prod, inttest-identity-staging]}
+  pool_exhaustion_pct: {uniform: [70.0, 98.0], round: 1}
+  slow_query_count: {randint: [50, 900]}
+
+rca_clues:
+  session-service:
+    session.pool_exhaustion_pct: {uniform: [70.0, 98.0], round: 1}
+    session.identity_lookup_error_pct: {uniform: [10.0, 55.0], round: 1}
+  edge-gateway:
+    gateway.request_latency_ms: {uniform: [300.0, 3500.0], round: 1}
+    gateway.auth_lookup_retry_flag: true
+
+generator_impact:
+  supabase_otel:
+    supavisor_pool_exhausted: {uniform: [0.96, 1.0]}
+    postgrest_database_pool_timeouts: {uniform: [1.0, 5.0]}
+    long_running_transaction: {uniform: [1000.0, 2400.0]}

@@ -6,67 +6,162 @@ sensor_type: session_pool
 affected_services:
 - storefront-gateway
 - order-management
+error_services: [storefront-gateway]
 cascade_services:
 - product-catalog
 - analytics-pipeline
-description: Surge of concurrent checkout sessions exhausting session pool capacity, causing checkout failures during peak
-  traffic
+description: A scalper bot in 203.0.113.0/24 exhausts the storefront checkout session pool because the edge WAF rule checkout-per-ip was left in count mode instead of block
+onset_delay_seconds: 10
 investigation_notes: |-
-  1. Check storefront-gateway logs for SESSION-STORM — active_sessions={active_sessions} vs max_sessions={max_sessions} shows utilization.
-  2. Identify the traffic source: check storefront.active_sessions metric trend — a sudden spike suggests a flash sale, bot storm, or marketing campaign.
-  3. Check for sticky session imbalance: if sessions are pinned to specific instances, some nodes may be at 100% while others are idle.
-  4. Review session TTL settings — sessions not expiring after abandonment keep slots occupied; default 30min TTL is too long for checkout flows.
-  5. Enable the rate limiter: if requests per IP exceed {rps_threshold}/s, apply throttling to prevent individual clients from monopolizing the pool.
-  6. As a circuit breaker, redirect overflow traffic to a static 'temporarily busy' page rather than queuing — queued requests timeout and hold slots longer.
+  Root cause: the edge WAF rate-based rule checkout-per-ip (300 requests per 5 minutes per IP) was switched from block to count by edge-security under CR-4127 during a false-positive investigation and never switched back. A scalper bot in {client_cidr} found the gap about two minutes later and now opens checkout sessions as fast as the gateway will accept them, so the {max_sessions}-slot checkout session pool fills over about 90 seconds (storefront.session_pool_utilization_pct from about 55% to about 99%) and real shoppers get rejected at checkout. Scaling is not the fix: the storefront-gateway HPA is already at 24/24 replicas and the pool limit is shared, and raising max_sessions only hands the bot more slots. This is not a flash sale or a marketing campaign: one /24 carries about 45% of checkout requests (normally under 1%), it is not sticky-session imbalance (instance skew stays around 4%), and it is not abandoned carts holding slots (idle sessions fall to about 5% because the bot keeps every session busy, normally about 18%).
+  Confirm:
+    - storefront-gateway "storefront.sessions pool=checkout" lines show waf_action=count (attributes.storefront.waf_checkout_rule_action) with top_client_cidr={client_cidr}, top_client_share_pct about 45 and status=ANOMALY; metrics.storefront.top_client_share_pct rises from about 0.8 to about 45 and metrics.storefront.session_pool_utilization_pct from about 55 to about 99, with metrics.storefront.active_sessions near {max_sessions}
+    - the storefront-gateway line "edge config change: waf rule checkout-per-ip ... action block -> count" (attributes.change.request CR-4127) comes about two minutes before the first SESSION-STORM line
+    - SESSION-STORM lines name client_ip={top_source_ip} inside {client_cidr}; order-management sees cart creation fall because the gateway rejects new checkout sessions, and analytics-pipeline counts about {bot_sessions_per_min} checkout_started events per minute from {client_cidr} with no page view before them
+  Remediation: put the rule back in block mode with opsctl patch waf-rule/checkout-per-ip --action block, then remove the sessions the bot already holds with opsctl delete session --selector client-cidr={client_cidr}. Blocking alone leaves the bot's sessions in the pool until their 1800s TTL; deleting them alone lets the bot refill the pool. The top-client share drops to about 0.8% within about 10 seconds of the block and pool utilization falls back to about 55% over about 30 seconds as the deleted slots are reused. The HPA scales storefront-gateway back from 24 to 10 replicas over about 5 minutes (normal scale-down stabilization).
 remediation_action: drain_session_pool
-error_message: '[StorefrontGateway] SESSION-STORM: active_sessions={active_sessions}/{max_sessions} ({session_util_pct}%)
-  new_sessions_rejected={rejected_sessions} rps={current_rps} threshold={rps_threshold} top_source_ip={top_source_ip}'
+remediation_command: |-
+  opsctl patch waf-rule/checkout-per-ip --action block
+  opsctl delete session --selector client-cidr=203.0.113.0/24
+error_message: 'ERROR storefront.checkout.sessions [SESSION-STORM] new checkout session rejected: pool checkout exhausted active={active_sessions}/{max_sessions} client_ip={top_source_ip} path=/api/v1/storefront/checkout request_id={request_id}'
 stack_trace: |-
-  SessionPoolExhaustedException: SESSION-STORM
-    at SessionManager.acquire(pool_id={pool_id})
-    at CheckoutController.initSession(request_id={request_id})
-  Active sessions:    {active_sessions}/{max_sessions} ({session_util_pct}%)
-  Rejected sessions:  {rejected_sessions}
-  Current RPS:        {current_rps}
-  RPS threshold:      {rps_threshold}
-  Top source IP:      {top_source_ip}
-  Session TTL:        1800s
+  Traceback (most recent call last):
+    File "/app/storefront/checkout.py", line 88, in init_session
+      session = self.sessions.acquire(pool_id="checkout", client_ip=request.client_ip)
+    File "/app/storefront/sessions.py", line 141, in acquire
+      raise SessionPoolExhausted("[SESSION-STORM] pool %s exhausted: %d/%d" % (pool_id, self.active, self.max_sessions))
+  storefront.sessions.SessionPoolExhausted: [SESSION-STORM] pool checkout exhausted: {active_sessions}/{max_sessions}
 correlation_attr:
-  key: storefront.session_pressure
-  value: true
+  key: storefront.waf_checkout_rule_action
+  value: count
 fault_params:
-  active_sessions: {randint: [48000, 55000]}
+  active_sessions: {randint: [49400, 50000]}
   max_sessions: 50000
-  session_util_pct: {randint: [94, 110]}
-  rejected_sessions: {randint: [100, 5000]}
-  current_rps: {randint: [5000, 20000]}
-  rps_threshold: 10000
-  top_source_ip:
-    format: "203.{a}.{b}.{c}"
-    a: {randint: [0, 255]}
-    b: {randint: [0, 255]}
-    c: {randint: [0, 255]}
-  pool_id: {format: "pool-{n}", n: {randint: [1, 4]}}
+  client_cidr: 203.0.113.0/24
+  top_source_ip: 203.0.113.47
   request_id: {format: "REQ-{n}", n: {randint: [100000, 999999]}}
+  bot_sessions_per_min: {randint: [3800, 5200]}
 rca_clues:
   storefront-gateway:
-    storefront.session_pool_utilization_pct: {uniform: [90, 100], round: 1}
-    storefront.new_sessions_rejected: {randint: [100, 2000]}
+    storefront.session_pool_utilization_pct: {uniform: [97, 100], round: 1}
+    storefront.new_sessions_rejected_per_min: {randint: [800, 2500]}
+    storefront.top_client_cidr: 203.0.113.0/24
+    storefront.top_client_share_pct: {uniform: [42, 48], round: 1}
+    storefront.waf_checkout_rule_action: count
+    storefront.hpa_replicas: 24
+    storefront.idle_session_pct: {uniform: [3, 7], round: 1}
+    storefront.instance_session_skew_pct: {uniform: [2, 6], round: 1}
   order-management:
-    order.cart_creation_rate_drop_pct: {uniform: [20, 70], round: 1}
-    order.checkout_queue_depth: {randint: [50, 500]}
+    order.cart_creation_rate_drop_pct: {uniform: [35, 60], round: 1}
+    order.upstream_503_per_min: {randint: [600, 2200]}
   product-catalog:
-    catalog.request_queue_depth: {randint: [200, 2000]}
-    catalog.p99_latency_ms: {randint: [2000, 10000]}
+    catalog.checkout_sku_reads_per_min: {randint: [18000, 30000]}
   analytics-pipeline:
-    analytics.session_event_spike: true
-    analytics.ingest_rate_multiplier: {uniform: [3, 10], round: 1}
+    analytics.checkout_sessions_without_page_views: {randint: [3800, 5200]}
+    analytics.page_views_per_min: {uniform: [3300, 3500], round: 0}
+cascade_messages:
+  order-management:
+    - severity: WARN
+      message: '{{"level":"warn","ts":"{iso_now}","logger":"cart","caller":"cart/handler.go:142","msg":"cart create failed: storefront-gateway returned 503 (checkout session pool exhausted)","request_id":"{request_id}","upstream":"storefront-gateway","status":503}}'
+  product-catalog:
+    - severity: WARN
+      message: '[http-nio-8080-exec-37] WARN  c.e.catalog.api.ProductController - product detail reads for limited-release SKUs at 6.1x normal rate; 92% from X-Forwarded-For 203.0.113.0/24 via storefront-gateway'
+  analytics-pipeline:
+    - severity: WARN
+      message: 'WARNING analytics.sessions: {bot_sessions_per_min} checkout_started events/min from 203.0.113.0/24 with no preceding page_view; flagged as non-human traffic'
+fault_scope:
+  cluster: ecommerce-eks-cluster
+  workloads: [storefront-gateway, order-management]
+infrastructure_events:
+  - service: storefront-gateway
+    severity: INFO
+    offset_seconds: -120
+    body: 'edge config change: waf rule checkout-per-ip (rate-based, 300 requests/5min per IP, web-acl storefront-edge) action block -> count by edge-security (CR-4127): false-positive investigation for corporate NAT egress'
+    attributes:
+      user.name: edge-security
+      change.request: CR-4127
+      operation: waf_rule_update
+      change.target: waf-rule/checkout-per-ip
+      change.summary: 'checkout-per-ip action: block -> count'
+      storefront.waf_checkout_rule_action: count
+remediation_effects:
+  log_taper_seconds: 20
+  log_events:
+    - service: storefront-gateway
+      severity: INFO
+      offset_seconds: 0
+      body: '[CHG] CHANGE APPLIED opsctl patch waf-rule/checkout-per-ip --action block by {actor}: web-acl storefront-edge rule checkout-per-ip action count -> block (300 requests/5min per IP); 203.0.113.0/24 now over the limit and blocked at the edge'
+      attributes:
+        operation: change_applied
+        change.target: waf-rule/checkout-per-ip
+        storefront.waf_checkout_rule_action: block
+    - service: storefront-gateway
+      severity: INFO
+      offset_seconds: 1
+      body: '[CHG] CHANGE APPLIED opsctl delete session --selector client-cidr=203.0.113.0/24 by {actor}: 22,140 checkout sessions from 203.0.113.0/24 deleted, slots returned to pool checkout'
+      attributes:
+        operation: change_applied
+        change.target: session
+        storefront.sessions_deleted: 22140
+    - service: storefront-gateway
+      severity: INFO
+      offset_seconds: 12
+      body: 'storefront.edge waf rule checkout-per-ip blocking 203.0.113.0/24: 4,812 requests blocked in the last minute, top_client_share_pct back under 1'
+      attributes:
+        operation: waf_rule_status
+        storefront.waf_checkout_rule_action: block
+    - service: storefront-gateway
+      severity: INFO
+      offset_seconds: 30
+      body: 'storefront.sessions pool=checkout utilization back to 55% (27,400/50000), no new sessions rejected in the last 30s'
+      attributes:
+        operation: session_pool_status
+    - service: storefront-gateway
+      severity: INFO
+      offset_seconds: 300
+      body: 'horizontal-pod-autoscaler storefront-gateway scaled down 24 -> 10 replicas after the 300s stabilization window (cpu below target)'
+      attributes:
+        operation: hpa_scale
+        storefront.hpa_replicas: 10
+  verification:
+    - signal: storefront.session_pool_utilization_pct
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "storefront-gateway"'
+      field: 'metrics.storefront.session_pool_utilization_pct'
+      expect: 'falls from about 99% back to about 55% over about 30s after the block and session delete'
+      within_seconds: 90
+    - signal: storefront.top_client_share_pct
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "storefront-gateway"'
+      field: 'metrics.storefront.top_client_share_pct'
+      expect: 'drops from about 45% to about 0.8% within about 10s of the block'
+      within_seconds: 60
+    - signal: SESSION-STORM lines
+      from: 'logs.otel.ecommerce'
+      where: 'body.text LIKE "*SESSION-STORM*"'
+      expect: 'no new lines about 20s after the fix'
+      within_seconds: 60
+    - signal: WAF checkout rule action
+      from: 'logs.otel.ecommerce'
+      where: 'resource.attributes.service.name == "storefront-gateway"'
+      field: 'attributes.storefront.waf_checkout_rule_action'
+      expect: 'count while the bot is filling the pool; block after the fix'
+      within_seconds: 30
 business_impact:
   - kpi: business.conversion_rate_pct
-    factor: {uniform: [0.20, 0.45]}
+    value: {uniform: [0.67, 0.77], round: 2}
   - kpi: business.orders_placed_per_min
-    factor: {uniform: [0.25, 0.50]}
+    value: {uniform: [31.62, 36.38]}
   - kpi: business.sessions_per_min
-    factor: {uniform: [0.30, 0.55]}
+    value: {uniform: [725.4, 834.6]}
   - kpi: business.cancel_rate_pct
     factor: {uniform: [2.0, 4.0]}
+
+generator_impact:
+  nginx_otel:
+    high_active_connections: 500.0
+  kubernetes_otel:
+    hpa_at_max_replicas: 1.0
+generator_hold_seconds: {nginx_otel: 30, kubernetes_otel: 300}
+# dependents degrade after the component at fault, in dependency order
+service_lag_seconds: {order-management: 20, product-catalog: 30, analytics-pipeline: 40}

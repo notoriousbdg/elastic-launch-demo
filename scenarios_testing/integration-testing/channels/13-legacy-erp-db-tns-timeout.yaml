@@ -1,0 +1,77 @@
+name: Legacy Erp Db Tns Timeout
+subsystem: database
+vehicle_section: database_pipeline
+error_type: ERPDB-TNS-TIMEOUT
+sensor_type: response_latency
+affected_services:
+- legacy-web-tier
+cascade_services:
+- billing-service
+description: 'The synthetic Oracle ERP database behind legacy-web-tier is hitting
+  TNS listener timeouts on {oracle_service}, causing slow queries and deadlocks on
+  order lookups.
+
+  '
+investigation_notes: "1. Search for body.text containing *ERPDB-TNS-TIMEOUT* to find\
+  \ the affected TNS service.\n2. Check legacy-web-tier legacyweb.response_time_ms\
+  \ for the resulting query slowdown.\n3. Confirm oracle_otel slow_query_fraction/slow_query_ms/deadlock_rate/connection_timeout_rate\n\
+  \   rise together for {oracle_service}.\n4. Check billing-service billing.settlement_latency_ms\
+  \ for cascading delay in ledger lookups.\n5. Verify timeouts clear once the TNS\
+  \ listener is restarted for {oracle_service}.\n"
+remediation_action: restart_tns_listener
+error_message: 'ERPDB-TNS-TIMEOUT: tns_service={oracle_service} timeout_ms={tns_timeout_ms}
+  deadlocks={deadlock_count}
+
+  '
+stack_trace: "OracleTnsTimeoutError: tns_service={oracle_service}\n  at LegacyWebTier.queryErpOrders()\n\
+  \  timeout_ms={tns_timeout_ms} deadlocks={deadlock_count}\n"
+fault_params:
+  oracle_service:
+    choice:
+    - ERPPROD.inttest
+    - ERPREPORT.inttest
+  tns_timeout_ms:
+    randint:
+    - 5000
+    - 60000
+  deadlock_count:
+    randint:
+    - 1
+    - 40
+rca_clues:
+  legacy-web-tier:
+    legacyweb.response_time_ms:
+      uniform:
+      - 800.0
+      - 8000.0
+      round: 1
+    legacyweb.tns_timeout_flag: true
+  billing-service:
+    billing.settlement_latency_ms:
+      uniform:
+      - 400.0
+      - 6000.0
+      round: 1
+    billing.ledger_lookup_error_pct:
+      uniform:
+      - 10.0
+      - 45.0
+      round: 1
+generator_impact:
+  oracle_otel:
+    hard_parse_ratio_high:
+      uniform:
+      - 0.3
+      - 0.8
+    buffer_cache_hit_ratio_low:
+      randint:
+      - 5000
+      - 60000
+    enqueue_deadlocks_detected:
+      uniform:
+      - 5.0
+      - 30.0
+    session_utilisation_high:
+      uniform:
+      - 0.2
+      - 0.7

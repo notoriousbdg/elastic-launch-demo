@@ -1,0 +1,46 @@
+name: Waf Block Rate Spike
+subsystem: platform
+vehicle_section: platform_pipeline
+error_type: WAF-BLOCK-SPIKE
+sensor_type: health_check
+affected_services: [edge-gateway]
+cascade_services: [session-service]
+
+description: >
+  The synthetic AWS WAF in front of edge-gateway is blocking a spike of inbound requests,
+  starving legitimate synthetic traffic and causing downstream session lookups to stall.
+
+investigation_notes: |
+  1. Search for body.text containing *WAF-BLOCK-SPIKE* to locate the affected rule and window.
+  2. Check edge-gateway gateway.waf_block_rate_pct for the elevated block percentage.
+  3. Confirm aws_waf_otel block_rate and records_per_cycle metrics rise on rule {waf_rule}.
+  4. Check session-service session.pool_exhaustion_pct for cascading pressure from retried requests.
+  5. Verify the block rate returns to baseline after the rule is tuned or the source IP set is cleared.
+
+remediation_action: tune_waf_rule
+
+error_message: |
+  WAF-BLOCK-SPIKE: rule={waf_rule} block_rate={block_rate_pct}% blocked_requests={blocked_requests}
+
+stack_trace: |
+  WafBlockRateSpikeError: rule={waf_rule}
+    at EdgeGateway.wafFilter()
+    block_rate={block_rate_pct}% blocked_requests={blocked_requests}
+
+fault_params:
+  waf_rule: {choice: [rate-limit-rule, geo-block-rule, sqli-signature-rule, bot-control-rule]}
+  block_rate_pct: {uniform: [40.0, 90.0], round: 1}
+  blocked_requests: {randint: [500, 8000]}
+
+rca_clues:
+  edge-gateway:
+    gateway.waf_block_rate_pct: {uniform: [40.0, 90.0], round: 1}
+    gateway.legit_request_reject_count: {randint: [100, 2000]}
+  session-service:
+    session.pool_exhaustion_pct: {uniform: [50.0, 90.0], round: 1}
+    session.retry_storm_flag: true
+
+generator_impact:
+  aws_waf_otel:
+    block_rate: {uniform: [0.4, 0.9]}
+    records_per_cycle: {randint: [200, 900]}

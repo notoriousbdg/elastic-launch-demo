@@ -24,109 +24,110 @@ constants:
   - ORDERS05
   - DELVRY07
   - MATMAS05
-  - INVOIC02
-  STATUS_CODES:
-  - '53'
-  - '53'
-  - '53'
-  - '51'
-  WIN_SERVICES:
-  - SAPHostControl
-  - SAPHostExec
-  - MSSQLSERVER
-  - MSExchangeIS
-  EVENT_IDS:
-  - 7036
-  - 7036
-  - 7036
-  - 4672
-  - 4624
+  - WMMBXY
+  - LOIPRO01
 state:
-  _idoc_total:
+  _idocs_total:
     init: 0
-  _last_health_report:
-    init: now
+  # Service crashes seen so far (all incidents) and in the current incident.
+  _crash_total:
+    init: 0
+  _crash_seen:
+    init: 0
 steps:
 - sample:
-    idoc_type:
-      choice: IDOC_TYPES
-    idoc_id:
-      expr: f'IDOC-{rand.randint(1000000, 9999999)}'
-    status:
-      choice: STATUS_CODES
-- log:
-    level: INFO
-    message: '[ERP] idoc_processed type={idoc_type} idoc={idoc_id} status_code={status} system=SAP-PRD'
-    attrs:
-      operation: idoc_processed
-      erp.idoc_type:
-        var: idoc_type
-      erp.idoc_id:
-        var: idoc_id
-      erp.status_code:
-        var: status
+    # Per-channel fault intensity: ramps 0->1 once the fault reaches this service, drains 1->0 after its fix.
+    f14:
+      expr: "min(1.0, max(0.0, elapsed.get(14, 0) - lag.get(14, 0)) / 120.0) if 14 in all_active else (max(0.0, 1.0 - since_fix.get(14, 0) / 120.0) if 14 in fixed_channels else 0.0)"
+    f17:
+      expr: "min(1.0, max(0.0, elapsed.get(17, 0) - lag.get(17, 0)) / 30.0) if 17 in all_active else (max(0.0, 1.0 - since_fix.get(17, 0) / 60.0) if 17 in fixed_channels else 0.0)"
 - sample:
-    svc:
-      choice: WIN_SERVICES
-    event_id:
-      choice: EVENT_IDS
-- log:
-    level: DEBUG
-    message: '[ERP-WIN] event_id={event_id} source=''Service Control Manager'' channel=System service={svc} message=''The
-      {svc} service entered the running state.'''
-    attrs:
-      operation: windows_event_log
-      winlog.event_id:
-        var: event_id
-      winlog.source: Service Control Manager
-      winlog.channel: System
-      winlog.service_name:
-        var: svc
-- every:
-    seconds: 10
-    state_key: _last_health_report
-    steps:
-    - sample:
-        uptime_h:
-          randint:
-          - 120
-          - 8500
-        cpu_pct:
-          randint:
-          - 8
-          - 45
-    - log:
-        level: INFO
-        message: '[ERP] host_health host=mfg-sap-bridge-01 os=''Windows Server 2022'' uptime_h={uptime_h} cpu_pct={cpu_pct}
-          status=NOMINAL'
-        attrs:
-          operation: host_health
-          erp.host: mfg-sap-bridge-01
-          erp.os: Windows Server 2022
+    bridge_build:
+      expr: "'2.8.0' if 14 in all_active else '2.7.4'"
+    # 2.8.0 leaks ~25-40 MB per IDoc batch and dies at ~3.6 GB, roughly every 3.5 minutes.
+    private_mb:
+      expr: "int(650.0 + (elapsed.get(14, 0) % 210.0) / 210.0 * 2950.0) if 14 in all_active else int(rand.gauss(760.0, 60.0))"
+    crash_this_incident:
+      expr: "int(elapsed.get(14, 0) / 210.0) if 14 in all_active else 0"
+    service_state:
+      expr: "'START_PENDING' if 14 in all_active and (elapsed.get(14, 0) % 210.0) < 8.0 and elapsed.get(14, 0) > 210.0 else 'RUNNING'"
+    idoc_backlog:
+      expr: "int(rand.randint(0, 15) + f14 * rand.randint(80, 235))"
+    goods_movements_per_min:
+      expr: "int(rand.randint(40, 80) * (1.0 - f17))"
+    txn_latency_ms:
+      expr: "int(rand.uniform(80.0, 240.0) + f14 * rand.uniform(400.0, 1600.0))"
 - counter:
-    state_key: _idoc_total
+    state_key: _crash_total
+    by:
+      expr: "max(0, crash_this_incident - _crash_seen)"
+- counter:
+    state_key: _crash_seen
+    by:
+      expr: "(max(_crash_seen, crash_this_incident) - _crash_seen) if 14 in all_active else -_crash_seen"
+- sample:
+    restarts:
+      expr: "_crash_total"
+- counter:
+    state_key: _idocs_total
     by: 1
 - metric:
     name: erp.idocs_processed
     value:
-      var: _idoc_total
+      var: _idocs_total
     unit: idocs
 - metric:
-    name: erp.queue_depth
+    name: erp.rfc_worker_private_mb
     value:
-      randint:
-      - 2
-      - 35
-    unit: messages
+      var: private_mb
+    unit: MB
+    attrs:
+      winlog.service_name: MfgIdocBridgeSvc
+- metric:
+    name: erp.service_restarts
+    value:
+      var: restarts
+    unit: restarts
+- metric:
+    name: erp.idoc_backlog
+    value:
+      var: idoc_backlog
+    unit: idocs
+- metric:
+    name: erp.goods_movements_posted_per_min
+    value:
+      var: goods_movements_per_min
+    unit: postings/min
 - metric:
     name: erp.transaction_latency_ms
     value:
-      if_active:
-        randint:
-        - 2000
-        - 18000
-      else:
-        randint:
-        - 80
-        - 450
+      var: txn_latency_ms
     unit: ms
+- log:
+    level: INFO
+    message: '[ERP-WIN] service_status service=MfgIdocBridgeSvc host=mfg-sap-bridge-01 build={bridge_build} state={service_state} rfc_worker_private_mb={private_mb} restarts={restarts} idoc_backlog={idoc_backlog}'
+    attrs:
+      operation: service_status
+      winlog.service_name: MfgIdocBridgeSvc
+      erp.bridge_build:
+        var: bridge_build
+      erp.rfc_worker_private_mb:
+        var: private_mb
+      erp.idoc_backlog:
+        var: idoc_backlog
+- sample:
+    idoc_type:
+      choice: IDOC_TYPES
+    idoc_id:
+      expr: f'{rand.randint(1000000000000000, 9999999999999999)}'
+- when: "service_state == 'RUNNING'"
+  log:
+    level: INFO
+    message: '[ERP] idoc_processed type={idoc_type} idoc={idoc_id} status_code=53 system=SAP-PRD client=100 latency_ms={txn_latency_ms}'
+    attrs:
+      operation: idoc_processed
+      erp.idoc_type:
+        var: idoc_type
+      erp.idoc_number:
+        var: idoc_id
+      erp.idoc_status: '53'

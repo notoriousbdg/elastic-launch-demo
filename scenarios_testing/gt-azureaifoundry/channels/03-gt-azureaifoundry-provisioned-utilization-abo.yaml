@@ -1,0 +1,37 @@
+name: "GT azure_ai_foundry: provisioned_utilization_above_threshold"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-AZUREAIFOUNDRY-PROVISIONED-UTILIZAT
+sensor_type: impact_key_probe
+affected_services:
+  - gt-azureaifoundry-aws-svc-1
+cascade_services:
+  - gt-azureaifoundry-aws-svc-2
+description: "Tests impact_key provisioned_utilization_above_threshold on generator azure_ai_foundry."
+investigation_notes: |-
+  1. Verify azure_ai_foundry is active and reporting metrics.
+  2. Check that the provisioned_utilization_above_threshold metric has reached the trigger value (637.0).
+  3. Confirm generator_impact for azure_ai_foundry.provisioned_utilization_above_threshold is set to 637.0.
+  4. Look for correlated changes in service gt-azureaifoundry-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_provisioned_utilization_above_threshold_baseline
+error_message: "GT-PROBE: gen=azure_ai_foundry key=provisioned_utilization_above_threshold value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=azure_ai_foundry
+  impact_key: provisioned_utilization_above_threshold
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 637.0
+  svc_name: gt-azureaifoundry-aws-svc-1
+rca_clues:
+  gt-azureaifoundry-aws-svc-1:
+    probe.generator: azure_ai_foundry
+    probe.impact_key: provisioned_utilization_above_threshold
+    probe.trigger_value: 637.0
+  gt-azureaifoundry-aws-svc-2:
+    probe.upstream_generator: azure_ai_foundry
+    probe.upstream_key: provisioned_utilization_above_threshold
+generator_impact:
+  azure_ai_foundry:
+    provisioned_utilization_above_threshold: 637.0

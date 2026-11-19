@@ -6,31 +6,40 @@ sensor_type: session_manager
 affected_services:
 - customer-portal
 - order-gateway
+error_services:
+- customer-portal
 cascade_services:
 - audit-logger
-description: Customer trading sessions expiring mid-transaction causing order failures
+description: Customer trading sessions are lost mid-transaction long before the idle timeout, logging users out and cancelling their working orders
+onset_delay_seconds: 10
+service_lag_seconds: {order-gateway: 30, audit-logger: 45}
 investigation_notes: |-
-  1. Check customer-portal logs for PORTAL-SESSION-TIMEOUT — note session_id, user_id, idle time, and the in-progress operation at the time of expiry.
-  2. Query FROM logs.otel.financial.* | WHERE body.text LIKE "*PORTAL-SESSION-TIMEOUT*" | STATS count() BY operation to find which workflow triggers the most mid-session timeouts.
-  3. Inspect order-gateway for orders cancelled on disconnect — confirm the cancel reason is logged as SESSION_EXPIRED for each pending_orders count.
-  4. Check audit-logger for the SSO/SAML heartbeat failures preceding the timeout — a missing heartbeat often indicates upstream IdP latency rather than idle user.
-  5. Investigate whether session max-age (900s) is too short for the affected operation; if order_submit or position_close operations regularly exceed 900s, request a session extension policy review.
-remediation_action: extend_session_idle_timeout_for_trading_ops
-error_message: '[PORTAL] PORTAL-SESSION-TIMEOUT: session={session_id} user={user_id} idle={session_age_s}s max=900s operation={operation}'
+  Root cause: the portal session store, Redis portal-sessions, was upgraded to 7.2 (CR-4381) and the upgrade applied the new parameter group's default maxmemory-policy allkeys-lru (it was volatile-lru). The instance holds two kinds of keys: sessions, which have no Redis TTL because the portal enforces the 900 s idle timeout itself, and the quote and portfolio cache, whose keys all carry a TTL. It runs at maxmemory by design, and under volatile-lru only the TTL'd cache keys are evicted. Under allkeys-lru the least recently used keys of either kind go, so a session idle for {session_age_s}s (well under the 900 s limit) is evicted and the next request finds no session: the user is logged out in the middle of {operation} and order-gateway cancels {pending_orders} working orders on disconnect. Idle expiries at 900 s continue at their normal rate, the IdP is healthy (SSO heartbeat failures 0 and IdP response 80-250 ms; heartbeat failures above zero or responses above 1000 ms would point at the IdP), and Redis memory at maxmemory is normal for this instance, not a new symptom.
+  Confirm:
+    - customer-portal session_summary lines (body.text LIKE "*session_summary*") show attributes.redis.maxmemory_policy=allkeys-lru and attributes.session.evicted_per_min at 60-300 (0 normally), while attributes.session.expired (idle timeouts) stays at 0-5
+    - metrics.customer_portal.session_evictions_per_min at 60-300 and metrics.customer_portal.active_sessions down by about a third from ~350; Redis evicted keys rise above their alert threshold as logged-out users sign in again and re-warm the cache
+    - order-gateway cancels with reason=SESSION_EXPIRED (metrics.order_gateway.session_expire_cancels_per_min) start together with the evictions
+    - the customer-portal line "[PORTAL] session_store redis://portal-sessions upgraded ... maxmemory-policy volatile-lru -> allkeys-lru" (attributes.operation=config_change, attributes.change.request=CR-4381) comes before the first PORTAL-SESSION-TIMEOUT line
+  Remediation: opsctl patch redis/portal-sessions --maxmemory-policy volatile-lru sets the policy with CONFIG SET (effective at once, no restart) and in the parameter group so it survives the next restart. Session evictions stop within about 20 s; active sessions recover over 2-3 minutes as users log back in. Extending the session idle timeout does not help (sessions are lost after 40-300 s idle, far below 900 s), and adding memory only delays the evictions because the cache grows into it.
+remediation_action: restore_session_redis_eviction_policy
+remediation_command: |-
+  opsctl patch redis/portal-sessions --maxmemory-policy volatile-lru
+error_message: '[PORTAL] PORTAL-SESSION-TIMEOUT: session={session_id} user={user_id} idle={session_age_s}s max_idle=900s operation={operation} reason=session key not found in redis://portal-sessions'
 stack_trace: |-
   === SESSION DETAILS ===
   session={session_id}  user={user_id}
-    created=14:02:17Z  last_activity=14:17:42Z  idle={session_age_s}s  max=900s
-    ip=10.2.0.47  user_agent=Bloomberg-Terminal/2026.1
-    auth_method=SSO/SAML  mfa=TOTP
+    idle={session_age_s}s  max_idle=900s  (idle timeout not reached)
+    auth_method=SSO/SAML  mfa=TOTP  idp_assertion=valid
+  --- SESSION STORE ---
+    store=redis://portal-sessions:6379/0  GET sess:{session_id} -> (nil)
+    key_ttl=none (idle timeout enforced by portal)  used_memory=maxmemory (quote cache, by design)
   --- PENDING OPERATIONS ---
     operation={operation}  status=IN_PROGRESS
     pending_orders={pending_orders}
-    unsaved_changes=true  last_heartbeat=892s_ago
+    unsaved_changes=true
   --- IMPACT ---
     orders_cancelled_on_disconnect={pending_orders}
-    portfolio_lock_released=true
-  ACTION: force_logout=true  cancel_pending=true  alert=PORTAL-SESSION-TIMEOUT
+    redirect=/login?reason=session_expired
 correlation_attr: {}
 fault_params:
   session_id:
@@ -39,19 +48,83 @@ fault_params:
   user_id:
     format: "USR-{n}"
     n: {randint: [10000, 99999]}
-  session_age_s: {randint: [1800, 7200]}
-  operation: {choice: [order_submit, portfolio_view, position_close, margin_check]}
+  session_age_s: {randint: [40, 300]}
+  operation: {choice: [order_submit, position_close]}
   pending_orders: {randint: [1, 10]}
 rca_clues:
   customer-portal:
-    portal.session_idle_age_s: {randint: [900, 7200]}
+    portal.session_idle_age_s: {randint: [40, 300]}
+    portal.session_store_miss: true
     portal.cancelled_on_disconnect: {randint: [1, 10]}
   order-gateway:
     oms.session_expire_cancels: {randint: [1, 50]}
     oms.in_progress_at_expiry: {randint: [1, 10]}
   audit-logger:
-    audit.sso_heartbeat_failures: {randint: [1, 20]}
+    audit.sso_heartbeat_failures: 0
+    audit.idp_response_ms: {randint: [80, 250]}
     audit.session_force_logout_events: {randint: [1, 50]}
+cascade_messages:
+  order-gateway:
+    - severity: WARN
+      message: '[OMS] cancel_on_disconnect user={user_id} session={session_id} reason=SESSION_EXPIRED cancelled={pending_orders} working orders'
+  audit-logger:
+    - severity: INFO
+      message: '[AUDIT] event_logged stream=auth type=SESSION_FORCE_LOGOUT user={user_id} session={session_id} idle_s={session_age_s} idp_status=OK'
+fault_scope:
+  cluster: finserv-aks-cluster
+  workloads: [customer-portal, order-gateway]
+infrastructure_events:
+  - service: customer-portal
+    severity: INFO
+    offset_seconds: -120
+    body: '[PORTAL] session_store redis://portal-sessions upgraded 6.2.14 -> 7.2.4 with parameter group redis7-default: maxmemory-policy volatile-lru -> allkeys-lru, maxmemory unchanged; applied by platform-data (CR-4381)'
+    attributes:
+      user.name: platform-data
+      change.request: CR-4381
+      operation: config_change
+      change.summary: 'maxmemory-policy: volatile-lru -> allkeys-lru (redis 6.2.14 -> 7.2.4)'
+      redis.maxmemory_policy: allkeys-lru
+remediation_effects:
+  log_events:
+    - service: audit-logger
+      severity: INFO
+      offset_seconds: 1
+      body: '[AUDIT] event_logged stream=change-mgmt type=CHANGE_APPLIED cmd="opsctl patch redis/portal-sessions --maxmemory-policy volatile-lru" actor={actor}: redis/portal-sessions maxmemory-policy allkeys-lru -> volatile-lru'
+      attributes:
+        operation: change_applied
+        audit.stream: change-mgmt
+        change.target: redis/portal-sessions
+    - service: customer-portal
+      severity: INFO
+      offset_seconds: 2
+      body: '[PORTAL] session_store redis://portal-sessions CONFIG SET maxmemory-policy volatile-lru OK (was allkeys-lru), persisted to parameter group; sessions without TTL are no longer eviction candidates'
+      attributes:
+        operation: config_change
+        redis.maxmemory_policy: volatile-lru
+  verification:
+    - signal: customer_portal.session_evictions_per_min
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "customer-portal"'
+      field: 'metrics.customer_portal.session_evictions_per_min'
+      expect: 'back to 0 within about 20 s (was 60-300 per minute)'
+      within_seconds: 60
+    - signal: customer_portal.active_sessions
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "customer-portal"'
+      field: 'metrics.customer_portal.active_sessions'
+      expect: 'back to about 350 over 2-3 minutes as users log back in (dipped to about 230)'
+      within_seconds: 210
+    - signal: PORTAL-SESSION-TIMEOUT lines
+      from: 'logs.otel.finserv'
+      where: 'body.text LIKE "*PORTAL-SESSION-TIMEOUT*"'
+      expect: '0 new lines'
+      within_seconds: 60
+    - signal: session store eviction policy
+      from: 'logs.otel.finserv'
+      where: 'resource.attributes.service.name == "customer-portal" AND body.text LIKE "*session_summary*"'
+      field: 'attributes.redis.maxmemory_policy'
+      expect: 'volatile-lru on every line since the fix; allkeys-lru stops appearing'
+      within_seconds: 60
 business_impact:
   - kpi: business.order_flow_per_min
     factor: {uniform: [0.30, 0.60]}
@@ -61,3 +134,8 @@ business_impact:
     factor: {uniform: [0.88, 0.97]}
   - kpi: business.ops_alerts_per_min
     factor: {uniform: [2.0, 4.5]}
+
+generator_impact:
+  redis_otel:
+    high_eviction_rate: 350.0
+generator_hold_seconds: {redis_otel: 20}

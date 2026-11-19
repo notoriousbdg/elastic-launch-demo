@@ -9,17 +9,18 @@ affected_services:
 cascade_services:
 - cloud-load-balancer
 - cloud-dns-resolver
-description: Cloud NAT gateway running out of available source ports
+description: Cloud NAT gateway gcpnet-nat-central1 has too few source ports per VM, so VMs hit 93-99% port utilization and outbound connections are dropped
 investigation_notes: |-
-  Root cause: Cloud NAT allocates a minimum of 64 source ports per VM by default. With high connection rates (e.g., GKE pods making many external API calls), the 64-port-per-VM minimum is quickly exhausted. Each unique (src_ip, src_port, dst_ip, dst_port, protocol) tuple consumes one port. Check current allocation:
-    gcloud compute routers nats describe <nat> --router=<router> --region=<region>
-    Console > Network Services > Cloud NAT > <gateway> > Monitoring tab (port utilization)
-  Remediation: Increase minimum ports per VM:
-    gcloud compute routers nats update <nat> --router=<router> --region=<region> --min-ports-per-vm=2048
-  Or enable Dynamic Port Allocation (DPA) for bursty workloads:
-    gcloud compute routers nats update <nat> --router=<router> --region=<region> --enable-dynamic-port-allocation --min-ports-per-vm=64 --max-ports-per-vm=65536
-  Also add more NAT IPs to increase the total port pool.
+  Root cause: change nat-dpa-v1.3-experimental (CR-7342, user.name=platform-netconfig) was applied to Cloud NAT gateway {nat_gateway_name} ({gcp_region}, project gcpnet-prod-001). It set min-ports-per-vm from 1024 to 64 with dynamic port allocation off, so each VM now has only 64 source ports. The busiest VM ({nat_top_vm}) holds {nat_ports_used} of {nat_ports_total} ports ({nat_port_util_pct}% utilization) and new outbound connections are dropped.
+  The data rules out a shortage of NAT IPs or a traffic surge: nat.allocated_ips is unchanged at 5, nat.new_connections stays in its usual 1000-10000/s range, and the other gateways (gcpnet-nat-east1, gcpnet-nat-europe1) stay at 20-40% utilization with 1024 min ports per VM. It also rules out endpoint-independent mapping: nat.mapping_failures stays near 0 and nat.endpoint_independent_mapping is false.
+  Confirm:
+    - cloud-nat-gateway, gateway {nat_gateway_name}: metrics.nat.port_utilization_pct 93-99 (normally 20-40); metrics.nat.ports_total = 64 (was 1024); metrics.nat.dropped_connections 50-500 (normally 0-5)
+    - logs.otel.gcpnet, operation=port_allocation: attributes.nat.min_ports_per_vm = 64, attributes.nat.dynamic_port_allocation = false, attributes.nat.status = ANOMALY
+    - the cloud-nat-gateway log "nat config change nat-dpa-v1.3-experimental applied" (attributes.infra.nat_config_rev = nat-dpa-v1.3-experimental) comes before the first NAT-PORT-EXHAUSTION line
+  Remediation: restore the 1024 ports per VM minimum on the gateway with opsctl patch nat/{nat_gateway_name} --region {gcp_region} --min-ports-per-vm 1024. Existing connections keep their ports, so the config applies without a restart; utilization of the larger pool is low at first (the top VM holds about 60 of 1024 ports) and climbs to the usual 20-40% within a minute as the retrying clients reconnect. Adding NAT IPs would not help, the limit is ports per VM.
 remediation_action: reset_nat_gateway
+remediation_command: |-
+  opsctl patch nat/gcpnet-nat-central1 --region us-central1 --min-ports-per-vm 1024
 error_message: 'cloudnat: NAT-PORT-EXHAUSTION gateway={nat_gateway_name} region={gcp_region} ports_used={nat_ports_used}/{nat_ports_total}
   utilization={nat_port_util_pct}% dropped_connections={nat_dropped_conns}/s top_vm={nat_top_vm}'
 stack_trace: |-
@@ -27,39 +28,109 @@ stack_trace: |-
   ----------------------------------
   Gateway:      {nat_gateway_name}
   Region:       {gcp_region}
-  Ports Used:   {nat_ports_used}/{nat_ports_total} ({nat_port_util_pct}%)
+  Ports Used:   {nat_ports_used}/{nat_ports_total} on top VM ({nat_port_util_pct}%)
   Dropped/s:    {nat_dropped_conns}
   Top Consumer: {nat_top_vm}
   Min Ports/VM: 64
-  Action: Increase minPortsPerVm or add NAT IP addresses
+  Action: Restore minPortsPerVm to 1024
 correlation_attr:
   key: infra.nat_config_rev
   value: nat-dpa-v1.3-experimental
 fault_params:
-  nat_gateway_name: {choice: [gcpnet-nat-central1, gcpnet-nat-east1, gcpnet-nat-europe1]}
-  gcp_region: {choice: [us-central1, us-east1, europe-west1]}
-  nat_ports_used: {randint: [60000, 64000]}
-  nat_ports_total: 64512
-  nat_port_util_pct: {uniform: [92.0, 99.5], round: 1}
+  nat_gateway_name: gcpnet-nat-central1
+  gcp_region: us-central1
+  nat_ports_used: 62
+  nat_ports_total: 64
+  nat_port_util_pct: 96.9
   nat_dropped_conns: {randint: [50, 500]}
-  nat_top_vm: {choice: [gke-node-pool-a-001, gke-node-pool-b-002, gke-node-pool-c-003]}
+  nat_top_vm: gke-node-pool-a-001
 rca_clues:
   cloud-nat-gateway:
     nat.min_ports_per_vm: 64
     nat.dynamic_port_allocation: false
+    nat.port_utilization_pct: 96.9
   vpc-network-manager:
     vpc.egress_failures: {randint: [50, 300]}
     vpc.affected_vms: {randint: [3, 12]}
   cloud-load-balancer:
     lb.external_api_timeouts: {randint: [20, 100]}
   cloud-dns-resolver:
-    dns.external_resolution_failures: {randint: [10, 80]}
+    dns.external_resolution_failures: {randint: [0, 2]}
+service_lag_seconds: {cloud-load-balancer: 30, cloud-dns-resolver: 60}
+cascade_messages:
+  cloud-load-balancer:
+    - severity: WARN
+      message: 'cloud-load-balancer: external API calls timing out through {nat_gateway_name}'
+fault_scope:
+  cluster: gcpnet-gke-central1
+  workloads: [cloud-nat-gateway, vpc-network-manager]
+infrastructure_events:
+  - service: cloud-nat-gateway
+    severity: INFO
+    offset_seconds: -90
+    body: 'cloudnat: nat config change nat-dpa-v1.3-experimental applied to gateway={nat_gateway_name} region={gcp_region}: min_ports_per_vm 1024 -> 64, dynamic_port_allocation=false; by platform-netconfig (CR-7342)'
+    attributes:
+      user.name: platform-netconfig
+      change.request: CR-7342
+      operation: nat_config_change
+      infra.nat_config_rev: nat-dpa-v1.3-experimental
+      nat.gateway: gcpnet-nat-central1
+      change.summary: 'min_ports_per_vm: 1024 -> 64'
+remediation_effects:
+  log_events:
+    - service: vpc-network-manager
+      severity: INFO
+      offset_seconds: 2
+      body: 'gcp-audit: logName=cloudaudit.googleapis.com/activity serviceName=compute.googleapis.com methodName=v1.compute.routers.patch resourceName=projects/gcpnet-prod-001/regions/us-central1/routers/gcpnet-router-central1/nats/gcpnet-nat-central1 principalEmail={actor} status=OK'
+      attributes:
+        operation: nat_config_change
+        nat.gateway: gcpnet-nat-central1
+    - service: cloud-nat-gateway
+      severity: INFO
+      offset_seconds: 8
+      body: 'cloudnat: gateway=gcpnet-nat-central1 config reloaded min_ports_per_vm=1024 (was 64); VM port pools are being re-allocated'
+      attributes:
+        operation: nat_config_change
+        nat.min_ports_per_vm: 1024
+  steady_attributes:
+    cloud-nat-gateway:
+      nat.min_ports_per_vm: 1024
+  log_taper_seconds: 60
+  verification:
+    - signal: nat.port_utilization_pct
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "cloud-nat-gateway" AND attributes.gateway == "gcpnet-nat-central1"'
+      field: 'metrics.nat.port_utilization_pct'
+      expect: 'back to 20-40 (was 93-99)'
+      within_seconds: 90
+    - signal: nat.ports_total
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "cloud-nat-gateway" AND attributes.gateway == "gcpnet-nat-central1"'
+      field: 'metrics.nat.ports_total'
+      expect: '1024 (was 64)'
+      within_seconds: 90
+    - signal: nat.dropped_connections
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "cloud-nat-gateway" AND attributes.gateway == "gcpnet-nat-central1"'
+      field: 'metrics.nat.dropped_connections'
+      expect: 'back to 0-5 (was 50-500)'
+      within_seconds: 90
+    - signal: NAT min ports per VM
+      from: 'logs.otel.gcpnet'
+      where: 'resource.attributes.service.name == "cloud-nat-gateway" AND attributes.nat.gateway == "gcpnet-nat-central1"'
+      field: 'attributes.nat.min_ports_per_vm'
+      expect: '1024 on every line logged since the fix; 64 stops appearing'
+      within_seconds: 90
 business_impact:
   - kpi: business.nat_port_exhaustion_rate_pct
     factor: {uniform: [8.0, 20.0]}
   - kpi: business.api_success_rate_pct
-    factor: {uniform: [0.55, 0.80]}
+    factor: {uniform: [0.55, 0.8]}
   - kpi: business.requests_per_min
-    factor: {uniform: [0.50, 0.75]}
+    value: {uniform: [1692600.0, 1947400.0]}
   - kpi: business.uptime_pct
     factor: {uniform: [0.88, 0.96]}
+generator_impact:
+  gcp_vpcflow_otel:
+    bytes_multiplier: 6.0
+    records_per_cycle: 150

@@ -1,0 +1,61 @@
+service: cache-tier
+sort_order: 3
+cloud_provider: aws
+cloud_region: us-east-1
+cloud_platform: aws_ec2
+cloud_availability_zone: us-east-1c
+subsystem: caching
+language: rust
+
+topology: []
+
+db_operations: []
+
+emit_fault_logs: true
+kpi_emitter: false
+
+constants:
+  KEYSPACES: [session, generator_state, fault_state]
+
+state:
+  _ops_total: {init: 0}
+  _last_summary: {init: now}
+
+steps:
+  - sample:
+      keyspace: {choice: KEYSPACES}
+      hit_ratio_pct:
+        if_active: {uniform: [20.0, 55.0], round: 1}
+        else: {uniform: [88.0, 99.5], round: 1}
+      eviction_count:
+        if_active: {randint: [500, 8000]}
+        else: {randint: [0, 50]}
+  - counter:
+      state_key: _ops_total
+      by: 1
+  - log:
+      level: INFO
+      message: '[cache-tier] cache_cycle keyspace={keyspace} hit_ratio={hit_ratio_pct}% evictions={eviction_count} total={_ops_total}'
+      attrs:
+        operation: cache_cycle
+        cache.keyspace: {var: keyspace}
+        cache.hit_ratio_pct: {var: hit_ratio_pct}
+        cache.eviction_count: {var: eviction_count}
+  - metric:
+      name: cache_tier.hit_ratio_pct
+      value: {var: hit_ratio_pct}
+      unit: '%'
+  - metric:
+      name: cache_tier.ops_per_sec
+      value: {uniform: [200.0, 3000.0], round: 1}
+      unit: ops/s
+  - every:
+      seconds: 15
+      state_key: _last_summary
+      steps:
+        - log:
+            level: INFO
+            message: '[cache-tier] summary total_ops={_ops_total} status=NOMINAL'
+            attrs:
+              operation: summary
+              cache.total_ops: {var: _ops_total}

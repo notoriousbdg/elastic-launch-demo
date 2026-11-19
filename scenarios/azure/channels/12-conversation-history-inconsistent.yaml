@@ -1,0 +1,134 @@
+name: Conversation History Inconsistent
+subsystem: database
+vehicle_section: database_pipeline
+error_type: COSMOS-HISTORY-INCONSISTENT
+sensor_type: health_check
+affected_services: [conversation-store, chat-orchestrator]
+error_services: [conversation-store]
+cascade_services: []
+
+description: Multi-region writes on the azureai-cosmos account produce conflicting conversation history with missing or duplicated turns that the assistant replays to users.
+
+investigation_notes: |
+  Root cause: the azureai-cosmos account was switched to multi-region writes, so {region_a} and {region_b} both accept writes for the same conversation. The container's conflict resolution policy is {resolution_policy}, which keeps the write with the latest _ts and discards the other without recording it in the conflicts feed, so turns go missing or are duplicated ({missing_turns} missing and {duplicate_turns} duplicate turns in {conversation_id}) and chat-orchestrator replays that history.
+  Confirm:
+    - metric conversation_store.write_conflicts_per_min is 40-900 (baseline 0) and conversation_store.replication_lag_ms is 800-9000 (baseline 40-400), while conversation_store.normalized_ru_consumption_pct and conversation_store.hot_partition_pct stay in their baseline bands, so this is not throttling
+    - conversation-store logs cosmosdb replication ... multi_region_writes=true status=ANOMALY (attributes.cosmos.write_mode is multi-region, attributes.cosmos.history_reconcile is pending)
+    - the Activity Log line for databaseAccounts/write on azureai-cosmos (change.summary single-region -> multi-region writes) comes before the first COSMOS-HISTORY-INCONSISTENT, and chat-orchestrator warns history_turn_gap for {conversation_id}
+  Remediation: disable multi-region writes with opsctl patch cosmos-account/azureai-cosmos --multi-region-writes false, then rebuild the damaged conversations from the change feed with opsctl run job/reconcile-conversation-history. Both are needed: turning writes off stops new conflicts but leaves the turns already lost, and the reconcile job alone leaves the account producing new conflicts. Conflicts fall to 0 and replication lag recovers over about 90 seconds.
+
+remediation_action: reconcile_conversation_history
+remediation_command: |-
+  opsctl patch cosmos-account/azureai-cosmos --multi-region-writes false
+  opsctl run job/reconcile-conversation-history
+
+error_message: |
+  [ConversationStore] COSMOS-HISTORY-INCONSISTENT: azure.cosmos.exceptions.CosmosConflictException: write conflict resolved by LastWriterWins container={container} conversation_id={conversation_id} missing_turns={missing_turns} duplicate_turns={duplicate_turns} regions={region_a}/{region_b} replication_lag_ms={replication_lag_ms}
+
+stack_trace: |
+  azure.cosmos.exceptions.CosmosConflictException: (409) Conflict resolved by LastWriterWins. COSMOS-HISTORY-INCONSISTENT
+    at ConversationRepository.appendTurn(conversation_id={conversation_id})
+    at ConversationRepository.loadHistory(container={container})
+  Resolution policy:  {resolution_policy} (path /_ts)
+  Write regions:      {region_a}, {region_b}
+  Replication lag:    {replication_lag_ms}ms
+  Missing turns:      {missing_turns}
+  Duplicate turns:    {duplicate_turns}
+  LWW conflicts/min:  {conflict_count}
+
+correlation_attr:
+  key: cosmos.write_mode
+  value: multi-region
+
+fault_params:
+  container: conversations
+  conversation_id: {choice: ["conv-7f3a91", "conv-b20c4d", "conv-e5518a", "conv-0d96f2"]}
+  resolution_policy: LastWriterWins
+  region_a: eastus
+  region_b: westeurope
+  replication_lag_ms: {randint: [800, 9000]}
+  missing_turns: {randint: [1, 6]}
+  duplicate_turns: {randint: [1, 5]}
+  conflict_count: {randint: [40, 900]}
+
+rca_clues:
+  conversation-store:
+    cosmos.lww_resolved_conflicts: {randint: [40, 900]}
+    cosmos.cross_region_replication_lag_ms: {randint: [800, 9000]}
+    cosmos.write_regions_active: 2
+    cosmos.conflict_resolution_policy: LastWriterWins
+  chat-orchestrator:
+    orchestrator.history_turn_gap_warnings: {randint: [20, 400]}
+    orchestrator.duplicate_turn_replays: {randint: [10, 250]}
+
+cascade_messages:
+  chat-orchestrator:
+    - severity: WARN
+      message: 'history_turn_gap conversation_id={conversation_id} container={container} expected_turns_missing={missing_turns} duplicate_turns={duplicate_turns}; replaying history as read from region {region_b}'
+
+service_lag_seconds: {chat-orchestrator: 30}
+fault_scope:
+  workloads: [conversation-store, chat-orchestrator]
+
+infrastructure_events:
+  - service: conversation-store
+    severity: INFO
+    offset_seconds: -120
+    body: 'azure-activity: operationName=Microsoft.DocumentDB/databaseAccounts/write resourceId=/subscriptions/38514ecc-371c-5d0a-9c14-ab99a396027d/resourceGroups/azureai-rg/providers/Microsoft.DocumentDB/databaseAccounts/azureai-cosmos caller=release-pipeline@contoso-demo.onmicrosoft.com status=Succeeded category=Administrative'
+    attributes:
+      user.name: release-pipeline@contoso-demo.onmicrosoft.com
+      operation: database_account_write
+      azure.activity.operation_name: Microsoft.DocumentDB/databaseAccounts/write
+      cosmos.write_mode: multi-region
+      change.summary: 'enableMultipleWriteLocations: false -> true (eastus, westeurope)'
+
+remediation_effects:
+  log_events:
+    - service: conversation-store
+      severity: INFO
+      offset_seconds: 1
+      body: 'azure-activity: operationName=Microsoft.DocumentDB/databaseAccounts/write resourceId=/subscriptions/38514ecc-371c-5d0a-9c14-ab99a396027d/resourceGroups/azureai-rg/providers/Microsoft.DocumentDB/databaseAccounts/azureai-cosmos caller={actor} status=Succeeded category=Administrative'
+      attributes:
+        operation: database_account_write
+        azure.activity.operation_name: Microsoft.DocumentDB/databaseAccounts/write
+        cosmos.write_mode: single-region
+        change.summary: 'enableMultipleWriteLocations: true -> false'
+    - service: conversation-store
+      severity: INFO
+      offset_seconds: 2
+      body: 'config-service: change applied job/reconcile-conversation-history cmd="opsctl run job/reconcile-conversation-history" by={actor} : rebuilding damaged conversations from the change feed'
+      attributes:
+        operation: job_run
+        config.target: job/reconcile-conversation-history
+        cosmos.history_reconcile: completed
+        change.summary: 'reconcile conversation history from change feed'
+  steady_attributes:
+    conversation-store:
+      cosmos.write_mode: single-region
+  verification:
+    - signal: conversation_store.write_conflicts_per_min
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "conversation-store"'
+      field: 'metrics.conversation_store.write_conflicts_per_min'
+      expect: '0 (was 40-900)'
+      within_seconds: 120
+    - signal: conversation_store.replication_lag_ms
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "conversation-store"'
+      field: 'metrics.conversation_store.replication_lag_ms'
+      expect: 'back in 40-400 (was 800-9000)'
+      within_seconds: 120
+    - signal: account write mode
+      from: 'logs.otel.azureai'
+      where: 'resource.attributes.service.name == "conversation-store"'
+      field: 'attributes.cosmos.write_mode'
+      expect: 'single-region on every line logged since the fix (was multi-region)'
+      within_seconds: 120
+
+business_impact:
+  - kpi: business.resolution_rate_pct
+    factor: {uniform: [0.6, 0.85]}
+  - kpi: business.error_rate_pct
+    value: {uniform: [7.67, 8.83], round: 2}
+  - kpi: business.avg_turns_per_conversation
+    value: {uniform: [2.6, 3.0], round: 1}

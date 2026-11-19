@@ -1,0 +1,215 @@
+service: cost-guard
+sort_order: 8
+cloud_provider: azure
+cloud_region: westeurope
+cloud_platform: azure_vm
+cloud_availability_zone: westeurope-2
+subsystem: cost_control
+language: dotnet
+
+# Topology: [downstream-service, endpoint, METHOD]
+topology: []
+
+db_operations: []
+
+emit_fault_logs: true
+kpi_emitter: false
+
+constants:
+  TENANT_TIERS:
+  - enterprise
+  - business
+  - standard
+  - trial
+  MODEL_DEPLOYMENTS:
+  - gpt-4o-prod
+  - gpt-4o-mini-prod
+  - foundry-reasoning-eu
+
+state:
+  _checks:
+    init: 0
+  _throttled:
+    init: 0
+  _last_summary:
+    init: now
+
+steps:
+- sample:
+    tier:
+      choice: TENANT_TIERS
+    deployment:
+      choice: MODEL_DEPLOYMENTS
+    decision:
+      expr: "'allow' if 14 in all_active else (rand.choice(['allow', 'throttle', 'throttle', 'deny']) if (15 in all_active and elapsed.get(15, 0) >= lag.get(15, 0)) else rand.choice(['allow', 'allow', 'allow', 'allow', 'allow', 'allow', 'allow', 'allow', 'allow', 'throttle']))"
+    tokens_per_conversation:
+      expr: "rand.randint(28000, 190000) if (2 in all_active and elapsed.get(2, 0) >= lag.get(2, 0)) or (15 in all_active and elapsed.get(15, 0) >= lag.get(15, 0)) else rand.randint(900, 6500)"
+    check_latency_ms:
+      expr: "round(rand.uniform(150.0, 1800.0), 1) if (15 in all_active and elapsed.get(15, 0) >= lag.get(15, 0)) else round(rand.uniform(3.0, 25.0), 1)"
+    agent_version:
+      expr: "'v3.7.2' if (2 in all_active and elapsed.get(2, 0) >= lag.get(2, 0)) else 'v3.7.1'"
+    agent_template:
+      expr: "'support-agent-v3.7.2-loop' if (2 in all_active and elapsed.get(2, 0) >= lag.get(2, 0)) else 'support-agent-v3.7.1'"
+- counter:
+    state_key: _checks
+    by: 1
+- log:
+    level: INFO
+    message: 'budget_check tier={tier} deployment={deployment} tokens_in_conversation={tokens_per_conversation} decision={decision} latency={check_latency_ms}ms agent=support-agent@{agent_version}'
+    attrs:
+      operation: budget_check
+      cost.tier:
+        var: tier
+      cost.deployment:
+        var: deployment
+      cost.tokens_per_conversation:
+        var: tokens_per_conversation
+      cost.decision:
+        var: decision
+      cost.check_latency_ms:
+        var: check_latency_ms
+      agent.version:
+        var: agent_version
+      agent.prompt_template_version:
+        var: agent_template
+- metric:
+    name: cost_guard.budget_check_latency_ms
+    value:
+      var: check_latency_ms
+    unit: ms
+- metric:
+    name: cost_guard.tokens_per_conversation
+    value:
+      var: tokens_per_conversation
+    unit: tokens
+- sample:
+    r2:
+      expr: "min(1.0, max(0.0, elapsed.get(2, 0) - lag.get(2, 0)) / 45.0)"
+    f2:
+      expr: "min(1.0, since_fix.get(2, 0) / 90.0)"
+    r14:
+      expr: "min(1.0, elapsed.get(14, 0) / 45.0)"
+    f14:
+      expr: "min(1.0, since_fix.get(14, 0) / 60.0)"
+    spend_mtd_usd:
+      expr: "rand.randint(82000, 128000) if (15 in all_active and elapsed.get(15, 0) >= lag.get(15, 0)) else rand.randint(31000, 56000)"
+    spend_base_usd:
+      expr: "rand.randint(2700, 4950)"
+    spend_to_date_usd:
+      expr: "int(spend_base_usd + (rand.randint(14000, 14500) - spend_base_usd) * r14) if 14 in all_active else (rand.randint(14000, 14500) if 14 in fixed_channels else spend_base_usd)"
+    budget_name: monthly-genai-prod
+    budget_unit:
+      expr: "'EUR-cents' if 14 in all_active else 'USD'"
+    budget_limit:
+      expr: "750000 if 14 in all_active else 7500"
+    budget_rev:
+      expr: "'budget-rev-2026-10-17' if 14 in all_active else 'budget-rev-2026-09-30'"
+    util_wrong_pct:
+      expr: "round(spend_to_date_usd / 750000.0 * 100, 1)"
+    util_real_pct:
+      expr: "round(spend_to_date_usd / 7500.0 * 100, 1)"
+    spend_pct:
+      expr: "util_wrong_pct if 14 in all_active else (round(util_wrong_pct + (util_real_pct - util_wrong_pct) * f14, 1) if 14 in fixed_channels else util_real_pct)"
+    burn_base:
+      expr: "round(rand.uniform(50.0, 62.0), 1)"
+    burn_rate_usd_per_h:
+      expr: "round(burn_base + (rand.uniform(640.0, 680.0) - burn_base) * r2, 1) if (2 in all_active and elapsed.get(2, 0) >= lag.get(2, 0)) else (round(660.0 + (burn_base - 660.0) * f2, 1) if 2 in fixed_channels else (round(rand.uniform(1400.0, 5200.0), 1) if (15 in all_active and elapsed.get(15, 0) >= lag.get(15, 0)) else burn_base))"
+    tokens_base_k:
+      expr: "rand.randint(420, 900)"
+    tokens_per_min_k:
+      expr: "int(tokens_base_k + (rand.randint(6000, 9500) - tokens_base_k) * r2) if (2 in all_active and elapsed.get(2, 0) >= lag.get(2, 0)) else (int(7500 + (tokens_base_k - 7500) * f2) if 2 in fixed_channels else (rand.randint(2400, 9800) if (15 in all_active and elapsed.get(15, 0) >= lag.get(15, 0)) else tokens_base_k))"
+    cost_status:
+      expr: "'ANOMALY' if (2 in all_active and elapsed.get(2, 0) >= lag.get(2, 0)) or 14 in all_active or (15 in all_active and elapsed.get(15, 0) >= lag.get(15, 0)) or burn_rate_usd_per_h > 150.0 or (14 in fixed_channels and f14 < 1.0) else 'NOMINAL'"
+- metric:
+    name: cost_guard.spend_month_to_date_usd
+    value:
+      var: spend_mtd_usd
+    unit: USD
+- metric:
+    name: cost_guard.budget_utilization_pct
+    value:
+      var: spend_pct
+    unit: '%'
+- metric:
+    name: cost_guard.burn_rate_usd_per_hour
+    value:
+      var: burn_rate_usd_per_h
+    unit: USD/h
+- metric:
+    name: cost_guard.tokens_per_minute_k
+    value:
+      var: tokens_per_min_k
+    unit: ktokens/min
+- log:
+    level: INFO
+    message: 'spend_snapshot spend_mtd=${spend_mtd_usd} budget={budget_name} limit={budget_limit} {budget_unit} rev={budget_rev} spend_to_date=${spend_to_date_usd} utilization={spend_pct}% burn_rate=${burn_rate_usd_per_h}/h tokens_per_min={tokens_per_min_k}k agent=support-agent@{agent_version} source=cost-management-export status={cost_status}'
+    attrs:
+      operation: spend_snapshot
+      cost.spend_mtd_usd:
+        var: spend_mtd_usd
+      cost.utilization_pct:
+        var: spend_pct
+      cost.burn_rate_usd_per_h:
+        var: burn_rate_usd_per_h
+      cost.tokens_per_min_k:
+        var: tokens_per_min_k
+      cost.status:
+        var: cost_status
+      budget.name:
+        var: budget_name
+      budget.limit:
+        var: budget_limit
+      budget.unit:
+        var: budget_unit
+      budget.config_revision:
+        var: budget_rev
+      budget.spend_to_date_usd:
+        var: spend_to_date_usd
+      agent.version:
+        var: agent_version
+      agent.prompt_template_version:
+        var: agent_template
+- sample:
+    throttle_events:
+      expr: "int(rand.randint(0, 6) * (1.0 - r14)) if 14 in all_active else (int(rand.randint(40, 140) * f14) if 14 in fixed_channels else (rand.randint(60, 420) if (15 in all_active and elapsed.get(15, 0) >= lag.get(15, 0)) else rand.randint(0, 6)))"
+    budget_alerts_open:
+      expr: "0 if 14 in all_active else (rand.randint(1, 3) if 14 in fixed_channels else (rand.randint(2, 6) if (15 in all_active and elapsed.get(15, 0) >= lag.get(15, 0)) else rand.randint(0, 1)))"
+- counter:
+    state_key: _throttled
+    by:
+      var: throttle_events
+- metric:
+    name: cost_guard.throttle_decisions
+    value:
+      var: throttle_events
+    unit: decisions
+- metric:
+    name: cost_guard.budget_alerts_open
+    value:
+      var: budget_alerts_open
+    unit: alerts
+- every:
+    seconds: 10
+    state_key: _last_summary
+    steps:
+    - log:
+        level: INFO
+        message: 'cost_summary checks={_checks} throttled_total={_throttled} open_budget_alerts={budget_alerts_open} budget={budget_name} unit={budget_unit} rev={budget_rev} enforcement=enabled status={cost_status}'
+        attrs:
+          operation: cost_summary
+          cost.total_checks:
+            var: _checks
+          cost.total_throttled:
+            var: _throttled
+          cost.open_budget_alerts:
+            var: budget_alerts_open
+          cost.status:
+            var: cost_status
+          budget.name:
+            var: budget_name
+          budget.unit:
+            var: budget_unit
+          budget.config_revision:
+            var: budget_rev
+          agent.version:
+            var: agent_version

@@ -38,28 +38,57 @@ db_operations:
   - SELECT ci.sku, ci.quantity, p.price, p.name FROM cart_items ci JOIN products p ON ci.sku = p.sku WHERE ci.cart_id = ?
 emit_fault_logs: true
 kpi_emitter: false
+constants:
+  HEALTHY_REPLICAS:
+  - order-db-replica-1.us-east-1.internal
+  - order-db-replica-3.us-east-1.internal
+state:
+  om_t:
+    init: now
+  repl_excess:
+    init: 0
+  abandon_excess:
+    init: 0
 steps:
 - sample:
-    orders_per_min:
-      uniform:
-      - 120.0
-      - 450.0
-      round: 1
-    gmv_usd:
-      uniform:
-      - 15000.0
-      - 65000.0
-      round: 2
-    avg_order_value_usd:
-      uniform:
-      - 48.0
-      - 185.0
-      round: 2
+    dt:
+      expr: "min(10.0, max(0.0, time.time() - om_t))"
+- counter:
+    state_key: om_t
+    by:
+      expr: "dt"
+# Ch 12: flag promo-stacking-v2 at 100% makes ValidateCoupon evaluate every active promotion,
+# so its p95 climbs to ~6.2s over ~30s, past the storefront's 3s client timeout. Abandonment is a
+# 5-minute rolling window: it moves toward ~88% (from ~70%) at 18 points per 300s and ages back the
+# same way after the flag is off, while the coupon p95 is back at ~180ms within ~15s.
+- sample:
+    abandon_delta:
+      expr: "(min(max(0.0, 18.0 - abandon_excess), 0.06 * dt) if elapsed.get(12, 0) > lag.get(12, 0) else 0.0) if 12 in all_active else (-min(abandon_excess, 0.06 * dt) if 12 in fixed_channels else -abandon_excess)"
+- counter:
+    state_key: abandon_excess
+    by:
+      expr: "abandon_delta"
+- sample:
+    coupon_ramp:
+      expr: "min(1.0, max(0.0, elapsed.get(12, 0) - lag.get(12, 0)) / 30.0) if 12 in all_active else ((1.0 - min(1.0, since_fix.get(12, 0) / 15.0)) if 12 in fixed_channels else 0.0)"
+    coupon_p95_ms:
+      expr: "round(max(120.0, 180.0 + rand.gauss(0, 15.0)) + 6020.0 * coupon_ramp * (1.0 + rand.gauss(0, 0.04)))"
+    promotions_evaluated:
+      expr: "round(212 + rand.gauss(0, 4)) if 12 in all_active else rand.randint(1, 3)"
     checkout_abandonment_pct:
-      uniform:
-      - 18.0
-      - 32.0
-      round: 2
+      expr: "round(70.0 + rand.gauss(0, 1.5) + abandon_excess, 2)"
+    orders_per_min:
+      expr: "round((285.0 + rand.gauss(0, 8.0)) * (100.0 - checkout_abandonment_pct) / 30.0, 1)"
+    avg_order_value_usd:
+      expr: "round(96.0 + rand.gauss(0, 3.0), 2)"
+    gmv_usd:
+      expr: "round(orders_per_min * avg_order_value_usd, 2)"
+    promo_stacking_v2:
+      expr: "12 in all_active"
+    promo_stacking_v2_str:
+      expr: "'true' if 12 in all_active else 'false'"
+    checkout_status:
+      expr: "'ANOMALY' if (coupon_p95_ms > 1000 or checkout_abandonment_pct > 75.0) else 'NOMINAL'"
 - metric:
     name: orders.per_minute
     value:
@@ -80,9 +109,15 @@ steps:
     value:
       var: checkout_abandonment_pct
     unit: '%'
+- metric:
+    name: orders.coupon_validation_p95_ms
+    value:
+      var: coupon_p95_ms
+    unit: ms
 - log:
     level: INFO
     message: orders.health orders_per_min={orders_per_min} gmv_usd={gmv_usd} avg_order_value={avg_order_value_usd} abandonment={checkout_abandonment_pct}%
+      coupon_validate_p95_ms={coupon_p95_ms} promo_stacking_v2={promo_stacking_v2_str} status={checkout_status}
     attrs:
       operation: orders_health
       orders.per_minute:
@@ -93,6 +128,25 @@ steps:
         var: avg_order_value_usd
       orders.checkout_abandonment_pct:
         var: checkout_abandonment_pct
+      orders.coupon_validation_p95_ms:
+        var: coupon_p95_ms
+      orders.promo_stacking_v2:
+        var: promo_stacking_v2
+      orders.checkout_status:
+        var: checkout_status
+- when: "coupon_p95_ms > 1000"
+  log:
+    level: WARN
+    message: 'level=warn ts={iso_now} caller=promo/client.go:142 msg="ValidateCoupon slow" upstream=promotions-engine.internal:8443
+      p95_ms={coupon_p95_ms} promotions_evaluated={promotions_evaluated} storefront_client_timeout_ms=3000 flag.promo-stacking-v2={promo_stacking_v2_str}'
+    attrs:
+      operation: coupon_validation
+      orders.coupon_validation_p95_ms:
+        var: coupon_p95_ms
+      orders.promotions_evaluated:
+        var: promotions_evaluated
+      orders.promo_stacking_v2:
+        var: promo_stacking_v2
 - sample:
     payment_success_rate:
       uniform:
@@ -106,3 +160,82 @@ steps:
       operation: payment_health
       orders.payment_success_rate_pct:
         var: payment_success_rate
+# Ch 9: the order-db-backup CronJob moved from 07:00 to 14:00 UTC, so xtrabackup on replica-2 runs at
+# peak and saturates its disk (~98%). The SQL thread falls behind ~0.65s per second up to ~78s
+# Seconds_Behind_Source. Once the backup job is deleted the disk is back to ~35% within ~10s and the
+# replica catches up at the same rate (~120s from 78s). Replicas 1 and 3 stay under 1s.
+- sample:
+    repl_delta:
+      expr: "(min(max(0.0, 77.7 - repl_excess), 0.65 * dt) if elapsed.get(9, 0) > lag.get(9, 0) else 0.0) if 9 in all_active else (-min(repl_excess, 0.65 * dt) if 9 in fixed_channels else -repl_excess)"
+- counter:
+    state_key: repl_excess
+    by:
+      expr: "repl_delta"
+- sample:
+    replica_lag_s:
+      expr: "round(max(0.05, 0.3 + rand.gauss(0, 0.1)) + repl_excess * (1.0 + rand.gauss(0, 0.02)), 2)"
+    replica_disk_util_pct:
+      expr: "round(min(99.9, 35.0 + 63.0 * min(1.0, max(0.0, elapsed.get(9, 0) - lag.get(9, 0)) / 15.0) + rand.gauss(0, 0.8)), 1) if 9 in all_active else (round(min(99.9, 35.0 + 63.0 * (1.0 - min(1.0, since_fix.get(9, 0) / 10.0)) + rand.gauss(0, 4.0)), 1) if 9 in fixed_channels else round(35.0 + rand.gauss(0, 4.0), 1))"
+    backup_schedule:
+      expr: "'0 14 * * *' if 9 in all_active else '0 7 * * *'"
+    backup_job:
+      expr: "'order-db-backup-29384117' if 9 in all_active else 'none'"
+    replica_status:
+      expr: "'ANOMALY' if (replica_lag_s > 1.0 or replica_disk_util_pct > 80.0) else 'NOMINAL'"
+    other_replica:
+      choice: HEALTHY_REPLICAS
+    other_replica_lag_s:
+      expr: "round(max(0.05, 0.3 + rand.gauss(0, 0.1)), 2)"
+    other_replica_disk_pct:
+      expr: "round(34.0 + rand.gauss(0, 4.0), 1)"
+- metric:
+    name: orders.replica_lag_s
+    value:
+      var: replica_lag_s
+    unit: s
+    attrs:
+      db.replica_host: order-db-replica-2.us-east-1.internal
+- metric:
+    name: orders.replica_disk_util_pct
+    value:
+      var: replica_disk_util_pct
+    unit: '%'
+    attrs:
+      db.replica_host: order-db-replica-2.us-east-1.internal
+- log:
+    level: INFO
+    message: 'level=info ts={iso_now} caller=store/replica_monitor.go:64 msg="replica status" replica=order-db-replica-2.us-east-1.internal
+      seconds_behind_source={replica_lag_s} io_running=Yes sql_running=Yes disk_util_pct={replica_disk_util_pct} primary_long_trx=0
+      backup_job={backup_job} backup_schedule="{backup_schedule}" read_pool=order-status status={replica_status}'
+    attrs:
+      operation: db_replica_status
+      db.replica_host: order-db-replica-2.us-east-1.internal
+      db.seconds_behind_source:
+        var: replica_lag_s
+      db.replica_disk_util_pct:
+        var: replica_disk_util_pct
+      db.primary_long_running_trx: 0
+      db.backup_job:
+        var: backup_job
+      db.backup_schedule:
+        var: backup_schedule
+      db.replica_status:
+        var: replica_status
+- log:
+    level: INFO
+    message: 'level=info ts={iso_now} caller=store/replica_monitor.go:64 msg="replica status" replica={other_replica}
+      seconds_behind_source={other_replica_lag_s} io_running=Yes sql_running=Yes disk_util_pct={other_replica_disk_pct} primary_long_trx=0
+      backup_job=none backup_schedule="{backup_schedule}" read_pool=order-status status=NOMINAL'
+    attrs:
+      operation: db_replica_status
+      db.replica_host:
+        var: other_replica
+      db.seconds_behind_source:
+        var: other_replica_lag_s
+      db.replica_disk_util_pct:
+        var: other_replica_disk_pct
+      db.primary_long_running_trx: 0
+      db.backup_job: none
+      db.backup_schedule:
+        var: backup_schedule
+      db.replica_status: NOMINAL

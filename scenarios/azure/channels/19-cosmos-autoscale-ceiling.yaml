@@ -1,0 +1,118 @@
+name: Cosmos Autoscale Ceiling
+subsystem: database
+vehicle_section: database_pipeline
+error_type: COSMOS-AUTOSCALE-CEILING
+sensor_type: health_check
+affected_services: [conversation-store, chat-orchestrator]
+error_services: [conversation-store]
+cascade_services: []
+
+description: Cosmos DB autoscale for the conversations container sits at its configured maximum of 10000 RU/s during a legitimate traffic peak and throttles writes on every partition.
+
+investigation_notes: |
+  Root cause: a legitimate traffic peak (active conversations up 60% or more, no single client above 10% of requests) pushes the conversations container to its autoscale maximum of {max_rus} RU/s. The autoscale maximum was never raised for the peak, so every partition is saturated and Cosmos DB returns 429 on writes. This is a capacity ceiling, not a hot key.
+  Confirm:
+    - metric conversation_store.normalized_ru_consumption_pct is 98-100 (baseline 35-60) with conversation_store.request_units_consumed at {consumed_rus} RU/s against {max_rus}, and conversation_store.throttled_requests_429 is above 0; conversation_store.hot_partition_pct stays near the 12-18 baseline because all partitions are evenly loaded (a hot partition shows one partition at 55-92 while total consumption stays near half of the provisioned throughput)
+    - conversation-store logs cosmosdb ru_stats container={container} ... autoscale max {max_rus} normalized_ru={normalized_ru_pct}% status=ANOMALY (attributes.cosmos.autoscale_max_ru = {max_rus})
+    - the Activity Log shows no recent change on container {container}, and the top client sends under 10% of requests, so no runaway client
+  Remediation: raise the autoscale maximum with opsctl patch cosmos-container/{container} --max-throughput {new_max_rus}. Normalized consumption falls to about 55% and 429s clear over about 60 seconds, and autoscale scales back down after the peak. Rate limiting a tenant does not help: the load is spread across all tenants.
+
+remediation_action: raise_cosmos_max_throughput
+remediation_command: |-
+  opsctl patch cosmos-container/conversations --max-throughput 20000
+
+error_message: |
+  [ConversationStore] COSMOS-AUTOSCALE-CEILING: azure.cosmos.exceptions.CosmosHttpResponseError: (429) Request rate is large. container={container} consumed_rus={consumed_rus} autoscale_max_rus={max_rus} normalized_ru={normalized_ru_pct}% throttled={throttled_requests_per_min}/min x-ms-substatus=3200
+
+stack_trace: |
+  azure.cosmos.exceptions.CosmosHttpResponseError: (429) Request rate is large. COSMOS-AUTOSCALE-CEILING
+    at ConversationStore.append_message(container={container})
+    at ContainerProxy.upsert_item()
+  Max autoscale RU/s: {max_rus}
+  Consumed RU/s:      {consumed_rus}
+  Normalized RU:      {normalized_ru_pct}% (all partitions)
+  Throttled per min:  {throttled_requests_per_min}
+  Suggested max RU/s: {new_max_rus}
+
+correlation_attr:
+  key: cosmos.autoscale_max_ru
+  value: 10000
+
+fault_params:
+  container: conversations
+  consumed_rus: {randint: [9700, 10000]}
+  max_rus: 10000
+  new_max_rus: 20000
+  normalized_ru_pct: {randint: [98, 100]}
+  throttled_requests_per_min: {randint: [150, 2500]}
+
+rca_clues:
+  conversation-store:
+    cosmos.autoscale_max_rus: 10000
+    cosmos.normalized_ru_consumption_pct: {randint: [98, 100]}
+    cosmos.throttled_429_count: {randint: [150, 2500]}
+    cosmos.top_client_request_share_pct: {uniform: [3.0, 9.0], round: 1}
+  chat-orchestrator:
+    orchestrator.history_write_retries: {randint: [50, 900]}
+    orchestrator.history_write_latency_ms: {randint: [800, 6000]}
+    orchestrator.active_conversations_change_pct: {uniform: [60.0, 120.0], round: 1}
+
+cascade_messages:
+  chat-orchestrator:
+    - severity: WARN
+      message: 'history write delayed: azure.cosmos.exceptions.CosmosHttpResponseError (429) container={container} retrying with backoff; autoscale_max_rus={max_rus}'
+
+service_lag_seconds: {chat-orchestrator: 15}
+fault_scope:
+  workloads: [conversation-store, chat-orchestrator]
+
+infrastructure_events:
+  - service: conversation-store
+    severity: WARN
+    offset_seconds: -120
+    body: 'cosmosdb[convstore-weu]: autoscale_state container=conversations current_rus=9880 autoscale_max_rus=10000 scale_up_blocked=true reason=max_throughput_reached active_conversations_change=+84%'
+    attributes:
+      operation: autoscale_state
+      cosmos.autoscale_max_ru: 10000
+      change.summary: 'traffic peak: autoscale held at maximum 10000 RU/s'
+
+remediation_effects:
+  log_events:
+    - service: conversation-store
+      severity: INFO
+      offset_seconds: 1
+      body: 'azure-activity: operationName=Microsoft.DocumentDB/databaseAccounts/sqlDatabases/containers/throughputSettings/write resourceId=/subscriptions/38514ecc-371c-5d0a-9c14-ab99a396027d/resourceGroups/azureai-rg/providers/Microsoft.DocumentDB/databaseAccounts/sqlDatabases/containers/conversations caller={actor} status=Succeeded category=Administrative'
+      attributes:
+        operation: throughput_settings_write
+        cosmos.autoscale_max_ru: 20000
+        change.summary: 'autoscale max RU/s: 10000 -> 20000'
+  steady_attributes:
+    conversation-store:
+      cosmos.autoscale_max_ru: 20000
+  verification:
+    - signal: conversation_store.normalized_ru_consumption_pct
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "conversation-store"'
+      field: 'metrics.conversation_store.normalized_ru_consumption_pct'
+      expect: 'about 55 and below 70 (was 98-100)'
+      within_seconds: 90
+    - signal: conversation_store.throttled_requests_429
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "conversation-store"'
+      field: 'metrics.conversation_store.throttled_requests_429'
+      expect: '0 (was 150-2500 per minute)'
+      within_seconds: 90
+    - signal: autoscale maximum
+      from: 'logs.otel.azureai'
+      where: 'resource.attributes.service.name == "conversation-store"'
+      field: 'attributes.cosmos.autoscale_max_ru'
+      expect: '20000 on every line logged since the fix (was 10000)'
+      within_seconds: 90
+
+business_impact:
+  - kpi: business.throughput_rpm
+    value: {uniform: [604.5, 695.5], round: 0}
+  - kpi: business.latency_p99_ms
+    factor: {uniform: [2.0, 4.0]}
+  - kpi: business.error_rate_pct
+    factor: {uniform: [2.0, 6.0]}

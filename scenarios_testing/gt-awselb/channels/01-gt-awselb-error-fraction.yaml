@@ -1,0 +1,37 @@
+name: "GT aws_elb_otel: error_fraction"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-AWSELB-ERROR-FRACTION
+sensor_type: impact_key_probe
+affected_services:
+  - gt-awselb-aws-svc-1
+cascade_services:
+  - gt-awselb-aws-svc-2
+description: "Tests impact_key error_fraction on generator aws_elb_otel."
+investigation_notes: |-
+  1. Verify aws_elb_otel is active and reporting metrics.
+  2. Check that the error_fraction metric has reached the trigger value (0.7).
+  3. Confirm generator_impact for aws_elb_otel.error_fraction is set to 0.7.
+  4. Look for correlated changes in service gt-awselb-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_error_fraction_baseline
+error_message: "GT-PROBE: gen=aws_elb_otel key=error_fraction value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=aws_elb_otel
+  impact_key: error_fraction
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 0.7
+  svc_name: gt-awselb-aws-svc-1
+rca_clues:
+  gt-awselb-aws-svc-1:
+    probe.generator: aws_elb_otel
+    probe.impact_key: error_fraction
+    probe.trigger_value: 0.7
+  gt-awselb-aws-svc-2:
+    probe.upstream_generator: aws_elb_otel
+    probe.upstream_key: error_fraction
+generator_impact:
+  aws_elb_otel:
+    error_fraction: 0.7

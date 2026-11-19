@@ -8,50 +8,109 @@ affected_services:
 - vpc-network-manager
 cascade_services:
 - cloud-interconnect
-description: Cloud NAT unable to allocate external IP addresses for outbound traffic
+description: Cloud NAT gateway gcpnet-nat-east1 cannot allocate more external IP addresses because the us-east1 STATIC_ADDRESSES quota is used up by load-test reservations
 investigation_notes: |-
-  Root cause: Cloud NAT cannot allocate additional external IPs due to project quota limits or IP conflicts. The EXTERNAL_IP_ADDRESS quota per region defaults to a limited number. If another NAT gateway or resource holds the IP, allocation fails. Check quotas:
-    gcloud compute project-info describe --project=<project> --format='table(quotas.filter(metric=STATIC_ADDRESSES).limit,usage)'
-    gcloud compute addresses list --filter='region:<region> AND status:RESERVED'
-  Remediation: Release unused static IPs:
-    gcloud compute addresses delete <unused-ip> --region=<region>
-  Or request a quota increase via Console > IAM & Admin > Quotas > filter 'In-use IP addresses'. If IPs are held by other NAT gateways, consolidate NAT configurations. For immediate relief, switch to AUTO_ONLY allocation mode which uses GCP-managed ephemeral IPs (note: IPs will change on gateway restart, which may break IP-allowlisted external services).
+  Root cause: the load-test team reserved static external IPs in {gcp_region} (label purpose=loadtest), which took the regional STATIC_ADDRESSES quota to {nat_quota_used}/{nat_quota_limit}. Cloud NAT gateway {nat_gateway_name} was scaled out from 5 to 8 NAT IPs ahead of a traffic peak, but the {nat_pending_allocs} new allocations are pending and fail with QUOTA_EXCEEDED. Port utilization is still normal because the 5 existing IPs carry today's load, so this is a failed scale-out rather than an outage in progress.
+  The data rules out an IP conflict or a port or mapping problem: vpc-network-manager reports vpc.nat_ip_conflict false, nat.port_utilization_pct stays at 20-40 and nat.mapping_failures at 0. The gateway keeps its 5 allocated IPs (nat.allocated_ips = 5), it just cannot grow. gcpnet-nat-central1 and gcpnet-nat-europe1 are in other regions and are not affected.
+  Confirm:
+    - cloud-nat-gateway, gateway {nat_gateway_name}: metrics.nat.pending_ip_allocations 3 (normally 0) and metrics.nat.static_address_quota_used = 10 (limit 10); logs.otel.gcpnet operation=ip_pool_status attributes.nat.status = ANOMALY
+    - the cloud-nat-gateway log "nat IP allocation failed ... QUOTA_EXCEEDED" and the load-test address reservations (attributes.infra.ip_allocation_pool = static-pool-region-east1) before the first NAT-IP-ALLOCATION-ERROR line
+    - gcloud compute addresses list --filter='region:us-east1 AND labels.purpose=loadtest' shows the orphaned reservations
+  Remediation: release the load-test reservations with opsctl delete address --selector purpose=loadtest --region {gcp_region}. Quota usage drops to 6/10, then the 3 pending allocations complete over about a minute, nat.allocated_ips grows from 5 to 8 and quota usage settles at 9/10. A quota increase or AUTO_ONLY allocation is not needed.
 remediation_action: reset_nat_gateway
-error_message: 'cloudnat: NAT-IP-ALLOCATION-ERROR gateway={nat_gateway_name} region={gcp_region} allocated_ips={nat_allocated_ips}/{nat_max_ips}
+remediation_command: |-
+  opsctl delete address --selector purpose=loadtest --region us-east1
+error_message: 'cloudnat: NAT-IP-ALLOCATION-ERROR gateway={nat_gateway_name} region={gcp_region} quota_used={nat_quota_used}/{nat_quota_limit} allocated_ips={nat_allocated_ips}
   pending_allocations={nat_pending_allocs} error="{nat_alloc_error}"'
 stack_trace: |-
   Cloud NAT IP Allocation Report
   ---------------------------------
   Gateway:     {nat_gateway_name}
   Region:      {gcp_region}
-  Allocated:   {nat_allocated_ips}/{nat_max_ips}
+  Allocated:   {nat_allocated_ips} IPs
+  Quota used:  {nat_quota_used}/{nat_quota_limit}
   Pending:     {nat_pending_allocs}
   Error:       {nat_alloc_error}
-  Quota:       EXTERNAL_IP_ADDRESS — check project quota
-  Action: Release unused IPs or request quota increase
+  Quota:       STATIC_ADDRESSES — check regional quota
+  Action: Release the unused load-test IPs or request quota increase
 correlation_attr:
   key: infra.ip_allocation_pool
   value: static-pool-region-east1
 fault_params:
-  nat_gateway_name: {choice: [gcpnet-nat-central1, gcpnet-nat-east1, gcpnet-nat-europe1]}
-  gcp_region: {choice: [us-central1, us-east1, europe-west1]}
-  nat_allocated_ips: {randint: [8, 10]}
-  nat_max_ips: 10
-  nat_pending_allocs: {randint: [2, 8]}
-  nat_alloc_error:
-    choice:
-      - "QUOTA_EXCEEDED: EXTERNAL_IP_ADDRESS"
-      - IP_ALREADY_IN_USE by another NAT
-      - REGION_QUOTA_EXCEEDED for static IPs
+  nat_gateway_name: gcpnet-nat-east1
+  gcp_region: us-east1
+  nat_allocated_ips: 5
+  nat_quota_used: 10
+  nat_quota_limit: 10
+  nat_pending_allocs: 3
+  nat_alloc_error: "QUOTA_EXCEEDED: Quota 'STATIC_ADDRESSES' exceeded. Limit: 10.0 in region us-east1."
 rca_clues:
   cloud-nat-gateway:
-    nat.quota_name: EXTERNAL_IP_ADDRESS
-    nat.quota_usage_pct: {uniform: [95, 100], round: 1}
+    nat.quota_name: STATIC_ADDRESSES
+    nat.quota_usage_pct: 100.0
   vpc-network-manager:
-    vpc.nat_ip_conflict: true
-    vpc.orphaned_static_ips: {randint: [2, 8]}
+    vpc.nat_ip_conflict: false
+    vpc.orphaned_static_ips: 4
   cloud-interconnect:
     interconnect.nat_failover_path: unavailable
+service_lag_seconds: {cloud-interconnect: 60}
+cascade_messages:
+  cloud-interconnect:
+    - severity: WARN
+      message: 'cloud-interconnect: NAT failover path via {nat_gateway_name} unavailable, no spare external IPs in {gcp_region}'
+fault_scope:
+  cluster: gcpnet-gke-east1
+  workloads: [cloud-nat-gateway, vpc-network-manager]
+infrastructure_events:
+  - service: vpc-network-manager
+    severity: INFO
+    offset_seconds: -90
+    body: 'gcp-audit: logName=cloudaudit.googleapis.com/activity serviceName=compute.googleapis.com methodName=v1.compute.addresses.insert resourceName=projects/gcpnet-prod-001/regions/us-east1/addresses/loadtest-ip-batch principalEmail=loadtest-team@gcpnet-project.iam.gserviceaccount.com status=OK labels=purpose=loadtest count=4'
+    attributes:
+      user.name: loadtest-team
+      change.request: CR-7360
+      operation: address_reserve
+      infra.ip_allocation_pool: static-pool-region-east1
+      change.summary: 'reserved 4 static external IPs in us-east1 (purpose=loadtest); STATIC_ADDRESSES 6/10 -> 10/10'
+remediation_effects:
+  log_events:
+    - service: vpc-network-manager
+      severity: INFO
+      offset_seconds: 2
+      body: 'gcp-audit: logName=cloudaudit.googleapis.com/activity serviceName=compute.googleapis.com methodName=v1.compute.addresses.delete resourceName=projects/gcpnet-prod-001/regions/us-east1/addresses/loadtest-ip-batch principalEmail={actor} status=OK'
+      attributes:
+        operation: address_release
+        nat.gateway: gcpnet-nat-east1
+    - service: cloud-nat-gateway
+      severity: INFO
+      offset_seconds: 15
+      body: 'cloudnat: gateway=gcpnet-nat-east1 region=us-east1 pending IP allocations completing; STATIC_ADDRESSES quota 9/10'
+      attributes:
+        operation: ip_pool_status
+        nat.static_address_quota_used: 9
+  steady_attributes:
+    cloud-nat-gateway:
+      nat.static_address_quota_used: 9
+  log_taper_seconds: 60
+  verification:
+    - signal: nat.pending_ip_allocations
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "cloud-nat-gateway" AND attributes.gateway == "gcpnet-nat-east1"'
+      field: 'metrics.nat.pending_ip_allocations'
+      expect: '0 (was 3)'
+      within_seconds: 90
+    - signal: nat.static_address_quota_used
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "cloud-nat-gateway" AND attributes.gateway == "gcpnet-nat-east1"'
+      field: 'metrics.nat.static_address_quota_used'
+      expect: '9 (was 10 of a 10 limit)'
+      within_seconds: 90
+    - signal: nat.allocated_ips
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "cloud-nat-gateway" AND attributes.gateway == "gcpnet-nat-east1"'
+      field: 'metrics.nat.allocated_ips'
+      expect: '8 (was 5)'
+      within_seconds: 120
 business_impact:
   - kpi: business.nat_port_exhaustion_rate_pct
     factor: {uniform: [6.0, 15.0]}

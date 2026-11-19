@@ -43,6 +43,7 @@ Spec schema summary (services/<svc>.yaml)
       - every:  {seconds: n, state_key: k, steps: [...], else: [...]}
       - counter: {state_key: k, by: value_spec}
       - incr_key: {state_key: k, key: value_spec, by: value_spec}
+    Any step may carry ``when: "<expr>"``; it runs only when the expression is true.
 
 Value spec forms
 ----------------
@@ -61,11 +62,11 @@ Scalar int/float/str/bool/None → pass through
 """
 from __future__ import annotations
 
-import json
 import random
 import time
 from typing import Any
 
+from app.chaos.protocol import ChaosSource
 from app.services.base_service import BaseService
 from app.services.expr import _SAFE_TIME, make_safe_rand, safe_eval
 from scenario_engine.fault_spec import resolve
@@ -88,7 +89,7 @@ class YamlService(BaseService):
     SERVICE_NAME: str = ""
     _telemetry_spec: dict = {}
 
-    def __init__(self, chaos_controller, otlp_client) -> None:
+    def __init__(self, chaos_controller: ChaosSource, otlp_client) -> None:
         super().__init__(chaos_controller, otlp_client)
         self._rng = random.Random()
         self._safe_rand = make_safe_rand(self._rng)
@@ -134,11 +135,22 @@ class YamlService(BaseService):
 
         active_channels = self.get_active_channels_for_service()
         cascade_channels = self.get_cascade_channels_for_service()
+        # Change events fire from every service a triggered channel names, before the
+        # symptoms' onset, and are only forgotten once the channel resolves.
+        triggered = self.get_triggered_channels_for_service()
+        self.reset_infrastructure_events(triggered)
+        for ch in triggered:
+            self.emit_infrastructure_events(ch)
+        # One-shot lines a fix left behind (audit records, rollout events).
+        self.emit_pending_fix_events()
 
         # Standard fault logs (all affected-service channels)
         if spec.get("emit_fault_logs", True):
             for ch in active_channels:
                 self.emit_fault_logs(ch)
+            # Old pods keep failing for a moment after a rolling fix.
+            for ch in self.get_tapering_channels_for_service():
+                self.emit_fault_logs(ch, with_infra_events=False)
 
         # Cascade logs (always, for cascade-service channels)
         for ch in cascade_channels:
@@ -173,9 +185,53 @@ class YamlService(BaseService):
             "active_channels": active_channels,
             "cascade_channels": cascade_channels,
             "cascade_count": len(cascade_channels),
-            # Service phase (set externally via set_phase())
             "_phase": self._phase,
+            # Channels whose fix has been applied (schema 1.3 remediation_effects), so a
+            # service can render post-fix values, e.g. the restored Corefile upstreams.
+            "fixed_channels": list(getattr(self.chaos_controller, "get_fixed_channels", lambda: [])()),
+            # Every active channel, not only those naming this service.
+            "all_active": list(self.chaos_controller.get_active_channels()),
+            # Seconds since each fixed channel's fix landed, so a value converges back to
+            # nominal after the fix instead of snapping: min(1, since_fix.get(2, 0) / 60).
+            "since_fix": dict(getattr(self.chaos_controller, "get_since_fix", lambda: {})()),
+            # Latest applied opsctl flags per target ("kind/name" -> {flag: value, "_verb"}),
+            # for any command, not only a completed fix: a partial or wrong change shows too.
+            "applied": dict(getattr(self.chaos_controller, "get_applied", lambda: {})()),
         }
+        # Seconds since each active channel was triggered, so a service can ramp a
+        # value (e.g. Ingress count climbing as objects are created) instead of stepping.
+        _elapsed = getattr(self.chaos_controller, "get_channel_elapsed", None)
+        env["elapsed"] = {
+            ch: e for ch in env["all_active"]
+            if _elapsed is not None and (e := _elapsed(ch)) is not None
+        }
+        # Seconds of onset delay that apply to THIS service per active channel (the
+        # channel's onset_delay_seconds plus its service_lag_seconds entry), so a
+        # dependent's metric can start later than the component at fault:
+        # min(1, max(0, elapsed.get(5, 0) - lag.get(5, 0)) / 20).
+        env["lag"] = {
+            ch: float((self._channel_registry.get(ch) or {}).get("onset_delay_seconds", 0) or 0)
+            + self._service_lag(self._channel_registry.get(ch) or {})
+            for ch in env["all_active"]
+        }
+        # Real timestamps for message bodies that carry their own (klog, logfmt, JSON).
+        import datetime as _dt
+
+        _now = _dt.datetime.now(_dt.timezone.utc)
+        env["klog_time"] = _now.strftime("%m%d %H:%M:%S.") + f"{_now.microsecond:06d}"
+        env["iso_now"] = _now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{_now.microsecond // 1000:03d}Z"
+        env["epoch_now"] = round(_now.timestamp(), 3)
+        # Live pod IPs per workload (pinned topology), e.g. for ingress upstream_addr.
+        env.setdefault("pod_ips", {})
+        env.setdefault("node_names", [])
+        platform = self._platform_model()
+        if platform is not None:
+            c = platform.default
+            pod_ips: dict[str, list[str]] = {}
+            for pod in c.pods:
+                pod_ips.setdefault(pod.workload, []).append(pod.ip)
+            env["pod_ips"] = pod_ips
+            env["node_names"] = [n.name for n in c.nodes]
         # All constants (lists, dicts, sensor tables, phase message tables, …)
         env.update(self._telemetry_spec.get("constants", {}))
         # All current state (counters, timestamps, per-key dicts, …)
@@ -203,6 +259,9 @@ class YamlService(BaseService):
         """Dispatch each step in *steps* using the shared *env*."""
         for step in steps:
             if not isinstance(step, dict):
+                continue
+            # ``when: <expr>`` guards any step, e.g. ``when: "13 in all_active"``.
+            if "when" in step and not safe_eval(str(step["when"]), env):
                 continue
             if "sample" in step:
                 self._step_sample(step["sample"], env)
@@ -238,6 +297,12 @@ class YamlService(BaseService):
 
     def _step_log(self, spec: dict, env: dict) -> None:
         level = str(spec.get("level", "INFO"))
+        # Pick the record's pod/node first so the message can quote it ({self_node},
+        # {self_pod_ip}, {node_count}...). ``scope:`` narrows it like a fault_scope.
+        scope = spec.get("scope")
+        identity = self._pick_identity(scope)
+        if identity is not None or scope:
+            env = {**env, **self._runtime_placeholders(identity, scope)}
         message = self._resolve_str(spec["message"], env)
         attrs_spec = spec.get("attrs", {})
         attrs = self._resolve_attrs(attrs_spec, env) if attrs_spec else {}
@@ -245,23 +310,13 @@ class YamlService(BaseService):
         channel = env.get("channel")
         with_remed = bool(spec.get("with_remediation_meta", False))
 
+        # ``with_remediation_meta`` is accepted for older specs but no longer stamps
+        # chaos.* fields or an event_name JSON blob on the record: who triggered a
+        # fault now lives in the {ns}-notify-context index (see Instance.trigger_channel).
         if with_remed and channel is not None:
-            # Mirror the remediation-metadata injection in emit_fault_logs
-            meta = self.chaos_controller.get_channel_metadata(channel)
-            if meta.get("callback_url"):
-                attrs["chaos.callback_url"] = meta["callback_url"]
-            if meta.get("user_email"):
-                attrs["chaos.user_email"] = meta["user_email"]
-            ev_name: str | None = None
-            if meta.get("callback_url") or meta.get("user_email"):
-                ev_name = json.dumps({
-                    "callback_url": meta.get("callback_url", ""),
-                    "user_email": meta.get("user_email", ""),
-                    "deployment_id": self._ctx.scenario_id if self._ctx else "",
-                })
-            self.emit_log(level, message, attrs or None, event_name=ev_name, channel=channel)
+            self.emit_log(level, message, attrs or None, channel=channel, identity=identity)
         else:
-            self.emit_log(level, message, attrs or None)
+            self.emit_log(level, message, attrs or None, identity=identity)
 
     def _step_for_each(self, spec: dict, env: dict) -> None:
         """Iterate over a list/dict source, binding loop vars into the shared env.
@@ -320,7 +375,11 @@ class YamlService(BaseService):
         state_key = str(spec["state_key"])
         key = self._resolve(spec["key"], env)
         by = self._resolve(spec.get("by", 1), env)
-        d = self._state.get(state_key, {})
+        d = self._state.get(state_key)
+        if not isinstance(d, dict):
+            # A scalar ``init`` (e.g. ``{init: 0}``) would crash every loop with
+            # AttributeError; per-key counters live in a dict, so start one.
+            d = {}
         d[key] = d.get(key, 0) + by
         self._state[state_key] = d
         env[state_key] = d

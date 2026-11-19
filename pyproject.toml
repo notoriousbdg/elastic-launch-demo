@@ -1,0 +1,6 @@
+[tool.pytest.ini_options]
+# Run from this directory: `python -m pytest`.
+testpaths = ["tests", "generator_engine", "generators"]
+python_files = ["test_*.py"]
+addopts = "-q -p no:cacheprovider"
+filterwarnings = ["ignore::DeprecationWarning"]

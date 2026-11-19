@@ -1,0 +1,23 @@
+# GCP Cloud Audit Logs style records. Scenario-neutral: map your kinds to it with
+# `kinds: {<kind>: {audit: gcp_audit, gcp: {service: compute.googleapis.com, method: {_: v1.compute.instances.setMetadata}}}}`.
+audit:
+  formats:
+    gcp_audit:
+      vars:
+        gcp: "kind_info.get('gcp') or {}"
+        gcp_methods: "gcp.get('method') or {}"
+        service_name: "gcp.get('service') or 'cloudresourcemanager.googleapis.com'"
+        method_name: "gcp_methods.get(verb) or gcp_methods.get('_') or (service_name.split('.')[0] + '.' + kind + '.' + verb)"
+        resource_name: "gcp.get('resource_prefix', '') + (name or kind)"
+      body: "gcp-audit: logName=cloudaudit.googleapis.com/activity serviceName={service_name} methodName={method_name} resourceName={resource_name} principalEmail={actor} status=OK change_id={change_id}"
+      attributes:
+        cloud.provider: gcp
+        gcp.audit.service_name: "{service_name}"
+        gcp.audit.method_name: "{method_name}"
+        gcp.audit.resource_name: "{resource_name}"
+        user.name: "{actor}"
+        change.id: "{change_id}"
+        event.action: "{method_name}"
+      match:
+        prefix: "gcp-audit:"
+        tokens: ["methodName={method_name}"]

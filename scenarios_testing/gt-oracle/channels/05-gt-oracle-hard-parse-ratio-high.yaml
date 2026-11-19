@@ -1,0 +1,37 @@
+name: "GT oracle_otel: hard_parse_ratio_high"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-ORACLE-HARD-PARSE-RATIO-HIGH
+sensor_type: impact_key_probe
+affected_services:
+  - gt-oracle-aws-svc-1
+cascade_services:
+  - gt-oracle-aws-svc-2
+description: "Tests impact_key hard_parse_ratio_high on generator oracle_otel."
+investigation_notes: |-
+  1. Verify oracle_otel is active and reporting metrics.
+  2. Check that the hard_parse_ratio_high metric has reached the trigger value (75.0).
+  3. Confirm generator_impact for oracle_otel.hard_parse_ratio_high is set to 75.0.
+  4. Look for correlated changes in service gt-oracle-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_hard_parse_ratio_high_baseline
+error_message: "GT-PROBE: gen=oracle_otel key=hard_parse_ratio_high value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=oracle_otel
+  impact_key: hard_parse_ratio_high
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 75.0
+  svc_name: gt-oracle-aws-svc-1
+rca_clues:
+  gt-oracle-aws-svc-1:
+    probe.generator: oracle_otel
+    probe.impact_key: hard_parse_ratio_high
+    probe.trigger_value: 75.0
+  gt-oracle-aws-svc-2:
+    probe.upstream_generator: oracle_otel
+    probe.upstream_key: hard_parse_ratio_high
+generator_impact:
+  oracle_otel:
+    hard_parse_ratio_high: 75.0

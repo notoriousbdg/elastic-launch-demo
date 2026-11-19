@@ -3,76 +3,128 @@ subsystem: network_core
 vehicle_section: routing_engine
 error_type: BGP-3-NOTIFICATION
 sensor_type: bgp_session
-affected_services:
-- network-controller
-- firewall-gateway
-cascade_services:
-- dns-dhcp-service
-- cloud-inventory-scanner
+affected_services: [network-controller, firewall-gateway, cloud-inventory-scanner]
+cascade_services: [dns-dhcp-service]
 description: BGP peering session repeatedly transitioning between Established and Idle states
+onset_delay_seconds: 15
+ramp_seconds: 10
 investigation_notes: |-
-  1. Run `show bgp neighbors <peer_ip>` to check the last NOTIFICATION code and hold timer status.
-  2. Examine `show bgp summary` for Established vs non-Established peers and check PfxRcd (prefix received) for anomalies.
-  3. Hold Timer Expired (code 4/0) usually means keepalives are not reaching the peer — check interface utilization and MTU with `show interface <intf>`.
-  4. Cease/Admin Reset (6/4) indicates the remote side cleared the session — coordinate with the peer AS administrator.
-  5. Check route policy: `show route-map` and `show ip prefix-list` — a misconfigured prefix filter can cause constant UPDATE/WITHDRAW cycling.
-  6. Verify TCP session health: `show tcp brief | include <peer_ip>` and check for retransmissions that indicate an underlying transport issue.
+  Root cause: route-policy-v3.2.0-rc1 was applied to edge-rtr-01 shortly before the first BGP-3-NOTIFICATION. The release candidate rewrote the cloud peer-group timers to keepalive 3s / hold 9s (previously 60s / 180s). The AWS transit gateway peer {bgp_peer_ip} (AS {bgp_peer_as}) sends keepalives on its own 10s cadence, so the 9s hold timer expires and the router sends {bgp_notification}: {bgp_flap_count} adjacency changes in {bgp_flap_window}s, last state {bgp_last_state}. Only edge-rtr-01 is affected: edge-rtr-02 keeps 6/6 neighbors Established on route-policy-v3.1.4. The path is healthy: interface utilization is 20-45%, MTU matches, the firewall drops no TCP/179 packets and idles TCP sessions after 3600s, which rules out transport loss and a firewall timeout.
+  Confirm:
+    - edge-rtr-01 logs %SYS-5-CONFIG_I (route-policy-v3.2.0-rc1, CHG0048402) before the first NOTIFICATION (attributes.network.bgp_policy_rev)
+    - bgp-summary lines show route_policy=route-policy-v3.2.0-rc1 and hold_timer=9s with fewer than 6/6 neighbors established; metric network.bgp.peers_established falls to about 3 and network.bgp.session_flaps_per_min rises to about 10 (baseline 0)
+    - the notification is 4/0 (hold time expired) sent by this router, not a Cease/Admin Reset from the peer
+  Remediation: roll the route policy back with opsctl rollback route-policy/edge-rtr-01-tgw --to-revision previous. The rollback hard-resets the sessions, so all 6 drop for about 10 seconds, then they re-establish one by one and are back to 6/6 within about 45 seconds; flaps drain to 0 by 60 seconds. Raising the hold timer by hand would leave the release candidate in place.
 remediation_action: reset_bgp_session
-error_message: '%BGP-3-NOTIFICATION: Neighbor {bgp_peer_ip} (AS {bgp_peer_as}) sent NOTIFICATION {bgp_notification}, {bgp_flap_count}
-  transitions in {bgp_flap_window}s, last state {bgp_last_state}'
+remediation_command: |-
+  opsctl rollback route-policy/edge-rtr-01-tgw --to-revision previous
+error_message: '%BGP-3-NOTIFICATION: sent to neighbor {bgp_peer_ip} 4/0 (hold time expired) 0 bytes'
 stack_trace: |-
   router# show bgp neighbors {bgp_peer_ip}
   BGP neighbor is {bgp_peer_ip}, remote AS {bgp_peer_as}, external link
-    BGP state = {bgp_last_state}, up for 00:00:03
+    BGP state = {bgp_last_state}, last reset 00:00:03, due to BGP Notification sent, hold time expired
     Last read 00:00:03, Last write 00:00:08
-    Hold time is 180, keepalive interval is 60 seconds
+    Hold time is 9, keepalive interval is 3 seconds
     Neighbor sessions: 1 active
-    Notification received: {bgp_notification}
+    Notification sent: {bgp_notification}
     Flap count: {bgp_flap_count} in {bgp_flap_window}s
       Opens:           Sent 12   Rcvd 9
-      Notifications:   Sent 0    Rcvd {bgp_flap_count}
-      Updates:         Sent 245  Rcvd 0
+      Notifications:   Sent {bgp_flap_count}    Rcvd 0
+      Updates:         Sent 245  Rcvd 312
       Keepalives:      Sent 1024 Rcvd 891
 correlation_attr:
   key: network.bgp_policy_rev
   value: route-policy-v3.2.0-rc1
 fault_params:
-  bgp_peer_ip:
-    format: "10.{a}.{b}.{c}"
-    a: {randint: [0, 255]}
-    b: {randint: [0, 255]}
-    c: {randint: [1, 254]}
-  bgp_peer_as: {choice: [64512, 64513, 64514, 65001, 65002, 65100]}
-  bgp_notification:
-    choice:
-    - "Hold Timer Expired (code 4/0)"
-    - "Cease/Admin Reset (code 6/4)"
-    - "UPDATE Message Error (code 3/1)"
-    - "FSM Error (code 5/0)"
-  bgp_flap_count: {randint: [5, 25]}
-  bgp_flap_window: {randint: [30, 300]}
+  bgp_peer_ip: 169.254.21.1
+  bgp_peer_as: 64512
+  bgp_notification: "Hold Timer Expired (code 4/0)"
+  bgp_flap_count: {randint: [8, 12]}
+  bgp_flap_window: 60
   bgp_last_state: {choice: [Idle, Active, OpenSent, OpenConfirm]}
 rca_clues:
   network-controller:
     bgp.hold_timer_misconfig: true
+    bgp.hold_timer_s: 9
+    bgp.keepalive_s: 3
+    bgp.interface_util_pct: {uniform: [20, 45], round: 1}
+    bgp.mtu_mismatch: false
     bgp.prefix_withdraw_count: {randint: [50, 500]}
   firewall-gateway:
-    firewall.bgp_port_179_drops: {randint: [10, 100]}
-    firewall.policy_id_blocking:
-      format: "rule-{n}"
-      n: {randint: [100, 999]}
+    firewall.bgp_port_179_drops: 0
+    firewall.tcp_idle_timeout_s: 3600
+    firewall.bgp_keepalive_interval_s: 3
   dns-dhcp-service:
     dns.forwarder_unreachable: true
     dns.affected_queries_pct: {uniform: [30, 80], round: 1}
   cloud-inventory-scanner:
     cloud_scan.cross_cloud_route_missing: true
     cloud_scan.affected_provider: {choice: [aws, azure]}
+cascade_messages:
+  dns-dhcp-service:
+    - severity: ERROR
+      message: 'named[1823]: forwarder {bgp_peer_ip}#53: SERVFAIL: no route to cross-cloud resolver while the BGP session to AS {bgp_peer_as} is {bgp_last_state}'
+fault_scope:
+  workloads: [network-controller, firewall-gateway, cloud-inventory-scanner]
+infrastructure_events:
+  - service: network-controller
+    severity: INFO
+    offset_seconds: -20
+    body: '%SYS-5-CONFIG_I: Configured from console by netops-release on vty0 (route-policy-v3.2.0-rc1, CHG0048402; peer-group TGW-CLOUD neighbor timers 60 180 -> 3 9) [edge-rtr-01]'
+    attributes:
+      user.name: netops-release
+      change.request: CHG0048402
+      operation: config_change
+      network.device: edge-rtr-01
+      network.bgp_policy_rev: route-policy-v3.2.0-rc1
+      change.summary: 'edge-rtr-01 route policy: route-policy-v3.1.4 -> route-policy-v3.2.0-rc1'
+remediation_effects:
+  log_events:
+    - service: network-controller
+      severity: INFO
+      offset_seconds: 1
+      body: '[CHG] CHANGE APPLIED opsctl rollback route-policy/edge-rtr-01-tgw --to-revision previous by {actor}: edge-rtr-01 route-policy-v3.2.0-rc1 -> route-policy-v3.1.4, neighbor timers 60 180'
+      attributes:
+        operation: config_change
+        change.target: route-policy/edge-rtr-01-tgw
+    - service: network-controller
+      severity: INFO
+      offset_seconds: 2
+      body: '%BGP-5-ADJCHANGE: neighbor 169.254.21.1 Down User reset [edge-rtr-01]'
+      attributes:
+        operation: bgp_adjacency
+        network.device: edge-rtr-01
+        network.bgp_policy_rev: route-policy-v3.1.4
+  steady_attributes:
+    network-controller:
+      network.bgp_policy_rev: route-policy-v3.1.4
+  verification:
+    - signal: network.bgp.peers_established
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "network-controller"'
+      field: 'metrics.network.bgp.peers_established'
+      expect: 'a dip to 0 for about 10 seconds after the reset, then back to 6 of 6 within about 45 seconds (was about 3)'
+      within_seconds: 120
+    - signal: network.bgp.session_flaps_per_min
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "network-controller"'
+      field: 'metrics.network.bgp.session_flaps_per_min'
+      expect: '0 within about 60 seconds (was about 10)'
+      within_seconds: 120
+    - signal: BGP route policy and hold timer
+      from: 'logs.otel.fanatics'
+      where: 'resource.attributes.service.name == "network-controller"'
+      field: 'attributes.network.bgp_policy_rev'
+      expect: 'route-policy-v3.1.4 on every bgp-summary line since the fix (was route-policy-v3.2.0-rc1); attributes.bgp.hold_timer_s 180 (was 9)'
+      within_seconds: 120
 business_impact:
   - kpi: business.app_sessions_per_min
-    factor: {uniform: [0.20, 0.50]}
+    value: {uniform: [334.8, 385.2]}
   - kpi: business.page_views_per_min
-    factor: {uniform: [0.20, 0.50]}
+    value: {uniform: [66960.0, 77040.0]}
   - kpi: business.ad_revenue_usd_per_min
-    factor: {uniform: [0.25, 0.55]}
+    value: {uniform: [31620.0, 36380.0], round: 1}
   - kpi: business.betting_handle_usd_per_min
-    factor: {uniform: [0.25, 0.55]}
+    value: {uniform: [108810.0, 125190.0], round: 1}
+# dependents degrade after the component at fault, in dependency order
+service_lag_seconds: {firewall-gateway: 10, dns-dhcp-service: 35, cloud-inventory-scanner: 40}

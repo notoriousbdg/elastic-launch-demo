@@ -9,45 +9,126 @@ cascade_services:
 - oee-analytics
 - shopfloor-portal
 - scada-gateway
-description: MES routing engine deadlocks; work orders stuck in IN_PROGRESS, blocking line releases
+description: A new MES routing ruleset takes row locks in the opposite order to the line-release transaction; SQL Server deadlocks and work orders on LINE-02 stay IN_PROGRESS
 investigation_notes: |-
-  Root Cause: Routing-engine deadlocks happen when concurrent work-order state transitions take shared row locks on the same equipment-resource record in a different order than the line-release transaction takes them, producing a cycle in the lock graph. Common after deploying a new routing ruleset or when the changeover transaction includes a cross-line resource swap.
-  Remediation: 1) Inspect the deadlock graph: `mes-admin deadlock-report --since 5m`. 2) Identify the offending transaction and abort the lower-priority side: `mes-admin abort-tx --tx-id {tx_id}`. 3) Restart the work-order engine to clear orphan locks: `systemctl restart mes-workorder-engine`. 4) Verify queue depth recovers: `mes-admin queue-depth --line {line_id}`. 5) If recurrence: revert the routing ruleset deploy and re-test in staging.
+  Root cause: the MES routing ruleset routing-v3.4.1 was activated shortly before the first MES-WORK-ORDER-DEADLOCK (previous: routing-v3.4.0). Its changeover step updates work_order before equipment_state, while the line-release transaction locks equipment_state first and then work_order. On {line_id} the two transactions now wait for each other, SQL Server breaks the cycle with Msg 1205 and rolls back the state transition, and the work order stays IN_PROGRESS. The stale-transition sweeper retries those work orders every 60 s, but each retry deadlocks again while the new ruleset is active. The database itself is healthy: CPU, page life expectancy and I/O latency on the MES SQL Server stay in band; only deadlocks and lock waits rise.
+  Confirm:
+    - mes-controller routing_status lines show ruleset=routing-v3.4.1 (attributes.mes.routing_ruleset); metric mes.deadlocks_per_min rises from 0 to 4-10 and mes.stuck_work_orders from 0-2 to 20-60
+    - the mes-controller deployment line activating routing-v3.4.1 (CHG-7342) comes before the first deadlock
+    - the SQL Server integration stream shows sqlserver deadlock and lock-wait rates rising at the same time, with no change in buffer cache or I/O latency
+    - only {line_id} is affected; the other lines keep releasing work orders
+  Remediation: reactivate the previous ruleset with opsctl rollback routing-ruleset/mes-routing --to-revision previous. New transitions take locks in the original order, so deadlocks stop at once; the sweeper's next passes complete the stuck work orders, and mes.stuck_work_orders drains to 0 within about 90 s. A restart of the work-order engine is not needed and would not stop the deadlocks.
 remediation_action: restart_workorder_engine
-error_message: '[MES] MES-WORK-ORDER-DEADLOCK: line={line_id} wo={work_order_id} tx={tx_id} queue_depth={queue_depth} stuck_for_s={stuck_seconds}'
+remediation_command: |-
+  opsctl rollback routing-ruleset/mes-routing --to-revision previous
+error_message: '[MES] MES-WORK-ORDER-DEADLOCK: line={line_id} wo={work_order_id} tx={tx_id} chosen as deadlock victim (SQL Server Msg 1205) on equipment_state; transition IN_PROGRESS -> COMPLETE rolled back; stuck_work_orders={stuck_count} ruleset=routing-v3.4.1'
 stack_trace: |-
-  === MES DEADLOCK GRAPH ===
-  Line: {line_id} | Stuck WO: {work_order_id}
-  ------------------------------------------------------------------------
-  TX-ID         | OPERATION               | LOCK MODE | RESOURCE
-  ------------------------------------------------------------------------
-  {tx_id}        | wo_state_transition     | EXCL_ROW  | equipment_state[{line_id}]
-  TX-OTHER-A     | line_release            | EXCL_ROW  | work_order[{work_order_id}]
-  TX-OTHER-A     | wo_state_transition     | WAIT      | equipment_state[{line_id}]
-  {tx_id}        | line_release            | WAIT      | work_order[{work_order_id}]
-  ------------------------------------------------------------------------
-  MES-WORK-ORDER-DEADLOCK: cycle detected; queue_depth={queue_depth}; stuck for {stuck_seconds}s
+  com.microsoft.sqlserver.jdbc.SQLServerException: Transaction (Process ID {spid}) was deadlocked on lock resources with another process and has been chosen as the deadlock victim. Rerun the transaction.
+    at com.microsoft.sqlserver.jdbc.SQLServerException.makeFromDatabaseError(SQLServerException.java:265)
+    at com.microsoft.sqlserver.jdbc.SQLServerPreparedStatement.doExecutePreparedStatement(SQLServerPreparedStatement.java:621)
+    at com.plant.mes.routing.ChangeoverStep.apply(ChangeoverStep.java:142)
+    at com.plant.mes.workorder.StateTransition.execute(StateTransition.java:88)
+  deadlock-list (system_health xml_deadlock_report):
+    victim process {tx_id}: UPDATE work_order SET status=@p0 WHERE work_order_id=@p1  -> waits KEY lock equipment_state[{line_id}]
+    process TX-LINE-RELEASE: UPDATE equipment_state SET state=@p0 WHERE line_id=@p1 -> waits KEY lock work_order[{work_order_id}]
+  MES-WORK-ORDER-DEADLOCK: {work_order_id} left IN_PROGRESS
 correlation_attr:
-  key: deployment.mes_routing_ruleset
-  value: routing-v3.4.1-beta
+  key: mes.routing_ruleset
+  value: routing-v3.4.1
 fault_params:
-  line_id: {choice: [LINE-01, LINE-02, LINE-03, LINE-04, LINE-05]}
+  line_id: LINE-02
   work_order_id:
     format: "WO-{n}"
     n: {randint: [100000, 999999]}
   tx_id:
     format: "TX-{n}"
     n: {randint: [100000, 999999]}
-  queue_depth: {randint: [2200, 4800]}
-  stuck_seconds: {randint: [120, 1800]}
+  spid: {randint: [51, 220]}
+  stuck_count: {randint: [20, 60]}
 rca_clues:
   mes-controller:
-    mes.deadlock_tx_count: {randint: [2, 12]}
-    mes.routing_ruleset_version: v3.4.1-beta
+    mes.deadlock_tx_count: {randint: [4, 10]}
+    mes.routing_ruleset: routing-v3.4.1
+    mes.line: LINE-02
+    db.page_life_expectancy_s: {randint: [2800, 4200]}
   oee-analytics:
-    oee.line_stalled_min: {randint: [5, 35]}
+    oee.line_stalled_min: {randint: [3, 12]}
   shopfloor-portal:
     portal.operator_actions_held: {randint: [4, 25]}
+  scada-gateway:
+    scada.mes_publish_buffered: {randint: [20, 200]}
+cascade_messages:
+  oee-analytics:
+    - severity: WARN
+      message: '[OEE] oee_calc line={line_id} performance input stale: no work order completions from MES for 3 windows; performance held at last value'
+  shopfloor-portal:
+    - severity: WARN
+      message: '[PORTAL] operator_action kiosk=KIOSK-LINE02-01 action=complete_operation wo={work_order_id} rejected by MES: work order still IN_PROGRESS (state transition pending)'
+  scada-gateway:
+    - severity: WARN
+      message: '[SCADA] mes_publish POST /api/v1/mes/equipment-state line={line_id} -> 503 after 5000 ms; buffering equipment state changes'
+fault_scope:
+  cluster: mfg-eks-cluster
+  workloads: [mes-controller]
+infrastructure_events:
+  - service: mes-controller
+    severity: INFO
+    offset_seconds: -90
+    body: '[MES] deployment routing ruleset routing-v3.4.1 activated (was routing-v3.4.0): changeover step reworked for cross-line resource swaps; activated by mes-release (CHG-7342)'
+    attributes:
+      operation: deployment
+      user.name: mes-release
+      change.request: CHG-7342
+      mes.routing_ruleset: routing-v3.4.1
+      change.summary: 'routing ruleset: routing-v3.4.0 -> routing-v3.4.1'
+service_lag_seconds:
+  scada-gateway: 20
+  oee-analytics: 30
+  shopfloor-portal: 45
+remediation_effects:
+  log_events:
+    - service: mes-controller
+      severity: INFO
+      offset_seconds: 1
+      body: '[CHG] CHANGE APPLIED opsctl rollback routing-ruleset/mes-routing --to-revision previous by {actor}: routing-v3.4.1 -> routing-v3.4.0'
+      attributes:
+        operation: change_applied
+        change.target: routing-ruleset/mes-routing
+    - service: mes-controller
+      severity: INFO
+      offset_seconds: 60
+      body: '[MES] stale_transition_sweep line=LINE-02 completed=41 failed=0; no work orders left IN_PROGRESS past their transition timeout'
+      attributes:
+        operation: transition_sweep
+        mes.line: LINE-02
+  steady_attributes:
+    mes-controller:
+      mes.routing_ruleset: routing-v3.4.0
+  log_taper_seconds: 20
+  verification:
+    - signal: mes.deadlocks_per_min
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "mes-controller"'
+      field: 'metrics.mes.deadlocks_per_min'
+      expect: '0 (was 4-10)'
+      within_seconds: 60
+    - signal: mes.stuck_work_orders
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "mes-controller"'
+      field: 'metrics.mes.stuck_work_orders'
+      expect: 'back under 3 (was 20-60)'
+      within_seconds: 120
+    - signal: MES-WORK-ORDER-DEADLOCK lines
+      from: 'logs.otel.mfg'
+      where: 'body.text LIKE "*MES-WORK-ORDER-DEADLOCK*"'
+      expect: '0 new lines'
+      within_seconds: 60
+    - signal: active routing ruleset
+      from: 'logs.otel.mfg'
+      where: 'resource.attributes.service.name == "mes-controller" AND body.text LIKE "*routing_status*"'
+      field: 'attributes.mes.routing_ruleset'
+      expect: 'routing-v3.4.0 on every line logged since the fix; routing-v3.4.1 stops appearing'
+      within_seconds: 60
 business_impact:
   - kpi: business.oee_overall_pct
     factor: {uniform: [0.30, 0.60]}
@@ -57,3 +138,9 @@ business_impact:
     factor: {uniform: [0.35, 0.65]}
   - kpi: business.unplanned_downtime_min_per_shift
     factor: {uniform: [2.0, 4.5]}
+generator_impact:
+  microsoft_sqlserver_otel:
+    deadlocks_detected: 5.0
+    blocked_processes: 8.0
+    lock_wait_rate_high: 20.0
+generator_hold_seconds: {microsoft_sqlserver_otel: 60}

@@ -6,19 +6,31 @@ sensor_type: netting_integrity
 affected_services:
 - settlement-processor
 - risk-calculator
+error_services:
+- settlement-processor
 cascade_services:
 - audit-logger
 - compliance-monitor
 description: Multilateral netting calculation produces inconsistent net obligations
+onset_delay_seconds: 15
+service_lag_seconds:
+  risk-calculator: 30
+  audit-logger: 30
+  compliance-monitor: 45
 investigation_notes: |-
-  1. Check settlement-processor logs for SETTLE-NETTING-CALC — note batch_id, currency, net_mismatch amount, and counterparty_count.
-  2. Query FROM logs.otel.financial.* | WHERE body.text LIKE "*SETTLE-NETTING-CALC*" | STATS max(net_mismatch) BY batch_id to find the largest imbalanced batches.
-  3. Inspect the per-counterparty deliver/receive totals — any single counterparty with deliver != receive (when summed across all pairs) is the likely source of the mismatch.
-  4. Check audit-logger for late trade amendments submitted after the netting batch cutoff — these are frequently missed in the batch computation.
-  5. Recompute the batch with risk-calculator cross-validation before resubmitting to NSCC CNS; do not release the settlement hold until net_mismatch < $0.01.
-remediation_action: recompute_netting_batch
+  Root cause: release-eng rolled settlement-processor out from 4.2.1 to 4.3.0 (CR-5240). 4.3.0 takes the netting batch's cutoff date from the UTC clock instead of America/New_York (netting.cutoff_tz=UTC). Once the UTC date has rolled over (19:00 ET), the cutoff moves to the next day's 16:00 ET, so trade amendments booked after today's 16:00 ET cutoff are pulled into the current batch. NSCC's CNS projection excludes them, so the batch no longer reconciles: the mismatch is exactly $1,000,000.00, the net value of the post-cutoff amendments, and it appears as a step at the first netting run after the rollout, not as drift. The inputs are healthy: the amendments themselves are valid and booked normally (audit-logger), the per-counterparty deliver and receive legs are internally consistent, and batches computed before the rollout balanced to the cent.
+  Confirm:
+    - settlement-processor lines with body.text LIKE "*SETTLE-NETTING-CALC*": net_mismatch=${net_mismatch} exactly, cutoff_tz=UTC, post_cutoff_amendments={amendment_count}; the dump's sum_receives minus sum_delivers is the same $1,000,000.00
+    - metrics.settlement.net_mismatch_usd on settlement-processor: 0.00 before (tolerance $0.01), a step to 1000000.00 at the first netting run after the rollout
+    - settlement-processor "netting_integrity" lines: attributes.deployment.version = 4.3.0 and attributes.netting.cutoff_tz = UTC
+    - the settlement-processor deployment_rollout line "settlement-processor 4.2.1 -> 4.3.0" (attributes.change.request CR-5240) comes before the first mismatch
+  Remediation: opsctl rollback deployment/settlement-processor --to-revision previous returns to 4.2.1 (rolling, about 30 s), then opsctl run job/netting-recompute rebuilds the batch with the America/New_York cutoff, moving the post-cutoff amendments to the next batch. The mismatch is back to 0.00 about 45 s after the fix and the settlement hold is released. Recomputing without the rollback rebuilds the same wrong batch, and adjusting the batch by hand or releasing the hold above the $0.01 tolerance sends an unreconciled batch to NSCC.
+remediation_action: rollback_settlement_release_and_recompute_netting
+remediation_command: |-
+  opsctl rollback deployment/settlement-processor --to-revision previous
+  opsctl run job/netting-recompute
 error_message: '[SETTLE] SETTLE-NETTING-CALC: batch={batch_id} net_mismatch=${net_mismatch} counterparties={counterparty_count}
-  currency={currency}'
+  currency={currency} cutoff_tz=UTC post_cutoff_amendments={amendment_count}'
 stack_trace: |-
   === NETTING BATCH SUMMARY ===
   batch={batch_id}  currency={currency}  counterparties={counterparty_count}
@@ -32,6 +44,9 @@ stack_trace: |-
     sum_receives   $122,900,000
     mismatch       ${net_mismatch}  <<< NON-ZERO
     tolerance      $0.01
+  --- CUTOFF ---
+    cutoff_tz=UTC  batch_cutoff=T+1 16:00 America/New_York  expected_cutoff=T 16:00 America/New_York
+    post_cutoff_amendments_in_batch={amendment_count}  net_value=${net_mismatch}
   reduction_pct=72.4%  expected_reduction=75.0%  NSCC_CNS=REJECTED
   ACTION: recompute_batch=true  hold_settlement=true  alert=SETTLE-NETTING-CALC
 correlation_attr: {}
@@ -39,22 +54,125 @@ fault_params:
   batch_id:
     format: "NET-{n}"
     n: {randint: [1000, 9999]}
-  net_mismatch: {uniform: [10000, 5000000], round: 2}
-  counterparty_count: {randint: [3, 20]}
-  currency: {choice: [USD, EUR, GBP, JPY, CHF]}
+  net_mismatch: '1,000,000.00'
+  counterparty_count: 4
+  currency: USD
+  amendment_count: {randint: [3, 10]}
 rca_clues:
   settlement-processor:
-    settlement.net_mismatch_usd: {uniform: [10000, 5000000], round: 2}
+    settlement.net_mismatch_usd: 1000000.00
     settlement.nscc_cns_rejection_count: {randint: [1, 10]}
+    netting.cutoff_tz: UTC
+    deployment.version: 4.3.0
   risk-calculator:
     risk.netting_reduction_pct: {uniform: [60.0, 74.9], round: 1}
     risk.counterparty_net_exposure_usd: {randint: [500000, 10000000]}
   audit-logger:
-    audit.late_amendment_count: {randint: [1, 20]}
-    audit.post_cutoff_trade_changes: {randint: [0, 10]}
+    audit.late_amendment_count: {randint: [3, 10]}
+    audit.post_cutoff_trade_changes: {randint: [3, 10]}
   compliance-monitor:
     compliance.netting_integrity_flags: {randint: [1, 5]}
     compliance.batch_hold_duration_s: {randint: [60, 3600]}
+cascade_messages:
+  risk-calculator:
+    - severity: WARN
+      message: '[RISK] netting batch {batch_id} does not reconcile to the CNS projection (diff ${net_mismatch} {currency}); counterparty
+        net exposure computed gross until the batch is released'
+  audit-logger:
+    - severity: INFO
+      message: '[AUDIT] event_logged stream=settlements type=NETTING_BATCH_HOLD batch={batch_id} mismatch=${net_mismatch} post_cutoff_amendments={amendment_count}'
+  compliance-monitor:
+    - severity: WARN
+      message: '[COMPL] netting integrity flag: batch={batch_id} held, CNS submission rejected (mismatch ${net_mismatch} {currency})'
+fault_scope:
+  cluster: finserv-gke-cluster
+  workloads: [settlement-processor, risk-calculator]
+infrastructure_events:
+  - service: settlement-processor
+    severity: INFO
+    offset_seconds: -120
+    body: 'deployment settlement-processor rolled out 4.2.1 -> 4.3.0 by release-eng (CR-5240): 3/3 pods updated and available; changes:
+      netting batch scheduler refactor (NettingCutoffResolver)'
+    attributes:
+      user.name: release-eng
+      change.request: CR-5240
+      operation: deployment_rollout
+      change.summary: 'settlement-processor: 4.2.1 -> 4.3.0'
+      deployment.version: 4.3.0
+      netting.cutoff_tz: UTC
+remediation_effects:
+  log_taper_seconds: 45
+  log_events:
+    - service: audit-logger
+      severity: INFO
+      offset_seconds: 1
+      body: '[AUDIT] event_logged stream=change-mgmt type=CHANGE_APPLIED cmd="opsctl rollback deployment/settlement-processor --to-revision previous" actor={actor}: settlement-processor 4.3.0 -> 4.2.1'
+      attributes:
+        operation: change_applied
+        audit.stream: change-mgmt
+        change.target: deployment/settlement-processor
+    - service: audit-logger
+      severity: INFO
+      offset_seconds: 2
+      body: '[AUDIT] event_logged stream=change-mgmt type=CHANGE_APPLIED cmd="opsctl run job/netting-recompute" actor={actor}: current netting batch recomputed with the America/New_York cutoff'
+      attributes:
+        operation: change_applied
+        audit.stream: change-mgmt
+        change.target: job/netting-recompute
+    - service: settlement-processor
+      severity: INFO
+      offset_seconds: 15
+      body: 'deployment settlement-processor rolled back to 4.2.1: rolling update in progress, 2/3 pods updated'
+      attributes:
+        operation: deployment_rollout
+        deployment.version: 4.2.1
+        deploy.updated_replicas: 2
+    - service: settlement-processor
+      severity: INFO
+      offset_seconds: 30
+      body: 'deployment settlement-processor rolled back to 4.2.1: 3/3 pods updated and available'
+      attributes:
+        operation: deployment_rollout
+        deployment.version: 4.2.1
+        deploy.updated_replicas: 3
+    - service: settlement-processor
+      severity: INFO
+      offset_seconds: 45
+      body: 'job netting-recompute completed: batch rebuilt with cutoff T 16:00 America/New_York, post-cutoff amendments moved to the
+        next batch; computed net matches the CNS projection (diff $0.00)'
+      attributes:
+        operation: job_run
+        job.name: netting-recompute
+        job.status: succeeded
+        netting.cutoff_tz: America/New_York
+  steady_attributes:
+    settlement-processor:
+      deployment.version: 4.2.1
+      netting.cutoff_tz: America/New_York
+  verification:
+    - signal: settlement.net_mismatch_usd
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "settlement-processor"'
+      field: 'metrics.settlement.net_mismatch_usd'
+      expect: 'back to 0.00, within the $0.01 tolerance (was exactly 1000000.00)'
+      within_seconds: 90
+    - signal: SETTLE-NETTING-CALC lines
+      from: 'logs.otel.finserv'
+      where: 'body.text LIKE "*SETTLE-NETTING-CALC*"'
+      expect: '0 new lines'
+      within_seconds: 90
+    - signal: settlement-processor version on the netting engine
+      from: 'logs.otel.finserv'
+      where: 'resource.attributes.service.name == "settlement-processor" AND body.text LIKE "*netting_integrity*"'
+      field: 'attributes.deployment.version'
+      expect: '4.2.1 on every line since the rollout completes; 4.3.0 stops appearing'
+      within_seconds: 90
+    - signal: netting cutoff time zone
+      from: 'logs.otel.finserv'
+      where: 'resource.attributes.service.name == "settlement-processor" AND body.text LIKE "*netting_integrity*"'
+      field: 'attributes.netting.cutoff_tz'
+      expect: 'America/New_York on every line since the rollout completes; UTC stops appearing'
+      within_seconds: 90
 business_impact:
   - kpi: business.settlement_success_rate_pct
     factor: {uniform: [0.65, 0.88]}
@@ -63,4 +181,4 @@ business_impact:
   - kpi: business.reconciliation_breaks
     factor: {uniform: [2.5, 6.0]}
   - kpi: business.notional_value_usd_per_min
-    factor: {uniform: [0.30, 0.60]}
+    value: {uniform: [1692600.0, 1947400.0], round: 1}

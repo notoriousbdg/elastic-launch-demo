@@ -1,0 +1,37 @@
+name: "GT temporal_otel: no_pollers_on_task_queue"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-TEMPORAL-NO-POLLERS-ON-TASK-QUEUE
+sensor_type: impact_key_probe
+affected_services:
+  - gt-temporal-aws-svc-1
+cascade_services:
+  - gt-temporal-aws-svc-2
+description: "Tests impact_key no_pollers_on_task_queue on generator temporal_otel."
+investigation_notes: |-
+  1. Verify temporal_otel is active and reporting metrics.
+  2. Check that the no_pollers_on_task_queue metric has reached the trigger value (2.0).
+  3. Confirm generator_impact for temporal_otel.no_pollers_on_task_queue is set to 2.0.
+  4. Look for correlated changes in service gt-temporal-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_no_pollers_on_task_queue_baseline
+error_message: "GT-PROBE: gen=temporal_otel key=no_pollers_on_task_queue value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=temporal_otel
+  impact_key: no_pollers_on_task_queue
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 2.0
+  svc_name: gt-temporal-aws-svc-1
+rca_clues:
+  gt-temporal-aws-svc-1:
+    probe.generator: temporal_otel
+    probe.impact_key: no_pollers_on_task_queue
+    probe.trigger_value: 2.0
+  gt-temporal-aws-svc-2:
+    probe.upstream_generator: temporal_otel
+    probe.upstream_key: no_pollers_on_task_queue
+generator_impact:
+  temporal_otel:
+    no_pollers_on_task_queue: 2.0

@@ -1,0 +1,135 @@
+# opsctl profile for Google Cloud Network Operations (see app/ops_profile.py for the contract).
+# Changes go through the Google Cloud control plane; Cloud Audit Logs record each one with a
+# change id. Records are logged by vpc-network-manager, the network control-plane service.
+extends: [gcp-audit]
+
+banner: "opsctl applies changes to the gcpnet Google Cloud network through the control plane. Every applied change is written to Cloud Audit Logs with a change id."
+
+actors:
+  default: netops-oncall@gcpnet-project.iam.gserviceaccount.com
+  auto: auto-remediator@gcpnet-project.iam.gserviceaccount.com
+
+auto_remediate_channels: [16, 17, 18, 19, 20]
+
+verbs:
+  patch:
+    summary: "Change settings on a network resource (--<setting> <value>)"
+    example: "opsctl patch nat/<gateway> --region <region> --min-ports-per-vm 1024\n  opsctl patch firewall/<rule> --priority 65534"
+  apply:
+    summary: "Create or update a policy, rule or IAM binding"
+    example: "opsctl apply security-policy/<policy> --rule <name> --action rate_based_ban\n  opsctl apply iam-binding/<principal> --role roles/compute.securityAdmin"
+  rollback:
+    summary: "Revert a resource or rollout to an earlier revision (--to-revision N|previous)"
+    example: "opsctl rollback mig/<group> --region <region> --to-revision previous"
+  rotate:
+    summary: "Rotate a secret or key and roll out the new version (--secret-version)"
+    example: "opsctl rotate vpn-tunnel/<tunnel> --region <region> --secret-version <name>"
+  sync:
+    summary: "Force a configuration push or zone publish from the source of truth"
+    example: "opsctl sync security-policy/<policy>\n  opsctl sync dns-zone/<zone>"
+  expand:
+    summary: "Grow a capacity (--prefix-length for a subnet)"
+    example: "opsctl expand subnet/<subnet> --region <region> --prefix-length 19"
+  replace:
+    summary: "Recreate or swap a resource: an optic for a spare (--link N), or a VPN tunnel with new settings (--ike-version)"
+    example: "opsctl replace transceiver/<interconnect> --link 1\n  opsctl replace vpn-tunnel/<tunnel> --region <region> --ike-version 2"
+    describe: "{ref} recreated{settings_text}"
+  delete:
+    summary: "Delete a resource, or every resource matching --selector"
+    example: "opsctl delete address --selector purpose=loadtest --region <region>\n  opsctl delete job/<name>"
+  # not used in this scenario
+  renew: null
+  restore: null
+  drain: null
+  run: null
+  restart: null
+
+kinds:
+  # kind: gcp.service / gcp.method (verb -> Cloud Audit methodName, `_` is the default)
+  peering:
+    gcp: {service: compute.googleapis.com, resource_prefix: "projects/gcpnet-prod-001/global/networks/", method: {_: v1.compute.networks.updatePeering}}
+  subnet:
+    gcp: {service: compute.googleapis.com, resource_prefix: "projects/gcpnet-prod-001/regions/us-central1/subnetworks/", method: {_: v1.compute.subnetworks.expandIpCidrRange}}
+  firewall:
+    gcp: {service: compute.googleapis.com, resource_prefix: "projects/gcpnet-prod-001/global/firewalls/", method: {_: v1.compute.firewalls.patch}}
+  security-policy:
+    gcp: {service: compute.googleapis.com, resource_prefix: "projects/gcpnet-prod-001/global/securityPolicies/", method: {apply: v1.compute.securityPolicies.addRule, _: v1.compute.securityPolicies.patch}}
+  iam-binding:
+    gcp: {service: cloudresourcemanager.googleapis.com, resource_prefix: "projects/gcpnet-prod-001/serviceAccounts/", method: {_: SetIamPolicy}}
+  bucket-iam:
+    gcp: {service: storage.googleapis.com, resource_prefix: "projects/_/buckets/", method: {_: storage.setIamPermissions}}
+  deployment:
+    gcp: {service: k8s.io, resource_prefix: "namespaces/security/deployments/", method: {_: io.k8s.apps.v1.deployments.patch}}
+  nat:
+    gcp: {service: compute.googleapis.com, resource_prefix: "projects/gcpnet-prod-001/regions/us-central1/routers/gcpnet-router-central1/nats/", method: {_: v1.compute.routers.patch}}
+  address:
+    gcp: {service: compute.googleapis.com, resource_prefix: "projects/gcpnet-prod-001/regions/us-east1/addresses/", method: {_: v1.compute.addresses.delete}}
+  dnskey:
+    gcp: {service: dns.googleapis.com, resource_prefix: "projects/gcpnet-prod-001/managedZones/", method: {_: dns.managedZones.patch}}
+  dns-zone:
+    gcp: {service: dns.googleapis.com, resource_prefix: "projects/gcpnet-prod-001/managedZones/", method: {_: dns.changes.create}}
+  dns-record:
+    gcp: {service: dns.googleapis.com, resource_prefix: "projects/gcpnet-prod-001/managedZones/gcpnet-public-zone/rrsets/", method: {_: dns.changes.create}}
+  sql-session:
+    gcp: {service: sqladmin.googleapis.com, resource_prefix: "projects/gcpnet-prod-001/instances/", method: {_: google.cloud.sql.v1.SqlInstancesService.ExecuteSql}}
+  job:
+    gcp: {service: cloudscheduler.googleapis.com, resource_prefix: "projects/gcpnet-prod-001/locations/us-central1/jobs/", method: {_: google.cloud.scheduler.v1.CloudScheduler.DeleteJob}}
+  transceiver:
+    gcp: {service: compute.googleapis.com, resource_prefix: "projects/gcpnet-prod-001/global/interconnects/", method: {_: v1.compute.interconnects.patch}}
+  bgp-peer:
+    gcp: {service: compute.googleapis.com, resource_prefix: "projects/gcpnet-prod-001/regions/us-central1/routers/", method: {_: v1.compute.routers.patch}}
+  cache-key-policy:
+    gcp: {service: compute.googleapis.com, resource_prefix: "projects/gcpnet-prod-001/global/backendServices/", method: {_: v1.compute.backendServices.patch}}
+  mig:
+    gcp: {service: compute.googleapis.com, resource_prefix: "projects/gcpnet-prod-001/regions/us-central1/instanceGroupManagers/", method: {_: v1.compute.regionInstanceGroupManagers.patch}}
+  vpn-tunnel:
+    gcp: {service: compute.googleapis.com, resource_prefix: "projects/gcpnet-prod-001/regions/europe-west1/vpnTunnels/", method: {_: v1.compute.vpnTunnels.insert}}
+  vpn-peer:
+    gcp: {service: compute.googleapis.com, resource_prefix: "projects/gcpnet-prod-001/global/externalVpnGateways/", method: {_: v1.compute.externalVpnGateways.patch}}
+  vertex-endpoint:
+    gcp: {service: aiplatform.googleapis.com, resource_prefix: "projects/gcpnet-prod-001/locations/us-central1/endpoints/", method: {_: google.cloud.aiplatform.v1.EndpointService.UpdateEndpoint}}
+
+audit:
+  service: [vpc-network-manager]
+  default: gcp_audit
+
+runbook:
+  scope_note: "Resources in the other regions and projects were not changed and make a useful comparison."
+  recovery_note: "Each query names the service that owns the signal, so its result is the value to compare."
+  audit_label: "Cloud Audit Logs"
+
+guide:
+  scenario: |
+    ## Where this network's telemetry is
+    The data is OpenTelemetry. Each networking component is a service
+    (`resource.attributes.service.name`): vpc-network-manager, cloud-armor-waf,
+    cloud-nat-gateway, cloud-dns-resolver, cloud-interconnect, cloud-vpn-gateway,
+    cloud-cdn-service, cloud-load-balancer, network-intelligence.
+
+    - **Logs:** `FROM logs.otel.gcpnet`. Message in `body.text` (never `body` alone), level in
+      `severity_text`. Fault codes (e.g. `NAT-PORT-EXHAUSTION`) appear in `body.text` and in
+      `attributes.error.type`; the configuration a component runs with (NAT min ports per VM,
+      firewall priority, tunnel PSK version) is on its status lines in `attributes.*`.
+    - **Component metrics:** `FROM metrics-generic.otel-default`, filtered by
+      `resource.attributes.service.name`, fields under `metrics.<area>.*`, for example
+      `metrics.nat.port_utilization_pct`, `metrics.vpc.subnet_ip_utilization_pct`,
+      `metrics.interconnect.rx_light_dbm`, `metrics.vpn.tunnel_established`.
+    - **Integration metrics** (Cloud SQL, Cloud Run, Compute Engine, Memorystore, Vertex AI,
+      Cloud Storage) come from their own Cloud Monitoring style indices; the runbook names them.
+    - **Changes:** every applied change is a Cloud Audit Logs record,
+      `body.text LIKE "gcp-audit:*"`, with `attributes.gcp.audit.method_name` and `attributes.change.id`.
+    - **Network KPIs:** `metrics.business.*` from cloud-cdn-service.
+
+    Compare a short window after the change with the window before it: readings converge
+    over the recovery time the runbook states, they do not jump back instantly.
+
+    Example: NAT port utilization per minute over the last 15 minutes:
+
+    ```
+    FROM metrics-generic.otel-default
+    | WHERE @timestamp > NOW() - 15 minutes AND resource.attributes.service.name == "cloud-nat-gateway"
+      AND metrics.nat.port_utilization_pct IS NOT NULL
+    | STATS min = MIN(metrics.nat.port_utilization_pct), max = MAX(metrics.nat.port_utilization_pct)
+        BY minute = BUCKET(@timestamp, 1 minute)
+    | SORT minute DESC
+    ```

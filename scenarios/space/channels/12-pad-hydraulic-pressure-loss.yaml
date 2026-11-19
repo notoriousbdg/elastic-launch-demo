@@ -9,19 +9,26 @@ affected_services:
 cascade_services:
 - mission-control
 description: Launch pad hydraulic system pressure dropping below minimum
-investigation_notes: 'Root cause: hydraulic pump wear or external leak causing system pressure to drop below 2800PSI minimum.
-  Reservoir level at 78% (nominal >90%) confirms fluid loss. Check filter differential pressure (12PSI is borderline — >15PSI
-  indicates clogged filter starving the pump). Fluid temperature 42.1C is within limits but elevated — could indicate pump
-  working harder to compensate for internal leakage. Inspect hydraulic lines to the holddown clamps and umbilical retract
-  mechanisms for visible leaks. Remediation: switch to backup hydraulic system (GND_HYD_SELECT HYD-B), isolate the affected
-  system (GND_HYD_ISOLATE {system}). Top off reservoir and replace filter element. If pump wear suspected, check pump discharge
-  pressure vs RPM curve. Pad operations cannot proceed with hydraulic pressure below 2800PSI — holddown clamp release requires
-  3000PSI minimum.'
+investigation_notes: 'Root cause: the rebuilt HYD-A pump (parker-pvp48-rebuilt) is wearing internally. Its case-drain flow
+  went high a couple of minutes before the first low-pressure alarm (Ground Systems logged it), and system pressure has since
+  dropped below the 2800PSI minimum. Reservoir level at 78% (nominal >90%) confirms fluid loss. Check filter differential pressure
+  (12PSI is borderline — >15PSI indicates clogged filter starving the pump). Fluid temperature 42.1C is within limits but elevated
+  — could indicate pump working harder to compensate for internal leakage. Inspect hydraulic lines to the holddown clamps and
+  umbilical retract mechanisms for visible leaks. HYD-B is healthy at 2920PSI. Remediation: make HYD-B the active pad hydraulic
+  system (opsctl patch hydraulics/pad --active=hyd-b), then isolate HYD-A (opsctl drain hydraulics/hyd-a). Recovery: pad
+  pressure (metrics.ground.hydraulics.pressure_psi) rebuilds on HYD-B to about 2900-2950PSI over roughly a minute, the
+  hydraulics_status log shows active=HYD-B status=NOMINAL, and the {system_id} low-pressure alarms stop within about 45 seconds.
+  Afterwards top off the reservoir, replace the filter element and check HYD-A pump discharge pressure vs RPM curve before returning
+  it to service. Pad operations cannot proceed with hydraulic pressure below {min_pressure}PSI — holddown clamp release requires
+  2800PSI minimum.'
 remediation_action: reset_ground_systems
+remediation_command: |-
+  opsctl patch hydraulics/pad --active=hyd-b
+  opsctl drain hydraulics/hyd-a
 error_message: '[GND] GND-HYDRAULIC-PRESS: system={system_id} pressure={pressure}PSI min_required={min_pressure}PSI status=LOW'
 stack_trace: |-
   == GROUND SYSTEM DIAGNOSTIC == HYDRAULIC SYSTEM ==
-  TIMESTAMP: MET+00:04:18.667 | FRAME: 0x4A3E | SEQ: 18457
+  TIMESTAMP: T-00:04:18.667 | FRAME: 0x4A3E | SEQ: 18457
   ---------------------------------------------------------------
   SYSTEM    PRESSURE   MIN_REQ    FLOW_RATE   STATUS
   {system_id}     {pressure}PSI  {min_pressure}PSI   12.4GPM     **LOW_PRESS**
@@ -34,24 +41,79 @@ correlation_attr:
   key: infra.hyd_pump_model
   value: parker-pvp48-rebuilt
 fault_params:
-  system_id: {choice: [HYD-A, HYD-B]}
-  pressure: {uniform: [180.0, 350.0], round: 1}
+  system_id: HYD-A
+  pressure: {uniform: [2400.0, 2750.0], round: 0}
   min_pressure: 2800
 rca_clues:
   ground-systems:
     ground.hyd_reservoir_pct: {uniform: [65.0, 82.0], round: 0}
-    ground.filter_dp_psi: {uniform: [10.0, 18.0], round: 1}
+    ground.filter_dp_psi: {uniform: [9.0, 12.0], round: 1}
   sensor-validator:
     validation.hydraulic_pressure_status: low
-    validation.system_affected: {choice: [HYD-A, HYD-B]}
+    validation.system_affected: HYD-A
   mission-control:
     upstream.degraded_subsystem: ground
 business_impact:
   - kpi: business.launch_readiness_index_0_100
-    factor: {uniform: [0.40, 0.65]}
+    factor: {uniform: [0.4, 0.65]}
   - kpi: business.schedule_variance_days
-    factor: {uniform: [2.0, 5.0]}
+    value: {uniform: [20.97, 24.13], round: 1}
   - kpi: business.contractor_sla_compliance_pct
     factor: {uniform: [0.65, 0.85]}
   - kpi: business.cost_variance_pct
     factor: {uniform: [1.5, 3.5]}
+cascade_messages:
+  mission-control:
+  - severity: WARN
+    message: '[MCC] pad readiness HOLD: {system_id} hydraulic pressure {pressure}PSI below {min_pressure}PSI, holddown clamp release
+      inhibited'
+  - severity: WARN
+    message: '[MCC] ground segment caution: pad hydraulics LOW_PRESS on {system_id}, umbilical retract sequence on hold'
+fault_scope:
+  workloads: [ground-systems, sensor-validator]
+infrastructure_events:
+- service: ground-systems
+  severity: WARN
+  offset_seconds: -120
+  body: '[GND] HYD-A pump case_drain_flow=3.8GPM limit=2.5GPM pump=parker-pvp48-rebuilt discharge=2990PSI status=CAUTION'
+  attributes:
+    operation: hydraulics_status
+    ground.hydraulics.active_system: HYD-A
+    ground.hydraulics.case_drain_gpm: 3.8
+    infra.hyd_pump_model: parker-pvp48-rebuilt
+remediation_effects:
+  log_taper_seconds: 45
+  log_events:
+  - service: mission-control
+    severity: INFO
+    offset_seconds: 1
+    body: '[MCC] CMD ACCEPTED opsctl patch hydraulics/pad --active=hyd-b from {actor}: pad hydraulic supply HYD-A -> HYD-B'
+  - service: mission-control
+    severity: INFO
+    offset_seconds: 4
+    body: '[MCC] CMD ACCEPTED opsctl drain hydraulics/hyd-a from {actor}: HYD-A isolated, pump offline'
+  - service: ground-systems
+    severity: INFO
+    offset_seconds: 45
+    body: '[GND] HYD-B online, pad hydraulic pressure 2925PSI min_required=2800PSI; HYD-A isolated status=NOMINAL'
+    attributes:
+      operation: hydraulics_status
+      ground.hydraulics.active_system: HYD-B
+  verification:
+  - signal: ground.hydraulics.pressure_psi
+    from: metrics-generic.otel-default
+    where: resource.attributes.service.name == "ground-systems"
+    field: metrics.ground.hydraulics.pressure_psi
+    expect: 'at or above 2800 PSI (HYD-B ~2900-2950); was 2400-2750 PSI'
+    within_seconds: 120
+  - signal: GND-HYDRAULIC-PRESS alarms
+    from: logs.otel.nova7
+    where: body.text LIKE "*GND-HYDRAULIC-PRESS*"
+    expect: '0 new lines'
+    within_seconds: 120
+  - signal: active pad hydraulic system
+    from: logs.otel.nova7
+    where: resource.attributes.service.name == "ground-systems"
+    field: attributes.ground.hydraulics.active_system
+    expect: 'HYD-B on the latest hydraulics_status lines'
+    within_seconds: 120

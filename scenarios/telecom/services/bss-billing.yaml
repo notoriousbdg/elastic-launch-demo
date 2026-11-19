@@ -23,102 +23,161 @@ topology:
 emit_fault_logs: true
 kpi_emitter: true
 state:
-  _billing_count:
-    init: 0
-  _last_summary:
-    init: now
+  _cdr_lag_peak:
+    init: 0.0
+  _med_lag_peak:
+    init: 0.0
 steps:
+# Account/order API, CDR rating (cdr-rating-engine, Kafka topic cdr.raw, 24 partitions) and
+# mediation (StatefulSet mediation-0..2, static assignment of cdr.mediation partitions).
+#   ch 12 tariff map without 5G-MAX-EU-v4: ~35% of orders rejected until the migration (~20s).
+#   ch 13 4 rating replicas (~12,000/min) vs ~18,000/min ingest from ~30s before the trigger:
+#         lag +6,000/min; 12 replicas after a ~30s rebalance rate ~36,000/min, -18,000/min.
+#   ch 14 the 168h window reopens the dedup store with a full compaction: mediation-02's volume
+#         goes 71% -> 100% over 120s (onset), then the pod crash-loops and partitions 2,3
+#         (~1,500/min) are unconsumed; the pod is back ~40s after the fix, catching up at ~12,000/min.
 - sample:
-    billing_op:
-      choice:
-      - account_create
-      - cdr_rate
-      - invoice_generate
-      - credit_apply
-    billing_plan:
-      choice:
-      - 5G-BASIC-EU-v3
-      - 5G-PLUS-EU-v3
-      - 5G-MAX-EU-v3
-      - ENT-BUS-L-v2
+    r12:
+      expr: "min(1.0, elapsed.get(12, 0) / 10.0) if 12 in all_active else ((1.0 if since_fix.get(12, 0) < 20 else 0.0) if 12 in fixed_channels else 0.0)"
+    order_rejects:
+      expr: "max(0, int(45 * r12 + rand.gauss(0, 6 * r12)))"
+    account_create_ms:
+      expr: "int(180 + rand.gauss(0, 12))"
+    tariff_map:
+      expr: "'2026-11-17' if 12 in fixed_channels else '2026-11-03'"
+    catalog_status:
+      expr: "'ANOMALY' if 12 in all_active else 'NORMAL'"
+- metric:
+    name: bss_billing.order_rejects_per_min
+    value: {var: order_rejects}
+    unit: orders/min
+- metric:
+    name: bss_billing.account_create_latency_ms
+    value: {var: account_create_ms}
+    unit: ms
+- log:
+    level: INFO
+    message: 'order-api stats tariff_map={tariff_map} account_create_p95_ms={account_create_ms} rejected_last_min={order_rejects} status={catalog_status}'
+    attrs:
+      operation: order_stats
+      billing.tariff_map_version: {var: tariff_map}
+      billing.order_rejects_per_min: {var: order_rejects}
+      billing.status: {var: catalog_status}
+- sample:
+    cdr_lag_live:
+      expr: "min(300000.0, 800.0 + 100.0 * elapsed.get(13, 0))"
 - counter:
-    state_key: _billing_count
-    by: 1
+    state_key: _cdr_lag_peak
+    by: {expr: "cdr_lag_live - _cdr_lag_peak"}
+  when: "13 in all_active"
+- sample:
+    cdr_peak:
+      expr: "_cdr_lag_peak if _cdr_lag_peak > 0 else 50000.0"
+    s13:
+      expr: "since_fix.get(13, 0)"
+    cdr_lag_center:
+      expr: "cdr_lag_live if 13 in all_active else ((cdr_peak + 100.0 * s13 if s13 < 30 else max(800.0, cdr_peak + 3000.0 - 18000.0 * (s13 - 30.0) / 60.0)) if 13 in fixed_channels else 800.0)"
+    cdr_lag:
+      expr: "int(max(0.0, cdr_lag_center + rand.gauss(0, 150)))"
+    draining:
+      expr: "bool(13 in fixed_channels and s13 >= 30 and cdr_lag_center > 800.0)"
+    cdr_ingest:
+      expr: "int(18000 * (1.0 + rand.gauss(0, 0.015)))"
+    cdr_rating:
+      expr: "int((12000 if (13 in all_active or (13 in fixed_channels and s13 < 30)) else (36000 if draining else 18000)) * (1.0 + rand.gauss(0, 0.015)))"
+    rating_replicas:
+      expr: "4 if 13 in all_active else 12"
+    rating_status:
+      expr: "'ANOMALY' if 13 in all_active else ('CATCHING_UP' if draining else 'NORMAL')"
+- metric:
+    name: bss_billing.cdr_consumer_lag
+    value: {var: cdr_lag}
+    unit: records
+- metric:
+    name: bss_billing.cdr_ingest_rate_per_min
+    value: {var: cdr_ingest}
+    unit: records/min
+- metric:
+    name: bss_billing.cdr_rating_rate_per_min
+    value: {var: cdr_rating}
+    unit: records/min
 - log:
     level: INFO
-    message: '[BSS] billing_operation type={billing_op} plan={billing_plan} currency=EUR status=COMPLETED'
+    message: 'cdr-rating group=cdr-rating topic=cdr.raw replicas={rating_replicas} lag={cdr_lag} rate_in={cdr_ingest}/min rate_out={cdr_rating}/min status={rating_status}'
     attrs:
-      operation: billing_operation
-      billing.operation:
-        var: billing_op
-      billing.plan_code:
-        var: billing_plan
+      operation: rating_status
+      billing.rating_replicas: {var: rating_replicas}
+      kafka.consumer_group: cdr-rating
+      kafka.total_lag: {var: cdr_lag}
+      billing.cdr_rating_rate_per_min: {var: cdr_rating}
+      billing.status: {var: rating_status}
 - sample:
-    cdr_rate:
-      randint:
-      - 1500
-      - 3000
-    cdr_queue:
-      randint:
-      - 100
-      - 500
+    compacting:
+      expr: "bool(14 in all_active and elapsed.get(14, 0) < 120)"
+    med_lag_live:
+      expr: "120.0 + 25.0 * max(0.0, elapsed.get(14, 0) - 120.0)"
+- counter:
+    state_key: _med_lag_peak
+    by: {expr: "med_lag_live - _med_lag_peak"}
+  when: "14 in all_active"
+- sample:
+    med_peak:
+      expr: "_med_lag_peak if _med_lag_peak > 0 else 10000.0"
+    s14:
+      expr: "since_fix.get(14, 0)"
+    med_down:
+      expr: "bool((14 in all_active and not compacting) or (14 in fixed_channels and s14 < 40))"
+    med_lag_center:
+      expr: "med_lag_live if 14 in all_active else ((med_peak + 25.0 * s14 if s14 < 40 else max(120.0, med_peak + 1000.0 - 12000.0 * (s14 - 40.0) / 60.0)) if 14 in fixed_channels else 120.0)"
+    med_lag:
+      expr: "int(max(0.0, med_lag_center + rand.gauss(0, 30)))"
+    pods_ready:
+      expr: "2 if med_down else 3"
+    vol_center:
+      expr: "(71.0 + 29.0 * elapsed.get(14, 0) / 120.0) if compacting else (100.0 if (14 in all_active or (14 in fixed_channels and s14 < 20)) else ((51.0 - 16.0 * min(1.0, (s14 - 20.0) / 180.0)) if 14 in fixed_channels else 71.0))"
+    vol_used_pct:
+      expr: "round(min(100.0, vol_center + (0.0 if vol_center >= 100.0 else rand.gauss(0, 0.2))), 1)"
+    vol_capacity:
+      expr: "'200Gi' if 14 in fixed_channels else '100Gi'"
+    dedup_window:
+      expr: "'168h' if 14 in all_active else '24h'"
+    med_status:
+      expr: "'ANOMALY' if (med_down or compacting) else ('CATCHING_UP' if med_lag > 500 else 'NORMAL')"
+- metric:
+    name: bss_billing.mediation_unconsumed_lag
+    value: {var: med_lag}
+    unit: records
+- metric:
+    name: bss_billing.mediation_pods_ready
+    value: {var: pods_ready}
+    unit: pods
+- metric:
+    name: bss_billing.mediation_volume_used_pct
+    value: {var: vol_used_pct}
+    unit: '%'
 - log:
     level: INFO
-    message: '[BSS] cdr_pipeline processing_rate={cdr_rate}/min queue_depth={cdr_queue} rating_engine=OK mediation=HEALTHY status=NORMAL'
+    message: 'mediation statefulset ready={pods_ready}/3 partitions_2_3_lag={med_lag} mediation-02 volume={vol_used_pct}% of {vol_capacity} dedup.window={dedup_window} status={med_status}'
     attrs:
-      operation: cdr_pipeline
-      billing.cdr_rate:
-        var: cdr_rate
-      billing.queue_depth:
-        var: cdr_queue
-- every:
-    seconds: 10
-    state_key: _last_summary
-    steps:
-    - log:
-        level: INFO
-        message: '[BSS] billing_summary operations={_billing_count} cdr_processed=45000 sla_compliance=99.8% status=NORMAL'
-        attrs:
-          operation: billing_summary
-          billing.total_operations:
-            var: _billing_count
-          billing.sla_compliance: 99.8
+      operation: mediation_status
+      mediation.pods_ready: {var: pods_ready}
+      mediation.volume_used_pct: {var: vol_used_pct}
+      mediation.dedup_window: {var: dedup_window}
+      kafka.unconsumed_lag: {var: med_lag}
+      mediation.status: {var: med_status}
 - sample:
-    cdr_processing_rate:
-      if_active:
-        uniform:
-        - 200.0
-        - 800.0
-        round: 1
-      else:
-        uniform:
-        - 1500.0
-        - 3000.0
-        round: 1
-    mediation_queue:
-      if_active:
-        randint:
-        - 50000
-        - 200000
-      else:
-        randint:
-        - 100
-        - 500
-- metric:
-    name: bss_billing.cdr_processing_rate
-    value:
-      var: cdr_processing_rate
-    unit: cdr/min
-- metric:
-    name: bss_billing.mediation_queue_depth
-    value:
-      var: mediation_queue
-    unit: cdrs
+    sla_breaches:
+      expr: "int(30 + rand.gauss(0, 5)) if 15 in all_active else 0"
+    revenue_per_hour:
+      expr: "round(412000.0 * (1.0 - 0.08 * len(active_channels)) * (1.0 + rand.gauss(0, 0.02)), 0)"
 - metric:
     name: bss_billing.revenue_per_hour
-    value:
-      uniform:
-      - 15000.0
-      - 45000.0
-      round: 2
-    unit: EUR
+    value: {var: revenue_per_hour}
+    unit: EUR/h
+- log:
+    level: INFO
+    message: 'sla-monitor rule=ENT-ACTIVATION-30S breaches_last_60m={sla_breaches} contracts_monitored=184'
+    attrs:
+      operation: sla_monitor
+      billing.sla_rule: ENT-ACTIVATION-30S
+      billing.sla_breaches_60m: {var: sla_breaches}

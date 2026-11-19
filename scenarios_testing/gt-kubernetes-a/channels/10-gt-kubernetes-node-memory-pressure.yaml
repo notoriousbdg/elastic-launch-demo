@@ -1,0 +1,37 @@
+name: "GT kubernetes_otel: node_memory_pressure"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-KUBERNETES-NODE-MEMORY-PRESSURE
+sensor_type: impact_key_probe
+affected_services:
+  - gt-kubernetes-a-aws-svc-1
+cascade_services:
+  - gt-kubernetes-a-aws-svc-2
+description: "Tests impact_key node_memory_pressure on generator kubernetes_otel."
+investigation_notes: |-
+  1. Verify kubernetes_otel is active and reporting metrics.
+  2. Check that the node_memory_pressure metric has reached the trigger value (0.8).
+  3. Confirm generator_impact for kubernetes_otel.node_memory_pressure is set to 0.8.
+  4. Look for correlated changes in service gt-kubernetes-a-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_node_memory_pressure_baseline
+error_message: "GT-PROBE: gen=kubernetes_otel key=node_memory_pressure value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=kubernetes_otel
+  impact_key: node_memory_pressure
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 0.8
+  svc_name: gt-kubernetes-a-aws-svc-1
+rca_clues:
+  gt-kubernetes-a-aws-svc-1:
+    probe.generator: kubernetes_otel
+    probe.impact_key: node_memory_pressure
+    probe.trigger_value: 0.8
+  gt-kubernetes-a-aws-svc-2:
+    probe.upstream_generator: kubernetes_otel
+    probe.upstream_key: node_memory_pressure
+generator_impact:
+  kubernetes_otel:
+    node_memory_pressure: 0.8

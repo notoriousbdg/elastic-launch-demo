@@ -8,55 +8,135 @@ affected_services:
 - analytics-pipeline
 cascade_services:
 - recommendation-engine
-description: Click tracking event queue backing up — attribution data delayed, causing ad spend optimization and budget reporting
-  to use stale data
+error_services: [ad-platform]
+description: Click attribution falls minutes behind because a rightsizing change capped the click-attribution consumers at 4 replicas, which cannot keep up with the ad-clicks topic.
+onset_delay_seconds: 15
 investigation_notes: |-
-  1. Check ad-platform logs for ADS-CLICK-BACKLOG — click_queue_depth={click_queue_depth} vs max {click_queue_max}.
-  2. Check the click event consumer throughput: if consumer_throughput={consumer_throughput_eps}eps but ingest_rate={ingest_rate_eps}eps, the consumer is too slow.
-  3. Look for dead-letter queue growth — malformed click events that fail validation keep re-queuing and inflate the backlog count.
-  4. Review click deduplication logic — a dedup window too large ({dedup_window_sec}s) can cause hash table exhaustion under high click volume.
-  5. Identify the backpressure source: check analytics-pipeline lag metric — if the pipeline is lagged, click events are waiting for downstream capacity.
-  6. Scale click consumers horizontally — add {suggested_consumer_count} consumers to the click processing group to reduce backlog within {eta_min}min.
+  Root cause: a rightsizing change (CR-5562, by finops-rightsizing) lowered the KEDA ScaledObject click-attribution maxReplicaCount from 24 to 4. The ad-clicks topic has 24 partitions and takes about 12,000 click events/s; each consumer handles about 750 events/s, so 4 consumers drain only about 3,000/s and consumer lag grows by about 9,000 events/s until retention caps it near 2,000,000. Flushing or purging the queue is the tempting fix and is wrong: the backlog is billable click attribution, and dropping it loses advertiser charges and conversion credit. Scaling past 24 does not help either, because a consumer group cannot use more consumers than the topic has partitions. Nothing downstream is slow: the dead-letter queue is at its usual ~20 events (no malformed-click requeue), the dedup window is the normal {dedup_window_sec}s, and the analytics sink shows no backpressure (downstream sink lag 1-3s), which rules out bad events, dedup exhaustion and a slow sink.
+  Confirm:
+    - ad-platform metrics.ads.click_queue_depth (consumer lag in events) climbs from about 1,200 by about 9,000 per second; metrics.ads.attribution_delay_s (lag / 12,000 events/s) climbs from about 0.1s to minutes
+    - metrics.ads.click_consumer_replicas is 4 (normally 24) and the "adplatform.attribution.consumer" status lines show replicas=4/4, consume_eps about 3,000 against produce_eps about 12,000, dlq=20 and attributes.ads.click_consumer_max_replicas = 4 (24 before the change)
+    - the ad-platform line "scaledobject click-attribution maxReplicaCount 24 -> 4" (attributes.change.request CR-5562, user.name finops-rightsizing) comes before the first ADS-CLICK-BACKLOG line
+    - analytics-pipeline receives click attribution {attribution_lag_s}s late and recommendation-engine serves click features that stale, both after ad-platform
+  Remediation: restore the cap with opsctl patch scaledobject/click-attribution --max-replicas 24. KEDA scales the consumers from 4 to 24 over about 30s (one per partition); 24 consumers drain about 18,000 events/s, a net ~6,000/s above ingest, so a 2,000,000-event backlog is gone in about 6 minutes and lag returns to about 1,200. No events are lost; attribution catches up in order.
 remediation_action: flush_click_queue
-error_message: '[AdPlatform] ADS-CLICK-BACKLOG: click_queue_depth={click_queue_depth}/{click_queue_max} consumer_throughput={consumer_throughput_eps}eps
-  ingest_rate={ingest_rate_eps}eps attribution_delay={attribution_delay_min}min dedup_window={dedup_window_sec}s'
-stack_trace: |-
-  ClickTrackingException: ADS-CLICK-BACKLOG
-    at ClickConsumer.process(queue_depth={click_queue_depth})
-    at AttributionEngine.attribute(event_id={click_event_id})
-  Queue depth:        {click_queue_depth}/{click_queue_max}
-  Consumer tput:      {consumer_throughput_eps} eps
-  Ingest rate:        {ingest_rate_eps} eps
-  Attribution delay:  {attribution_delay_min}min
-  Dead-letter queue:  {dlq_size} events
+remediation_command: |-
+  opsctl patch scaledobject/click-attribution --max-replicas 24
+error_message: '[adplatform.attribution.consumer] ADS-CLICK-BACKLOG group=click-attribution topic=ad-clicks: consumer lag growing,
+  consumed {consumer_throughput_eps} ev/s < produced {ingest_rate_eps} ev/s with replicas={consumer_replicas}/{max_replicas}
+  (maxReplicaCount reached); oldest unattributed click {click_event_id} on partition {partition}'
+stack_trace: ''
 correlation_attr:
-  key: ads.click_backlog_active
-  value: true
+  key: ads.click_consumer_max_replicas
+  value: 4
 fault_params:
-  click_queue_depth: {randint: [50000, 500000]}
-  click_queue_max: 1000000
-  consumer_throughput_eps: {randint: [500, 2000]}
-  ingest_rate_eps: {randint: [5000, 20000]}
-  attribution_delay_min: {randint: [15, 120]}
-  dedup_window_sec: {randint: [60, 300]}
+  consumer_throughput_eps: {randint: [2900, 3100]}
+  ingest_rate_eps: {randint: [11700, 12300]}
+  consumer_replicas: 4
+  max_replicas: 4
   click_event_id: {format: "CLK-{n}", n: {randint: [100000, 999999]}}
-  dlq_size: {randint: [100, 10000]}
-  suggested_consumer_count: {randint: [5, 20]}
-  eta_min: {randint: [10, 60]}
+  partition: {randint: [0, 23]}
+  dedup_window_sec: 300
+  attribution_lag_s: {randint: [30, 170]}
 rca_clues:
   ad-platform:
-    ads.click_queue_depth: {randint: [10000, 500000]}
-    ads.attribution_delay_min: {randint: [15, 120]}
+    ads.click_consumer_replicas: 4
+    ads.click_consumer_max_replicas: 4
+    ads.click_consumer_throughput_eps: {randint: [2900, 3100]}
+    ads.click_ingest_rate_eps: {randint: [11700, 12300]}
   analytics-pipeline:
-    analytics.click_consumer_lag: {randint: [5000, 100000]}
-    analytics.dlq_depth: {randint: [100, 5000]}
+    analytics.click_attribution_delay_s: {randint: [30, 170]}
+    analytics.dlq_depth: {randint: [15, 25]}
+    analytics.downstream_sink_lag_s: {randint: [1, 3]}
   recommendation-engine:
     reco.click_signal_stale: true
-    reco.behavioral_features_lag_min: {randint: [10, 60]}
+    reco.behavioral_features_lag_s: {randint: [30, 170]}
+cascade_messages:
+  analytics-pipeline:
+    - severity: WARN
+      message: '[analytics.ingest.attribution] ad_click attribution arriving late from ad-platform: newest attributed click is {attribution_lag_s}s behind wall clock (normal < 1s); sink write latency normal, dlq=20'
+  recommendation-engine:
+    - severity: WARN
+      message: '[reco.features.clicks] click features stale: last click feature update {attribution_lag_s}s ago (max_staleness=60s); ranking with cached behavioral features'
+fault_scope:
+  cluster: ecommerce-gke-cluster
+  workloads: [ad-platform]
+infrastructure_events:
+  - service: ad-platform
+    severity: INFO
+    offset_seconds: -90
+    body: '[keda] scaledobject click-attribution updated: maxReplicaCount 24 -> 4 (minReplicaCount 2, trigger kafka lagThreshold=5000, topic ad-clicks); applied by finops-rightsizing (CR-5562)'
+    attributes:
+      operation: scaledobject_update
+      user.name: finops-rightsizing
+      change.request: CR-5562
+      change.summary: 'scaledobject/click-attribution maxReplicaCount: 24 -> 4'
+      ads.click_consumer_max_replicas: 4
+service_lag_seconds: {analytics-pipeline: 30, recommendation-engine: 40}
+remediation_effects:
+  log_taper_seconds: 30
+  log_events:
+    - service: ad-platform
+      severity: INFO
+      offset_seconds: 1
+      body: '[CHG] CHANGE APPLIED opsctl patch scaledobject/click-attribution --max-replicas 24 by {actor}: maxReplicaCount 4 -> 24'
+      attributes:
+        operation: change_applied
+        change.target: scaledobject/click-attribution
+        ads.click_consumer_max_replicas: 24
+    - service: ad-platform
+      severity: INFO
+      offset_seconds: 15
+      body: '[keda] scaledobject click-attribution scaling up: 14/24 replicas ready, partitions rebalanced across group click-attribution'
+      attributes:
+        operation: scaledobject_update
+        ads.click_consumer_replicas: 14
+    - service: ad-platform
+      severity: INFO
+      offset_seconds: 30
+      body: '[keda] scaledobject click-attribution at 24/24 replicas (one per ad-clicks partition); consumer lag decreasing'
+      attributes:
+        operation: scaledobject_update
+        ads.click_consumer_replicas: 24
+    - service: ad-platform
+      severity: INFO
+      offset_seconds: 360
+      body: '[adplatform.attribution.consumer] group=click-attribution caught up: lag back under 2,000 events, attribution delay under 1s; no clicks dropped'
+      attributes:
+        operation: click_attribution_status
+  verification:
+    - signal: ads.click_queue_depth
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "ad-platform"'
+      field: 'metrics.ads.click_queue_depth'
+      expect: 'stops growing about 20s after the patch, then falls by about 6,000 events/s back to about 1,200 (up to about 6 minutes from a 2,000,000-event backlog)'
+      within_seconds: 480
+    - signal: ads.click_consumer_replicas
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "ad-platform"'
+      field: 'metrics.ads.click_consumer_replicas'
+      expect: '24 within about 30s (was 4)'
+      within_seconds: 90
+    - signal: ADS-CLICK-BACKLOG lines
+      from: 'logs.otel.ecommerce'
+      where: 'body.text LIKE "*ADS-CLICK-BACKLOG*"'
+      expect: 'stop within about 30s, once KEDA has the group at 24/24 replicas; the drain is then visible in click_queue_depth and the click-attribution status lines, not in new ADS-CLICK-BACKLOG lines'
+      within_seconds: 90
+    - signal: click consumer max replicas
+      from: 'logs.otel.ecommerce'
+      where: 'resource.attributes.service.name == "ad-platform"'
+      field: 'attributes.ads.click_consumer_max_replicas'
+      expect: '24 on the click-attribution status lines after the patch (4 during the incident)'
+      within_seconds: 60
 business_impact:
   - kpi: business.ad_revenue_usd_per_min
-    factor: {uniform: [0.25, 0.55]}
+    value: {uniform: [10416.0, 11984.0], round: 1}
   - kpi: business.conversion_rate_pct
-    factor: {uniform: [0.35, 0.60]}
+    value: {uniform: [0.67, 0.77], round: 2}
   - kpi: business.gmv_usd_per_min
-    factor: {uniform: [0.35, 0.60]}
+    value: {uniform: [51382.0, 59118.0], round: 1}
+
+generator_impact:
+  kafka_otel:
+    high_consumer_lag_by_topic: 80000.0
+generator_hold_seconds: {kafka_otel: 360}

@@ -45,6 +45,50 @@ state:
   _last_queue_report:
     init: now
 steps:
+# Queue depth and wait (shared contract). Channel 3: the gs-c5-2xlarge node group cap leaves
+# no free game servers, so the queue grows to 3000-6000 over 90 s and drains over 240 s
+# after the cap is restored. Channel 19: slow ticks make matches run long, fewer servers free
+# up, and the queue rises mildly to 600-1200; it settles within 120 s of that fix.
+- sample:
+    q_base:
+      expr: "max(80, min(400, round(rand.gauss(220, 55))))"
+    q3_f:
+      expr: "min(1.0, max(0.0, elapsed.get(3, 0) - lag.get(3, 0)) / 90.0) if 3 in all_active else ((1.0 - min(1.0, since_fix.get(3, 0) / 240.0)) if 3 in fixed_channels else 0.0)"
+    q19_f:
+      expr: "min(1.0, max(0.0, elapsed.get(19, 0) - lag.get(19, 0)) / 60.0) if 19 in all_active else ((1.0 - min(1.0, since_fix.get(19, 0) / 120.0)) if 19 in fixed_channels else 0.0)"
+    queue_depth:
+      expr: "round(max(q_base + (rand.uniform(3000, 6000) - q_base) * q3_f, q_base + (rand.uniform(600, 1200) - q_base) * q19_f))"
+    w_base:
+      expr: "round(max(8.0, min(25.0, rand.gauss(15.0, 3.5))), 1)"
+    avg_wait:
+      expr: "round(w_base + (rand.uniform(120.0, 300.0) - w_base) * q3_f, 1)"
+    dequeue_rate:
+      expr: "round(max(1.0, 12.0 * (1.0 - 0.8 * q3_f) * (1.0 - 0.3 * q19_f) + rand.gauss(0, 0.4)), 1)"
+    queue_status:
+      expr: "'degraded' if queue_depth > 500 or avg_wait > 30 else 'healthy'"
+- metric:
+    name: matchmaking.queue_depth
+    value:
+      var: queue_depth
+    unit: players
+- metric:
+    name: matchmaking.avg_wait_time_s
+    value:
+      var: avg_wait
+    unit: s
+- log:
+    level: INFO
+    message: '[MM] queue_status pools=4 depth={queue_depth} avg_wait={avg_wait}s dequeue_rate={dequeue_rate}/s status={queue_status}'
+    attrs:
+      operation: queue_status
+      queue.depth:
+        var: queue_depth
+      queue.avg_wait_s:
+        var: avg_wait
+      queue.dequeue_rate:
+        var: dequeue_rate
+      queue.status:
+        var: queue_status
 - counter:
     state_key: _matches_formed
     by: 1
@@ -62,10 +106,7 @@ steps:
       - 20
       - 200
     wait_s:
-      uniform:
-      - 5.0
-      - 45.0
-      round: 1
+      expr: "round(avg_wait * rand.uniform(0.6, 1.4), 1)"
 - log:
     level: INFO
     message: '[MM] match_formed pool={match_queue} teams={team_size}v{team_size} avg_mmr={avg_mmr} spread={mmr_spread} wait={wait_s}s
@@ -82,80 +123,155 @@ steps:
         var: mmr_spread
       match.wait_seconds:
         var: wait_s
-- sample:
-    queue_name:
-      choice: QUEUES
-    queue_depth_status:
-      randint:
-      - 100
-      - 2000
-    queue_avg_wait:
-      uniform:
-      - 5.0
-      - 35.0
-      round: 1
-- log:
-    level: INFO
-    message: '[MM] queue_status pool={queue_name} depth={queue_depth_status} avg_wait={queue_avg_wait}s dequeue_rate=12/s'
-    attrs:
-      operation: queue_status
-      queue.name:
-        var: queue_name
-      queue.depth:
-        var: queue_depth_status
-      queue.avg_wait_s:
-        var: queue_avg_wait
 - every:
     seconds: 10
     state_key: _last_queue_report
     steps:
-    - sample:
-        total_waiting:
-          randint:
-          - 500
-          - 5000
     - log:
         level: INFO
-        message: '[MM] summary matches_formed={_matches_formed} total_waiting={total_waiting} pools=4 avg_quality=0.87'
+        message: '[MM] summary matches_formed={_matches_formed} total_waiting={queue_depth} pools=4'
         attrs:
           operation: queue_summary
           summary.matches_formed:
             var: _matches_formed
           summary.total_waiting:
-            var: total_waiting
-- sample:
-    queue_depth:
-      if_active:
-        randint:
-        - 8000
-        - 50000
-      else:
-        randint:
-        - 200
-        - 3000
-    avg_wait:
-      if_active:
-        uniform:
-        - 60.0
-        - 300.0
-        round: 1
-      else:
-        uniform:
-        - 8.0
-        - 30.0
-        round: 1
-- metric:
-    name: matchmaking.queue_depth
-    value:
-      var: queue_depth
-    unit: players
-- metric:
-    name: matchmaking.avg_wait_time_s
-    value:
-      var: avg_wait
-    unit: s
+            var: queue_depth
 - metric:
     name: matchmaking.matches_formed
     value:
       var: _matches_formed
     unit: matches
+# Channel 4: v3.0.1 changed the Glicko-2 volatility solver (tau 0.5 -> 1.2, epsilon 1e-6 ->
+# 1e-9). Long-streak updates hit the 100-iteration cap and write ratings outside 0-5000.
+# After the rollback the new pods are serving within ~45 s and the readings follow.
+- sample:
+    rt_f:
+      expr: "min(1.0, max(0.0, elapsed.get(4, 0) - lag.get(4, 0)) / 30.0) if 4 in all_active else ((1.0 - min(1.0, since_fix.get(4, 0) / 45.0)) if 4 in fixed_channels else 0.0)"
+    rating_updates:
+      expr: "round(rand.uniform(1800, 2600))"
+    rating_oor:
+      expr: "round(rand.uniform(40, 120) * rt_f)"
+    solver_base:
+      expr: "max(8, min(15, round(rand.gauss(11, 1.8))))"
+    solver_p99:
+      expr: "round(solver_base + (100 - solver_base) * rt_f)"
+    solver_p50:
+      expr: "max(5, min(9, round(rand.gauss(6.5, 1.0))))"
+    mm_version:
+      expr: "'v3.0.1' if 4 in all_active else 'v3.0.0'"
+    glicko_tau:
+      expr: "1.2 if 4 in all_active else 0.5"
+    rating_status:
+      expr: "'degraded' if rating_oor > 0 or solver_p99 > 30 else 'healthy'"
+- metric:
+    name: matchmaking.rating.out_of_range_updates_per_min
+    value:
+      var: rating_oor
+    unit: updates
+- metric:
+    name: matchmaking.rating.solver_iterations_p99
+    value:
+      var: solver_p99
+    unit: iterations
+- log:
+    level: INFO
+    message: '[MM] rating_status engine=glicko2 build={mm_version} tau={glicko_tau} season=S14 updates_1m={rating_updates} out_of_range_1m={rating_oor}
+      solver_iter_p50={solver_p50} solver_iter_p99={solver_p99} max_iter=100 status={rating_status}'
+    attrs:
+      operation: rating_status
+      deployment.version:
+        var: mm_version
+      rating.glicko2_tau:
+        var: glicko_tau
+      rating.updates_per_min:
+        var: rating_updates
+      rating.out_of_range_per_min:
+        var: rating_oor
+      rating.solver_iterations_p50:
+        var: solver_p50
+      rating.solver_iterations_p99:
+        var: solver_p99
+      rating.status:
+        var: rating_status
+# Channel 20: wg-use1-usw2 MTU raised 1380 -> 1440. Full-size state-transfer packets no longer
+# fit the underlay and frag-needed is filtered, so transfers to us-west-2 time out. The
+# use1-euw1 route (still 1380) is the healthy peer. Patching the MTU back works within ~30 s.
+- sample:
+    mg_f:
+      expr: "min(1.0, max(0.0, elapsed.get(20, 0) - lag.get(20, 0)) / 20.0) if 20 in all_active else ((1.0 - min(1.0, since_fix.get(20, 0) / 30.0)) if 20 in fixed_channels else 0.0)"
+    mg_base:
+      expr: "rand.uniform(99.0, 100.0)"
+    mg_usw2:
+      expr: "round(mg_base + (rand.uniform(5.0, 20.0) - mg_base) * mg_f, 1)"
+    mg_euw1:
+      expr: "round(rand.uniform(99.0, 100.0), 1)"
+    mg_timeouts:
+      expr: "round(rand.uniform(60, 200) * mg_f)"
+    mg_attempts_usw2:
+      expr: "round(rand.uniform(180, 260))"
+    mg_attempts_euw1:
+      expr: "round(rand.uniform(120, 190))"
+    usw2_mtu:
+      expr: "1440 if 20 in all_active else 1380"
+    mg_status:
+      expr: "'degraded' if mg_usw2 < 98.0 or mg_timeouts > 0 else 'healthy'"
+- metric:
+    name: matchmaking.migration.success_rate_pct
+    value:
+      var: mg_usw2
+    unit: '%'
+    attrs:
+      migration.route: use1-usw2
+- metric:
+    name: matchmaking.migration.success_rate_pct
+    value:
+      var: mg_euw1
+    unit: '%'
+    attrs:
+      migration.route: use1-euw1
+- metric:
+    name: matchmaking.migration.transfer_timeouts_per_min
+    value:
+      var: mg_timeouts
+    unit: timeouts
+    attrs:
+      migration.route: use1-usw2
+- metric:
+    name: matchmaking.migration.transfer_timeouts_per_min
+    value: 0
+    unit: timeouts
+    attrs:
+      migration.route: use1-euw1
+- log:
+    level: INFO
+    message: '[MM] migration_status route=use1-usw2 tunnel=wg-use1-usw2 tunnel_mtu={usw2_mtu} attempts_1m={mg_attempts_usw2} success_rate={mg_usw2}%
+      transfer_timeouts_1m={mg_timeouts} status={mg_status}'
+    attrs:
+      operation: migration_status
+      migration.route: use1-usw2
+      network.tunnel: wg-use1-usw2
+      network.tunnel_mtu:
+        var: usw2_mtu
+      migration.attempts_per_min:
+        var: mg_attempts_usw2
+      migration.success_rate_pct:
+        var: mg_usw2
+      migration.transfer_timeouts_per_min:
+        var: mg_timeouts
+      migration.status:
+        var: mg_status
+- log:
+    level: INFO
+    message: '[MM] migration_status route=use1-euw1 tunnel=wg-use1-euw1 tunnel_mtu=1380 attempts_1m={mg_attempts_euw1} success_rate={mg_euw1}%
+      transfer_timeouts_1m=0 status=healthy'
+    attrs:
+      operation: migration_status
+      migration.route: use1-euw1
+      network.tunnel: wg-use1-euw1
+      network.tunnel_mtu: 1380
+      migration.attempts_per_min:
+        var: mg_attempts_euw1
+      migration.success_rate_pct:
+        var: mg_euw1
+      migration.transfer_timeouts_per_min: 0
+      migration.status: healthy

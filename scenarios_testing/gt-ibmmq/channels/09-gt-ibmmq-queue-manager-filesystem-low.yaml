@@ -1,0 +1,37 @@
+name: "GT ibmmq_otel: queue_manager_filesystem_low"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-IBMMQ-QUEUE-MANAGER-FILESYSTEM-LOW
+sensor_type: impact_key_probe
+affected_services:
+  - gt-ibmmq-aws-svc-1
+cascade_services:
+  - gt-ibmmq-aws-svc-2
+description: "Tests impact_key queue_manager_filesystem_low on generator ibmmq_otel."
+investigation_notes: |-
+  1. Verify ibmmq_otel is active and reporting metrics.
+  2. Check that the queue_manager_filesystem_low metric has reached the trigger value (10.0).
+  3. Confirm generator_impact for ibmmq_otel.queue_manager_filesystem_low is set to 10.0.
+  4. Look for correlated changes in service gt-ibmmq-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_queue_manager_filesystem_low_baseline
+error_message: "GT-PROBE: gen=ibmmq_otel key=queue_manager_filesystem_low value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=ibmmq_otel
+  impact_key: queue_manager_filesystem_low
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 10.0
+  svc_name: gt-ibmmq-aws-svc-1
+rca_clues:
+  gt-ibmmq-aws-svc-1:
+    probe.generator: ibmmq_otel
+    probe.impact_key: queue_manager_filesystem_low
+    probe.trigger_value: 10.0
+  gt-ibmmq-aws-svc-2:
+    probe.upstream_generator: ibmmq_otel
+    probe.upstream_key: queue_manager_filesystem_low
+generator_impact:
+  ibmmq_otel:
+    queue_manager_filesystem_low: 10.0

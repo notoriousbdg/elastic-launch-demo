@@ -1,0 +1,96 @@
+name: Pods evicted for ephemeral storage on report-builder nodes
+subsystem: nodes
+vehicle_section: tenant-batch/report-builder
+error_type: 'The node was low on resource: ephemeral-storage'
+sensor_type: ephemeral_storage
+affected_services:
+  - kubelet
+cascade_services: []
+description: The three general-c6i nodes running report-builder hit disk pressure and the kubelet evicts pods, including
+  unrelated tenant pods on the same nodes. Other nodes are unaffected.
+investigation_notes: |-
+  Root cause: report-builder {bad_version} (tenant-batch) writes intermediate export files to an emptyDir at /scratch and no longer deletes them. emptyDir counts against node ephemeral storage, so the nodes running report-builder fill their root filesystem, cross the kubelet's 10% eviction threshold and start evicting pods, report-builder first (largest consumer, no ephemeral-storage request) and then co-located pods.
+  Confirm:
+    - kubelet on those nodes: eviction manager: attempting to reclaim ephemeral-storage; Evicted: The node was low on resource: ephemeral-storage ... Container report-builder was using {used_gi}Gi, request is 0
+    - attributes.k8s.node.name on the eviction lines are only the nodes hosting report-builder; k8s.node.filesystem.utilization climbs past 0.85 there and k8s.node.condition_disk_pressure = 1
+    - audit: deployments/report-builder image updated to {bad_version} before the disk started filling
+    - kubectl -n tenant-batch describe pod <report-builder pod> | grep -A3 scratch
+  Remediation: roll report-builder back to {good_version}; replacing the pods frees their emptyDirs and the nodes leave DiskPressure.
+remediation_action: rollback_deployment
+remediation_command: |-
+  opsctl rollback deployment/report-builder -n tenant-batch
+error_message: 'E{klog_time}    2817 eviction_manager.go:{line}] "Eviction manager: pod is evicted successfully" pod="tenant-batch/report-builder-{rs}-{sfx}"
+  message="The node was low on resource: ephemeral-storage. Threshold quantity: 10%, available: {avail_pct}%. Container report-builder
+  was using {used_gi}Gi, request is 0, has larger consumption of ephemeral-storage."'
+stack_trace: ''
+fault_params:
+  line: {randint: [360, 380]}
+  rs: 49af2bf083
+  sfx: {choice: [75p86, 74vmz, c5rdm]}
+  avail_pct: {randint: [5, 8]}
+  used_gi: {randint: [54, 63]}
+  bad_version: v3.2.0
+  good_version: v3.1.4
+rca_clues:
+  kubelet:
+    k8s.node.fs.available_pct: {randint: [5, 8]}
+    kubelet.eviction.signal: nodefs.available
+    k8s.volume.type: emptyDir
+cascade_messages: {}
+fault_scope:
+  cluster: prod-use1
+  workloads: [report-builder]
+onset_delay_seconds: 120
+ramp_seconds: 0
+generator_impact:
+  kubernetes_otel:
+    node_disk_pressure: 1.0
+    pods_in_failed_phase: 2
+fault_state:
+  kubernetes_otel:
+    workloads:
+      report-builder: {image: 'harbor.example-saas.io/tenant-batch/report-builder:v3.2.0'}
+infrastructure_events:
+  - service: kube-apiserver
+    severity: INFO
+    offset_seconds: -180
+    body: 'audit: level=RequestResponse stage=ResponseComplete verb=patch resource=deployments namespace=tenant-batch name=report-builder
+      user=system:serviceaccount:argocd:argocd-application-controller code=200 sync.revision=0a5d8e3 change="image report-builder:v3.1.4
+      -> report-builder:v3.2.0"'
+  - service: kubelet
+    severity: WARN
+    offset_seconds: 90
+    body: 'W{klog_time}    2817 eviction_manager.go:366] "Eviction manager: attempting to reclaim" resourceName="ephemeral-storage"'
+remediation_effects:
+  # the old pods keep failing until the rolling update replaces them
+  log_taper_seconds: 60
+  transition_seconds: 180
+  log_events:
+    - service: kube-apiserver
+      severity: INFO
+      offset_seconds: 3
+      body: 'audit: level=Metadata verb=patch resource=deployments namespace=tenant-batch name=report-builder user={actor}
+        code=200 change="rollback to revision 27 (report-builder:v3.1.4)"'
+  verification:
+    - signal: ephemeral-storage evictions
+      from: 'logs.otel.platform'
+      where: 'resource.attributes.service.name == "kubelet" AND body.text LIKE "*ephemeral-storage*"'
+      expect: '0 new lines'
+      within_seconds: 240
+    - signal: k8s.node.condition_disk_pressure on the report-builder nodes
+      from: 'metrics-k8sclusterreceiver.otel-*'
+      field: 'resource.attributes.k8s.node.name'
+      where: 'metrics.k8s.node.condition_disk_pressure == 1 AND resource.attributes.k8s.cluster.name == "prod-use1"'
+      expect: '0 nodes'
+      within_seconds: 300
+    - signal: report-builder image
+      from: 'metrics-k8sclusterreceiver.otel-*'
+      field: 'resource.attributes.container.image.tag'
+      where: 'resource.attributes.k8s.deployment.name == "report-builder" AND resource.attributes.k8s.cluster.name == "prod-use1"'
+      expect: 'container.image.tag = v3.1.4'
+      within_seconds: 120
+business_impact:
+  - kpi: business.batch_jobs_success_pct
+    value: {uniform: [79.0, 84.0], round: 1}
+  - kpi: business.pending_pods
+    value: {uniform: [3.3, 3.7], round: 0}

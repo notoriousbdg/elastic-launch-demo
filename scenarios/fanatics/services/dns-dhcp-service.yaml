@@ -32,35 +32,81 @@ constants:
   - fanatics.internal
   - collectibles.prod
   - warehouse.local
+  - cloud-ops.internal
   DHCP_SCOPES:
-  - 10.1.0.0/24
   - 10.2.0.0/24
   - 172.16.0.0/22
   - 192.168.1.0/24
 steps:
+# Channel 10: forwarders for collectibles.prod and cloud-ops.internal sit behind the
+# aws-to-azure-01 VPN. First the cached answers hide the failure (stepped SERVFAIL rate),
+# then it climbs as TTLs expire. After the rollback the tunnel needs about 60s to
+# renegotiate, then negative cache entries expire and SERVFAIL decays over ~3 minutes.
+- sample:
+    dns_servfail_c:
+      expr: "(28.0 + 40.0 * min(1.0, max(0.0, elapsed.get(10, 0) - 30) / 45.0)) if 10 in all_active
+        else ((68.0 if since_fix.get(10, 0) < 60 else 0.5 + 67.5 * max(0.0, 1.0 - (since_fix.get(10, 0) - 60) / 180.0)) if 10 in fixed_channels
+        else 0.5)"
+    dns_servfail_pct:
+      expr: "round(max(0.05, dns_servfail_c + rand.gauss(0, 0.04 * dns_servfail_c + 0.04)), 2)"
+    dns_forwarder_up:
+      expr: "0 if 10 in all_active else ((0 if since_fix.get(10, 0) < 60 else 1) if 10 in fixed_channels else 1)"
+    dns_forwarder_rtt_ms:
+      expr: "round(min(10000.0, max(3000.0, 6500.0 + rand.gauss(0, 600.0))), 0) if dns_forwarder_up == 0
+        else round(max(4.0, rand.gauss(12.0, 1.5)), 0)"
+    vpn_ike_profile:
+      expr: "'ikev2-profile-aes256-sha512' if 10 in all_active else 'ikev2-profile-aes256-sha256'"
+    dns_fwd_status:
+      expr: "'ANOMALY' if dns_forwarder_up == 0 or dns_servfail_pct > 5.0 else 'NOMINAL'"
+- metric:
+    name: dns.servfail_pct
+    value:
+      var: dns_servfail_pct
+    unit: '%'
+- metric:
+    name: dns.forwarder_reachable
+    value:
+      var: dns_forwarder_up
+    unit: '1'
+- metric:
+    name: dns.forwarder_rtt_ms
+    value:
+      var: dns_forwarder_rtt_ms
+    unit: ms
+- log:
+    level: INFO
+    message: 'named[12345]: info: forwarders check: 10.2.0.4#53 via aws-to-azure-01 reachable={dns_forwarder_up} rtt={dns_forwarder_rtt_ms}ms servfail={dns_servfail_pct}% ike_profile={vpn_ike_profile} status={dns_fwd_status}'
+    attrs:
+      operation: forwarder_check
+      dns.forwarder_ip: 10.2.0.4
+      dns.forwarder_reachable:
+        var: dns_forwarder_up
+      dns.forwarder_rtt_ms:
+        var: dns_forwarder_rtt_ms
+      dns.servfail_pct:
+        var: dns_servfail_pct
+      dns.status:
+        var: dns_fwd_status
+      network.vpn_tunnel_name: aws-to-azure-01
+      network.vpn_ike_profile:
+        var: vpn_ike_profile
+# Per-zone resolver health. Only the VPN-hosted zones feel the forwarder failure; the
+# local zones stay nominal.
 - sample:
     queries_per_sec:
-      uniform:
-      - 500.0
-      - 2000.0
-      round: 1
+      expr: "round(max(100.0, rand.gauss(1200.0, 60.0)), 1)"
     cache_hit_pct:
-      uniform:
-      - 85.0
-      - 98.0
-      round: 1
+      expr: "round(min(99.5, max(70.0, rand.gauss(93.0, 0.8))), 1)"
     nxdomain_pct:
-      uniform:
-      - 0.5
-      - 3.0
-      round: 2
-    avg_latency_ms:
-      uniform:
-      - 0.5
-      - 5.0
-      round: 2
+      expr: "round(max(0.1, rand.gauss(1.6, 0.15)), 2)"
     zone:
       choice: DNS_ZONES
+    zone_via_vpn:
+      expr: "zone == 'collectibles.prod' or zone == 'cloud-ops.internal'"
+    zone_servfail_pct:
+      expr: "dns_servfail_pct if zone_via_vpn else round(max(0.05, rand.gauss(0.4, 0.06)), 2)"
+    avg_latency_ms:
+      expr: "round(max(0.3, rand.gauss(2.2, 0.2)) + (zone_servfail_pct / 100.0 * dns_forwarder_rtt_ms if zone_via_vpn else 0.0), 2)"
 - metric:
     name: dns.queries_per_sec
     value:
@@ -83,8 +129,7 @@ steps:
     unit: ms
 - log:
     level: INFO
-    message: 'named[12345]: info: zone ''{zone}'' queries={queries_per_sec}/s cache_hit={cache_hit_pct}% nxdomain={nxdomain_pct}%
-      latency={avg_latency_ms}ms'
+    message: 'named[12345]: info: zone ''{zone}'' queries={queries_per_sec}/s cache_hit={cache_hit_pct}% nxdomain={nxdomain_pct}% servfail={zone_servfail_pct}% latency={avg_latency_ms}ms'
     attrs:
       operation: dns_health
       dns.zone:
@@ -95,20 +140,77 @@ steps:
         var: cache_hit_pct
       dns.nxdomain:
         var: nxdomain_pct
+      dns.servfail_pct:
+        var: zone_servfail_pct
       dns.latency_ms:
         var: avg_latency_ms
+# Channel 11: pool 10.1.0.0/24. With the hot-standby failover mode the standby peer keeps
+# the unleased addresses ("backup"), so leases fill gradually as clients renew and the
+# primary answers "no free leases". After the rollback the reserved addresses return at
+# once (NAKs stop) but utilization only falls as leases expire.
+- sample:
+    dhcp_leases_c:
+      expr: "(150.0 + 95.0 * min(1.0, max(0.0, elapsed.get(11, 0) - 20) / 180.0)) if 11 in all_active
+        else ((245.0 - 95.0 * min(1.0, since_fix.get(11, 0) / 300.0)) if 11 in fixed_channels else 150.0)"
+    dhcp_leases_lo:
+      expr: "241 if (11 in all_active and elapsed.get(11, 0) >= 200) else 100"
+    dhcp_scope_leases:
+      expr: "int(max(dhcp_leases_lo, min(250, round(dhcp_leases_c + rand.gauss(0, 0.015 * dhcp_leases_c)))))"
+    dhcp_scope_util_pct:
+      expr: "round(dhcp_scope_leases / 254.0 * 100.0, 1)"
+    dhcp_backup_leases:
+      expr: "((254 - dhcp_scope_leases) if dhcp_scope_leases >= 225 else int(round((254 - dhcp_scope_leases) * 0.3))) if 11 in all_active
+        else (((254 - dhcp_scope_leases) if since_fix.get(11, 0) < 5 else 0) if 11 in fixed_channels else 0)"
+    dhcp_free_leases:
+      expr: "254 - dhcp_scope_leases - dhcp_backup_leases"
+    dhcp_nak_per_min:
+      expr: "max(0, int(round((dhcp_scope_leases - 225) * 3.5 + rand.gauss(0, 4.0)))) if 11 in all_active
+        else (max(0, int(round(70.0 * max(0.0, 1.0 - since_fix.get(11, 0) / 10.0) + rand.gauss(0, 0.5)))) if 11 in fixed_channels
+        else max(0, int(round(rand.gauss(0.4, 0.6)))))"
+    dhcp_failover_mode:
+      expr: "'dhcpd-hot-standby-v2' if 11 in all_active else 'dhcpd-load-balance-v1'"
+    dhcp_pool_status:
+      expr: "'ANOMALY' if dhcp_free_leases < 5 or dhcp_nak_per_min > 5 else 'NOMINAL'"
+- metric:
+    name: dhcp.scope_utilization_pct
+    value:
+      var: dhcp_scope_util_pct
+    unit: '%'
+- metric:
+    name: dhcp.scope_active_leases
+    value:
+      var: dhcp_scope_leases
+    unit: leases
+- metric:
+    name: dhcp.nak_per_min
+    value:
+      var: dhcp_nak_per_min
+    unit: naks
+- log:
+    level: INFO
+    message: 'dhcpd[6789]: balanced pool 7f3a1c10 10.1.0.0/24 total 254 free {dhcp_free_leases} backup {dhcp_backup_leases} lts 0 max-own (+/-)25 failover={dhcp_failover_mode} status={dhcp_pool_status}'
+    attrs:
+      operation: dhcp_pool_check
+      dhcp.scope: 10.1.0.0/24
+      dhcp.active_leases:
+        var: dhcp_scope_leases
+      dhcp.total_leases: 254
+      dhcp.free_leases:
+        var: dhcp_free_leases
+      dhcp.backup_leases:
+        var: dhcp_backup_leases
+      dhcp.utilization_pct:
+        var: dhcp_scope_util_pct
+      dhcp.pool_status:
+        var: dhcp_pool_status
+      infra.dhcp_failover_mode:
+        var: dhcp_failover_mode
+# Other scopes: baseline only.
 - sample:
     scope:
       choice: DHCP_SCOPES
     active_leases:
-      if_active:
-        randint:
-        - 240
-        - 254
-      else:
-        randint:
-        - 100
-        - 230
+      expr: "int(max(100, min(190, round(rand.gauss(150.0, 6.0)))))"
     utilization_pct:
       expr: round(active_leases / 254 * 100, 1)
 - metric:
@@ -131,7 +233,8 @@ steps:
       dhcp.active_leases:
         var: active_leases
       dhcp.total_leases: 254
-- log:
+- when: "10 not in all_active"
+  log:
     level: INFO
     message: 'named[12345]: info: resolver health check PASS — all upstream forwarders responding within SLA'
     attrs:

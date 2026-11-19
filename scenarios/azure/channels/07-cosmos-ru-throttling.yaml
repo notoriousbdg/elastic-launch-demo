@@ -1,0 +1,126 @@
+name: Cosmos Ru Throttling
+subsystem: database
+vehicle_section: database_pipeline
+error_type: COSMOS-RU-THROTTLED
+sensor_type: health_check
+affected_services: [conversation-store, chat-orchestrator]
+error_services: [conversation-store]
+cascade_services: []
+
+description: >
+  A bulk transcript import by tenant-4417 concentrates writes on one partition key of the conversation-store Cosmos DB container, so one physical partition exhausts its share of the provisioned RU/s and returns 429 Request rate is large while total consumption stays near half of the provisioned throughput.
+
+investigation_notes: |
+  Root cause: tenant-4417 started a bulk transcript import and its per-tenant rate limit allows {tenant_rpm} requests per minute, so every write lands on the single logical partition key {hot_partition} of container {container_name}. Cosmos DB splits the {provisioned_ru} RU/s evenly across physical partitions, so the partition that holds {hot_partition} saturates and returns 429 (substatus 3200) while the container as a whole uses only {consumed_ru} of {provisioned_ru} RU/s. Autoscale is not at its ceiling and no throughput change was made.
+  Confirm:
+    - metric conversation_store.hot_partition_pct is 55-92 (baseline 12-18) and conversation_store.throttled_requests_429 is above 0, while conversation_store.normalized_ru_consumption_pct stays 35-60 and conversation_store.request_units_consumed stays near half of {provisioned_ru}; a saturated autoscale ceiling would show every partition at 98-100 instead
+    - conversation-store logs cosmosdb partition_heat ... hottest_key={hot_partition} tenant_rpm_limit={tenant_rpm} status=ANOMALY (attributes.ratelimit.tenant_rpm); the other tenants' partitions stay near the baseline share
+    - the conversation-store bulk_import started line for {hot_partition} comes before the first COSMOS-RU-THROTTLED, and the Activity Log shows no throughput change on {container_name}
+  Remediation: cap the tenant with opsctl patch ratelimit/tenant-4417 --rpm 600. The hot partition drains and 429s clear over about 90 seconds. Raising the container throughput or the autoscale maximum does not help: the extra RU/s are shared across all partitions and the hot partition stays saturated.
+
+remediation_action: raise_cosmos_throughput_and_rekey
+remediation_command: |-
+  opsctl patch ratelimit/tenant-4417 --rpm 600
+
+error_message: |
+  [ConversationStore] COSMOS-RU-THROTTLED: azure.cosmos.exceptions.CosmosHttpResponseError: ({status_code}) Request rate is large. container={container_name} partition_key={hot_partition} hot_partition_pct={hot_partition_pct} consumed_ru={consumed_ru} provisioned_ru={provisioned_ru} x-ms-substatus=3200 x-ms-retry-after-ms={retry_after_ms}
+
+stack_trace: |
+  azure.cosmos.exceptions.CosmosHttpResponseError: (429) Request rate is large. COSMOS-RU-THROTTLED
+    at ConversationStore.append_message(container={container_name})
+    at ContainerProxy.upsert_item(partition_key={hot_partition})
+  Status code:        {status_code} (substatus 3200)
+  Provisioned RU/s:   {provisioned_ru}
+  Consumed RU/s:      {consumed_ru}
+  Hot partition:      {hot_partition} ({hot_partition_pct}% of the partition's RU share)
+  Tenant rate limit:  {tenant_rpm} rpm
+  Retry after:        {retry_after_ms}ms
+
+correlation_attr:
+  key: ratelimit.tenant_rpm
+  value: 12000
+
+fault_params:
+  status_code: 429
+  container_name: conversations
+  provisioned_ru: 10000
+  consumed_ru: {randint: [4800, 5800]}
+  hot_partition: tenant-4417
+  hot_partition_pct: {uniform: [55.0, 92.0], round: 1}
+  retry_after_ms: {randint: [250, 4000]}
+  tenant_rpm: 12000
+
+rca_clues:
+  conversation-store:
+    cosmos.normalized_ru_consumption_pct: {uniform: [45.0, 58.0], round: 1}
+    cosmos.hot_partition_share_pct: {uniform: [55.0, 92.0], round: 1}
+    cosmos.throttled_requests_per_min: {randint: [300, 6000]}
+    cosmos.throughput_changed_last_24h: false
+    cosmos.total_request_rate_change_pct: {uniform: [-5.0, 5.0], round: 1}
+  chat-orchestrator:
+    orchestrator.history_read_latency_ms: {randint: [900, 6000]}
+    orchestrator.history_write_retries_exhausted: {randint: [20, 400]}
+
+cascade_messages:
+  chat-orchestrator:
+    - severity: WARN
+      message: 'history write retries exhausted: azure.cosmos.exceptions.CosmosHttpResponseError ({status_code}) container={container_name} partition_key={hot_partition} retry_after_ms={retry_after_ms}; conversation turn not persisted'
+
+service_lag_seconds: {chat-orchestrator: 15}
+fault_scope:
+  workloads: [conversation-store, chat-orchestrator]
+
+infrastructure_events:
+  - service: conversation-store
+    severity: INFO
+    offset_seconds: -120
+    body: 'cosmosdb[convstore-weu]: bulk_import started tenant=tenant-4417 container=conversations partition_key=/tenantId source=transcript-archive documents=2400000 tenant_rpm_limit=12000 requested_by=svc-tenant-importer'
+    attributes:
+      user.name: svc-tenant-importer
+      operation: bulk_import
+      ratelimit.tenant: tenant-4417
+      ratelimit.tenant_rpm: 12000
+      change.summary: 'tenant-4417 bulk transcript import started, rate limit 12000 rpm'
+
+remediation_effects:
+  log_events:
+    - service: conversation-store
+      severity: INFO
+      offset_seconds: 1
+      body: 'config-service: change applied ratelimit/tenant-4417 cmd="opsctl patch ratelimit/tenant-4417 --rpm 600" by={actor} : rpm 12000 -> 600'
+      attributes:
+        operation: ratelimit_config_change
+        config.target: ratelimit/tenant-4417
+        ratelimit.tenant: tenant-4417
+        ratelimit.tenant_rpm: 600
+        change.summary: 'rpm: 12000 -> 600'
+  steady_attributes:
+    conversation-store:
+      ratelimit.tenant_rpm: 600
+  verification:
+    - signal: conversation_store.hot_partition_pct
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "conversation-store"'
+      field: 'metrics.conversation_store.hot_partition_pct'
+      expect: 'back to about 12-18 (was 55-92)'
+      within_seconds: 120
+    - signal: conversation_store.throttled_requests_429
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "conversation-store"'
+      field: 'metrics.conversation_store.throttled_requests_429'
+      expect: '0 (was 300-6000 per minute)'
+      within_seconds: 120
+    - signal: tenant-4417 rate limit
+      from: 'logs.otel.azureai'
+      where: 'resource.attributes.service.name == "conversation-store"'
+      field: 'attributes.ratelimit.tenant_rpm'
+      expect: '600 on every line logged since the fix (was 12000)'
+      within_seconds: 120
+
+business_impact:
+  - kpi: business.conversations_per_min
+    value: {uniform: [120.9, 139.1], round: 0}
+  - kpi: business.error_rate_pct
+    factor: {uniform: [2.5, 5.0]}
+  - kpi: business.latency_p99_ms
+    value: {uniform: [737.03, 847.98], round: 0}

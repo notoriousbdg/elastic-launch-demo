@@ -1,5 +1,6 @@
 version: "1"
 name: __SCENARIO_NAME__ Remediation Action
+enabled: true
 description: >
   Execute remediation actions for __SCENARIO_NAME__ anomalies. Queues a
   remediation command to an ES index for the backend poller to process.
@@ -204,6 +205,8 @@ steps:
             namespace: "__NS__"
             status: "pending"
             mission_id: "__SCENARIO_NAME__"
+            # who applies the fix: the app's change records name the automation
+            approval_mode: "skip"
           refresh: wait_for
 
       - name: log_queued_auto

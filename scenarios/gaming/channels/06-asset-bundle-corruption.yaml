@@ -6,41 +6,43 @@ sensor_type: integrity_checker
 affected_services:
 - content-delivery
 - game-server
-cascade_services:
-- moderation-engine
-description: Game asset bundles fail integrity verification after CDN transfer, causing client crashes on load
+cascade_services: []
+error_services:
+- content-delivery
+description: Game asset bundles fail integrity verification because a publisher config change overwrote a shared path, so edges serve a mix of old and new chunks
+onset_delay_seconds: 10
+ramp_seconds: 30
+service_lag_seconds: {game-server: 15}
 investigation_notes: |-
-  Root cause: chunk-level corruption during CDN edge-to-client transfer — TCP resets during large bundle downloads cause partial chunk writes that pass length checks but fail SHA-256 verification. The corrupt chunk is typically at a TCP segment boundary.
-  1. Identify the corrupt chunk offset: chunk 23 at offset 92274688 — correlate with CDN edge access logs for `tcp_resets` around the transfer timestamp.
-  2. Verify origin integrity: re-fetch the bundle directly from origin (bypassing CDN) with `curl -H 'Cache-Control: no-cache' <origin_url> | sha256sum` to rule out origin corruption vs. transit corruption.
-  3. Check edge node health: if `edge-iad-01` shows elevated tcp_resets across multiple bundles, the edge node may have a faulty NIC or be under DDoS.
-  4. Remediate: issue `reset_cdn_origin` to invalidate the corrupted cached copy on the edge node; quarantine the bad bundle hash and force re-download for affected clients.
-  5. Enable end-to-end chunk checksumming with per-chunk CRC32 verification on the client side so corrupted chunks trigger targeted re-fetch instead of full bundle re-download.
+  Root cause: an Argo CD sync of the asset-publisher ConfigMap (CHG0052063) switched publish.path_mode from versioned to mutable, so release {bundle_version} was uploaded over the previous release's objects under bundles/latest/ instead of to its own versioned prefix. The edges still hold chunks cached under the same keys from the previous upload, so clients assemble bundles from a mix of old and new chunks and the SHA-256 in the new manifest does not match ({expected_hash} expected, {actual_hash} computed). Bundles published to versioned prefixes before the change still verify, and the failures are spread over all four edges with no TCP resets or range retries, which rules out one edge's NIC or the network path; a no-cache fetch from origin returns the new chunk, so the object store is intact.
+  Confirm:
+    - content-delivery publisher_status lines carry attributes.config.publish_path_mode mutable and prefix bundles/latest/ (versioned and bundles/v14.3.0/ before the sync); the Argo CD sync line for asset-publisher comes before the first CDN-ASSET-CORRUPT line
+    - metrics.cdn.bundle_integrity_failures_per_min is 200-600 (baseline 0-1), and every CDN-ASSET-CORRUPT line is for release {bundle_version} under bundles/latest/
+    - content-delivery edge_health lines (connections, CPU) are unchanged on all four edges
+  Remediation: roll the ConfigMap back with opsctl rollback configmap/asset-publisher --to-revision previous. The publisher re-publishes {bundle_version} to bundles/v14.3.0/ and re-signs the manifest so it references the versioned chunks; clients pick up the new manifest on their next check, so integrity failures fall back to 0-1 per minute over about 90 seconds. Purging the edge cache alone does not hold, because the next upload to the mutable path mixes chunks again, and restarting edges changes nothing.
 remediation_action: reset_cdn_origin
-error_message: '[CDN] CDN-ASSET-CORRUPT: bundle={bundle_id} expected={expected_hash} actual={actual_hash} size={bundle_size_mb}MB
-  version={bundle_version}'
+remediation_command: |-
+  opsctl rollback configmap/asset-publisher --to-revision previous
+error_message: '[CDN] CDN-ASSET-CORRUPT: bundle={bundle_id} path=bundles/latest/{bundle_id}.pak expected={expected_hash} actual={actual_hash}
+  size={bundle_size_mb}MB release={bundle_version}'
 stack_trace: |-
   === ASSET INTEGRITY VERIFICATION LOG ===
-  bundle={bundle_id}  version={bundle_version}
+  bundle={bundle_id}  release={bundle_version}  manifest=manifest-{bundle_version}.json
   ----------- checksums ---------------
-    expected  = {expected_hash}
+    expected  = {expected_hash}  (manifest {bundle_version})
     actual    = {actual_hash}
     algorithm = SHA-256
   ----------- bundle info -------------
+    path        = bundles/latest/{bundle_id}.pak
     size        = {bundle_size_mb}MB
-    chunks      = 48
-    chunk_size  = 4MB
-    corrupt_chunk = 23 (offset 92274688)
-    edge_source   = edge-iad-01
-  ----------- transfer log ------------
-    started    = 2026-02-17T14:22:01.847Z
-    completed  = 2026-02-17T14:22:04.213Z
-    retries    = 1
-    tcp_resets = 2
-  CDN-ASSET-CORRUPT: bundle {bundle_id} checksum mismatch — quarantined
+    chunks      = 48 (chunk_size 4MB)
+    chunk etags = 31 match manifest, 17 from previous upload (Last-Modified before publish)
+  ----------- transfer ----------------
+    retries = 0  tcp_resets = 0  range_requests = 0
+  CDN-ASSET-CORRUPT: bundle {bundle_id} checksum mismatch, quarantined
 correlation_attr:
-  key: infra.nic_firmware
-  value: mellanox-cx6-fw-22.39.1014
+  key: config.publish_path_mode
+  value: mutable
 fault_params:
   bundle_id:
     format: "BDL-{n}"
@@ -53,21 +55,85 @@ fault_params:
     format: "sha256:{a:08x}{b:08x}"
     a: {randint: [0, 4294967295]}
     b: {randint: [0, 4294967295]}
-  bundle_size_mb: {uniform: [50.0, 500.0], round: 1}
-  bundle_version:
-    format: "v{major}.{minor}.{patch}"
-    major: {randint: [1, 5]}
-    minor: {randint: [0, 9]}
-    patch: {randint: [0, 99]}
+  bundle_size_mb: {uniform: [188.0, 192.0], round: 1}
+  bundle_version: v14.3.0
 rca_clues:
   content-delivery:
-    cdn.corrupt_chunk_offset: {randint: [50000000, 200000000]}
-    cdn.edge_tcp_resets: {randint: [5, 30]}
+    config.publish_path_mode: mutable
+    cdn.publish_prefix: bundles/latest/
+    cdn.stale_chunks_in_bundle: {randint: [8, 24]}
+    cdn.edge_tcp_resets: 0
   game-server:
-    game.bundle_load_failures: {randint: [50, 500]}
-    game.client_redownloads: {randint: [20, 200]}
-  moderation-engine:
-    moderation.asset_scan_status: bypassed
+    game.client_patch_retries: {randint: [50, 400]}
+cascade_messages:
+  game-server:
+    - severity: WARN
+      message: '[Net] client patch verify failed release={bundle_version} bundle={bundle_id}; client re-downloading, match join held (retry 2/3)'
+fault_scope:
+  cluster: gaming-eks-cluster
+  workloads: [content-delivery]
+infrastructure_events:
+  - service: content-delivery
+    severity: INFO
+    offset_seconds: -150
+    body: 'level=info msg="Sync operation to 9be41c7 succeeded" application=argocd/asset-publisher dest-server=gaming-eks-cluster dest-namespace=cdn
+      resources=ConfigMap/asset-publisher initiated-by=content-release-pipeline change=CHG0052063'
+    attributes:
+      operation: config_change
+      change.request: CHG0052063
+      user.name: content-release-pipeline
+      change.summary: 'asset-publisher publish.path_mode: versioned -> mutable (prefix bundles/latest/)'
+      config.publish_path_mode: mutable
+  - service: content-delivery
+    severity: INFO
+    offset_seconds: -90
+    body: '[CDN] publisher release=v14.3.0 uploaded 1284 chunks to bundles/latest/ (path_mode=mutable), manifest-v14.3.0.json published'
+    attributes:
+      operation: deployment_rollout
+      change.request: CHG0052063
+      config.publish_path_mode: mutable
+      cdn.publish_prefix: bundles/latest/
+remediation_effects:
+  transition_seconds: 90
+  log_taper_seconds: 60
+  log_events:
+    - service: content-delivery
+      severity: INFO
+      offset_seconds: 1
+      body: 'level=info logger=changelog msg="change applied" cmd="opsctl rollback configmap/asset-publisher --to-revision previous" actor={actor}
+        result="rolled back to revision 41 (publish.path_mode=versioned)"'
+      attributes:
+        operation: change_applied
+        change.target: configmap/asset-publisher
+    - service: content-delivery
+      severity: INFO
+      offset_seconds: 40
+      body: '[CDN] publisher release=v14.3.0 re-published 1284 chunks to bundles/v14.3.0/ (path_mode=versioned), manifest-v14.3.0.json re-signed'
+      attributes:
+        operation: deployment_rollout
+        config.publish_path_mode: versioned
+        cdn.publish_prefix: bundles/v14.3.0/
+  steady_attributes:
+    content-delivery:
+      config.publish_path_mode: versioned
+  verification:
+    - signal: cdn.bundle_integrity_failures_per_min
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "content-delivery"'
+      field: 'metrics.cdn.bundle_integrity_failures_per_min'
+      expect: 'back to 0-1 per minute (was 200-600), falling over about 90 seconds as clients fetch the re-signed manifest'
+      within_seconds: 180
+    - signal: CDN-ASSET-CORRUPT lines
+      from: 'logs.otel.gaming'
+      where: 'body.text LIKE "*CDN-ASSET-CORRUPT*"'
+      expect: '0 new lines'
+      within_seconds: 180
+    - signal: publisher path mode
+      from: 'logs.otel.gaming'
+      where: 'resource.attributes.service.name == "content-delivery" AND attributes.operation == "publisher_status"'
+      field: 'attributes.config.publish_path_mode'
+      expect: 'versioned on every publisher_status line since the rollback (was mutable)'
+      within_seconds: 180
 business_impact:
   - kpi: business.sessions_per_min
     factor: {uniform: [0.20, 0.45]}

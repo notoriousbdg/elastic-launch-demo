@@ -10,14 +10,19 @@ cascade_services:
 - mission-control
 - comms-array
 description: Cross-cloud telemetry relay latency exceeds acceptable bounds
-investigation_notes: 'Root cause: relay buffer saturation at 87% utilization causing queuing delay, compounded by 342 retransmits
-  indicating packet loss on the inter-cloud link. High buffer utilization points to a congestion event — either a telemetry
-  data burst from upstream sensors or a bandwidth reduction on the cross-cloud peering link. Check if the affected route has
-  a degraded BGP path (longer AS path) or if cloud provider maintenance reduced link capacity. 42ms jitter on the nominal
-  routes confirms the issue is isolated to the affected hop. Remediation: failover to backup route (RLY_ROUTE_FAILOVER {source}->{dest}
-  BACKUP), flush relay buffers (RLY_BUFFER_FLUSH), and enable QoS priority tagging for telemetry frames (RLY_QOS TELEMETRY
-  HIGH). Monitor latency convergence below 200ms threshold.'
+investigation_notes: 'Root cause: a BGP path change on the {source_cloud}->{dest_cloud} hop (link AWS-GCP-01). Telemetry Relay
+  logged the AS path moving from 64512-64514-64515 to 64512-64513-64515 shortly before the latency alarms; transit AS 64513 is
+  congested. Relay buffer saturation at 87% utilization causes queuing delay, compounded by 342 retransmits indicating packet
+  loss on the new path. 42ms jitter on the affected route vs 5-8ms on the nominal routes confirms the issue is isolated to the
+  affected hop; gcp->azure and aws->azure stay nominal. The link_status log shows path, as_path and latency. Remediation: move
+  the hop to the backup route (opsctl patch route/aws-gcp --path=backup). Recovery: latency (metrics.relay.latency_ms) falls
+  below the {threshold_ms_relay}ms threshold and settles at about 70-110ms within about a minute as the buffers drain;
+  link_status shows path=backup and the RLY-LATENCY-CRITICAL errors stop. Afterwards raise the AS 64513 congestion with the
+  peering provider and enable QoS priority tagging for telemetry frames (RLY_QOS TELEMETRY HIGH) before returning to the
+  primary path.'
 remediation_action: reset_relay_link
+remediation_command: |-
+  opsctl patch route/aws-gcp --path=backup
 error_message: '[RLY] RLY-LATENCY-CRITICAL: hop={source_cloud}->{dest_cloud} latency={latency_ms}ms threshold={threshold_ms_relay}ms'
 stack_trace: |-
   == RELAY DIAGNOSTIC REPORT == CROSS-CLOUD ROUTER ==
@@ -35,17 +40,18 @@ correlation_attr:
   key: network.bgp_as_path
   value: 64512-64513-64515
 fault_params:
-  source_cloud: {choice: [aws, gcp, azure]}
-  dest_cloud: {choice: [aws, gcp, azure]}
+  source_cloud: aws
+  dest_cloud: gcp
   latency_ms: {randint: [500, 3000]}
   threshold_ms_relay: 200
 rca_clues:
   telemetry-relay:
     relay.buffer_utilization_pct: {uniform: [75.0, 95.0], round: 1}
     relay.retransmit_count: {randint: [200, 600]}
+    relay.bgp_transit_as: '64513'
   sensor-validator:
     validation.relay_health: degraded
-    validation.affected_route: {choice: [aws->gcp, gcp->azure, aws->azure]}
+    validation.affected_route: aws->gcp
   mission-control:
     upstream.degraded_subsystem: relay
     telemetry.data_freshness: stale
@@ -60,3 +66,55 @@ business_impact:
     factor: {uniform: [0.60, 0.82]}
   - kpi: business.contact_window_utilization_pct
     factor: {uniform: [0.60, 0.80]}
+cascade_messages:
+  mission-control:
+  - severity: WARN
+    message: '[MCC] telemetry freshness STALE: relay hop {source_cloud}->{dest_cloud} latency {latency_ms}ms exceeds {threshold_ms_relay}ms'
+  comms-array:
+  - severity: WARN
+    message: '[COMMS] downlink frames queued for relay: hop {source_cloud}->{dest_cloud} at {latency_ms}ms, forward buffer
+      filling'
+fault_scope:
+  workloads: [telemetry-relay, sensor-validator]
+infrastructure_events:
+- service: telemetry-relay
+  severity: WARN
+  offset_seconds: -90
+  body: '[RLY] BGP best path changed hop=aws->gcp link=AWS-GCP-01 as_path=64512-64514-64515 -> 64512-64513-64515 next_hop_as=64513'
+  attributes:
+    operation: link_status
+    relay.route_id: AWS-GCP-01
+    network.bgp_as_path: 64512-64513-64515
+remediation_effects:
+  log_events:
+  - service: mission-control
+    severity: INFO
+    offset_seconds: 1
+    body: '[MCC] CMD ACCEPTED opsctl patch route/aws-gcp --path=backup from {actor}: hop aws->gcp primary (AS 64513) -> backup
+      (AS 64516)'
+  - service: telemetry-relay
+    severity: INFO
+    offset_seconds: 45
+    body: '[RLY] hop aws->gcp on backup path as_path=64512-64516-64515 latency=92ms buffer_util=31% status=NOMINAL'
+    attributes:
+      operation: link_status
+      relay.route_path: backup
+      network.bgp_as_path: 64512-64516-64515
+  verification:
+  - signal: relay.latency_ms
+    from: metrics-generic.otel-default
+    where: resource.attributes.service.name == "telemetry-relay"
+    field: metrics.relay.latency_ms
+    expect: 'below 200 ms (backup path ~70-110 ms); was 500-3000 ms'
+    within_seconds: 120
+  - signal: RLY-LATENCY-CRITICAL errors
+    from: logs.otel.nova7
+    where: body.text LIKE "*RLY-LATENCY-CRITICAL*"
+    expect: '0 new lines'
+    within_seconds: 120
+  - signal: aws->gcp route path
+    from: logs.otel.nova7
+    where: resource.attributes.service.name == "telemetry-relay"
+    field: attributes.relay.route_path
+    expect: 'backup on the latest link_status lines'
+    within_seconds: 120

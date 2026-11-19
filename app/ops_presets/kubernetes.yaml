@@ -1,0 +1,164 @@
+# Kubernetes API conventions for opsctl: kind short names, kubectl-style output and
+# kube-apiserver audit records. Scenario-neutral: any scenario running on Kubernetes
+# can extend it.
+banner: "opsctl applies changes to the platform (cluster and cloud account). Every applied change is written to the audit log with a change id."
+namespaces: true
+
+flags:
+  switches: [all, not-ready, ignore-daemonsets, delete-emptydir-data, force, wait, all-namespaces, a]
+
+vars:
+  group: "kind_info.get('group', '')"
+  ref: "(kind_info.get('display') or kind) + (('.' + group) if group else '') + (('/' + name) if name else '')"
+  plural: "kind_info.get('plural') or (kind + 's')"
+  ns_text: "(' in namespace ' + namespace) if namespace else ''"
+  where: "(' (namespace ' + namespace + ')') if namespace else ''"
+  run_suffix: "change_id.split('-')[-1][:5] if change_id else '00000'"
+
+verbs:
+  rollback:
+    summary: "Roll a resource back to an earlier revision (--to-revision N|previous)"
+    example: "opsctl rollback configmap/<name> -n <namespace> --to-revision <N|previous>"
+    audit_verb: update
+    plan: ["~ {ref}{where}: restore data from revision {=flag('to-revision') or 'previous'}"]
+  restore:
+    summary: "Restore a versioned resource to a known-good version (--version)"
+    example: "opsctl restore iam-policy/<name> --version <vN>"
+    audit_verb: update
+    plan: ["~ {ref}: set default version -> {=flag('version') or 'last known-good'}"]
+  renew:
+    summary: "Trigger certificate renewal (--all, --not-ready to limit the selection)"
+    example: "opsctl renew certificate[/<name>] -n <namespace> [--all] [--not-ready]"
+    audit_verb: patch
+    describe:
+      - {when: "name", text: "{ref} renewal triggered"}
+      - {text: "renewal triggered for all {=('not-ready certificates' if 'not-ready' in flags else 'certificates')}{ns_text}"}
+    plan: ["~ {ref}{where}: issue renewal request{=(' for every matching certificate' if 'all' in flags else '')}"]
+  rotate:
+    summary: "Rotate a credential or secret and roll out the new value"
+    example: "opsctl rotate registry-credential/<name> -n <namespace>"
+    audit_verb: update
+    plan: ["~ {ref}{where}: generate new credential, stage it, roll dependent workloads"]
+  sync:
+    summary: "Force an immediate refresh of a synced secret or config source"
+    example: "opsctl sync externalsecret/<name> -n <namespace>"
+    audit_verb: patch
+    describe: "{ref} force-sync requested; secret refreshed from provider"
+    plan: ["~ {ref}{where}: annotate force-sync, refresh target secret"]
+  drain:
+    summary: "Cordon a node and evict its pods (--ignore-daemonsets)"
+    example: "opsctl drain node/<name> --ignore-daemonsets"
+    audit_verb: create
+    describe: "{ref} cordoned\n{ref} drained"
+    plan: ["~ {ref}: cordon (spec.unschedulable=true)", "- {ref}: evict pods"]
+  replace:
+    summary: "Cordon, drain and terminate a node; the node group launches a replacement"
+    example: "opsctl replace node/<name>"
+    audit_verb: delete
+    describe: "{ref} cordoned\n{ref} drained\n{ref} terminated; replacement instance requested from node group"
+    plan: ["~ {ref}: cordon and drain", "- {ref}: terminate instance", "+ node group: launch replacement instance"]
+  patch:
+    summary: "Change settings on a resource (e.g. --memory-limit, --instance-types, --cron)"
+    example: "opsctl patch deployment/<name> -n <namespace> --memory-limit 3Gi\n  opsctl patch nodegroup/<name> --instance-types c6i.4xlarge,m6i.4xlarge"
+    audit_verb: patch
+  apply:
+    summary: "Create or update a policy object (e.g. ratelimit --rps)"
+    example: "opsctl apply ratelimit/<name> -n <namespace> --rps 200"
+    audit_verb: patch
+  expand:
+    summary: "Grow a persistent volume claim (--size)"
+    example: "opsctl expand pvc/<name> -n <namespace> --size 2Ti"
+    audit_verb: patch
+    describe: "{ref} resize requested{=(' to ' + flag('size')) if flag('size') else ''}; filesystem expansion pending"
+  run:
+    summary: "Start a one-off job from its template"
+    example: "opsctl run job/<name> -n <namespace>"
+    audit_verb: create
+    describe: "job.batch/{=name or kind}-manual-{run_suffix} created"
+    plan: ["+ job.batch/{=name or kind}-manual-<id>{where}"]
+  delete:
+    summary: "Delete a resource, or every resource matching --selector"
+    example: "opsctl delete <kind>/<name> -n <namespace>\n  opsctl delete <kind> -n <namespace> --selector key=value"
+    audit_verb: delete
+    describe:
+      - {when: "flag('selector')", text: "{plural} matching {flags.selector} deleted{ns_text}"}
+      - {text: "{ref} deleted"}
+    plan:
+      - {when: "flag('selector')", lines: ["- {ref}{where}: every object matching {flags.selector}"]}
+      - {lines: ["- {ref}{where}"]}
+  restart:
+    summary: "Rolling restart of a workload"
+    example: "opsctl restart deployment/<name> -n <namespace>"
+    audit_verb: patch
+    plan: ["~ {ref}{where}: spec.template.metadata.annotations[kubectl.kubernetes.io/restartedAt] -> <now>"]
+
+kinds:
+  configmap: {aliases: [cm, configmaps], plural: configmaps}
+  deployment: {aliases: [deploy, deployments], plural: deployments, group: apps}
+  statefulset: {aliases: [sts, statefulsets], plural: statefulsets, group: apps}
+  daemonset: {aliases: [ds, daemonsets], plural: daemonsets, group: apps}
+  node: {aliases: ["no", nodes], plural: nodes}
+  pod: {aliases: [po, pods], plural: pods}
+  service: {aliases: [svc, services], plural: services}
+  ingress: {aliases: [ing, ingresses], plural: ingresses, group: networking.k8s.io}
+  certificate: {aliases: [cert, certificates], plural: certificates, group: cert-manager.io}
+  pvc: {aliases: [persistentvolumeclaim, persistentvolumeclaims, pvcs], plural: persistentvolumeclaims, display: persistentvolumeclaim}
+  job: {aliases: [jobs], plural: jobs, group: batch}
+  secret: {aliases: [secrets], plural: secrets}
+  externalsecret: {aliases: [externalsecrets, es], plural: externalsecrets, group: external-secrets.io}
+  networkpolicy: {aliases: [netpol, networkpolicies], plural: networkpolicies, group: networking.k8s.io}
+  pdb: {aliases: [poddisruptionbudget, poddisruptionbudgets, pdbs], plural: poddisruptionbudgets, group: policy, display: poddisruptionbudget}
+  hpa: {aliases: [horizontalpodautoscaler, horizontalpodautoscalers, hpas], plural: horizontalpodautoscalers, group: autoscaling, display: horizontalpodautoscaler}
+
+audit:
+  service: [kube-apiserver]
+  default: kube_audit
+  formats:
+    kube_audit:
+      vars:
+        k8s_verb: "'deletecollection' if (verb == 'delete' and not name) else (verb_info.get('audit_verb') or 'patch')"
+        resource: "'pods/eviction' if verb == 'drain' else plural"
+        status: "201 if k8s_verb == 'create' else 200"
+        detail: "describe.replace('\"', \"'\")"
+      body: >-
+        audit: level=Metadata stage=ResponseComplete verb={k8s_verb} resource={resource}{=(' namespace=' + namespace) if namespace else ''}{=(' name=' + name) if name else ''}
+        user={actor}{=(' labelSelector=\"' + flag('selector') + '\"') if flag('selector') else ''} code={status} change="{detail}" change_id={change_id}
+      attributes:
+        k8s.audit.verb: "{k8s_verb}"
+        k8s.audit.resource: "{resource}"
+        k8s.audit.response_code: "{status}"
+        user.name: "{actor}"
+        change.id: "{change_id}"
+        event.action: "{verb}"
+        k8s.audit.object_name: "{name}"
+        k8s.namespace.name: "{namespace}"
+      match:
+        prefix: "audit:"
+        tokens: ["resource={resource}", "namespace={namespace}", "name={name}"]
+
+side_effects:
+  - when: "verb == 'restart'"
+    severity: INFO
+    body: "{ref} restarted (kubectl.kubernetes.io/restartedAt annotation set); rolling update started"
+    attributes:
+      k8s.namespace.name: "{namespace}"
+      change.id: "{change_id}"
+      user.name: "{actor}"
+      event.action: rollout-restart
+      "k8s.{kind}.name": "{name}"
+
+runbook:
+  scope_note: "Other clusters, pools and zones are unaffected and make a useful comparison."
+  recovery_note: "The queries include the node group label, image tag and kubelet version of the fixed objects."
+  audit_label: "kube-apiserver audit log"
+
+guide:
+  kubernetes: |
+    ## Kubernetes telemetry
+    - Filter by `resource.attributes.k8s.cluster.name` first; most scenarios run several clusters.
+    - Object state (desired/available replicas, pod phase, node conditions): `metrics-k8sclusterreceiver.otel-*`, fields under `metrics.k8s.*`.
+    - Usage (CPU, memory, filesystem): `metrics-kubeletstatsreceiver.otel-*`.
+    - Kubernetes events: `logs-k8seventsreceiver.otel-default`, `attributes.k8s.event.reason`.
+    - Field names that contain `/` (node labels) must be backtick-quoted in ES|QL, e.g. ``resource.attributes.`k8s.node.label.eks.amazonaws.com/nodegroup` ``.
+    - A Deployment rollout creates a new ReplicaSet hash; pods of the old hash drain as the new ones become ready.
+    - Audit records of changes are on the `kube-apiserver` service (`body.text LIKE "audit:*"`).

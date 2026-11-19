@@ -1,0 +1,123 @@
+name: Retrieval Latency Regression
+subsystem: retrieval
+vehicle_section: retrieval_pipeline
+error_type: RAG-LATENCY-REGRESSION
+sensor_type: response_latency
+affected_services: [retrieval-service]
+cascade_services: [chat-orchestrator, assistant-web]
+
+description: An Azure AI Search ranker and query configuration change (vector k raised to 200 with exhaustive kNN) pushes retrieval query latency far above baseline and slows every chat turn.
+
+investigation_notes: |
+  Root cause: search config {index_name} was changed to ranker config {ranker_config}, which raises the hybrid query's vector k from {baseline_candidates} to {rerank_candidates} with exhaustive=true (previously HNSW), so every query on search service {search_service} does a brute-force vector scan before fusion. Query p95 is {query_p95_ms} ms against a baseline of {baseline_p95_ms} ms. Capacity is not the cause: replicas stay at {replica_count} and no queries are throttled.
+  Confirm:
+    - retrieval-service logs retrieval.search_health index={index_name} ranker_config=semantic-ranker-v3-rerank200 status=ANOMALY (attributes.search.ranker_config); metric retrieval.search_latency_ms rises from 45-160 ms to 1800-6500 ms
+    - the retrieval-service line "config-service: change applied search-config/{index_name}" (ranker config rerank50 -> rerank200, exhaustive kNN) comes before the first RAG-LATENCY-REGRESSION; rca attributes search.vector_k=200 and search.vector_exhaustive_knn=true
+    - retrieval.semantic_ranker_ms (semantic re-ranking only re-scores the top 50), retrieval.search_units_used_pct and search.throttled_query_count=0 stay at baseline, which rules out the semantic ranker itself and a replica or partition shortage; retrieval.cache_stale_hit_pct and retrieval.hits_returned also stay at baseline
+    - chat-orchestrator time-to-first-token and assistant-web turn time rise only after retrieval latency breaches, so they are downstream
+  Remediation: roll the search config back to its previous revision with opsctl rollback search-config/{index_name} --to-revision previous. The ranker returns to semantic-ranker-v3-rerank50 and query latency converges to its baseline of about {baseline_p95_ms} ms or less over about 60 seconds. Adding replicas or partitions would add cost without removing the exhaustive scan.
+
+remediation_action: revert_search_ranker_config
+remediation_command: |-
+  opsctl rollback search-config/kb-passages-prod --to-revision previous
+
+error_message: |
+  [RETRIEVAL] RAG-LATENCY-REGRESSION: index={index_name} service={search_service} query_p95_ms={query_p95_ms} (baseline {baseline_p95_ms}ms) ranker_config={ranker_config} vector_k={rerank_candidates} exhaustive=true
+
+stack_trace: |
+  SearchLatencyRegressionException: RAG-LATENCY-REGRESSION
+    at AzureAISearchClient.query(index={index_name}, service={search_service})
+    at RetrievalService.retrievePassages(top_k={top_k})
+  Query p95:           {query_p95_ms}ms (baseline: {baseline_p95_ms}ms)
+  Ranker config:       {ranker_config}
+  Vector k:            {rerank_candidates} exhaustive (baseline: {baseline_candidates} HNSW)
+  Replicas:            {replica_count}
+  Search service:      {search_service}
+
+correlation_attr:
+  key: search.ranker_config_version
+  value: semantic-ranker-v3-rerank200-2026-10-20
+
+fault_params:
+  index_name: kb-passages-prod
+  search_service: azureai-search-eus
+  query_p95_ms: {randint: [1800, 6500]}
+  baseline_p95_ms: 240
+  ranker_config: semantic-ranker-v3-rerank200
+  rerank_candidates: 200
+  baseline_candidates: 50
+  top_k: {choice: [8, 10, 12]}
+  replica_count: 3
+
+rca_clues:
+  retrieval-service:
+    search.query_p95_ms: {randint: [1800, 6500]}
+    search.vector_k: 200
+    search.vector_exhaustive_knn: true
+    search.ranker_config_changed: true
+    search.throttled_query_count: 0
+  chat-orchestrator:
+    orchestrator.retrieval_wait_ms: {randint: [1500, 6000]}
+    orchestrator.time_to_first_token_ms: {randint: [2500, 9000]}
+  assistant-web:
+    web.chat_turn_p95_ms: {randint: [4000, 12000]}
+    web.user_abandon_rate_pct: {uniform: [8, 25], round: 1}
+
+cascade_messages:
+  chat-orchestrator:
+    - severity: WARN
+      message: '[CHAT] retrieval call to {search_service} took {query_p95_ms}ms (top_k={top_k}); time to first token delayed'
+  assistant-web:
+    - severity: WARN
+      message: '[WEB] chat turn slow: retrieval stage p95={query_p95_ms}ms exceeds the 1500ms retrieval budget'
+
+service_lag_seconds: {chat-orchestrator: 15, assistant-web: 30}
+fault_scope:
+  workloads: [retrieval-service]
+
+infrastructure_events:
+  - service: retrieval-service
+    severity: INFO
+    offset_seconds: -120
+    body: 'config-service: change applied search-config/kb-passages-prod cmd="release-pipeline apply search-config/kb-passages-prod --ranker=semantic-ranker-v3-rerank200" by=release-pipeline@contoso-demo.onmicrosoft.com : vector k 50 -> 200, exhaustive kNN enabled'
+    attributes:
+      user.name: release-pipeline@contoso-demo.onmicrosoft.com
+      operation: search_config_change
+      config.target: search-config/kb-passages-prod
+      search.ranker_config: semantic-ranker-v3-rerank200
+      change.summary: 'ranker config: semantic-ranker-v3-rerank50 -> semantic-ranker-v3-rerank200'
+
+remediation_effects:
+  log_events:
+    - service: retrieval-service
+      severity: INFO
+      offset_seconds: 1
+      body: 'config-service: change applied search-config/kb-passages-prod cmd="opsctl rollback search-config/kb-passages-prod --to-revision previous" by={actor} : ranker config semantic-ranker-v3-rerank200 -> semantic-ranker-v3-rerank50'
+      attributes:
+        operation: search_config_rollback
+        search.ranker_config: semantic-ranker-v3-rerank50
+        change.summary: 'ranker config: semantic-ranker-v3-rerank200 -> semantic-ranker-v3-rerank50'
+  steady_attributes:
+    retrieval-service:
+      search.ranker_config: semantic-ranker-v3-rerank50
+  verification:
+    - signal: retrieval.search_latency_ms
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "retrieval-service"'
+      field: 'metrics.retrieval.search_latency_ms'
+      expect: 'back under 240 ms (was 1800-6500)'
+      within_seconds: 90
+    - signal: ranker config
+      from: 'logs.otel.azureai'
+      where: 'resource.attributes.service.name == "retrieval-service"'
+      field: 'attributes.search.ranker_config'
+      expect: 'semantic-ranker-v3-rerank50 on every line logged since the fix'
+      within_seconds: 60
+
+business_impact:
+  - kpi: business.latency_p99_ms
+    factor: {uniform: [3.0, 6.0]}
+  - kpi: business.throughput_rpm
+    value: {uniform: [372.0, 428.0], round: 0}
+  - kpi: business.conversations_per_min
+    value: {uniform: [120.9, 139.1], round: 0}

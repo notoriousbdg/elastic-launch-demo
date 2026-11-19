@@ -1,0 +1,37 @@
+name: "GT microsoft_sqlserver_otel: os_wait_duration_high"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-MICROSOFTSQLSERVER-OS-WAIT-DURATION
+sensor_type: impact_key_probe
+affected_services:
+  - gt-microsoftsqlserver-aws-svc-1
+cascade_services:
+  - gt-microsoftsqlserver-aws-svc-2
+description: "Tests impact_key os_wait_duration_high on generator microsoft_sqlserver_otel."
+investigation_notes: |-
+  1. Verify microsoft_sqlserver_otel is active and reporting metrics.
+  2. Check that the os_wait_duration_high metric has reached the trigger value (450.0).
+  3. Confirm generator_impact for microsoft_sqlserver_otel.os_wait_duration_high is set to 450.0.
+  4. Look for correlated changes in service gt-microsoftsqlserver-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_os_wait_duration_high_baseline
+error_message: "GT-PROBE: gen=microsoft_sqlserver_otel key=os_wait_duration_high value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=microsoft_sqlserver_otel
+  impact_key: os_wait_duration_high
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 450.0
+  svc_name: gt-microsoftsqlserver-aws-svc-1
+rca_clues:
+  gt-microsoftsqlserver-aws-svc-1:
+    probe.generator: microsoft_sqlserver_otel
+    probe.impact_key: os_wait_duration_high
+    probe.trigger_value: 450.0
+  gt-microsoftsqlserver-aws-svc-2:
+    probe.upstream_generator: microsoft_sqlserver_otel
+    probe.upstream_key: os_wait_duration_high
+generator_impact:
+  microsoft_sqlserver_otel:
+    os_wait_duration_high: 450.0

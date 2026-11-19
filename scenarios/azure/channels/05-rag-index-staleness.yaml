@@ -1,0 +1,119 @@
+name: RAG Index Staleness
+subsystem: retrieval
+vehicle_section: retrieval_pipeline
+error_type: RAG-INDEX-STALE
+sensor_type: health_check
+affected_services: [retrieval-service]
+cascade_services: [chat-orchestrator]
+description: The Azure AI Search indexer for the knowledge base fails because its data source credential has expired, so the index stops receiving documents and answers cite outdated content.
+investigation_notes: |-
+  Root cause: the credential of AI Search data source {datasource_name} expired, so indexer {indexer_name} fails on every run with "{indexer_error}" and index {index_name} has received no documents for {hours_since_success} hours. Index age is {index_age_hours} hours against a {freshness_slo_hours} hour freshness SLO and {doc_count_gap} source documents are missing. The query path is healthy, so the ranker, the skillset and the result cache are not involved.
+  Confirm:
+    - retrieval-service logs retrieval.index_status index={index_name} indexer={indexer_name} indexer_status=error status=ANOMALY (attributes.search.indexer_status and attributes.search.indexer_error); metric retrieval.index_freshness_minutes grows from 2-18 minutes to 2880-14400 minutes (48-240 hours), far beyond the 360 minute SLO
+    - the retrieval-service line "[RETRIEVAL] indexer {indexer_name} execution failed" comes before the first RAG-INDEX-STALE and names the expired credential of {datasource_name}
+    - rca attributes search.datasource_auth_status=EXPIRED with search.skillset_429_count=0 rule out skillset throttling and quota; retrieval.search_latency_ms, retrieval.hits_returned and retrieval.cache_stale_hit_pct stay in their baseline bands, which rules out a ranker change, an embedding problem and a stale result cache
+    - chat-orchestrator shows outdated citations (orchestrator.outdated_citation_ratio_pct) only as a downstream effect
+  Remediation: rotate the data source credential with opsctl rotate datasource-credential/{datasource_name}, then run the indexer with opsctl run indexer/{indexer_name}; change tracking picks up the missed documents (resetting the indexer or rebuilding the index is only needed if the gap does not close). Index freshness falls back under the {freshness_slo_hours} hour SLO and then to its 2-18 minute baseline over about 150 seconds. Restarting retrieval-service or flushing the result cache does not help: the index itself is old.
+remediation_action: rebuild_search_index
+remediation_command: |-
+  opsctl rotate datasource-credential/kb-docs-datasource
+  opsctl run indexer/kb-docs-indexer
+error_message: '[RETRIEVAL] RAG-INDEX-STALE: index={index_name} indexer={indexer_name} lastResult={indexer_status} errorMessage="{indexer_error}" index_age={index_age_hours}h (freshness SLO {freshness_slo_hours}h) missing_docs={doc_count_gap}'
+stack_trace: |-
+  StaleSearchIndexException: RAG-INDEX-STALE
+    at RetrievalService.searchPassages(index={index_name})
+    at SearchIndexFreshnessCheck.verify(indexer={indexer_name})
+  Index age:         {index_age_hours}h (SLO: {freshness_slo_hours}h)
+  Indexer status:    {indexer_status}
+  Last success:      {hours_since_success}h ago
+  Last error:        {indexer_error}
+  Missing documents: {doc_count_gap}
+correlation_attr:
+  key: search.indexer_definition_version
+  value: kb-docs-indexer-2025-09-r4
+fault_params:
+  index_name: kb-docs-index-prod
+  indexer_name: kb-docs-indexer
+  datasource_name: kb-docs-datasource
+  indexer_status: error
+  indexer_error: "Data source credentials expired"
+  index_age_hours: {randint: [48, 240]}
+  freshness_slo_hours: 6
+  hours_since_success: {randint: [48, 240]}
+  doc_count_gap: {randint: [1200, 28000]}
+rca_clues:
+  retrieval-service:
+    search.indexer_last_success_hours_ago: {randint: [48, 240]}
+    search.index_document_count_gap: {randint: [1200, 28000]}
+    search.indexer_failed_runs: {randint: [10, 80]}
+    search.datasource_auth_status: EXPIRED
+    search.skillset_429_count: 0
+  chat-orchestrator:
+    orchestrator.outdated_citation_ratio_pct: {uniform: [25.0, 60.0], round: 1}
+    orchestrator.grounding_score_drop_pct: {uniform: [10.0, 35.0], round: 1}
+cascade_messages:
+  chat-orchestrator:
+    - severity: WARN
+      message: '[CHAT] grounding passages from {index_name} are {index_age_hours}h old (freshness SLO {freshness_slo_hours}h); answers may cite outdated documents'
+service_lag_seconds: {chat-orchestrator: 30}
+fault_scope:
+  workloads: [retrieval-service]
+infrastructure_events:
+  - service: retrieval-service
+    severity: ERROR
+    offset_seconds: -120
+    body: '[RETRIEVAL] indexer kb-docs-indexer execution failed: status=transientFailure errorMessage="Data source credentials expired" datasource=kb-docs-datasource (storage SAS token expired); index kb-docs-index-prod not updated'
+    attributes:
+      operation: indexer_execution
+      search.indexer: kb-docs-indexer
+      search.indexer_status: error
+      search.indexer_error: Data source credentials expired
+      search.datasource: kb-docs-datasource
+      change.summary: 'data source credential: valid -> expired'
+remediation_effects:
+  log_events:
+    - service: retrieval-service
+      severity: INFO
+      offset_seconds: 1
+      body: 'config-service: change applied datasource-credential/kb-docs-datasource cmd="opsctl rotate datasource-credential/kb-docs-datasource" by={actor} : data source credential rotated, connection validated'
+      attributes:
+        operation: datasource_credential_rotate
+        search.datasource: kb-docs-datasource
+        change.summary: 'data source credential: expired -> rotated'
+    - service: retrieval-service
+      severity: INFO
+      offset_seconds: 5
+      body: 'config-service: change applied indexer/kb-docs-indexer cmd="opsctl run indexer/kb-docs-indexer" by={actor} : run started, change tracking resumes from the last high-water mark'
+      attributes:
+        operation: indexer_run
+        search.indexer: kb-docs-indexer
+        change.summary: 'indexer run started'
+    - service: retrieval-service
+      severity: INFO
+      offset_seconds: 60
+      body: '[RETRIEVAL] indexer kb-docs-indexer execution succeeded: status=success; index kb-docs-index-prod catching up'
+      attributes:
+        operation: indexer_execution
+        search.indexer: kb-docs-indexer
+        search.indexer_status: success
+  steady_attributes:
+    retrieval-service:
+      search.indexer_status: success
+  verification:
+    - signal: retrieval.index_freshness_minutes
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "retrieval-service"'
+      field: 'metrics.retrieval.index_freshness_minutes'
+      expect: 'under 360 minutes (6 hour SLO; was 2880-14400) and back to 2-18 minutes'
+      within_seconds: 180
+    - signal: indexer status
+      from: 'logs.otel.azureai'
+      where: 'resource.attributes.service.name == "retrieval-service"'
+      field: 'attributes.search.indexer_status'
+      expect: 'success on every line logged since the fix; error stops appearing'
+      within_seconds: 60
+business_impact:
+  - kpi: business.conversations_per_min
+    value: {uniform: [120.9, 139.1], round: 0}
+  - kpi: business.resolution_rate_pct
+    value: {uniform: [46.5, 53.5], round: 1}

@@ -1,0 +1,161 @@
+name: Lambda Cold Start Latency
+subsystem: payments
+vehicle_section: payments_pipeline
+error_type: PAY-LAMBDA-COLD-START
+sensor_type: response_latency
+affected_services: [payment-processor]
+cascade_services: [orders-service]
+
+description: >
+  After a scale-up the payment-processor Lambda starts many new execution environments and cold starts add seconds of latency to checkout charges.
+
+investigation_notes: |
+  1. Search body.text LIKE *PAY-LAMBDA-COLD-START* and confirm function={function_name} reports init_duration_ms={init_duration_ms} on cold invocations.
+  2. In CloudWatch Lambda Insights compare InitDuration and Duration (cold starts raise Init Duration in the REPORT line, not the function's own Duration); cold_start_pct={cold_start_pct}% of invocations is far above the baseline of ~2%, while error counts stay flat.
+  3. Check ConcurrentExecutions against ProvisionedConcurrencyUtilization: provisioned={provisioned_concurrency} is exhausted (ProvisionedConcurrencySpilloverInvocations is non-zero while concurrency under the campaign load is about 120), so spillover requests land on fresh on-demand environments.
+  4. Confirm no deployment changed the package: code_size and runtime={runtime} are unchanged, so the cost is the init phase after a traffic ramp, not a regression.
+  5. Check orders-service rca_clues (payment.call_p99_ms): charge calls slow to {call_p99_ms}ms at p99 but still succeed with no timeouts at the {client_timeout_ms}ms client limit.
+  6. Check CloudTrail: PutProvisionedConcurrencyConfig left alias live at provisioned concurrency 10, sized for the pre-campaign traffic level (the alias config was not touched when the campaign was scheduled), and the marketing campaign traffic ramp started shortly before the first cold-start alarm.
+  7. Remediation: `opsctl patch lambda-alias/awsorders-payment-processor:live --provisioned-concurrency 120` sizes the alias for the observed campaign concurrency and is reversible. Provisioned concurrency is not instant: the alias status stays IN_PROGRESS while environments are allocated and initialised (a few minutes for 120), and invocations only stop cold-starting as environments turn READY; init duration converges back to baseline over about 3 to 4 minutes.
+remediation_action: raise_provisioned_concurrency
+remediation_command: |-
+  opsctl patch lambda-alias/awsorders-payment-processor:live --provisioned-concurrency 120
+
+error_message: |
+  PAY-LAMBDA-COLD-START: function={function_name} init_duration_ms={init_duration_ms} cold_start_pct={cold_start_pct} provisioned={provisioned_concurrency}
+
+stack_trace: |
+  === LAMBDA COLD START REPORT ===
+  function={function_name}  runtime={runtime}  region=us-west-2  alias=live
+  --- REPORT LINE ---
+    REPORT RequestId: {request_id}  Duration: {duration_ms} ms  Billed Duration: {duration_ms} ms  Memory Size: 1024 MB  Max Memory Used: 412 MB  Init Duration: {init_duration_ms} ms
+  --- CLOUDWATCH METRICS ---
+    cold_start_pct={cold_start_pct}%  (baseline ~2%)
+    ProvisionedConcurrencyUtilization=100%  provisioned={provisioned_concurrency}
+    Errors=0  Throttles=0
+  --- ASSESSMENT ---
+    cause=provisioned_concurrency_exhausted  client_timeout_ms={client_timeout_ms}
+  ACTION: raise_provisioned_concurrency=true  target={target_provisioned}  alert=PAY-LAMBDA-COLD-START
+
+infrastructure_events:
+- body: '[CloudTrail] PutProvisionedConcurrencyConfig: function=awsorders-payment-processor qualifier=live provisioned_concurrent_executions=10 initiated_by=deploy-pipeline region=us-west-2 event_source=lambda.amazonaws.com; marketing campaign traffic ramp started'
+  severity: INFO
+  event_name: aws.cloudtrail.PutProvisionedConcurrencyConfig
+  offset_seconds: -90
+  service: payment-processor
+  attributes:
+    cloud.provider: aws
+    cloud.service: lambda
+    aws.cloudtrail.event_name: PutProvisionedConcurrencyConfig
+    aws.lambda.function_name: awsorders-payment-processor
+    aws.lambda.provisioned_concurrency: 10
+    infrastructure.source: CloudTrail
+- body: '[CloudWatch] Alarm in ALARM: awsorders-payment-processor InitDuration p95 > 1500ms for 3 datapoints region=us-west-2'
+  severity: WARN
+  event_name: aws.cloudwatch.AlarmStateChange
+  service: payment-processor
+  attributes:
+    cloud.provider: aws
+    cloud.service: lambda
+    aws.cloudwatch.alarm_name: awsorders-payment-processor-init-duration
+    aws.lambda.function_name: awsorders-payment-processor
+    infrastructure.source: CloudWatch
+
+correlation_attr:
+  key: aws.lambda.provisioned_concurrency
+  value: payment-processor-live-pc-10
+
+fault_params:
+  function_name: awsorders-payment-processor
+  runtime: python3.12
+  request_id: {format: "{a:08x}-{b:04x}-4{c:03x}-a{d:03x}-{e:012x}", a: {randint: [0, 4294967295]}, b: {randint: [0, 65535]}, c: {randint: [0, 4095]}, d: {randint: [0, 4095]}, e: {randint: [0, 281474976710655]}}
+  init_duration_ms: {randint: [1100, 2600]}
+  duration_ms: {randint: [180, 650]}
+  cold_start_pct: {randint: [25, 70]}
+  provisioned_concurrency: 10
+  target_provisioned: 120
+  call_p99_ms: {randint: [1400, 3200]}
+  client_timeout_ms: 10000
+
+rca_clues:
+  payment-processor:
+    lambda.init_duration_ms: {randint: [1100, 2600]}
+    lambda.cold_start_pct: {randint: [25, 70]}
+    lambda.provisioned_utilization_pct: 100
+  orders-service:
+    payment.call_p99_ms: {randint: [1400, 3200]}
+    payment.slow_charge_count: {randint: [100, 800]}
+
+business_impact:
+  - kpi: business.latency_p99_ms
+    factor: {uniform: [2.5, 5.0]}
+  - kpi: business.orders_per_min
+    factor: {uniform: [0.85, 0.95]}
+  - kpi: business.availability_pct
+    factor: {uniform: [0.99, 0.998]}
+
+generator_impact:
+  aws_lambda_otel:
+    high_average_duration: 1500.0
+    high_concurrent_executions: 150.0
+# the package streams keep the fault while the scenario's own metrics converge
+generator_hold_seconds: {aws_lambda_otel: 210}
+
+cascade_messages:
+  orders-service:
+    - severity: WARN
+      message: 'charge call to payment-processor slow: call_p99_ms={call_p99_ms} (cold start on {function_name}); charge still succeeded within client timeout {client_timeout_ms}ms'
+
+fault_scope:
+  cluster: awsorders-eks-usw2
+  workloads: [payment-processor]
+
+service_lag_seconds: {orders-service: 45}
+onset_delay_seconds: 20
+ramp_seconds: 60
+
+remediation_effects:
+  transition_seconds: 210
+  log_events:
+    - service: payment-processor
+      severity: INFO
+      offset_seconds: 1
+      body: 'cloudtrail: eventSource=lambda.amazonaws.com eventName=PutProvisionedConcurrencyConfig userIdentity={actor} requestParameters.functionName=awsorders-payment-processor requestParameters.qualifier=live requestParameters.provisionedConcurrentExecutions=120 errorCode=none'
+      attributes:
+        operation: lambda_config_update
+        command.target: lambda-alias/awsorders-payment-processor:live
+        aws.cloudtrail.event_name: PutProvisionedConcurrencyConfig
+    - service: payment-processor
+      severity: INFO
+      offset_seconds: 150
+      body: 'lambda[awsorders-payment-processor]: provisioned concurrency allocated alias=live provisioned_concurrent_executions=120 status=READY'
+      attributes:
+        operation: lambda_config_update
+        aws.lambda.provisioned_concurrency: 120
+  steady_attributes:
+    payment-processor:
+      aws.lambda.provisioned_concurrency: 120
+  verification:
+    - signal: aws.lambda.init_duration_ms
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "payment-processor"'
+      field: 'metrics.aws.lambda.init_duration_ms'
+      expect: 'back in 220-520 ms (was 1100-2600 ms)'
+      within_seconds: 300
+    - signal: Lambda average duration (AWS integration stream)
+      from: 'metrics-aws.lambda.otel-*'
+      where: 'Namespace == "AWS/Lambda" AND MetricName == "Duration" AND stat == "Average"'
+      field: '`metrics.amazonaws.com/AWS/Lambda/Duration`'
+      expect: 'back under 800 ms (was about 1500 ms) once provisioned environments are ready'
+      within_seconds: 300
+    - signal: PAY-LAMBDA-COLD-START lines
+      from: 'logs.otel.awsorders'
+      where: 'body.text LIKE "*PAY-LAMBDA-COLD-START*"'
+      expect: '0 new lines'
+      within_seconds: 300
+    - signal: provisioned concurrency
+      from: 'logs.otel.awsorders'
+      where: 'resource.attributes.service.name == "payment-processor"'
+      field: 'attributes.aws.lambda.provisioned_concurrency'
+      expect: '120 on every line since the fix; 10 stops appearing'
+      within_seconds: 300

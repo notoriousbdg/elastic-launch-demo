@@ -1,0 +1,37 @@
+name: "GT traefik_otel: file_descriptor_pressure"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-TRAEFIK-FILE-DESCRIPTOR-PRESSURE
+sensor_type: impact_key_probe
+affected_services:
+  - gt-traefik-aws-svc-1
+cascade_services:
+  - gt-traefik-aws-svc-2
+description: "Tests impact_key file_descriptor_pressure on generator traefik_otel."
+investigation_notes: |-
+  1. Verify traefik_otel is active and reporting metrics.
+  2. Check that the file_descriptor_pressure metric has reached the trigger value (600.0).
+  3. Confirm generator_impact for traefik_otel.file_descriptor_pressure is set to 600.0.
+  4. Look for correlated changes in service gt-traefik-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_file_descriptor_pressure_baseline
+error_message: "GT-PROBE: gen=traefik_otel key=file_descriptor_pressure value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=traefik_otel
+  impact_key: file_descriptor_pressure
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 600.0
+  svc_name: gt-traefik-aws-svc-1
+rca_clues:
+  gt-traefik-aws-svc-1:
+    probe.generator: traefik_otel
+    probe.impact_key: file_descriptor_pressure
+    probe.trigger_value: 600.0
+  gt-traefik-aws-svc-2:
+    probe.upstream_generator: traefik_otel
+    probe.upstream_key: file_descriptor_pressure
+generator_impact:
+  traefik_otel:
+    file_descriptor_pressure: 600.0

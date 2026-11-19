@@ -6,59 +6,156 @@ sensor_type: replication_lag
 affected_services:
 - inventory-service
 - order-management
+error_services:
+- inventory-service
 cascade_services:
 - fulfillment-orchestrator
 - storefront-gateway
-description: Inventory replication lag causing overselling — orders accepted for out-of-stock items, leading to cancellations
-  and customer complaints
+description: Storefront stock levels go stale and orders oversell because the inventory-sync-consumer group rebalances in a loop after config revision 31 cut max.poll.interval.ms from 300000 to 30000, below the ~45s it takes to apply a batch.
+onset_delay_seconds: 15
 investigation_notes: |-
-  1. Check inventory-service logs for INVENTORY-SYNC-LAG — sync_lag_ms={sync_lag_ms} vs max acceptable {max_lag_ms}ms.
-  2. Check the replication consumer group lag: if consumer_lag={consumer_lag} messages, the inventory event stream is backed up.
-  3. Identify affected SKUs: query `inventory.stockout_rate_pct` metric — SKUs above 5% oversell risk are immediate candidates for a hold.
-  4. Review the sync writer throughput — if write_throughput_eps={write_throughput_eps} events/sec, a sudden spike in order volume exceeds replication capacity.
-  5. As an immediate fix, enable pessimistic locking on high-velocity SKUs to prevent overselling at the cost of slightly higher checkout latency.
-  6. Trigger a full inventory reconciliation: compare order-management committed stock with inventory-service available stock and cancel any excess orders.
+  Root cause: config inventory-sync-consumer was changed to revision 31 (CR-4172), which set max.poll.interval.ms to {max_poll_interval_ms} instead of 300000 (a dropped zero). The consumer applies stock events in batches that take about {batch_apply_ms}ms to write, so every member of the {consumer_group} group exceeds the poll interval in the middle of a batch, librdkafka evicts it ("Application maximum poll interval ({max_poll_interval_ms}ms) exceeded ... leaving group") and the group rebalances in a loop, about 12 times a minute. Each rebalance throws away the uncommitted batch, so the applied rate collapses to about 900 events/s while inbound stock events keep arriving at the normal ~6,000/s. The backlog grows by about 5,000 events/s, inventory.sync_lag_ms climbs from ~800ms without limit, and the storefront and order-management stock checks read stale availability, so orders are accepted for items that are already gone. Adding consumers or partitions is the tempting fix and is wrong: every new member hits the same 30s limit and the extra joins only make the rebalances longer. This is not a volume surge or a slow database: the inbound rate is normal (~6,000 events/s), inventory DB write p95 is ~11ms, the group still has all 12 members on 48 partitions with lag spread evenly (no partition skew), and there are no deserialization errors.
+  Confirm:
+    - inventory-service metrics.inventory.sync_lag_ms rises from about 800ms and keeps growing (about 830ms per second of fault); metrics.inventory.consumer_rebalances_per_min goes from 0 to about 12
+    - inventory-service "sync status" lines show attributes.inventory.max_poll_interval_ms 30000 (300000 before) and config.revision 31, with inventory.inbound_event_rate_eps ~6,000, inventory.sync_apply_rate_eps ~900, inventory.consumer_group_members 12 and inventory.db_write_p95_ms ~11
+    - the inventory-service change line "config inventory-sync-consumer revision 31 applied ... max.poll.interval.ms 300000 -> 30000" comes before the first INVENTORY-SYNC-LAG line, and the error lines quote the librdkafka MAXPOLL message with the 30000ms interval
+    - order-management logs stale stock checks and oversold orders (order_id {order_id}, reason=insufficient_stock); fulfillment-orchestrator cancels allocations for oversold SKUs
+  Remediation: roll the config back with opsctl rollback config/inventory-sync-consumer --to-revision previous. The consumers restart with max.poll.interval.ms 300000; the group needs about 20s to stabilise (rebalances fall to 0 within about 30s), then the members drain the backlog at about 14,000 events/s, a net 8,000 events/s against the inbound stream. inventory.sync_lag_ms falls steadily and is back near 800ms after roughly 60% of the time the fault ran (about 3 minutes after a 5-minute incident). Oversold orders are reconciled by fulfillment once stock is current; no manual resync is needed.
 remediation_action: force_inventory_resync
-error_message: '[InventoryService] INVENTORY-SYNC-LAG: sync_lag={sync_lag_ms}ms (max {max_lag_ms}ms) consumer_lag={consumer_lag}
-  oversell_risk_skus={oversell_risk_skus} write_throughput={write_throughput_eps}eps'
-stack_trace: |-
-  InventorySyncException: INVENTORY-SYNC-LAG
-    at InventoryReplicator.consume(partition={kafka_partition})
-    at InventoryService.reconcile(sku_batch={sku_batch_id})
-  Sync lag:          {sync_lag_ms}ms (max: {max_lag_ms}ms)
-  Consumer lag:      {consumer_lag} messages
-  Oversell risk SKUs:{oversell_risk_skus}
-  Write throughput:  {write_throughput_eps} eps
-  Kafka partition:   {kafka_partition}
+remediation_command: |-
+  opsctl rollback config/inventory-sync-consumer --to-revision previous
+error_message: 'level=error ts={iso_now} caller=sync/consumer.go:211 msg="INVENTORY-SYNC-LAG: consumer evicted from group, batch discarded" group={consumer_group} topic={kafka_topic} member=rdkafka#consumer-{consumer_member} partition={kafka_partition} batch_records={batch_records} batch_apply_ms={batch_apply_ms} rdkafka="%4|{epoch_now}|MAXPOLL|rdkafka#consumer-{consumer_member}| [thrd:main]: Application maximum poll interval ({max_poll_interval_ms}ms) exceeded by {poll_exceeded_ms}ms (adjust max.poll.interval.ms for long-running message processing): leaving group"'
+stack_trace: ''
 correlation_attr:
-  key: inventory.sync_lagging
-  value: true
+  key: inventory.max_poll_interval_ms
+  value: 30000
 fault_params:
-  sync_lag_ms: {randint: [30000, 300000]}
-  max_lag_ms: 5000
-  consumer_lag: {randint: [5000, 100000]}
-  oversell_risk_skus: {randint: [10, 500]}
-  write_throughput_eps: {randint: [500, 3000]}
-  kafka_partition: {randint: [0, 15]}
-  sku_batch_id: {format: "SKU-BATCH-{n}", n: {randint: [1000, 9999]}}
+  consumer_group: inventory-sync-consumer
+  kafka_topic: inventory.stock-events
+  max_poll_interval_ms: 30000
+  poll_exceeded_ms: {randint: [13800, 16400]}
+  batch_apply_ms: {randint: [43800, 46400]}
+  batch_records: {randint: [240000, 280000]}
+  consumer_member: {randint: [1, 12]}
+  kafka_partition: {randint: [0, 47]}
+  order_id: {format: "ORD-{n}", n: {randint: [100000, 999999]}}
 rca_clues:
   inventory-service:
-    inventory.consumer_lag_events: {randint: [5000, 100000]}
-    inventory.sync_lag_ms: {randint: [30000, 300000]}
+    inventory.max_poll_interval_ms: 30000
+    config.revision: 31
+    inventory.consumer_rebalances_per_min: {randint: [10, 14]}
+    inventory.batch_apply_ms: {randint: [43800, 46400]}
+    inventory.sync_apply_rate_eps: {randint: [600, 1300]}
+    inventory.inbound_event_rate_eps: {randint: [5700, 6300]}
+    inventory.consumer_group_members: 12
+    inventory.partition_lag_skew_ratio: {uniform: [0.92, 1.12], round: 2}
+    inventory.deserialization_errors: 0
+    inventory.db_write_p95_ms: {uniform: [9.5, 13.0], round: 1}
   order-management:
-    order.oversell_count: {randint: [5, 100]}
-    order.stock_check_stale_reads: {randint: [100, 2000]}
+    orders.stock_check_stale_reads_per_min: {randint: [400, 2000]}
+    orders.oversold_orders_per_min: {randint: [5, 60]}
   fulfillment-orchestrator:
-    fulfillment.cancelled_due_to_stockout: {randint: [10, 100]}
-    fulfillment.manual_review_queue: {randint: [5, 50]}
+    fulfillment.cancelled_due_to_stockout_per_min: {randint: [5, 50]}
   storefront-gateway:
-    storefront.in_stock_inaccuracy_pct: {uniform: [2, 15], round: 1}
+    storefront.in_stock_inaccuracy_pct: {uniform: [4, 15], round: 1}
+cascade_messages:
+  order-management:
+    - severity: WARN
+      message: 'level=warn ts={iso_now} caller=orders/stock.go:88 msg="stock check served from stale inventory snapshot" order_id={order_id} sku_partition={kafka_partition} source=inventory-service upstream_group={consumer_group}'
+    - severity: ERROR
+      message: 'level=error ts={iso_now} caller=orders/create.go:154 msg="order accepted for oversold sku: reservation rejected at allocation" order_id={order_id} reason=insufficient_stock upstream_group={consumer_group}'
+  fulfillment-orchestrator:
+    - severity: WARN
+      message: '{iso_now} WARN  [allocation-worker-3] c.e.fulfillment.AllocationService - allocation cancelled: on-hand quantity below ordered quantity, order {order_id} moved to manual review (inventory snapshot older than the warehouse count)'
+  storefront-gateway:
+    - severity: WARN
+      message: '{iso_now} WARNING storefront.checkout: availability changed at checkout: item shown in stock on PDP is out of stock at reservation (inventory topic {kafka_topic} behind)'
+fault_scope:
+  cluster: ecommerce-gke-cluster
+  workloads: [inventory-service]
+infrastructure_events:
+  - service: inventory-service
+    severity: INFO
+    offset_seconds: -90
+    body: 'level=info ts={iso_now} caller=config/watcher.go:73 msg="config inventory-sync-consumer revision 31 applied" change=CR-4172 by=inventory-platform keys="max.poll.interval.ms 300000 -> 30000" consumers=12 restart=rolling'
+    attributes:
+      user.name: inventory-platform
+      change.request: CR-4172
+      operation: config_change
+      change.target: config/inventory-sync-consumer
+      config.revision: 31
+      inventory.max_poll_interval_ms: 30000
+      change.summary: 'max.poll.interval.ms: 300000 -> 30000'
+remediation_effects:
+  log_taper_seconds: 20
+  log_events:
+    - service: inventory-service
+      severity: INFO
+      offset_seconds: 1
+      body: '[CHG] CHANGE APPLIED opsctl rollback config/inventory-sync-consumer --to-revision previous by {actor}: config inventory-sync-consumer rolled back from revision 31 to revision 30 (max.poll.interval.ms 30000 -> 300000)'
+      attributes:
+        operation: change_applied
+        change.target: config/inventory-sync-consumer
+    - service: inventory-service
+      severity: INFO
+      offset_seconds: 8
+      body: 'level=info ts={iso_now} caller=config/watcher.go:73 msg="config inventory-sync-consumer revision 30 applied" keys="max.poll.interval.ms 30000 -> 300000" consumers=12 restart=rolling'
+      attributes:
+        operation: config_change
+        config.revision: 30
+        inventory.max_poll_interval_ms: 300000
+    - service: inventory-service
+      severity: INFO
+      offset_seconds: 22
+      body: 'level=info ts={iso_now} caller=sync/consumer.go:96 msg="group stable" group=inventory-sync-consumer members=12 partitions=48 assignor=cooperative-sticky'
+      attributes:
+        operation: consumer_group_stable
+        kafka.consumer_group: inventory-sync-consumer
+        inventory.consumer_group_members: 12
+    - service: inventory-service
+      severity: INFO
+      offset_seconds: 60
+      body: 'level=info ts={iso_now} caller=sync/consumer.go:131 msg="draining backlog" group=inventory-sync-consumer applied_eps=14000 inbound_eps=6000 net_eps=8000'
+      attributes:
+        operation: inventory_sync_status
+        inventory.sync_apply_rate_eps: 14000
+  verification:
+    - signal: inventory.sync_lag_ms
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "inventory-service"'
+      field: 'metrics.inventory.sync_lag_ms'
+      expect: 'stops growing about 20s after the rollback, then falls steadily (net drain ~8,000 events/s) and is back near 800ms (under 1,500ms) after roughly 60% of the time the fault ran'
+      within_seconds: 600
+    - signal: inventory.consumer_rebalances_per_min
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "inventory-service"'
+      field: 'metrics.inventory.consumer_rebalances_per_min'
+      expect: 'falls from about 12 to 0 within about 30s'
+      within_seconds: 90
+    - signal: INVENTORY-SYNC-LAG lines
+      from: 'logs.otel.ecommerce'
+      where: 'body.text LIKE "*INVENTORY-SYNC-LAG*"'
+      expect: 'no new lines once the group is stable (about 20s)'
+      within_seconds: 90
+    - signal: consumer max.poll.interval.ms
+      from: 'logs.otel.ecommerce'
+      where: 'resource.attributes.service.name == "inventory-service"'
+      field: 'attributes.inventory.max_poll_interval_ms'
+      expect: '300000 on the sync status lines (was 30000)'
+      within_seconds: 60
 business_impact:
   - kpi: business.cancel_rate_pct
     factor: {uniform: [2.5, 5.0]}
   - kpi: business.returns_per_min
     factor: {uniform: [2.0, 4.0]}
   - kpi: business.fulfillment_sla_pct
-    factor: {uniform: [0.25, 0.50]}
+    factor: {uniform: [0.25, 0.5]}
   - kpi: business.inventory_turn_rate
-    factor: {uniform: [0.30, 0.55]}
+    value: {uniform: [2.59, 2.99], round: 2}
+
+generator_impact:
+  kafka_otel:
+    high_consumer_lag_per_partition: 40000.0
+    high_consumer_lag_by_topic: 120000.0
+generator_hold_seconds: {kafka_otel: 240}
+service_lag_seconds: {order-management: 20, fulfillment-orchestrator: 30, storefront-gateway: 30}

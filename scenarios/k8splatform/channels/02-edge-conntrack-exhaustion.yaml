@@ -1,0 +1,109 @@
+name: Edge node conntrack table exhaustion
+subsystem: nodes
+vehicle_section: edge-c6i/kernel
+error_type: 'nf_conntrack: table full, dropping packet'
+sensor_type: conntrack
+affected_services:
+  - kubelet
+cascade_services:
+  - ingress-nginx
+description: The six edge-c6i nodes that run ingress-nginx drop new connections because their conntrack table is full.
+  Clients get 504s from the ingress; the other node pools are unaffected.
+investigation_notes: |-
+  Root cause: a GitOps sync set upstream-keepalive-connections: "0" in the ingress-nginx-controller ConfigMap (commit {commit_sha}, message "disable upstream keepalive to debug stale conns"). Every proxied request now opens a new TCP connection from the edge node to a tenant-gateway pod, and each closed connection holds a conntrack entry in TIME_WAIT for 120s. At ~{edge_rps} requests/s per edge node that exceeds nf_conntrack_max ({conntrack_max} on c6i.2xlarge, set by kube-proxy from 32768 per vCPU), so the kernel drops new connections.
+  Confirm:
+    - kernel lines on edge-c6i nodes only: nf_conntrack: nf_conntrack: table full, dropping packet
+    - attributes.nf_conntrack.count equals attributes.nf_conntrack.max on those lines; nodes in other pools stay around 15%
+    - ingress-nginx error log: upstream timed out (110: Connection timed out) while connecting to upstream; upstream connect time ~5s; 504s in the access log
+    - host metrics on an edge node: system.network.connections far above baseline
+    - kube-apiserver audit: configmaps/ingress-nginx-controller updated by argocd-application-controller before the first drop
+    - kubectl -n ingress-nginx get cm ingress-nginx-controller -o jsonpath='{.data.upstream-keepalive-connections}'
+  Remediation: roll the ingress-nginx-controller ConfigMap back to the previous revision (keepalive 320). The controller reloads nginx; conntrack drains as TIME_WAIT entries expire (~2 minutes). Raising nf_conntrack_max would only hide the connection churn.
+  Follow-up: revert commit 9e41c7b in Git, or pause auto-sync for the Argo CD application, before the next sync; otherwise Argo CD re-applies the change and the fault returns.
+remediation_action: rollback_ingress_configmap
+remediation_command: |-
+  opsctl rollback configmap/ingress-nginx-controller -n ingress-nginx --to-revision previous
+error_message: 'kernel: [{uptime_s}.{uptime_us}] nf_conntrack: nf_conntrack: table full, dropping packet'
+stack_trace: ''
+fault_params:
+  uptime_s: {randint: [1801234, 1809999]}
+  uptime_us: {randint: [100000, 999999]}
+  commit_sha: 9e41c7b
+  edge_rps: {randint: [2600, 3100]}
+  conntrack_max: 262144
+  conn_id: {randint: [1000000, 9999999]}
+  client_octet: {randint: [2, 250]}
+rca_clues:
+  kubelet:
+    nf_conntrack.count: 262144
+    nf_conntrack.max: 262144
+    nf_conntrack.insert_failed_per_s: {randint: [180, 420]}
+    k8s.node.pool: edge-c6i
+cascade_messages:
+  ingress-nginx:
+    - severity: ERROR
+      message: '{nginx_time} [error] 41#41: *{conn_id} upstream timed out (110: Connection timed out) while connecting to upstream,
+        client: 203.0.113.{client_octet}, server: api.example-saas.io, request: "GET /v1/invoices HTTP/1.1", upstream: "http://10.42.37.219:8080/v1/invoices",
+        host: "api.example-saas.io"'
+fault_scope:
+  cluster: prod-use1
+  node_pool: edge-c6i
+onset_delay_seconds: 60
+ramp_seconds: 180
+generator_impact:
+  host_metrics:
+    network_connections_multiplier: 30.0
+infrastructure_events:
+  - service: kube-apiserver
+    severity: INFO
+    offset_seconds: -90
+    body: 'audit: level=RequestResponse stage=ResponseComplete verb=update resource=configmaps namespace=ingress-nginx name=ingress-nginx-controller
+      user=system:serviceaccount:argocd:argocd-application-controller code=200 annotations=argocd.argoproj.io/tracking-id=platform-ingress:/ConfigMap:ingress-nginx/ingress-nginx-controller
+      sync.revision=9e41c7b requestObject.data.upstream-keepalive-connections="0" (was "320")'
+    attributes:
+      k8s.audit.verb: update
+      k8s.audit.resource: configmaps
+      k8s.namespace.name: ingress-nginx
+      user.name: system:serviceaccount:argocd:argocd-application-controller
+      vcs.revision: 9e41c7b
+      change.summary: 'upstream-keepalive-connections: "320" -> "0"'
+  - service: ingress-nginx
+    severity: INFO
+    offset_seconds: -70
+    body: 'I{klog_time}       7 controller.go:213] "Backend successfully reloaded"'
+remediation_effects:
+  transition_seconds: 120
+  log_events:
+    - service: ingress-nginx
+      severity: INFO
+      offset_seconds: 8
+      body: '"Backend successfully reloaded" reason="configmap ingress-nginx/ingress-nginx-controller changed" upstream-keepalive-connections=320'
+  steady_attributes:
+    ingress-nginx:
+      nginx.upstream_keepalive_connections: 320
+  verification:
+    - signal: kernel conntrack drops on edge-c6i
+      from: 'logs.otel.platform'
+      where: 'resource.attributes.service.name == "kubelet" AND body.text LIKE "*nf_conntrack: table full*"'
+      expect: '0 new lines'
+      within_seconds: 180
+    - signal: nginx_ingress_controller.upstream_connect_time_ms
+      from: 'metrics-generic.otel-default'
+      field: 'metrics.nginx_ingress_controller.upstream_connect_time_ms'
+      where: 'resource.attributes.service.name == "ingress-nginx"'
+      expect: 'back to ~1-3 ms (was ~5000 ms)'
+      within_seconds: 180
+    - signal: 504s in the ingress-nginx access log
+      from: 'logs.otel.platform'
+      where: 'resource.attributes.service.name == "ingress-nginx" AND attributes.http.response.status_code == 504'
+      expect: '0'
+      within_seconds: 180
+business_impact:
+  - kpi: business.api_availability_pct
+    value: {uniform: [96.5, 97.5], round: 3}
+  - kpi: business.api_p99_latency_ms
+    value: {uniform: [4800.0, 5100.0], round: 0}
+  - kpi: business.api_5xx_rate_pct
+    value: {uniform: [2.8, 3.4], round: 3}
+  - kpi: business.error_budget_burn_rate
+    value: {uniform: [30.0, 40.0], round: 2}

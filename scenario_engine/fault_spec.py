@@ -108,3 +108,25 @@ def resolve_dict(specs: dict[str, Any], rng: _random.Random | None = None) -> di
     if rng is None:
         rng = _random.Random()
     return {k: resolve(v, rng) for k, v in specs.items()}
+
+
+def describe(spec: Any) -> str:
+    """Describe the values *spec* can resolve to, for documentation.
+
+    Docs show the range instead of one random draw, which would not match the
+    values the generators actually emit.
+    """
+    if not isinstance(spec, dict):
+        return str(spec)
+    if "choice" in spec:
+        options = [str(o) for o in spec["choice"]]
+        shown = ", ".join(options[:4]) + (", ..." if len(options) > 4 else "")
+        return f"one of {shown}"
+    if "randint" in spec or "uniform" in spec:
+        lo, hi = spec.get("randint") or spec["uniform"]
+        return f"{lo}–{hi}"
+    if "random" in spec:
+        return "0–1"
+    if "format" in spec:
+        return "a generated value"
+    return str(spec)

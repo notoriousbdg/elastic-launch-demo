@@ -8,7 +8,6 @@ Elastic cluster with different scenario configurations.
 from __future__ import annotations
 
 import logging
-import threading
 from typing import TYPE_CHECKING
 
 from app.chaos.controller import ChaosController
@@ -23,6 +22,13 @@ if TYPE_CHECKING:
 logger = logging.getLogger("nova7.instance")
 
 
+def _profile_actors(ctx) -> dict:
+    """Actors from the scenario's ops profile (ops.yaml `actors`)."""
+    from app import ops_profile
+
+    return dict(ops_profile.profile_for(getattr(ctx, "scenario", None)).get("actors") or {})
+
+
 class ScenarioInstance:
     """One running deployment: scenario + credentials + generators."""
 
@@ -35,6 +41,7 @@ class ScenarioInstance:
         self.otlp = OTLPClient(
             endpoint=ctx.otlp_endpoint or None,
             api_key=ctx.otlp_api_key or None,
+            elastic_url=ctx.elastic_url or None,
         )
 
         # Per-instance chaos controller with this scenario's channel registry.
@@ -52,6 +59,7 @@ class ScenarioInstance:
             chaos_store=chaos_store,
             deployment_id=self.deployment_id,
             on_resolve=_revert_ml_baseline,
+            actors=_profile_actors(ctx),
         )
 
         # ServiceManager — owns service threads + generator threads
@@ -69,7 +77,7 @@ class ScenarioInstance:
                 elastic_api_key=ctx.elastic_api_key,
                 namespace=ctx.namespace,
                 chaos_controller=self.chaos_controller,
-                stop_event=self.service_manager._stop_event,
+                stop_event=self.service_manager.stop_event,
             )
 
         self._running = False
@@ -100,3 +108,162 @@ class ScenarioInstance:
         self.service_manager.stop_all()
         self._running = False
         logger.info("Instance %s stopped", self.scenario_id)
+
+    def reconfigure_otlp(self, endpoint: str, api_key: str) -> None:
+        if endpoint:
+            self.otlp.reconfigure(endpoint, api_key)
+
+    @property
+    def scenario(self):
+        return self.ctx.scenario
+
+    @property
+    def namespace(self) -> str:
+        return self.ctx.namespace
+
+    @property
+    def mission_id(self) -> str:
+        return self.ctx.mission_id
+
+    @property
+    def scenario_name(self) -> str:
+        return self.ctx.scenario.scenario_name
+
+    @property
+    def kibana_url(self) -> str:
+        return self.ctx.kibana_url
+
+    @property
+    def elastic_url(self) -> str:
+        return self.ctx.elastic_url
+
+    @property
+    def elastic_api_key(self) -> str:
+        return self.ctx.elastic_api_key
+
+    def elastic_connection(self):
+        """Credentials a deployer needs: url, kibana, api key, scenario."""
+        return (
+            self.ctx.elastic_url,
+            self.ctx.kibana_url,
+            self.ctx.elastic_api_key,
+            self.ctx.scenario,
+        )
+
+    def trigger_channel(self, channel: int, **kwargs):
+        result = self.chaos_controller.trigger(channel, **kwargs)
+        if isinstance(result, dict) and result.get("status") == "triggered":
+            self._record_notify_context(
+                channel, kwargs.get("user_email", ""), kwargs.get("callback_url", ""),
+            )
+        return result
+
+    def _record_notify_context(self, channel: int, user_email: str, callback_url: str) -> None:
+        """Write who triggered *channel* to ``{ns}-notify-context`` (best effort).
+
+        The notification workflows look the email up there by the alert's fault code
+        (``error_type``), so each channel's investigation goes to whoever triggered it.
+        The document holds no channel number or deployment id: Nightshift can query any
+        index, and it would show the audience the fault was injected.
+        """
+        url = (self.ctx.elastic_url or "").rstrip("/")
+        key = self.ctx.elastic_api_key
+        if not url or not key:
+            return
+        import datetime
+        import threading
+
+        import httpx
+
+        status = self.chaos_controller.get_channel_status(channel)
+        doc = {
+            "@timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "error_type": status.get("error_type", ""),
+            "user_email": user_email or "",
+            "callback_url": callback_url or "",
+        }
+
+        def _post() -> None:
+            try:
+                with httpx.Client(timeout=10.0) as client:
+                    client.post(
+                        f"{url}/{self.namespace}-notify-context/_doc",
+                        headers={"Authorization": f"ApiKey {key}",
+                                 "Content-Type": "application/json"},
+                        json=doc,
+                    )
+            except Exception as exc:
+                logger.debug("notify-context write failed: %s", exc)
+
+        threading.Thread(target=_post, name="notify-context", daemon=True).start()
+
+    def resolve_channel(self, channel: int, **kwargs):
+        return self.chaos_controller.resolve(channel, **kwargs)
+
+    def set_infra_spikes(self, spikes: dict) -> None:
+        self.chaos_controller.set_infra_spikes(spikes)
+
+    def infra_spikes(self) -> dict:
+        return self.chaos_controller.get_infra_spikes()
+
+    def chaos_status(self) -> dict:
+        return self.chaos_controller.get_status()
+
+    def channel_status(self, channel: int) -> dict:
+        return self.chaos_controller.get_channel_status(channel)
+
+    def validate_session(self, session_id: str, user_email: str = "") -> list:
+        return self.chaos_controller.validate_session(session_id, user_email=user_email)
+
+    def runtime_status(self) -> dict:
+        return {
+            "scenario": self.scenario_id,
+            "mission_id": self.mission_id,
+            "mission_name": self.scenario_name,
+            "namespace": self.namespace,
+            "services": self.service_manager.get_all_status(),
+            "generators": self.service_manager.get_generator_status(),
+            "chaos": self.chaos_status(),
+        }
+
+
+def start_deployment(
+    scenario,
+    *,
+    deployment_id: str,
+    registry,
+    store,
+    chaos_store,
+    otlp_endpoint: str = "",
+    otlp_api_key: str = "",
+    elastic_url: str = "",
+    elastic_api_key: str = "",
+    kibana_url: str = "",
+    cloud_api_key: str = "",
+    persist: bool = True,
+) -> ScenarioInstance:
+    """Build, start, register, and optionally persist one deployment."""
+    ctx = ScenarioContext.from_scenario(
+        scenario,
+        otlp_endpoint=otlp_endpoint,
+        otlp_api_key=otlp_api_key,
+        elastic_url=elastic_url,
+        elastic_api_key=elastic_api_key,
+        kibana_url=kibana_url,
+    )
+    instance = ScenarioInstance(ctx, chaos_store=chaos_store)
+    instance.reconfigure_otlp(otlp_endpoint, otlp_api_key)
+    instance.start()
+    registry.register(deployment_id, instance)
+    if persist:
+        store.upsert(
+            deployment_id=deployment_id,
+            scenario_id=scenario.scenario_id,
+            otlp_endpoint=otlp_endpoint,
+            otlp_api_key=otlp_api_key,
+            elastic_url=elastic_url,
+            elastic_api_key=elastic_api_key,
+            kibana_url=kibana_url,
+            cloud_api_key=cloud_api_key,
+        )
+    return instance

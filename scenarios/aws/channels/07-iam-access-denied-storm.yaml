@@ -1,0 +1,148 @@
+name: Iam Access Denied Storm
+subsystem: inventory
+vehicle_section: inventory_pipeline
+error_type: INV-IAM-ACCESS-DENIED
+sensor_type: health_check
+affected_services: [inventory-service]
+cascade_services: [orders-service]
+
+description: >
+  An IAM policy change removes DynamoDB and SQS permissions from the inventory-service task role, producing a storm of AccessDenied errors in CloudTrail and failed stock reservations.
+
+investigation_notes: |
+  1. Search body.text for *INV-IAM-ACCESS-DENIED* and note the denied action ({denied_action}) and principal ({role_name}).
+  2. In CloudTrail (with data events enabled for the table, since UpdateItem is a data event), filter errorCode=AccessDeniedException for the assumed-role session of {role_name} (SQS denials show errorCode=AccessDenied); the error share is {error_pct}% of {denied_calls} calls in the window, against a baseline near zero.
+  3. Look for CreatePolicyVersion with setAsDefault=true on the managed policy attached to {role_name}, just before the first denial (policy version {policy_version}); IAM keeps at most 5 versions per policy, so the previous default is still listed as v{previous_policy_version}.
+  4. Use the IAM policy simulator or Access Analyzer to confirm {denied_action} on {resource_arn} is now implicitly denied.
+  5. Check orders-service: stock reservation calls to inventory-service return 500 and the retry rate climbs.
+  6. Confirm inventory.aws_access_denied_per_min is high while inventory.reservation_success_rate_pct has fallen, and that the policy default version is v7 on the AccessDenied lines.
+  7. Remediation: `opsctl restore iam-policy/awsorders-inventory-task --version v6` sets the default policy version back to v{previous_policy_version} (SetDefaultPolicyVersion; policy changes are eventually consistent and take effect on the next call, no credential refresh needed); AccessDenied stops and reservations recover in about 90 s.
+
+remediation_action: restore_iam_role_policy
+remediation_command: |-
+  opsctl restore iam-policy/awsorders-inventory-task --version v6
+
+error_message: |
+  INV-IAM-ACCESS-DENIED: AccessDeniedException role={role_name} action={denied_action} resource={resource_arn} denied_calls={denied_calls}
+
+stack_trace: |
+  === CLOUDTRAIL ACCESS DENIED REPORT ===
+  principal=assumed-role/{role_name}  account=781386958653  region=us-west-2
+  --- DENIED CALL ---
+    event_source={event_source}  event_name={denied_action}
+    errorCode=AccessDeniedException  resource={resource_arn}
+    message=User: arn:aws:sts::781386958653:assumed-role/{role_name}/9f2c41d07ab84e63b1d5c8a7e0f3126b is not authorized to perform: {denied_action} on resource: {resource_arn} because no identity-based policy allows the {denied_action} action
+  --- POLICY CHANGE ---
+    change_event=CreatePolicyVersion  policy_version={policy_version}
+    previous_version=v{previous_policy_version}  removed_actions=dynamodb:GetItem,dynamodb:UpdateItem,sqs:SendMessage
+  --- IMPACT ---
+    denied_calls={denied_calls}  error_pct={error_pct}
+    stock_reservations_failed={failed_reservations}
+  ACTION: restore_policy_version=v{previous_policy_version}  alert=INV-IAM-ACCESS-DENIED
+
+infrastructure_events:
+  - offset_seconds: -100
+    body: '[CloudTrail] CreatePolicyVersion: policy=awsorders-inventory-task new_version=v7 set_as_default=true removed_actions=dynamodb:GetItem,dynamodb:UpdateItem,sqs:SendMessage region=us-west-2 event_source=iam.amazonaws.com'
+    severity: WARN
+    event_name: aws.cloudtrail.CreatePolicyVersion
+    service: inventory-service
+    attributes:
+      cloud.provider: aws
+      cloud.service: iam
+      aws.cloudtrail.event_name: CreatePolicyVersion
+      aws.iam.role: inventory-service-task-role
+      aws.iam.policy_version: v7
+      infrastructure.source: CloudTrail
+
+correlation_attr:
+  key: infra.iam_policy_version
+  value: inventory-service-task-policy-v7
+
+fault_params:
+  role_name: inventory-service-task-role
+  denied_action: dynamodb:UpdateItem
+  event_source: dynamodb.amazonaws.com
+  resource_arn: arn:aws:dynamodb:us-west-2:781386958653:table/awsorders-inventory
+  policy_version: v7
+  previous_policy_version: 6
+  denied_calls: {randint: [300, 1800]}
+  error_pct: {randint: [55, 70]}
+  failed_reservations: {randint: [80, 600]}
+
+rca_clues:
+  inventory-service:
+    iam.role: inventory-service-task-role
+    iam.policy_version_changed: true
+    iam.denied_action: dynamodb:UpdateItem
+    cloudtrail.access_denied_count: {randint: [300, 1800]}
+  orders-service:
+    upstream.inventory_reserve_failures: {randint: [80, 600]}
+    upstream.inventory_http_status: 500
+
+business_impact:
+  - kpi: business.orders_per_min
+    factor: {uniform: [0.35, 0.60]}
+  - kpi: business.error_rate_pct
+    factor: {uniform: [4.0, 8.0]}
+  - kpi: business.availability_pct
+    factor: {uniform: [0.90, 0.96]}
+
+generator_impact:
+  aws_cloudtrail_otel:
+    error_rate: 0.6
+    records_per_cycle: 60
+
+cascade_messages:
+  orders-service:
+    - severity: ERROR
+      message: '[orders] stock reservation failed: inventory-service POST /api/v1/inventory/reserve returned 500; retrying (attempt 2 of 3)'
+service_lag_seconds:
+  orders-service: 20
+fault_scope:
+  cluster: awsorders-eks-usw2
+  workloads: [inventory-service]
+remediation_effects:
+  transition_seconds: 90
+  log_events:
+    - service: orders-service
+      severity: INFO
+      offset_seconds: 1
+      body: 'cloudtrail: eventSource=iam.amazonaws.com eventName=SetDefaultPolicyVersion userIdentity={actor} requestParameters.policyArn=arn:aws:iam::781386958653:policy/awsorders-inventory-task requestParameters.versionId=v6 errorCode=none'
+      attributes:
+        operation: command
+        command.target: iam-policy/awsorders-inventory-task
+        aws.cloudtrail.event_name: SetDefaultPolicyVersion
+    - service: inventory-service
+      severity: INFO
+      offset_seconds: 30
+      body: 'inventory.reserve role={role_name} policy=awsorders-inventory-task default_version=v6; dynamodb:UpdateItem and sqs:SendMessage permitted again'
+      attributes:
+        operation: policy_restored
+        aws.iam.policy_version: v6
+  steady_attributes:
+    inventory-service:
+      aws.iam.policy_version: v6
+  verification:
+    - signal: inventory.aws_access_denied_per_min
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "inventory-service"'
+      field: 'metrics.inventory.aws_access_denied_per_min'
+      expect: 'back in 0-1 (was 60-320)'
+      within_seconds: 120
+    - signal: inventory.reservation_success_rate_pct
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "inventory-service"'
+      field: 'metrics.inventory.reservation_success_rate_pct'
+      expect: 'back in 98.8-99.95 % (was 38-62 %)'
+      within_seconds: 120
+    - signal: INV-IAM-ACCESS-DENIED lines
+      from: 'logs.otel.awsorders'
+      where: 'body.text LIKE "*INV-IAM-ACCESS-DENIED*"'
+      expect: '0 new lines'
+      within_seconds: 120
+    - signal: IAM policy default version
+      from: 'logs.otel.awsorders'
+      where: 'resource.attributes.service.name == "inventory-service"'
+      field: 'attributes.aws.iam.policy_version'
+      expect: 'v6 on every line since the fix; v7 stops appearing'
+      within_seconds: 120

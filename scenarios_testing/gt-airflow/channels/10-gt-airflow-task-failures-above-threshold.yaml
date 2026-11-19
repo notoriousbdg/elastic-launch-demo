@@ -1,0 +1,37 @@
+name: "GT airflow_otel: task_failures_above_threshold"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-AIRFLOW-TASK-FAILURES-ABOVE-THRESHO
+sensor_type: impact_key_probe
+affected_services:
+  - gt-airflow-aws-svc-1
+cascade_services:
+  - gt-airflow-aws-svc-2
+description: "Tests impact_key task_failures_above_threshold on generator airflow_otel."
+investigation_notes: |-
+  1. Verify airflow_otel is active and reporting metrics.
+  2. Check that the task_failures_above_threshold metric has reached the trigger value (75.0).
+  3. Confirm generator_impact for airflow_otel.task_failures_above_threshold is set to 75.0.
+  4. Look for correlated changes in service gt-airflow-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_task_failures_above_threshold_baseline
+error_message: "GT-PROBE: gen=airflow_otel key=task_failures_above_threshold value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=airflow_otel
+  impact_key: task_failures_above_threshold
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 75.0
+  svc_name: gt-airflow-aws-svc-1
+rca_clues:
+  gt-airflow-aws-svc-1:
+    probe.generator: airflow_otel
+    probe.impact_key: task_failures_above_threshold
+    probe.trigger_value: 75.0
+  gt-airflow-aws-svc-2:
+    probe.upstream_generator: airflow_otel
+    probe.upstream_key: task_failures_above_threshold
+generator_impact:
+  airflow_otel:
+    task_failures_above_threshold: 75.0

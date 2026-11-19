@@ -34,10 +34,14 @@ constants:
   - market_data_stream
   - download_statement
 state:
-  _active_sessions:
-    init: 350
-  _last_session_report:
-    init: now
+  _last_status_report:
+    init: 0
+  # valuation lag (ch14) and confirmation backlog (ch15) when the fix landed, so the drain
+  # starts from the level the fault reached
+  _c14_lag_peak:
+    init: 0
+  _c15_lag_peak:
+    init: 0
 steps:
 - sample:
     action:
@@ -94,59 +98,216 @@ steps:
         var: total_value
       portfolio.pnl_pct:
         var: pnl_pct
+# Upstream faults the portal only feels: ramp in after the channel's lag, fade out after its fix.
+- sample:
+    w03:
+      expr: "min(1.0, max(0.0, elapsed.get(3, 0) - lag.get(3, 0)) / 60.0) if 3 in all_active else (max(0.0, 1.0 - since_fix.get(3, 0) / 90.0) if 3 in fixed_channels else 0.0)"
+    w05:
+      expr: "min(1.0, max(0.0, elapsed.get(5, 0) - lag.get(5, 0)) / 60.0) if 5 in all_active else (max(0.0, 1.0 - since_fix.get(5, 0) / 120.0) if 5 in fixed_channels else 0.0)"
+    w10:
+      expr: "min(1.0, max(0.0, elapsed.get(10, 0) - lag.get(10, 0)) / 60.0) if 10 in all_active else (max(0.0, 1.0 - since_fix.get(10, 0) / 90.0) if 10 in fixed_channels else 0.0)"
+    w12:
+      expr: "min(1.0, max(0.0, elapsed.get(12, 0) - lag.get(12, 0)) / 60.0) if 12 in all_active else (max(0.0, 1.0 - since_fix.get(12, 0) / 90.0) if 12 in fixed_channels else 0.0)"
+    w18:
+      expr: "min(1.0, max(0.0, elapsed.get(18, 0) - lag.get(18, 0)) / 30.0) if 18 in all_active else (max(0.0, 1.0 - since_fix.get(18, 0) / 45.0) if 18 in fixed_channels else 0.0)"
+# Ch 13: Redis portal-sessions runs at maxmemory by design (the TTL'd quote/portfolio cache fills
+# it). Under allkeys-lru, sessions (no Redis TTL) become eviction candidates after a short idle.
+# CONFIG SET volatile-lru stops it at once; evicted users log back in over a few minutes.
+- sample:
+    c13_t:
+      expr: "max(0.0, elapsed.get(13, 0) - lag.get(13, 0))"
+    evict_fault:
+      expr: "min(300.0, max(60.0, rand.gauss(180.0, 45.0)))"
+    session_evictions:
+      expr: "round(evict_fault * min(1.0, c13_t / 60.0)) if 13 in all_active else (round(evict_fault * max(0.0, 1.0 - since_fix.get(13, 0) / 20.0)) if 13 in fixed_channels else 0)"
+    sess_deficit:
+      expr: "0.34 * min(1.0, c13_t / 90.0) if 13 in all_active else (0.34 * max(0.0, 1.0 - since_fix.get(13, 0) / 150.0) if 13 in fixed_channels else 0.0)"
+    active_sessions:
+      expr: "max(100, round(350.0 * (1.0 - sess_deficit) + rand.gauss(0, 8.0)))"
+    expired_idle:
+      randint:
+      - 0
+      - 5
+    redis_policy:
+      expr: "'allkeys-lru' if 13 in all_active else 'volatile-lru'"
+    session_status:
+      expr: "'ANOMALY' if session_evictions > 0 else 'NOMINAL'"
+# Ch 14: fx.rates.cache_ttl_s=0 sends every position conversion to the FX provider, which
+# answers HTTP 429; the valuation queue backs up (~0.45 s of lag per second, capped by the
+# stale-valuation cutoff). With the cache back, conversions are served locally and the queue
+# drains in about 75 s.
+- sample:
+    c14_t:
+      expr: "max(0.0, elapsed.get(14, 0) - lag.get(14, 0))"
+    val_core:
+      expr: "min(270.0, 0.45 * c14_t) if 14 in all_active else ((_c14_lag_peak if _c14_lag_peak > 0 else 270.0) * max(0.0, 1.0 - since_fix.get(14, 0) / 75.0) if 14 in fixed_channels else 0.0)"
+- counter:
+    state_key: _c14_lag_peak
+    by:
+      expr: "(val_core - _c14_lag_peak) if 14 in all_active else (0.0 if 14 in fixed_channels else -_c14_lag_peak)"
+- sample:
+    valuation_lag_s:
+      expr: "round(min(300.0, max(1.0, min(5.0, rand.gauss(2.8, 0.7))) + val_core * (1.0 + rand.gauss(0, 0.03))), 1)"
+    fx_w:
+      expr: "min(1.0, c14_t / 20.0) if 14 in all_active else (max(0.0, 1.0 - since_fix.get(14, 0) / 10.0) if 14 in fixed_channels else 0.0)"
+    fx_conversion_ms:
+      expr: "round(max(5.0, min(20.0, rand.gauss(11.0, 3.0))) * (1.0 - fx_w) + min(10000.0, max(3000.0, rand.gauss(6500.0, 1500.0))) * fx_w)"
+    fx_429_w:
+      expr: "min(1.0, c14_t / 30.0) if 14 in all_active else (max(0.0, 1.0 - since_fix.get(14, 0) / 30.0) if 14 in fixed_channels else 0.0)"
+    fx_429_per_min:
+      expr: "round(min(900.0, max(250.0, rand.gauss(520.0, 120.0))) * fx_429_w)"
+    fx_cache_ttl_s:
+      expr: "0 if 14 in all_active else 60"
+    val_status:
+      expr: "'ANOMALY' if valuation_lag_s > 15.0 else 'NOMINAL'"
+# Ch 15: trade-confirmations has 12 partitions and ~220 msg/s at peak. Two dispatcher pods
+# consume ~75 msg/s each (150/s), so the group lag grows by ~70 msg/s. After the scale-up the
+# four new pods join in ~30 s and six consumers (450/s) drain the backlog at a net 230/s.
+- sample:
+    c15_t:
+      expr: "max(0.0, elapsed.get(15, 0) - lag.get(15, 0))"
+    conf_core:
+      expr: "(200.0 + 70.0 * c15_t) if 15 in all_active else (max(0.0, (_c15_lag_peak if _c15_lag_peak > 0 else 42200.0) + 70.0 * min(30.0, since_fix.get(15, 0)) - 230.0 * max(0.0, since_fix.get(15, 0) - 30.0)) if 15 in fixed_channels else 0.0)"
+- counter:
+    state_key: _c15_lag_peak
+    by:
+      expr: "(conf_core - _c15_lag_peak) if 15 in all_active else (0.0 if 15 in fixed_channels else -_c15_lag_peak)"
+- sample:
+    conf_inflow:
+      expr: "max(150.0, rand.gauss(220.0, 8.0))"
+    conf_lag:
+      expr: "round(max(rand.uniform(20.0, 200.0), conf_core * (1.0 + rand.gauss(0, 0.01))))"
+    conf_consumers:
+      expr: "2 if (15 in all_active or (15 in fixed_channels and since_fix.get(15, 0) < 30)) else 6"
+    conf_replicas:
+      expr: "2 if 15 in all_active else 6"
+    conf_consumed_per_s:
+      expr: "round(conf_consumers * 75.0 * (1.0 + rand.gauss(0, 0.02)), 1) if conf_lag > 500 else round(conf_inflow, 1)"
+    conf_delay_s:
+      expr: "round(conf_lag / max(1.0, conf_consumed_per_s), 1)"
+    conf_status:
+      expr: "'ANOMALY' if conf_lag > 500 else 'NOMINAL'"
 - every:
     seconds: 10
-    state_key: _last_session_report
+    state_key: _last_status_report
     steps:
-    - sample:
-        expired:
-          randint:
-          - 0
-          - 5
     - log:
         level: INFO
-        message: '[PORTAL] session_summary active={_active_sessions} expired={expired} status=NOMINAL'
+        message: '[PORTAL] session_summary active={active_sessions} expired_idle={expired_idle} evicted_per_min={session_evictions}
+          idle_timeout_s=900 store=redis://portal-sessions maxmemory_policy={redis_policy} status={session_status}'
         attrs:
           operation: session_summary
           session.active:
-            var: _active_sessions
+            var: active_sessions
           session.expired:
-            var: expired
-          session.status: NOMINAL
-- sample:
-    session_delta:
-      randint:
-      - -5
-      - 5
-- sample:
-    _active_sessions:
-      expr: max(100, _active_sessions + session_delta)
+            var: expired_idle
+          session.evicted_per_min:
+            var: session_evictions
+          redis.maxmemory_policy:
+            var: redis_policy
+          session.status:
+            var: session_status
+    - log:
+        level: INFO
+        message: '[PORTAL] valuation_status lag_s={valuation_lag_s} max_lag_s=15 fx_conversion_ms={fx_conversion_ms} fx_provider_429_per_min={fx_429_per_min}
+          fx_cache_ttl_s={fx_cache_ttl_s} status={val_status}'
+        attrs:
+          operation: valuation_status
+          valuation.lag_s:
+            var: valuation_lag_s
+          valuation.fx_conversion_ms:
+            var: fx_conversion_ms
+          valuation.fx_cache_ttl_s:
+            var: fx_cache_ttl_s
+          valuation.status:
+            var: val_status
+    - log:
+        level: INFO
+        message: '[PORTAL] confirmation_status topic=trade-confirmations partitions=12 consumers={conf_consumers} lag={conf_lag}
+          consumed_per_s={conf_consumed_per_s} delay_s={conf_delay_s} sla_s=120 status={conf_status}'
+        attrs:
+          operation: confirmation_status
+          kafka.topic: trade-confirmations
+          kafka.consumer.count:
+            var: conf_consumers
+          deployment.name: customer-portal-confirmations
+          deployment.replicas:
+            var: conf_replicas
+          confirmation.queue_lag:
+            var: conf_lag
+          confirmation.delay_s:
+            var: conf_delay_s
+          confirmation.status:
+            var: conf_status
 - metric:
     name: customer_portal.active_sessions
     value:
-      var: _active_sessions
+      var: active_sessions
     unit: sessions
+- metric:
+    name: customer_portal.session_evictions_per_min
+    value:
+      var: session_evictions
+    unit: '{session}/min'
+- metric:
+    name: customer_portal.valuation_lag_s
+    value:
+      var: valuation_lag_s
+    unit: s
+- metric:
+    name: customer_portal.fx_conversion_ms
+    value:
+      var: fx_conversion_ms
+    unit: ms
+- metric:
+    name: customer_portal.fx_provider_429_per_min
+    value:
+      var: fx_429_per_min
+    unit: '{request}/min'
+- metric:
+    name: customer_portal.confirmation_queue_lag
+    value:
+      var: conf_lag
+    unit: '{message}'
+- metric:
+    name: customer_portal.confirmation_delay_s
+    value:
+      var: conf_delay_s
+    unit: s
+- metric:
+    name: customer_portal.confirmations_consumed_per_s
+    value:
+      var: conf_consumed_per_s
+    unit: '{message}/s'
+# 401s after a session eviction (ch13), order tickets rejected by false fraud holds (ch10) or
+# margin calls (ch05), order tickets timing out on slow AML screening (ch12), market stream
+# resubscribes on feed gaps (ch03). Page load waits on screening (ch12) and valuations (ch14).
+- sample:
+    api_error_rate:
+      expr: "round(min(25.0, max(0.01, min(0.5, rand.gauss(0.2, 0.08))) + 0.8 * w03 + 1.5 * w05 + 2.0 * w10 + 2.5 * w12 + 5.0 * session_evictions / 180.0), 3)"
+    page_load_ms:
+      expr: "round(max(50.0, min(300.0, rand.gauss(160.0, 40.0))) + 900.0 * w12 + 350.0 * val_core / 270.0)"
+    quote_age_ms:
+      expr: "round(max(40.0, min(500.0, rand.gauss(180.0, 60.0))) + 2500.0 * w03 + w18 * (epoch_now % 30.0) * 1000.0)"
+    margin_call_notices:
+      expr: "round(rand.uniform(0.0, 2.0) + w05 * max(40.0, min(150.0, rand.gauss(90.0, 20.0))))"
 - metric:
     name: customer_portal.page_load_ms
     value:
-      randint:
-      - 50
-      - 300
+      var: page_load_ms
     unit: ms
-- sample:
-    api_error_rate:
-      if_active:
-        uniform:
-        - 2.0
-        - 10.0
-        round: 3
-      else:
-        uniform:
-        - 0.01
-        - 0.5
-        round: 3
 - metric:
     name: customer_portal.api_error_rate
     value:
       var: api_error_rate
     unit: '%'
+- metric:
+    name: customer_portal.displayed_quote_age_ms
+    value:
+      var: quote_age_ms
+    unit: ms
+- metric:
+    name: customer_portal.margin_call_notices_per_min
+    value:
+      var: margin_call_notices
+    unit: '{notice}/min'

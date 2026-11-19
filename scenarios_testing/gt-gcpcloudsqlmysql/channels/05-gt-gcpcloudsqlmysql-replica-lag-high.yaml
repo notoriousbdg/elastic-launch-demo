@@ -1,0 +1,37 @@
+name: "GT gcp_cloudsql_mysql_otel: replica_lag_high"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-GCPCLOUDSQLMYSQL-REPLICA-LAG-HIGH
+sensor_type: impact_key_probe
+affected_services:
+  - gt-gcpcloudsqlmysql-aws-svc-1
+cascade_services:
+  - gt-gcpcloudsqlmysql-aws-svc-2
+description: "Tests impact_key replica_lag_high on generator gcp_cloudsql_mysql_otel."
+investigation_notes: |-
+  1. Verify gcp_cloudsql_mysql_otel is active and reporting metrics.
+  2. Check that the replica_lag_high metric has reached the trigger value (300.0).
+  3. Confirm generator_impact for gcp_cloudsql_mysql_otel.replica_lag_high is set to 300.0.
+  4. Look for correlated changes in service gt-gcpcloudsqlmysql-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_replica_lag_high_baseline
+error_message: "GT-PROBE: gen=gcp_cloudsql_mysql_otel key=replica_lag_high value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=gcp_cloudsql_mysql_otel
+  impact_key: replica_lag_high
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 300.0
+  svc_name: gt-gcpcloudsqlmysql-aws-svc-1
+rca_clues:
+  gt-gcpcloudsqlmysql-aws-svc-1:
+    probe.generator: gcp_cloudsql_mysql_otel
+    probe.impact_key: replica_lag_high
+    probe.trigger_value: 300.0
+  gt-gcpcloudsqlmysql-aws-svc-2:
+    probe.upstream_generator: gcp_cloudsql_mysql_otel
+    probe.upstream_key: replica_lag_high
+generator_impact:
+  gcp_cloudsql_mysql_otel:
+    replica_lag_high: 300.0

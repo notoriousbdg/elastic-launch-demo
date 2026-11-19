@@ -1,0 +1,77 @@
+name: Model Store Connection Storm
+subsystem: ml_inference
+vehicle_section: ml_inference_pipeline
+error_type: MODELSTORE-CONN-STORM
+sensor_type: connection_pool
+affected_services:
+- ml-inference
+cascade_services:
+- worker-pool
+description: 'A synthetic MongoDB model registry backing ml-inference is being hit
+  by a connection storm against {mongo_collection}, exhausting the connection pool
+  and slowing model metadata reads.
+
+  '
+investigation_notes: '1. Search for body.text containing *MODELSTORE-CONN-STORM* to
+  find the affected collection.
+
+  2. Check ml-inference ml.inference_latency_ms for the resulting metadata-read slowdown.
+
+  3. Confirm mongodb_otel op_multiplier/connection_multiplier spike for {mongo_collection}.
+
+  4. Check worker-pool worker_pool.queue_depth for cascading backlog from stalled
+  model loads.
+
+  5. Verify latency normalizes once the connection pool is resized or the storm subsides.
+
+  '
+remediation_action: resize_mongo_connection_pool
+error_message: 'MODELSTORE-CONN-STORM: collection={mongo_collection} active_connections={active_connection_count}
+  op_latency_ms={mongo_op_latency_ms}
+
+  '
+stack_trace: "ModelStoreConnectionStormError: collection={mongo_collection}\n  at\
+  \ MlInference.loadModelMetadata()\n  active_connections={active_connection_count}\
+  \ op_latency_ms={mongo_op_latency_ms}\n"
+fault_params:
+  mongo_collection:
+    choice:
+    - model_registry
+    - model_versions
+  active_connection_count:
+    randint:
+    - 400
+    - 3000
+  mongo_op_latency_ms:
+    uniform:
+    - 200.0
+    - 3000.0
+    round: 1
+rca_clues:
+  ml-inference:
+    ml.inference_latency_ms:
+      uniform:
+      - 200.0
+      - 3000.0
+      round: 1
+    ml.model_load_failure_pct:
+      uniform:
+      - 10.0
+      - 50.0
+      round: 1
+  worker-pool:
+    worker_pool.queue_depth:
+      randint:
+      - 200
+      - 2500
+    worker_pool.model_load_wait_flag: true
+generator_impact:
+  mongodb_otel:
+    high_operation_latency:
+      uniform:
+      - 4.0
+      - 9.0
+    connection_exhaustion:
+      uniform:
+      - 2.0
+      - 4.5

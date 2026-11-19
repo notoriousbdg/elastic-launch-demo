@@ -1,56 +1,125 @@
 name: OEE Availability Drop
-subsystem: oee
-vehicle_section: availability_calc
+subsystem: analytics
+vehicle_section: oee_calculation
 error_type: OEE-AVAILABILITY-DROP
-sensor_type: availability_calc
+sensor_type: oee_calculator
 affected_services:
 - oee-analytics
 cascade_services:
 - mes-controller
 - shopfloor-portal
-description: Calculated OEE for a critical line falls below 75%; production guidance at risk
+description: A shift calendar imported with the wrong time zone makes the OEE engine count planned breaks as unplanned downtime; reported availability collapses while the lines run normally
 investigation_notes: |-
-  Root Cause: An OEE availability drop is the *symptom* — the underlying cause is upstream (unplanned downtime, micro-stops, slow cycles). Always correlate the drop window with maintenance events, MES equipment-state transitions, and SCADA tag-quality changes for the same line.
-  Remediation: 1) Pull the equipment-state timeline: `oee-admin timeline --line {line_id} --window 60m`. 2) Cross-reference with MES work-order status: `mes-admin status --line {line_id}`. 3) Check for active maintenance: `cmms-admin active-mwo --line {line_id}`. 4) Recompute OEE with corrected planned-downtime exclusions: `oee-admin recompute --line {line_id} --exclude-planned`. 5) Engage the line lead and shift supervisor before reporting upward — the metric needs human context.
-remediation_action: recompute_oee
-error_message: '[OEE] OEE-AVAILABILITY-DROP: line={line_id} availability={availability_pct}% threshold=75% downtime_min={downtime_minutes}
-  target_oee={target_oee}%'
+  Root cause: shift calendar plant-p002 was re-imported as revision 23 with timezone UTC instead of America/New_York shortly before the first OEE-AVAILABILITY-DROP (CHG-7368, by mes-planning). Every planned break, changeover and shift handover in the calendar is now five hours off, so oee-analytics no longer sees them as planned stops: the real stops on {line_id} (breaks, shift change) are booked as unplanned downtime, and the shifted "planned" windows land while the line is running. Reported availability on all lines falls from 82-96% to 45-74%. The production itself is unchanged: scada-gateway machine states, part counts and cycle times are normal, and there are no new equipment alarms.
+  Confirm:
+    - oee-analytics oee_window lines show calendar_rev=23 tz=UTC (attributes.oee.shift_calendar_rev, attributes.oee.calendar_tz); metric oee.availability_pct drops from 82-96 to 45-74 and oee.unplanned_downtime_min rises while oee.planned_downtime_min drops to about 0
+    - the oee-analytics calendar import line (CHG-7368) comes before the first OEE-AVAILABILITY-DROP
+    - scada.tag_update_rate_per_s and scada.connected_plcs on scada-gateway are normal; mes.units_completed_per_min on mes-controller is normal, so the line output did not change
+  Remediation: roll back the calendar with opsctl rollback shift-calendar/plant-p002 --to-revision previous. oee-analytics recomputes the open OEE windows when the calendar changes, so reported availability returns to its normal range within about a minute. Closed shifts that were already published with the wrong calendar need a manual recompute; that is a follow-up, not part of the fix.
+remediation_action: rollback_shift_calendar
+remediation_command: |-
+  opsctl rollback shift-calendar/plant-p002 --to-revision previous
+error_message: '[OEE] OEE-AVAILABILITY-DROP: line={line_id} availability={availability_pct}% (target>=85%) unplanned_downtime={unplanned_downtime_min}min planned_downtime=0min window=current_shift calendar=plant-p002 rev 23 tz=UTC'
 stack_trace: |-
-  === OEE AVAILABILITY DROP — {line_id} ===
-  Window: 60 minutes | Calculated: {availability_pct}% | Threshold: 75%
+  === OEE AVAILABILITY WINDOW — {line_id} (current shift) ===
+  Calendar: plant-p002 rev 23 (tz UTC) | Plant time zone: America/New_York
   ------------------------------------------------------------------------
-  INTERVAL    | STATE       | DURATION (s)  | NOTES
+  STOP          | MACHINE STATE   | CALENDAR SAYS     | BOOKED AS
   ------------------------------------------------------------------------
-  00:00–02:14 | RUNNING     | 134           | nominal
-  02:14–08:30 | UNPLANNED   | {downtime_minutes}m         | trigger event
-  08:30–18:00 | RUNNING     | 570           | recovered
-  18:00–22:45 | MICROSTOP   | 285           | <2min stops
+  10:00-10:15   | IDLE (break)    | production        | UNPLANNED ({line_id})
+  12:00-12:30   | IDLE (lunch)    | production        | UNPLANNED ({line_id})
+  15:00-15:15   | RUNNING         | planned break     | -- (no stop)
   ------------------------------------------------------------------------
-  OEE-AVAILABILITY-DROP: target {target_oee}%, actual {availability_pct}% — investigation required
+  Availability: {availability_pct}% | Unplanned downtime: {unplanned_downtime_min} min | Planned: 0 min
+  OEE-AVAILABILITY-DROP: availability below target on every line
 correlation_attr:
-  key: deployment.oee_calc_engine
-  value: oee-v5.1.0-rc2
+  key: oee.shift_calendar_rev
+  value: '23'
 fault_params:
-  line_id: {choice: [LINE-01, LINE-02, LINE-03, LINE-04, LINE-05]}
-  availability_pct: {uniform: [45.0, 74.0], round: 1}
-  downtime_minutes: {randint: [8, 45]}
-  target_oee: 85.0
+  line_id: LINE-02
+  availability_pct: {randint: [45, 74]}
+  unplanned_downtime_min: {randint: [35, 90]}
 rca_clues:
   oee-analytics:
-    oee.availability_pct: {uniform: [45.0, 74.0], round: 1}
-    oee.target_pct: 85.0
+    oee.calendar_tz: UTC
+    oee.planned_downtime_min: 0
   mes-controller:
-    mes.unplanned_downtime_min: {randint: [8, 45]}
+    mes.units_completed_per_min: {randint: [38, 46]}
   shopfloor-portal:
-    portal.line_alert_displayed: true
+    portal.oee_tile_status: red
+cascade_messages:
+  mes-controller:
+    - severity: WARN
+      message: '[MES] shift_report LINE-02 availability from oee-analytics {availability_pct}% disagrees with MES run time 93% for the same window'
+  shopfloor-portal:
+    - severity: WARN
+      message: '[PORTAL] plant dashboard OEE tiles red on all lines (availability {availability_pct}%); supervisor alert raised'
+fault_scope:
+  cluster: mfg-gke-cluster
+  workloads: [oee-analytics]
+infrastructure_events:
+  - service: oee-analytics
+    severity: INFO
+    offset_seconds: -120
+    body: '[OEE] calendar import shift-calendar/plant-p002 revision 22 -> 23 source=planning-export.csv timezone=UTC entries=126 (previous revision timezone America/New_York); imported by mes-planning (CHG-7368)'
+    attributes:
+      operation: config_change
+      user.name: mes-planning
+      change.request: CHG-7368
+      oee.shift_calendar_rev: 23
+      oee.calendar_tz: UTC
+      change.summary: 'plant-p002 shift calendar: rev 22 (America/New_York) -> rev 23 (UTC)'
+service_lag_seconds:
+  mes-controller: 20
+  shopfloor-portal: 30
+remediation_effects:
+  log_events:
+    - service: oee-analytics
+      severity: INFO
+      offset_seconds: 1
+      body: '[CHG] CHANGE APPLIED opsctl rollback shift-calendar/plant-p002 --to-revision previous by {actor}: plant-p002 revision 23 -> 22 (timezone America/New_York)'
+      attributes:
+        operation: change_applied
+        change.target: shift-calendar/plant-p002
+    - service: oee-analytics
+      severity: INFO
+      offset_seconds: 30
+      body: '[OEE] recomputed 5 open shift windows with calendar plant-p002 rev 22; LINE-02 availability 91.8%'
+      attributes:
+        operation: oee_recompute
+  steady_attributes:
+    oee-analytics:
+      oee.shift_calendar_rev: 22
+      oee.calendar_tz: America/New_York
+  log_taper_seconds: 20
+  verification:
+    - signal: oee.availability_pct
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "oee-analytics"'
+      field: 'metrics.oee.availability_pct'
+      expect: 'back to 82-96 (was 45-74)'
+      within_seconds: 90
+    - signal: oee.planned_downtime_min
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "oee-analytics"'
+      field: 'metrics.oee.planned_downtime_min'
+      expect: 'back to 25-45 (was about 0)'
+      within_seconds: 90
+    - signal: OEE-AVAILABILITY-DROP lines
+      from: 'logs.otel.mfg'
+      where: 'body.text LIKE "*OEE-AVAILABILITY-DROP*"'
+      expect: '0 new lines'
+      within_seconds: 60
+    - signal: shift calendar revision
+      from: 'logs.otel.mfg'
+      where: 'resource.attributes.service.name == "oee-analytics" AND body.text LIKE "*oee_window*"'
+      field: 'attributes.oee.shift_calendar_rev'
+      expect: '22 on every line logged since the fix; 23 stops appearing'
+      within_seconds: 60
 business_impact:
   - kpi: business.oee_overall_pct
-    factor: {uniform: [0.20, 0.50]}
+    factor: {uniform: [0.50, 0.75]}
   - kpi: business.oee_availability_pct
-    factor: {uniform: [0.15, 0.45]}
-  - kpi: business.throughput_units_per_hour
-    factor: {uniform: [0.25, 0.55]}
+    factor: {uniform: [0.50, 0.78]}
   - kpi: business.unplanned_downtime_min_per_shift
-    factor: {uniform: [3.0, 6.0]}
-  - kpi: business.on_time_delivery_pct
-    factor: {uniform: [0.40, 0.70]}
+    factor: {uniform: [2.5, 3.5]}

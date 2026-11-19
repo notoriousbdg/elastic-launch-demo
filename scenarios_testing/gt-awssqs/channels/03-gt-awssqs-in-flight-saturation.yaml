@@ -1,0 +1,37 @@
+name: "GT aws_sqs_otel: in_flight_saturation"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-AWSSQS-IN-FLIGHT-SATURATION
+sensor_type: impact_key_probe
+affected_services:
+  - gt-awssqs-aws-svc-1
+cascade_services:
+  - gt-awssqs-aws-svc-2
+description: "Tests impact_key in_flight_saturation on generator aws_sqs_otel."
+investigation_notes: |-
+  1. Verify aws_sqs_otel is active and reporting metrics.
+  2. Check that the in_flight_saturation metric has reached the trigger value (750000.0).
+  3. Confirm generator_impact for aws_sqs_otel.in_flight_saturation is set to 750000.0.
+  4. Look for correlated changes in service gt-awssqs-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_in_flight_saturation_baseline
+error_message: "GT-PROBE: gen=aws_sqs_otel key=in_flight_saturation value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=aws_sqs_otel
+  impact_key: in_flight_saturation
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 750000.0
+  svc_name: gt-awssqs-aws-svc-1
+rca_clues:
+  gt-awssqs-aws-svc-1:
+    probe.generator: aws_sqs_otel
+    probe.impact_key: in_flight_saturation
+    probe.trigger_value: 750000.0
+  gt-awssqs-aws-svc-2:
+    probe.upstream_generator: aws_sqs_otel
+    probe.upstream_key: in_flight_saturation
+generator_impact:
+  aws_sqs_otel:
+    in_flight_saturation: 750000.0

@@ -1,0 +1,158 @@
+name: Storefront Burst Credit Exhaustion
+subsystem: storefront
+vehicle_section: storefront_pipeline
+error_type: WEB-EC2-CREDIT-EXHAUSTION
+sensor_type: health_check
+affected_services: [storefront-web]
+cascade_services: [orders-gateway]
+
+description: >
+  Burstable storefront-web EC2 instances run out of CPU credits during a promotion and CPU is throttled, so page and checkout requests slow down and time out.
+
+investigation_notes: |
+  1. Search body.text containing *WEB-EC2-CREDIT-EXHAUSTION* and check CPUCreditBalance for the {instance_type} instances: the balance has fallen to {credit_balance} credits and stays near zero.
+  2. Check CPUUtilization for the same instances: it flat-lines at {cpu_pct}%, the t3.large baseline that standard mode throttles to once credits run out, while request volume stays high from the {promotion_name} promotion (inside the guest, top shows high steal time).
+  3. Compare CPUCreditUsage with the earn rate (t3.large earns 36 credits/hour, a 30% baseline of 2 vCPUs; the balance caps at 576): usage has exceeded the earn rate for the whole promotion. CPUSurplusCreditBalance stays 0 because the instances are in standard credit mode ({credit_specification}); T3 launches as unlimited by default, so someone set standard in the launch template. In standard mode the CPU is capped at baseline rather than allowed to burst.
+  4. Check the launch template behind the Auto Scaling group {asg_name} (CreditSpecification CpuCredits=standard) and CloudTrail for earlier RunInstances and ModifyInstanceCreditSpecification events: the fleet was sized for normal traffic with {instance_count} instances.
+  5. Confirm the cascade in orders-gateway: checkout calls from storefront-web arrive late, with {slow_requests} requests over {slow_threshold_ms}ms and client timeouts in the access log.
+  6. Confirm the campaign start in CloudTrail/EventBridge about two minutes before the balance began to drain, and that storefront.ec2_cpu_credit_balance is near 0 while storefront.page_render_ms is several seconds.
+  7. Remediation: `opsctl patch instance-credit-spec/awsorders-storefront-web --cpu-credits unlimited`; the running instances switch to unlimited within seconds and the throttle is lifted, so CPU and page render time recover in about 120 s. Under unlimited the instances spend earned credits first, so CPUCreditBalance stays near zero while CPUSurplusCreditBalance accrues (surplus credits beyond 24 h of earnings are billed per vCPU-hour); the launch template still needs the same change so replacement instances launch unlimited.
+
+remediation_action: enable_unlimited_cpu_credits
+remediation_command: |-
+  opsctl patch instance-credit-spec/awsorders-storefront-web --cpu-credits unlimited
+
+error_message: |
+  WEB-EC2-CREDIT-EXHAUSTION: asg={asg_name} instance_type={instance_type} cpu_credit_balance={credit_balance} cpu_pct={cpu_pct} mode={credit_specification} promotion={promotion_name}
+
+stack_trace: |
+  === EC2 CPU CREDIT EXHAUSTION REPORT ===
+  asg={asg_name}  instances={instance_count}  instance_type={instance_type}  region=us-east-1
+  --- CLOUDWATCH ---
+    METRIC                BASELINE     CURRENT
+    CPUCreditBalance      healthy      {credit_balance}
+    CPUUtilization        low          {cpu_pct}
+    credit_specification  -            {credit_specification}
+  --- TRIGGER ---
+    promotion={promotion_name}  traffic well above the normal daily peak
+  --- IMPACT ---
+    storefront-web throttled  slow_requests={slow_requests}  threshold_ms={slow_threshold_ms}
+    orders-gateway checkout calls arriving late
+  ACTION: set_credit_specification=unlimited  update_launch_template=unlimited  scale_out_asg={asg_name}  alert=WEB-EC2-CREDIT-EXHAUSTION
+
+infrastructure_events:
+- body: '[EventBridge] Scheduled rule awsorders-autumn-flash-sale-start fired: campaign=autumn-flash-sale started, storefront-web request rate rising region=us-east-1'
+  severity: INFO
+  event_name: aws.events.ScheduledRuleInvoked
+  service: storefront-web
+  offset_seconds: -120
+  attributes:
+    cloud.provider: aws
+    cloud.service: events
+    aws.events.rule_name: awsorders-autumn-flash-sale-start
+    marketing.campaign: autumn-flash-sale
+    infrastructure.source: EventBridge
+- body: '[CloudWatch] Alarm storefront-web-CPUCreditBalance-Low in ALARM: CPUCreditBalance below threshold for asg=storefront-web-asg region=us-east-1'
+  severity: WARN
+  event_name: aws.cloudwatch.AlarmStateChange
+  service: storefront-web
+  attributes:
+    cloud.provider: aws
+    cloud.service: ec2
+    aws.cloudwatch.alarm_name: storefront-web-CPUCreditBalance-Low
+    aws.autoscaling.group: storefront-web-asg
+    infrastructure.source: CloudWatch
+
+correlation_attr:
+  key: infra.ec2_credit_specification
+  value: t3.large-standard
+
+fault_params:
+  asg_name: storefront-web-asg
+  instance_type: t3.large
+  instance_count: {randint: [4, 8]}
+  credit_balance: {randint: [0, 5]}
+  cpu_pct: {randint: [29, 31]}
+  credit_specification: standard
+  promotion_name: autumn-flash-sale
+  slow_requests: {randint: [500, 5000]}
+  slow_threshold_ms: 3000
+
+rca_clues:
+  storefront-web:
+    ec2.cpu_credit_balance: {randint: [0, 5]}
+    ec2.cpu_utilization_pct: {randint: [29, 31]}
+    ec2.credit_specification: standard
+  orders-gateway:
+    gateway.slow_upstream_calls: {randint: [200, 2000]}
+    gateway.client_timeouts_from_storefront: {randint: [50, 600]}
+
+business_impact:
+  - kpi: business.throughput_rpm
+    value: {uniform: [604.5, 695.5], round: 0}
+  - kpi: business.latency_p99_ms
+    factor: {uniform: [3.0, 6.0]}
+
+generator_impact:
+  aws_ec2_otel:
+    low_cpu_credit_balance: 5.0
+    high_cpu_utilization: 30.0
+  aws_elb_metrics_otel:
+    high_application_load_balancer_target_response_time_tail: 8.0
+# the package streams keep the fault while the scenario's own metrics converge
+generator_hold_seconds: {aws_ec2_otel: 120, aws_elb_metrics_otel: 120}
+
+cascade_messages:
+  orders-gateway:
+    - severity: WARN
+      message: '[gateway] upstream storefront-web call POST /api/v1/orders exceeded {slow_threshold_ms}ms; client timeout, returning 504'
+service_lag_seconds:
+  orders-gateway: 30
+fault_scope:
+  cluster: awsorders-eks-use1
+  workloads: [storefront-web]
+remediation_effects:
+  transition_seconds: 120
+  log_events:
+    - service: orders-gateway
+      severity: INFO
+      offset_seconds: 1
+      body: 'cloudtrail: eventSource=ec2.amazonaws.com eventName=ModifyInstanceCreditSpecification userIdentity={actor} requestParameters.autoScalingGroup=awsorders-storefront-web requestParameters.cpuCredits=unlimited errorCode=none'
+      attributes:
+        operation: command
+        command.target: instance-credit-spec/awsorders-storefront-web
+        aws.cloudtrail.event_name: ModifyInstanceCreditSpecification
+    - service: storefront-web
+      severity: INFO
+      offset_seconds: 40
+      body: '[storefront] asg=storefront-web-asg instances in-service cpu_credits=unlimited; CPUSurplusCreditBalance accruing, CPUCreditBalance held near zero, CPUUtilization released from baseline throttle'
+      attributes:
+        operation: credit_specification
+        aws.ec2.cpu_credits: unlimited
+  steady_attributes:
+    storefront-web:
+      aws.ec2.cpu_credits: unlimited
+  verification:
+    - signal: storefront.ec2_cpu_credit_balance
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "storefront-web"'
+      field: 'metrics.storefront.ec2_cpu_credit_balance'
+      expect: 'stays near 0-6 credits (unlimited mode spends earned credits first and bills surplus); judge recovery on page_render_ms'
+      within_seconds: 150
+    - signal: storefront.page_render_ms
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "storefront-web"'
+      field: 'metrics.storefront.page_render_ms'
+      expect: 'back in 35-180 ms (was 900-4200)'
+      within_seconds: 150
+    - signal: WEB-EC2-CREDIT-EXHAUSTION lines
+      from: 'logs.otel.awsorders'
+      where: 'body.text LIKE "*WEB-EC2-CREDIT-EXHAUSTION*"'
+      expect: '0 new lines'
+      within_seconds: 150
+    - signal: EC2 CPU credit specification
+      from: 'logs.otel.awsorders'
+      where: 'resource.attributes.service.name == "storefront-web"'
+      field: 'attributes.aws.ec2.cpu_credits'
+      expect: 'unlimited on every line since the fix; standard before'
+      within_seconds: 150

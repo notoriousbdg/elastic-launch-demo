@@ -1,0 +1,37 @@
+name: "GT etcd_otel: database_size_approaching_quota"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-ETCD-DATABASE-SIZE-APPROACHING-QUOT
+sensor_type: impact_key_probe
+affected_services:
+  - gt-etcd-aws-svc-1
+cascade_services:
+  - gt-etcd-aws-svc-2
+description: "Tests impact_key database_size_approaching_quota on generator etcd_otel."
+investigation_notes: |-
+  1. Verify etcd_otel is active and reporting metrics.
+  2. Check that the database_size_approaching_quota metric has reached the trigger value (85.0).
+  3. Confirm generator_impact for etcd_otel.database_size_approaching_quota is set to 85.0.
+  4. Look for correlated changes in service gt-etcd-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_database_size_approaching_quota_baseline
+error_message: "GT-PROBE: gen=etcd_otel key=database_size_approaching_quota value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=etcd_otel
+  impact_key: database_size_approaching_quota
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 85.0
+  svc_name: gt-etcd-aws-svc-1
+rca_clues:
+  gt-etcd-aws-svc-1:
+    probe.generator: etcd_otel
+    probe.impact_key: database_size_approaching_quota
+    probe.trigger_value: 85.0
+  gt-etcd-aws-svc-2:
+    probe.upstream_generator: etcd_otel
+    probe.upstream_key: database_size_approaching_quota
+generator_impact:
+  etcd_otel:
+    database_size_approaching_quota: 85.0

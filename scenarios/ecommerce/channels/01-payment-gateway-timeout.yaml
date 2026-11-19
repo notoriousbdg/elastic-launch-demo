@@ -6,62 +6,170 @@ sensor_type: gateway_latency
 affected_services:
 - payment-processor
 - order-management
+error_services:
+- payment-processor
 cascade_services:
 - storefront-gateway
 - fulfillment-orchestrator
-description: Payment gateway connections timing out, causing checkout failures and order drop-off
+description: Card authorizations sent to Stripe, the primary payment provider, hit the 10s HttpClient timeout during a Stripe regional API incident, so checkouts fail and orders are held pending payment.
+onset_delay_seconds: 15
 investigation_notes: |-
-  1. Check payment-processor logs for PAYMENT-GATEWAY-TIMEOUT — note which gateway provider ({payment_provider}) is affected.
-  2. Query recent error rate: FROM logs.otel.ecommerce.* | WHERE body.text LIKE "*PAYMENT-GATEWAY-TIMEOUT*" | STATS count() BY service.name.
-  3. Verify TLS handshake health — timeouts above {payment_timeout_ms}ms often indicate certificate validation delays or MTU black holes on the path to the provider.
-  4. Check the payment provider's status page and correlate timing with their reported incidents.
-  5. Review connection pool exhaustion: if pool_size={pool_size} and active={active_connections}, the pool is saturated — scale horizontally or increase pool size.
-  6. As an immediate mitigation, route traffic to the secondary gateway provider while the primary recovers.
+  Root cause: Stripe, the primary PSP, has a regional incident in us-east ("Elevated API latency and timeouts", component API). payment-processor received the Stripe Statuspage webhook (status=investigating) about a minute and a half before the first timeout. About a third of all authorizations now wait the full {payment_timeout_ms}ms HttpClient timeout on POST /v1/payment_intents to {payment_provider} and fail. Our side is healthy, which rules out the usual suspects: the TLS handshake to the provider is 60-90ms, the HTTP connection pool holds about 70 of {pool_size} connections (a slow provider holds a few more open, but the pool is nowhere near full), and the Adyen and Braintree probes answer in about 300-400ms. Restarting payment-processor or raising the timeout does not help: the provider is slow, so a restart only drops in-flight charges and a longer timeout only makes checkout wait longer. The routing policy psp-routing still sends every new authorization to Stripe.
+  Confirm:
+    - metrics.payments.gateway_timeout_pct on payment-processor rises from about 0.2% to about 30% over 45s, and metrics.payments.gateway_p95_ms goes from about 420ms to 10000ms (the HttpClient timeout); metrics.payments.success_rate_pct and metrics.payments.transactions_per_min fall by the same share
+    - "payments.gateway_health" lines (attributes.operation gateway_health) show provider=stripe status=DEGRADED with latency_ms around 9000-10000, while adyen and braintree stay status=HEALTHY at 300-400ms; tls_handshake_ms stays 58-92 and pool_active stays far below 200
+    - the payment-processor line "Statuspage webhook received provider=stripe ... status=investigating" (attributes.operation provider_status) comes before the first PAYMENT-GATEWAY-TIMEOUT line, and every timeout names provider={payment_provider}
+    - attributes.payment.psp_primary on the "payments.health" line is stripe; order-management holds orders in PENDING_PAYMENT, storefront-gateway returns 504 on checkout, fulfillment-orchestrator places orders on payment hold
+  Remediation: move new authorizations to the secondary PSP with opsctl patch routing-policy/psp-routing --primary adyen. The routing policy reloads within seconds; Stripe retries already in flight run out within about 50s, after which gateway_timeout_pct is back under 0.5% and gateway_p95_ms back near 420ms. Charges that timed out are reconciled by idempotency key, so no customer is charged twice. Traffic stays on Adyen until Stripe's status page shows the incident resolved and routing is switched back deliberately; meanwhile the Stripe probe keeps reporting DEGRADED (role=secondary) until Stripe's side recovers.
 remediation_action: restart_payment_gateway
-error_message: '[PaymentProcessor] PAYMENT-GATEWAY-TIMEOUT: provider={payment_provider} order_id={order_id} timeout={payment_timeout_ms}ms
-  pool_size={pool_size} active={active_connections} retry={retry_count}'
+remediation_command: |-
+  opsctl patch routing-policy/psp-routing --primary adyen
+error_message: 'fail: Ecommerce.Payments.Gateway.StripeGatewayClient[1002] PAYMENT-GATEWAY-TIMEOUT provider={payment_provider} request=POST /v1/payment_intents
+  order_id={order_id} idempotency_key={idempotency_key} elapsed_ms={elapsed_ms} timeout_ms={payment_timeout_ms} pool_active={active_connections}/{pool_size}
+  attempt={retry_count}/3'
 stack_trace: |-
-  System.TimeoutException: PAYMENT-GATEWAY-TIMEOUT
-     at PaymentGatewayClient.ChargeAsync(ChargeRequest request)
-     at PaymentProcessor.ProcessOrder(OrderId {order_id})
-     at CheckoutOrchestrator.CompleteCheckout(SessionId {session_id})
-  Provider:      {payment_provider}
-  Timeout (ms):  {payment_timeout_ms}
-  Pool size:     {pool_size}
-  Active conns:  {active_connections}
-  Retry count:   {retry_count}
-  Last success:  {last_success_sec}s ago
+  System.Threading.Tasks.TaskCanceledException: The request was canceled due to the configured HttpClient.Timeout of 10 seconds elapsing.
+   ---> System.TimeoutException: The operation was canceled.
+   ---> System.Threading.Tasks.TaskCanceledException: The operation was canceled.
+   ---> System.IO.IOException: Unable to read data from the transport connection: Operation canceled.
+   ---> System.Net.Sockets.SocketException (125): Operation canceled
+     --- End of inner exception stack trace ---
+     at System.Net.Sockets.Socket.AwaitableSocketAsyncEventArgs.ThrowException(SocketError error, CancellationToken cancellationToken)
+     at System.Net.Security.SslStream.ReadAsyncInternal[TIOAdapter](Memory`1 buffer, CancellationToken cancellationToken)
+     at System.Net.Http.HttpConnection.SendAsync(HttpRequestMessage request, Boolean async, CancellationToken cancellationToken)
+     --- End of inner exception stack trace ---
+     at System.Net.Http.HttpClient.HandleFailure(Exception e, Boolean telemetryStarted, HttpResponseMessage response, CancellationTokenSource cts, CancellationToken cancellationToken, CancellationTokenSource pendingRequestsCts)
+     at System.Net.Http.HttpClient.<SendAsync>g__Core|83_0(HttpRequestMessage request, HttpCompletionOption completionOption, CancellationTokenSource cts, Boolean disposeCts, CancellationTokenSource pendingRequestsCts, CancellationToken originalCancellationToken)
+     at Stripe.SystemNetHttpClient.MakeRequestAsync(StripeRequest request, CancellationToken cancellationToken)
+     at Stripe.StripeClient.RequestAsync[T](HttpMethod method, String path, BaseOptions options, RequestOptions requestOptions, CancellationToken cancellationToken)
+     at Ecommerce.Payments.Gateway.StripeGatewayClient.AuthorizeAsync(AuthorizeRequest request, CancellationToken ct) in /src/Payments/Gateway/StripeGatewayClient.cs:line 118
+     at Ecommerce.Payments.PaymentProcessor.AuthorizeAsync(String orderId, CancellationToken ct) in /src/Payments/PaymentProcessor.cs:line 76
+     at Ecommerce.Payments.Api.AuthorizeEndpoint.HandleAsync(AuthorizeCommand command, CancellationToken ct) in /src/Payments/Api/AuthorizeEndpoint.cs:line 41
 correlation_attr:
-  key: payment.gateway_degraded
-  value: true
+  key: payment.provider_incident_status
+  value: investigating
 fault_params:
-  payment_provider: {choice: [stripe, adyen, braintree]}
+  payment_provider: stripe
+  payment_timeout_ms: 10000
+  pool_size: 200
+  elapsed_ms: {randint: [10001, 10045]}
+  active_connections: {randint: [62, 84]}
+  retry_count: {randint: [1, 3]}
   order_id: {format: "ORD-{n}", n: {randint: [100000, 999999]}}
-  session_id: {format: "SESS-{n}", n: {randint: [100000, 999999]}}
-  payment_timeout_ms: {randint: [3000, 15000]}
-  pool_size: {randint: [50, 200]}
-  active_connections: {randint: [48, 200]}
-  retry_count: {randint: [2, 5]}
-  last_success_sec: {randint: [30, 300]}
+  idempotency_key: {format: "auth-ord-{n}", n: {randint: [100000, 999999]}}
 rca_clues:
   payment-processor:
-    payment.gateway_timeout_ms: {randint: [3000, 15000]}
-    payment.provider_circuit_open: true
+    payment.provider: stripe
+    payment.provider_incident_status: investigating
+    payment.gateway_timeout_ms: 10000
+    payment.tls_handshake_ms: {randint: [58, 92]}
+    payment.pool_active_connections: {randint: [62, 84]}
+    payment.adyen_p95_ms: {randint: [380, 460]}
   order-management:
-    order.checkout_failure_rate_pct: {uniform: [15, 60], round: 1}
-    order.pending_payment_count: {randint: [50, 500]}
+    order.pending_payment_count: {randint: [120, 400]}
+    order.checkout_payment_timeout_pct: {uniform: [26.0, 34.0], round: 1}
   storefront-gateway:
-    storefront.checkout_error_rate_pct: {uniform: [10, 45], round: 1}
-    storefront.error_page_shown: true
+    storefront.checkout_504_rate_pct: {uniform: [24.0, 33.0], round: 1}
+    storefront.upstream: order-management
   fulfillment-orchestrator:
-    fulfillment.pending_payment_orders: {randint: [20, 200]}
-    fulfillment.hold_queue_depth: {randint: [10, 100]}
+    fulfillment.payment_hold_orders: {randint: [80, 260]}
+cascade_messages:
+  order-management:
+    - severity: WARN
+      message: 'time={iso_now} level=WARN msg="payment authorization timed out, order held in PENDING_PAYMENT" component=checkout order_id={order_id} upstream=payment-processor provider={payment_provider} timeout_ms={payment_timeout_ms} attempt={retry_count}/3'
+    - severity: ERROR
+      message: 'time={iso_now} level=ERROR msg="checkout payment step failed" component=checkout order_id={order_id} upstream=payment-processor err="POST /api/v1/payments/authorize: context deadline exceeded"'
+  storefront-gateway:
+    - severity: WARN
+      message: '{iso_now} WARNING [storefront.checkout] POST /api/v1/checkout/complete status=504 upstream=order-management duration_ms={elapsed_ms} order_id={order_id} reason=payment_authorization_timeout'
+  fulfillment-orchestrator:
+    - severity: INFO
+      message: '{iso_now} INFO  [hold-scheduler-3] c.e.fulfillment.hold.PaymentHoldService - Order {order_id} placed on payment hold: status PENDING_PAYMENT, waiting for payment-confirm before release to warehouse'
+fault_scope:
+  cluster: ecommerce-aks-cluster
+  workloads: [payment-processor]
+infrastructure_events:
+  - service: payment-processor
+    severity: WARN
+    offset_seconds: -90
+    body: 'warn: Ecommerce.Payments.Gateway.ProviderStatusWebhook[230] Statuspage webhook received provider=stripe incident="Elevated API latency and timeouts" status=investigating impact=major component=API region=us-east'
+    attributes:
+      operation: provider_status
+      payment.provider: stripe
+      payment.provider_incident_status: investigating
+      payment.provider_incident: Elevated API latency and timeouts
+      payment.provider_component: API
+      payment.psp_primary: stripe
+      user.name: stripe-statuspage
+remediation_effects:
+  log_taper_seconds: 50
+  log_events:
+    - service: payment-processor
+      severity: INFO
+      offset_seconds: 1
+      body: '[CHG] CHANGE APPLIED opsctl patch routing-policy/psp-routing --primary adyen by {actor}: primary PSP stripe -> adyen, braintree stays fallback'
+      attributes:
+        operation: change_applied
+        change.target: routing-policy/psp-routing
+        payment.psp_primary: adyen
+    - service: payment-processor
+      severity: INFO
+      offset_seconds: 5
+      body: 'info: Ecommerce.Payments.Routing.PspRouter[240] routing policy psp-routing reloaded primary=adyen secondary=braintree,stripe; new authorizations route to adyen'
+      attributes:
+        operation: routing_policy_reload
+        payment.psp_primary: adyen
+    - service: payment-processor
+      severity: INFO
+      offset_seconds: 45
+      body: 'info: Ecommerce.Payments.Gateway.StripeGatewayClient[1010] in-flight stripe authorizations drained outstanding=0; adyen authorizations p95_ms=431'
+      attributes:
+        operation: gateway_drain
+        payment.provider: stripe
+    - service: order-management
+      severity: INFO
+      offset_seconds: 50
+      body: 'time={iso_now} level=INFO msg="payment confirmations resumed, released orders held in PENDING_PAYMENT" component=checkout released=187 provider=adyen'
+      attributes:
+        operation: pending_payment_release
+    - service: payment-processor
+      severity: INFO
+      offset_seconds: 75
+      body: 'info: Ecommerce.Payments.Reconciliation.PaymentReconciler[510] reconciled timed-out stripe PaymentIntents by idempotency key: 214 succeeded at stripe (kept), 389 never created (re-authorized via adyen), 0 duplicate charges'
+      attributes:
+        operation: payment_reconcile
+  verification:
+    - signal: payments.gateway_timeout_pct
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "payment-processor"'
+      field: 'metrics.payments.gateway_timeout_pct'
+      expect: 'back under 0.5% within about 60s of the routing change (was about 30%)'
+      within_seconds: 150
+    - signal: payments.gateway_p95_ms
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "payment-processor"'
+      field: 'metrics.payments.gateway_p95_ms'
+      expect: 'back near 420ms (was 10000ms, the HttpClient timeout)'
+      within_seconds: 150
+    - signal: PAYMENT-GATEWAY-TIMEOUT lines
+      from: 'logs.otel.ecommerce'
+      where: 'body.text LIKE "*PAYMENT-GATEWAY-TIMEOUT*"'
+      expect: 'no new lines once in-flight Stripe retries have run out (about 50s)'
+      within_seconds: 150
+    - signal: primary PSP
+      from: 'logs.otel.ecommerce'
+      where: 'resource.attributes.service.name == "payment-processor"'
+      field: 'attributes.payment.psp_primary'
+      expect: 'adyen on the payments.health line after the change (was stripe)'
+      within_seconds: 60
 business_impact:
   - kpi: business.conversion_rate_pct
-    factor: {uniform: [0.15, 0.40]}
+    value: {uniform: [0.67, 0.77], round: 2}
   - kpi: business.orders_placed_per_min
-    factor: {uniform: [0.20, 0.45]}
+    value: {uniform: [31.62, 36.38]}
   - kpi: business.gmv_usd_per_min
-    factor: {uniform: [0.20, 0.45]}
+    value: {uniform: [51382.0, 59118.0], round: 1}
   - kpi: business.cancel_rate_pct
     factor: {uniform: [2.5, 5.0]}
+# dependents degrade after the component at fault, in dependency order
+service_lag_seconds: {order-management: 20, storefront-gateway: 25, fulfillment-orchestrator: 30}

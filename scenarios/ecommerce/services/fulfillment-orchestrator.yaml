@@ -34,27 +34,163 @@ constants:
   - ups
   - usps
   - dhl
+  CARRIER_CALLS_PER_MIN:
+    fedex: 1800
+    ups: 1150
+    usps: 880
+    dhl: 290
+  CARRIER_QUOTA_PER_MIN:
+    fedex: 3000
+    ups: 2500
+    usps: 2000
+    dhl: 1000
+  OTHER_WAREHOUSES:
+  - WH-US-NJ-01
+  - WH-US-TX-03
+  - WH-US-CA-04
+  WAREHOUSE_UTIL_PCT:
+    WH-US-NJ-01: 81.2
+    WH-US-TX-03: 77.4
+    WH-US-CA-04: 70.1
+state:
+  fo_t:
+    init: now
+  asn_backlog:
+    init: 0
+  label_backlog:
+    init: 0
 steps:
 - sample:
-    orders_queued:
-      randint:
-      - 200
-      - 3500
-    avg_ship_time_hrs:
-      uniform:
-      - 18.0
-      - 48.0
-      round: 1
-    on_time_delivery_pct:
-      uniform:
-      - 91.0
-      - 98.5
-      round: 2
+    dt:
+      expr: "min(10.0, max(0.0, time.time() - fo_t))"
+- counter:
+    state_key: fo_t
+    by:
+      expr: "dt"
+# Ch 4: location hold CC-2291 takes zones C and D (220,000 sqft) out of counted available storage at
+# WH-US-OH-02, so 738,000 sqft used reads as 94.6% of 780,000 instead of 73.8% of 1,000,000. Receiving
+# rejects inbound above the 92% gate and ASNs queue at the docks (2 per minute). Releasing the hold gives
+# the locations back within ~8 s; the queue then drains (time constant 40 s, ~120 s to baseline).
+- sample:
+    wh_hold_sqft:
+      expr: "220000.0 if (4 in all_active and elapsed.get(4, 0) >= lag.get(4, 0)) else (220000.0 * (1.0 - min(1.0, since_fix.get(4, 0) / 8.0)) if 4 in fixed_channels else 0.0)"
+    wh_used_sqft:
+      expr: "round(738000.0 + rand.gauss(0, 3000.0))"
+    wh_available_sqft:
+      expr: "round(1000000.0 - wh_hold_sqft)"
+    wh_capacity_pct:
+      expr: "round(wh_used_sqft / wh_available_sqft * 100.0, 1)"
+    wh_rejected_per_min:
+      expr: "max(0, round(14.0 + rand.gauss(0, 2.0))) if wh_capacity_pct >= 92.0 else 0"
+    asn_delta:
+      expr: "(2.0 / 60.0 * dt) if wh_capacity_pct >= 92.0 else -asn_backlog * min(1.0, dt / 40.0)"
+- counter:
+    state_key: asn_backlog
+    by:
+      expr: "asn_delta"
+- sample:
+    wh_receiving_queue:
+      expr: "max(0, round(3.0 + asn_backlog + rand.gauss(0, 0.8)))"
+    wh_status:
+      expr: "'ANOMALY' if (wh_capacity_pct >= 90.0 or asn_backlog >= 3.0) else 'NOMINAL'"
+    wh_holds:
+      expr: "'CC-2291' if 4 in all_active else 'none'"
+    wh_locked_zones:
+      expr: "'C,D' if 4 in all_active else 'none'"
+    other_wh:
+      choice: OTHER_WAREHOUSES
+    other_wh_pct:
+      expr: "round(WAREHOUSE_UTIL_PCT[other_wh] + rand.gauss(0, 0.3), 1)"
+    other_wh_used_sqft:
+      expr: "round(other_wh_pct * 10000.0)"
+    other_wh_queue:
+      expr: "max(0, round(3.0 + rand.gauss(0, 0.8)))"
+- metric:
+    name: fulfillment.warehouse_capacity_pct
+    value:
+      var: wh_capacity_pct
+    unit: '%'
+- metric:
+    name: fulfillment.inbound_rejected_per_min
+    value:
+      var: wh_rejected_per_min
+    unit: receipts/min
+- metric:
+    name: fulfillment.receiving_queue_asns
+    value:
+      var: wh_receiving_queue
+    unit: asns
+- log:
+    level: INFO
+    message: '[wms-capacity-poller] c.e.fulfillment.wms.CapacityMonitor : warehouse=WH-US-OH-02 capacity_pct={wh_capacity_pct}
+      used_sqft={wh_used_sqft} available_sqft={wh_available_sqft} receiving_gate_pct=92.0 inbound_rejected_per_min={wh_rejected_per_min}
+      receiving_queue_asns={wh_receiving_queue} location_holds={wh_holds} locked_zones={wh_locked_zones} status={wh_status}'
+    attrs:
+      operation: warehouse_capacity
+      fulfillment.warehouse_id: WH-US-OH-02
+      fulfillment.warehouse_capacity_pct:
+        var: wh_capacity_pct
+      fulfillment.available_sqft:
+        var: wh_available_sqft
+      fulfillment.inbound_rejected_per_min:
+        var: wh_rejected_per_min
+      fulfillment.receiving_queue_asns:
+        var: wh_receiving_queue
+      wms.location_holds:
+        var: wh_holds
+      wms.locked_zones:
+        var: wh_locked_zones
+      warehouse.status:
+        var: wh_status
+- log:
+    level: INFO
+    message: '[wms-capacity-poller] c.e.fulfillment.wms.CapacityMonitor : warehouse={other_wh} capacity_pct={other_wh_pct}
+      used_sqft={other_wh_used_sqft} available_sqft=1000000 receiving_gate_pct=92.0 inbound_rejected_per_min=0 receiving_queue_asns={other_wh_queue}
+      location_holds=none locked_zones=none status=NOMINAL'
+    attrs:
+      operation: warehouse_capacity
+      fulfillment.warehouse_id:
+        var: other_wh
+      fulfillment.warehouse_capacity_pct:
+        var: other_wh_pct
+      fulfillment.available_sqft: 1000000
+      fulfillment.inbound_rejected_per_min: 0
+      fulfillment.receiving_queue_asns:
+        var: other_wh_queue
+      wms.location_holds: none
+      wms.locked_zones: none
+      warehouse.status: NOMINAL
+# Ch 11: wave-planner revision 9 releases ~27,000 FedEx label requests every 15 minutes against a quota
+# of 3,000/min. The 429 rate ramps to ~62% over 30 s, attempts (with retries) climb to ~7,800/min while
+# accepted calls sit at the quota, and the label backlog grows by ~4/s. After the rollback the 60 s
+# rate-limit window ages out, and the 40 req/s token bucket (2,400/min against ~1,800/min of new labels)
+# drains the backlog at ~10 labels/s.
+- sample:
+    lbl_frac:
+      expr: "min(1.0, max(0.0, elapsed.get(11, 0) - lag.get(11, 0)) / 30.0) if 11 in all_active else ((1.0 - min(1.0, since_fix.get(11, 0) / 60.0)) if 11 in fixed_channels else 0.0)"
+    fedex_429_pct:
+      expr: "round(max(0.0, 0.1 + rand.gauss(0, 0.05)) + 62.0 * lbl_frac * (1.0 + rand.gauss(0, 0.04)), 2)"
+    lbl_delta:
+      expr: "(4.0 * lbl_frac * dt) if 11 in all_active else -min(label_backlog, 10.0 * dt)"
+- counter:
+    state_key: label_backlog
+    by:
+      expr: "lbl_delta"
+- sample:
+    label_queue_depth:
+      expr: "max(0, round(120.0 + rand.gauss(0, 30.0) + label_backlog))"
     label_creation_success_rate_pct:
-      uniform:
-      - 98.0
-      - 99.9
-      round: 2
+      expr: "round(min(99.9, 99.4 + rand.gauss(0, 0.15)) * (1.0 - 0.45 * fedex_429_pct / 100.0), 2)"
+    fedex_calls:
+      expr: "round(max((1800.0 + rand.gauss(0, 50.0)) * (1.0 - lbl_frac) + 7800.0 * lbl_frac * (1.0 + rand.gauss(0, 0.02)), 2400.0 + rand.gauss(0, 20.0) if (label_backlog > 1.0 and 11 not in all_active) else 0.0))"
+    label_release_mode:
+      expr: "'wave-15m' if 11 in all_active else 'token-bucket-40rps'"
+    orders_queued:
+      expr: "round(1400.0 + rand.gauss(0, 60.0) + label_backlog * 0.9)"
+    avg_ship_time_hrs:
+      expr: "round(26.0 + rand.gauss(0, 0.5) + label_backlog / 1200.0, 1)"
+    on_time_delivery_pct:
+      expr: "round(max(80.0, 96.4 + rand.gauss(0, 0.25) - label_backlog / 800.0), 2)"
 - metric:
     name: fulfillment.orders_queued
     value:
@@ -75,10 +211,20 @@ steps:
     value:
       var: label_creation_success_rate_pct
     unit: '%'
+- metric:
+    name: fulfillment.carrier_429_pct
+    value:
+      var: fedex_429_pct
+    unit: '%'
+- metric:
+    name: fulfillment.label_queue_depth
+    value:
+      var: label_queue_depth
+    unit: labels
 - log:
     level: INFO
     message: fulfillment.health orders_queued={orders_queued} avg_ship_time={avg_ship_time_hrs}hrs on_time={on_time_delivery_pct}%
-      label_success={label_creation_success_rate_pct}%
+      label_success={label_creation_success_rate_pct}% label_queue={label_queue_depth}
     attrs:
       operation: fulfillment_health
       fulfillment.orders_queued:
@@ -89,19 +235,34 @@ steps:
         var: on_time_delivery_pct
       fulfillment.label_creation_success_rate_pct:
         var: label_creation_success_rate_pct
+      fulfillment.label_queue_depth:
+        var: label_queue_depth
 - sample:
     carrier:
       choice: CARRIERS
     carrier_api_calls:
-      randint:
-      - 500
-      - 4000
+      expr: "fedex_calls if carrier == 'fedex' else round(CARRIER_CALLS_PER_MIN[carrier] * (1.0 + rand.gauss(0, 0.03)))"
+    carrier_quota:
+      expr: "CARRIER_QUOTA_PER_MIN[carrier]"
+    carrier_429_pct:
+      expr: "fedex_429_pct if carrier == 'fedex' else round(max(0.0, 0.1 + rand.gauss(0, 0.05)), 2)"
+    carrier_status:
+      expr: "'THROTTLED' if carrier_429_pct >= 5.0 else 'NOMINAL'"
 - log:
     level: INFO
-    message: fulfillment.carrier_health carrier={carrier} api_calls={carrier_api_calls} status=NOMINAL
+    message: fulfillment.carrier_health carrier={carrier} api_calls={carrier_api_calls} quota_per_min={carrier_quota} http_429_pct={carrier_429_pct}
+      label_release={label_release_mode} status={carrier_status}
     attrs:
       operation: carrier_health
       fulfillment.active_carrier:
         var: carrier
       fulfillment.carrier_api_calls:
         var: carrier_api_calls
+      fulfillment.carrier_quota_per_min:
+        var: carrier_quota
+      fulfillment.carrier_429_pct:
+        var: carrier_429_pct
+      fulfillment.carrier_status:
+        var: carrier_status
+      fulfillment.label_release_mode:
+        var: label_release_mode

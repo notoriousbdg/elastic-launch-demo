@@ -1,0 +1,361 @@
+scenario_id: gt-ibmmq
+scenario_name: '[GT] ibmmq_otel Impact Key Coverage'
+scenario_description: 'Generator impact_key coverage scenario for ibmmq_otel. Each HITL channel tests one impact_key via generator_impact.'
+namespace: gtibmmq
+scenario_icon: 🔬
+sort_order: 900
+nominal_label: NOMINAL
+schema_version: '1.2'
+apm_ml_bucket_span: 1m
+hosts:
+  - host.name: gtibmmq-aws-host-01
+    host.id: i-ed76ee4dd3212da09
+    host.arch: amd64
+    host.type: m5.2xlarge
+    host.cpu.model.name: Intel(R) Xeon(R) Platinum 8259CL CPU @ 2.50GHz
+    host.cpu.vendor.id: GenuineIntel
+    host.cpu.family: '6'
+    host.cpu.model.id: '85'
+    host.cpu.stepping: '7'
+    host.cpu.cache.l2.size: 1310720
+    host.ip:
+      - 10.0.1.10
+      - 172.16.0.10
+    host.mac:
+      - 0a:1b:2c:3d:4e:5f
+      - 0a:1b:2c:3d:4e:60
+    os.type: linux
+    os.description: Amazon Linux 2023.6.20250115
+    cloud.provider: aws
+    cloud.platform: aws_ec2
+    cloud.region: us-east-1
+    cloud.availability_zone: us-east-1a
+    cloud.account.id: '969720829353'
+    cloud.instance.id: i-ed76ee4dd3212da09
+    cpu_count: 8
+    memory_total_bytes: 34359738368
+    disk_total_bytes: 536870912000
+  - host.name: gtibmmq-gcp-host-02
+    host.id: '6650442284956296'
+    host.arch: amd64
+    host.type: n2-standard-8
+    host.cpu.model.name: Intel(R) Xeon(R) CPU @ 2.80GHz
+    host.cpu.vendor.id: GenuineIntel
+    host.cpu.family: '6'
+    host.cpu.model.id: '85'
+    host.cpu.stepping: '7'
+    host.cpu.cache.l2.size: 1048576
+    host.ip:
+      - 10.128.0.10
+      - 10.128.0.11
+    host.mac:
+      - 42:01:0a:80:00:0a
+      - 42:01:0a:80:00:0b
+    os.type: linux
+    os.description: Debian GNU/Linux 12 (bookworm)
+    cloud.provider: gcp
+    cloud.platform: gcp_compute_engine
+    cloud.region: us-central1
+    cloud.availability_zone: us-central1-a
+    cloud.account.id: gtibmmq-project
+    cloud.instance.id: '6650442284956296'
+    cpu_count: 8
+    memory_total_bytes: 34359738368
+    disk_total_bytes: 274877906944
+  - host.name: gtibmmq-azure-host-03
+    host.id: /subscriptions/afb09849-3e24-559d-b655-7fdcfe43a575/resourceGroups/gtibmmq-rg/providers/Microsoft.Compute/virtualMachines/gtibmmq-vm-01
+    host.arch: amd64
+    host.type: Standard_D4s_v3
+    host.cpu.model.name: Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz
+    host.cpu.vendor.id: GenuineIntel
+    host.cpu.family: '6'
+    host.cpu.model.id: '106'
+    host.cpu.stepping: '6'
+    host.cpu.cache.l2.size: 1310720
+    host.ip:
+      - 10.0.2.10
+      - 10.0.2.11
+    host.mac:
+      - 00:0d:3a:1b:2c:3d
+      - 00:0d:3a:1b:2c:3e
+    os.type: linux
+    os.description: Ubuntu 22.04.5 LTS
+    cloud.provider: azure
+    cloud.platform: azure_vm
+    cloud.region: eastus
+    cloud.availability_zone: eastus-1
+    cloud.account.id: afb09849-3e24-559d-b655-7fdcfe43a575
+    cloud.instance.id: gtibmmq-vm-01
+    cpu_count: 4
+    memory_total_bytes: 17179869184
+    disk_total_bytes: 137438953472
+k8s_clusters:
+  - name: gtibmmq-aws-k8s
+    provider: aws
+    platform: aws_eks
+    region: us-east-1
+    zones:
+      - us-east-1a
+    os_description: Amazon Linux 2
+    services:
+      - gt-ibmmq-aws-svc-1
+      - gt-ibmmq-aws-svc-2
+      - gt-ibmmq-aws-svc-3
+  - name: gtibmmq-gcp-k8s
+    provider: gcp
+    platform: gcp_gke
+    region: us-central1
+    zones:
+      - us-central1-a
+    os_description: Container-Optimized OS
+    services:
+      - gt-ibmmq-gcp-svc-1
+      - gt-ibmmq-gcp-svc-2
+      - gt-ibmmq-gcp-svc-3
+  - name: gtibmmq-azure-k8s
+    provider: azure
+    platform: azure_aks
+    region: eastus
+    zones:
+      - eastus-1
+    os_description: Ubuntu 22.04
+    services:
+      - gt-ibmmq-azure-svc-1
+      - gt-ibmmq-azure-svc-2
+      - gt-ibmmq-azure-svc-3
+agent_config:
+  id: gtibmmq-analyst
+  name: '[GT] ibmmq_otel Impact Key Coverage Operations Analyst'
+  assessment_tool_name: gtibmmq_readiness_assessment
+  system_prompt: "You are an expert SRE assistant for the [GT] ibmmq_otel Impact Key Coverage.\n\nWhen an incident is reported,\
+    \ your job is to:\n1. Diagnose the root cause from the error_type, stack traces, and RCA clues\n2. Recommend a specific\
+    \ remediation action\n3. Explain business impact in terms the executive team understands\n\nKnown fault channels and their\
+    \ error types:\n  - GT-IBMMQ-CPU-LOAD-HIGH: Gt Ibmmq Cpu Load High\n  - GT-IBMMQ-MESSAGES-EXPIRING-BEFORE-CONS: Gt Ibmmq\
+    \ Messages Expiring Before Consumption\n  - GT-IBMMQ-FAILED-CONNECTION-ATTEMPTS: Gt Ibmmq Failed Connection Attempts\n\
+    \  - GT-IBMMQ-FAILED-MESSAGE-OPERATIONS: Gt Ibmmq Failed Message Operations\n  - GT-IBMMQ-FDC-FILES-INCREASING: Gt Ibmmq\
+    \ Fdc Files Increasing\n  - GT-IBMMQ-HIGH-LOG-WRITE-LATENCY: Gt Ibmmq High Log Write Latency\n  - GT-IBMMQ-HIGH-TRANSACTION-ROLLBACK-RAT:\
+    \ Gt Ibmmq High Transaction Rollback Ratio\n  - GT-IBMMQ-LOG-FILESYSTEM-CRITICALLY-LOW: Gt Ibmmq Log Filesystem Critically\
+    \ Low\n  - GT-IBMMQ-QUEUE-MANAGER-FILESYSTEM-LOW: Gt Ibmmq Queue Manager Filesystem Low\n  - GT-PLACEHOLDER-10: Gt Placeholder\
+    \ 10\n  - GT-PLACEHOLDER-11: Gt Placeholder 11\n  - GT-PLACEHOLDER-12: Gt Placeholder 12\n  - GT-PLACEHOLDER-13: Gt Placeholder\
+    \ 13\n  - GT-PLACEHOLDER-14: Gt Placeholder 14\n  - GT-PLACEHOLDER-15: Gt Placeholder 15\n  - GT-AUTO-PH-16: Gt Auto Placeholder\
+    \ 16\n  - GT-AUTO-PH-17: Gt Auto Placeholder 17\n  - GT-AUTO-PH-18: Gt Auto Placeholder 18\n  - GT-AUTO-PH-19: Gt Auto\
+    \ Placeholder 19\n  - GT-AUTO-PH-20: Gt Auto Placeholder 20\n\nFor each fault, examine the affected_services first, then\
+    \ look for cascade_services that may be experiencing downstream effects."
+assessment_tool_config:
+  id: gtibmmq_readiness_assessment
+  description: 'Validates that each impact_key for ibmmq_otel correctly drives generator behaviour. Checks that chaos channels produce expected metric deviations when individual impact_keys are activated.'
+executive_kpi_emitter_service_name: gt-ibmmq-aws-svc-2
+executive_dashboard_intro: '**Generator test view** — synthetic platform metrics for ibmmq_otel coverage testing.'
+executive_kpi_sections:
+  - header: '**Platform** — throughput, errors, latency, and availability'
+    specs:
+      - - Primary KPI (unit)
+        - metrics.business.primary_kpi
+      - - Secondary KPI (unit)
+        - metrics.business.secondary_kpi
+      - - Throughput (req/min)
+        - metrics.business.throughput_rpm
+      - - Error Rate (%)
+        - metrics.business.error_rate_pct
+      - - P99 Latency (ms)
+        - metrics.business.latency_p99_ms
+      - - Availability (%)
+        - metrics.business.availability_pct
+executive_trend_charts:
+  - title: Primary KPI trend
+    field: metrics.business.primary_kpi
+    y_label: units
+  - title: Throughput trend
+    field: metrics.business.throughput_rpm
+    y_label: req/min
+  - title: Error Rate trend
+    field: metrics.business.error_rate_pct
+    y_label: '%'
+  - title: Latency P99 trend
+    field: metrics.business.latency_p99_ms
+    y_label: ms
+  - title: Availability trend
+    field: metrics.business.availability_pct
+    y_label: '%'
+executive_kpi_emissions:
+  - name: business.primary_kpi
+    value:
+      uniform: &id001
+        - 100.0
+        - 1000.0
+      round: 1
+    unit: units
+  - name: business.secondary_kpi
+    value:
+      uniform: *id001
+      round: 1
+    unit: units
+  - name: business.throughput_rpm
+    value:
+      uniform:
+        - 1000.0
+        - 50000.0
+      round: 0
+    unit: units
+  - name: business.error_rate_pct
+    value:
+      uniform:
+        - 0.0
+        - 5.0
+      round: 2
+    unit: units
+  - name: business.latency_p99_ms
+    value:
+      uniform:
+        - 50.0
+        - 500.0
+      round: 0
+    unit: units
+  - name: business.availability_pct
+    value:
+      uniform:
+        - 99.0
+        - 100.0
+      round: 2
+    unit: units
+raw_log_profile:
+  service_name: gtibmmq-gt-ibmmq-aws-svc-1
+  user_id_prefix: u
+  tier_field: user_tier
+  tier_values:
+    - - standard
+      - 80
+    - - premium
+      - 20
+  country_weights:
+    US: 35
+    GB: 15
+    DE: 15
+    FR: 10
+    JP: 10
+    IN: 15
+  methods:
+    - GET
+    - POST
+    - PUT
+    - DELETE
+  paths:
+    - /api/v1/gtibmmq/process
+    - /api/v1/health
+  change_point_path: /api/v1/gtibmmq/process
+trace_attributes:
+  base:
+    platform.region:
+      choice:
+        - us-east-1
+        - us-east-1
+        - us-east-1
+    platform.traffic_tier:
+      choice:
+        - normal
+        - normal
+        - elevated
+        - peak
+  services:
+    gt-ibmmq-aws-svc-1:
+      svc.version:
+        choice:
+          - 1.0.0
+          - 1.0.1
+          - 1.1.0
+      svc.environment:
+        choice:
+          - prod
+          - prod
+          - staging
+    gt-ibmmq-aws-svc-2:
+      svc.version:
+        choice:
+          - 1.0.0
+          - 1.0.1
+          - 1.1.0
+      svc.environment:
+        choice:
+          - prod
+          - prod
+          - staging
+    gt-ibmmq-aws-svc-3:
+      svc.version:
+        choice:
+          - 1.0.0
+          - 1.0.1
+          - 1.1.0
+      svc.environment:
+        choice:
+          - prod
+          - prod
+          - staging
+    gt-ibmmq-gcp-svc-1:
+      svc.version:
+        choice:
+          - 1.0.0
+          - 1.0.1
+          - 1.1.0
+      svc.environment:
+        choice:
+          - prod
+          - prod
+          - staging
+    gt-ibmmq-gcp-svc-2:
+      svc.version:
+        choice:
+          - 1.0.0
+          - 1.0.1
+          - 1.1.0
+      svc.environment:
+        choice:
+          - prod
+          - prod
+          - staging
+    gt-ibmmq-gcp-svc-3:
+      svc.version:
+        choice:
+          - 1.0.0
+          - 1.0.1
+          - 1.1.0
+      svc.environment:
+        choice:
+          - prod
+          - prod
+          - staging
+    gt-ibmmq-azure-svc-1:
+      svc.version:
+        choice:
+          - 1.0.0
+          - 1.0.1
+          - 1.1.0
+      svc.environment:
+        choice:
+          - prod
+          - prod
+          - staging
+    gt-ibmmq-azure-svc-2:
+      svc.version:
+        choice:
+          - 1.0.0
+          - 1.0.1
+          - 1.1.0
+      svc.environment:
+        choice:
+          - prod
+          - prod
+          - staging
+    gt-ibmmq-azure-svc-3:
+      svc.version:
+        choice:
+          - 1.0.0
+          - 1.0.1
+          - 1.1.0
+      svc.environment:
+        choice:
+          - prod
+          - prod
+          - staging
+
+generators:
+  ibmmq_otel: true

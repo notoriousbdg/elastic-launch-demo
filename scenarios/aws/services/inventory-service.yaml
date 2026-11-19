@@ -1,0 +1,148 @@
+service: inventory-service
+sort_order: 7
+cloud_provider: aws
+cloud_region: us-west-2
+cloud_platform: aws_ec2
+cloud_availability_zone: us-west-2c
+subsystem: inventory
+language: dotnet
+
+# Topology: [downstream-service, endpoint, METHOD]
+# Stock lives in DynamoDB (not a relational store), so there are no downstream
+# service calls and no SQL db_operations.
+topology: []
+
+entry_endpoints:
+  - [/api/v1/inventory/reserve, POST]
+  - [/api/v1/inventory/availability, GET]
+
+db_operations: []
+
+emit_fault_logs: true
+kpi_emitter: false
+
+constants:
+  TABLES: [awsorders-inventory]
+  WAREHOUSES: [pdx-01, sea-02, sjc-03, phx-04]
+  SKUS: [SKU-48213, SKU-77120, SKU-30955, SKU-61804, SKU-90277, SKU-12469]
+
+state:
+  _reservations: {init: 0}
+  _last_summary: {init: now}
+
+steps:
+  - sample:
+      table: {choice: TABLES}
+      warehouse: {choice: WAREHOUSES}
+      sku: {choice: SKUS}
+      qty: {randint: [1, 4]}
+      read_latency_ms:
+        expr: "round(max(0.0, 5.5 + (700.0 - 5.5) * min(1.0, elapsed.get(11, 0) / 45.0) + rand.gauss(0, 35.0) * min(1.0, elapsed.get(11, 0) / 45.0)), 1) if 11 in all_active
+          else (round(max(0.0, 700.0 + (5.5 - 700.0) * min(1.0, since_fix.get(11, 0) / 120.0) + rand.gauss(0, 35.0) * (1.0 - min(1.0, since_fix.get(11, 0) / 120.0)) + rand.gauss(0, 0.9) * min(1.0, since_fix.get(11, 0) / 120.0)), 1) if 11 in fixed_channels
+          else round(rand.uniform(2.0, 9.0), 1))"
+      write_latency_ms:
+        expr: "round(max(0.0, 11.0 + (1400.0 - 11.0) * min(1.0, elapsed.get(11, 0) / 45.0) + rand.gauss(0, 70.0) * min(1.0, elapsed.get(11, 0) / 45.0)), 1) if 11 in all_active
+          else (round(max(0.0, 1400.0 + (11.0 - 1400.0) * min(1.0, since_fix.get(11, 0) / 120.0) + rand.gauss(0, 70.0) * (1.0 - min(1.0, since_fix.get(11, 0) / 120.0)) + rand.gauss(0, 2.0) * min(1.0, since_fix.get(11, 0) / 120.0)), 1) if 11 in fixed_channels
+          else round(rand.uniform(4.0, 18.0), 1))"
+      consumed_rcu: {uniform: [120.0, 640.0], round: 1}
+      consumed_wcu:
+        expr: "round(max(0.0, min(500.0, 240.0 + (490.0 - 240.0) * min(1.0, elapsed.get(11, 0) / 45.0) + rand.gauss(0, 4.0) * min(1.0, elapsed.get(11, 0) / 45.0))), 1) if 11 in all_active
+          else (round(max(0.0, 490.0 + (420.0 - 490.0) * min(1.0, since_fix.get(11, 0) / 120.0) + rand.gauss(0, 4.0) * (1.0 - min(1.0, since_fix.get(11, 0) / 120.0)) + rand.gauss(0, 60.0) * min(1.0, since_fix.get(11, 0) / 120.0)), 1) if 11 in fixed_channels
+          else round(rand.uniform(60.0, 420.0), 1))"
+      throttled_requests:
+        expr: "round(max(0.0, 0.0 + (120.0 - 0.0) * min(1.0, elapsed.get(11, 0) / 45.0) + rand.gauss(0, 6.0) * min(1.0, elapsed.get(11, 0) / 45.0))) if 11 in all_active
+          else (round(max(0.0, 120.0 + (0.0 - 120.0) * min(1.0, since_fix.get(11, 0) / 120.0) + rand.gauss(0, 6.0) * (1.0 - min(1.0, since_fix.get(11, 0) / 120.0)) + rand.gauss(0, 0.3) * min(1.0, since_fix.get(11, 0) / 120.0))) if 11 in fixed_channels
+          else rand.randint(0, 1))"
+      aws_access_denied_per_min:
+        expr: "round(max(0.0, 0.0 + (180.0 - 0.0) * min(1.0, elapsed.get(7, 0) / 30.0) + rand.gauss(0, 8.0) * min(1.0, elapsed.get(7, 0) / 30.0))) if 7 in all_active
+          else (round(max(0.0, 180.0 + (0.0 - 180.0) * min(1.0, since_fix.get(7, 0) / 90.0) + rand.gauss(0, 8.0) * (1.0 - min(1.0, since_fix.get(7, 0) / 90.0)) + rand.gauss(0, 0.3) * min(1.0, since_fix.get(7, 0) / 90.0))) if 7 in fixed_channels
+          else rand.randint(0, 1))"
+      success_c7:
+        expr: "round(max(0.0, 99.4 + (50.0 - 99.4) * min(1.0, elapsed.get(7, 0) / 30.0) + rand.gauss(0, 2.5) * min(1.0, elapsed.get(7, 0) / 30.0)), 2) if 7 in all_active
+          else (round(max(0.0, 50.0 + (99.4 - 50.0) * min(1.0, since_fix.get(7, 0) / 90.0) + rand.gauss(0, 2.5) * (1.0 - min(1.0, since_fix.get(7, 0) / 90.0)) + rand.gauss(0, 0.15) * min(1.0, since_fix.get(7, 0) / 90.0)), 2) if 7 in fixed_channels
+          else round(rand.uniform(98.8, 99.95), 2))"
+      success_c11:
+        expr: "round(max(0.0, 99.4 + (82.0 - 99.4) * min(1.0, elapsed.get(11, 0) / 45.0) + rand.gauss(0, 2.5) * min(1.0, elapsed.get(11, 0) / 45.0)), 2) if 11 in all_active
+          else (round(max(0.0, 82.0 + (99.4 - 82.0) * min(1.0, since_fix.get(11, 0) / 120.0) + rand.gauss(0, 2.5) * (1.0 - min(1.0, since_fix.get(11, 0) / 120.0)) + rand.gauss(0, 0.15) * min(1.0, since_fix.get(11, 0) / 120.0)), 2) if 11 in fixed_channels
+          else round(rand.uniform(98.8, 99.95), 2))"
+      reservation_success_rate_pct:
+        expr: "round(min(success_c7, success_c11), 2)"
+      iam_policy_version:
+        expr: "'v7' if 7 in all_active else 'v6'"
+      billing_mode:
+        expr: "'PAY_PER_REQUEST' if 11 in fixed_channels else 'PROVISIONED'"
+      inv_status:
+        expr: "'ANOMALY' if 7 in all_active or 11 in all_active or (7 in fixed_channels and since_fix.get(7, 0) < 90) or (11 in fixed_channels and since_fix.get(11, 0) < 120) else 'NOMINAL'"
+      available_qty: {randint: [12, 2400]}
+  - counter:
+      state_key: _reservations
+      by: 1
+  - metric:
+      name: inventory.dynamodb.read_latency_ms
+      value: {var: read_latency_ms}
+      unit: ms
+  - metric:
+      name: inventory.dynamodb.write_latency_ms
+      value: {var: write_latency_ms}
+      unit: ms
+  - metric:
+      name: inventory.dynamodb.consumed_read_capacity_units
+      value: {var: consumed_rcu}
+      unit: '{unit}'
+  - metric:
+      name: inventory.dynamodb.consumed_write_capacity_units
+      value: {var: consumed_wcu}
+      unit: '{unit}'
+  - metric:
+      name: inventory.dynamodb.throttled_requests
+      value: {var: throttled_requests}
+      unit: '{request}'
+  - metric:
+      name: inventory.aws_access_denied_per_min
+      value: {var: aws_access_denied_per_min}
+      unit: '{errors}/min'
+  - metric:
+      name: inventory.reservation_success_rate_pct
+      value: {var: reservation_success_rate_pct}
+      unit: '%'
+  - log:
+      level: INFO
+      message: 'inventory.reserve sku={sku} qty={qty} warehouse={warehouse} table={table} write_latency={write_latency_ms}ms wcu={consumed_wcu} status=RESERVED'
+      attrs:
+        operation: reserve_stock
+        inventory.sku: {var: sku}
+        inventory.qty: {var: qty}
+        inventory.warehouse_id: {var: warehouse}
+        aws.dynamodb.table_name: {var: table}
+        aws.dynamodb.write_latency_ms: {var: write_latency_ms}
+        aws.dynamodb.consumed_write_capacity: {var: consumed_wcu}
+        aws.dynamodb.billing_mode: {var: billing_mode}
+        aws.iam.policy_version: {var: iam_policy_version}
+  - log:
+      level: INFO
+      message: 'inventory.availability sku={sku} warehouse={warehouse} available_qty={available_qty} read_latency={read_latency_ms}ms rcu={consumed_rcu} throttled={throttled_requests}'
+      attrs:
+        operation: check_availability
+        inventory.sku: {var: sku}
+        inventory.warehouse_id: {var: warehouse}
+        inventory.available_qty: {var: available_qty}
+        aws.dynamodb.read_latency_ms: {var: read_latency_ms}
+        aws.dynamodb.consumed_read_capacity: {var: consumed_rcu}
+        aws.dynamodb.throttled_requests: {var: throttled_requests}
+        aws.dynamodb.billing_mode: {var: billing_mode}
+        aws.iam.policy_version: {var: iam_policy_version}
+  - every:
+      seconds: 30
+      state_key: _last_summary
+      steps:
+        - log:
+            level: INFO
+            message: 'inventory.summary reservations={_reservations} success_rate={reservation_success_rate_pct}% throttled={throttled_requests} access_denied_per_min={aws_access_denied_per_min} billing_mode={billing_mode} iam_policy_version={iam_policy_version} status={inv_status}'
+            attrs:
+              operation: inventory_summary
+              inventory.total_reservations: {var: _reservations}
+              inventory.reservation_success_rate_pct: {var: reservation_success_rate_pct}
+              aws.dynamodb.throttled_requests: {var: throttled_requests}
+              aws.dynamodb.billing_mode: {var: billing_mode}
+              aws.iam.policy_version: {var: iam_policy_version}
+              inventory.status: {var: inv_status}

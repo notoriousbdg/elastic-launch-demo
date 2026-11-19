@@ -1,0 +1,1197 @@
+{
+ "aws_ec2_otel-metrics-ml": {
+  "generators": [
+   "aws_ec2_otel"
+  ],
+  "package": "aws_ec2_otel",
+  "version": "0.14.0",
+  "id": "aws_ec2_otel-metrics-ml",
+  "default_index": "metrics-aws.ec2.otel-*",
+  "index_mismatch": false,
+  "discovery_datasets": [
+   "aws.ec2.otel"
+  ],
+  "query": {
+   "bool": {
+    "filter": [
+     {
+      "term": {
+       "Namespace": "AWS/EC2"
+      }
+     },
+     {
+      "exists": {
+       "field": "InstanceId"
+      }
+     }
+    ],
+    "must_not": {
+     "terms": {
+      "_tier": [
+       "data_frozen",
+       "data_cold"
+      ]
+     }
+    }
+   }
+  },
+  "datafeeds": [
+   {
+    "id": "datafeed-aws_ec2_instance_resource_anomaly",
+    "job_id": "aws_ec2_instance_resource_anomaly",
+    "query": {
+     "bool": {
+      "filter": [
+       {
+        "term": {
+         "stat": "Average"
+        }
+       },
+       {
+        "terms": {
+         "MetricName": [
+          "CPUUtilization",
+          "CPUCreditBalance",
+          "NetworkOut"
+         ]
+        }
+       },
+       {
+        "exists": {
+         "field": "InstanceId"
+        }
+       }
+      ]
+     }
+    },
+    "fields": [
+     "stat",
+     "MetricName",
+     "InstanceId",
+     "cloud.account.id",
+     "cloud.region"
+    ],
+    "aggregated": true
+   }
+  ],
+  "jobs": [
+   {
+    "id": "aws_ec2_instance_resource_anomaly",
+    "bucket_span": "15m",
+    "summary_count_field_name": "doc_count",
+    "detectors": [
+     {
+      "function": "high_mean",
+      "field": "metrics.amazonaws.com/AWS/EC2/CPUUtilization",
+      "by": "InstanceId",
+      "over": null,
+      "partition": "cloud.region"
+     },
+     {
+      "function": "low_mean",
+      "field": "metrics.amazonaws.com/AWS/EC2/CPUCreditBalance",
+      "by": "InstanceId",
+      "over": null,
+      "partition": "cloud.region"
+     },
+     {
+      "function": "high_mean",
+      "field": "metrics.amazonaws.com/AWS/EC2/NetworkOut",
+      "by": "InstanceId",
+      "over": null,
+      "partition": "cloud.region"
+     }
+    ],
+    "influencers": [
+     "InstanceId",
+     "cloud.region",
+     "cloud.account.id"
+    ]
+   }
+  ],
+  "fields": [
+   "Namespace",
+   "InstanceId",
+   "metrics.amazonaws.com/AWS/EC2/CPUUtilization",
+   "cloud.region",
+   "metrics.amazonaws.com/AWS/EC2/CPUCreditBalance",
+   "metrics.amazonaws.com/AWS/EC2/NetworkOut",
+   "cloud.account.id",
+   "stat",
+   "MetricName"
+  ]
+ },
+ "aws_ecs_otel-metrics-ml": {
+  "generators": [
+   "aws_ecs_otel"
+  ],
+  "package": "aws_ecs_otel",
+  "version": "0.12.0",
+  "id": "aws_ecs_otel-metrics-ml",
+  "default_index": "metrics-aws.ecs.otel-*",
+  "index_mismatch": false,
+  "discovery_datasets": [
+   "aws.ecs.otel"
+  ],
+  "query": {
+   "bool": {
+    "filter": [
+     {
+      "term": {
+       "Namespace": "AWS/ECS"
+      }
+     },
+     {
+      "exists": {
+       "field": "ServiceName"
+      }
+     }
+    ],
+    "must_not": {
+     "terms": {
+      "_tier": [
+       "data_frozen",
+       "data_cold"
+      ]
+     }
+    }
+   }
+  },
+  "datafeeds": [
+   {
+    "id": "datafeed-aws_ecs_service_resource_anomaly",
+    "job_id": "aws_ecs_service_resource_anomaly",
+    "query": {
+     "bool": {
+      "filter": [
+       {
+        "term": {
+         "stat": "Average"
+        }
+       },
+       {
+        "terms": {
+         "MetricName": [
+          "MemoryUtilization",
+          "CPUUtilization"
+         ]
+        }
+       },
+       {
+        "exists": {
+         "field": "ServiceName"
+        }
+       }
+      ]
+     }
+    },
+    "fields": [
+     "stat",
+     "MetricName",
+     "ServiceName",
+     "cloud.region",
+     "cloud.account.id",
+     "ClusterName"
+    ],
+    "aggregated": true
+   }
+  ],
+  "jobs": [
+   {
+    "id": "aws_ecs_service_resource_anomaly",
+    "bucket_span": "15m",
+    "summary_count_field_name": "doc_count",
+    "detectors": [
+     {
+      "function": "high_mean",
+      "field": "metrics.amazonaws.com/AWS/ECS/MemoryUtilization",
+      "by": "ServiceName",
+      "over": null,
+      "partition": "ClusterName"
+     },
+     {
+      "function": "high_mean",
+      "field": "metrics.amazonaws.com/AWS/ECS/CPUUtilization",
+      "by": "ServiceName",
+      "over": null,
+      "partition": "ClusterName"
+     }
+    ],
+    "influencers": [
+     "ServiceName",
+     "ClusterName",
+     "cloud.region",
+     "cloud.account.id"
+    ]
+   }
+  ],
+  "fields": [
+   "Namespace",
+   "ServiceName",
+   "metrics.amazonaws.com/AWS/ECS/MemoryUtilization",
+   "ClusterName",
+   "metrics.amazonaws.com/AWS/ECS/CPUUtilization",
+   "cloud.region",
+   "cloud.account.id",
+   "stat",
+   "MetricName"
+  ]
+ },
+ "aws_elb_metrics_otel-activity-ml": {
+  "generators": [
+   "aws_elb_metrics_otel"
+  ],
+  "package": "aws_elb_metrics_otel",
+  "version": "0.12.1",
+  "id": "aws_elb_metrics_otel-activity-ml",
+  "default_index": "metrics-aws.applicationelb.otel-*",
+  "index_mismatch": true,
+  "discovery_datasets": [
+   "aws.elb.otel",
+   "aws.elb_network.otel",
+   "aws.elb_gateway.otel"
+  ],
+  "query": {
+   "bool": {
+    "filter": [
+     {
+      "term": {
+       "Namespace": "AWS/ApplicationELB"
+      }
+     },
+     {
+      "exists": {
+       "field": "LoadBalancer"
+      }
+     }
+    ],
+    "must_not": {
+     "terms": {
+      "_tier": [
+       "data_frozen",
+       "data_cold"
+      ]
+     }
+    }
+   }
+  },
+  "datafeeds": [
+   {
+    "id": "datafeed-aws_elb_request_error_anomaly",
+    "job_id": "aws_elb_request_error_anomaly",
+    "query": {
+     "bool": {
+      "filter": [
+       {
+        "term": {
+         "stat": "Sum"
+        }
+       },
+       {
+        "terms": {
+         "MetricName": [
+          "HTTPCode_ELB_5XX_Count",
+          "HTTPCode_Target_5XX_Count",
+          "RejectedConnectionCount"
+         ]
+        }
+       },
+       {
+        "exists": {
+         "field": "LoadBalancer"
+        }
+       }
+      ]
+     }
+    },
+    "fields": [
+     "stat",
+     "MetricName",
+     "LoadBalancer",
+     "cloud.account.id",
+     "cloud.region"
+    ],
+    "aggregated": true
+   }
+  ],
+  "jobs": [
+   {
+    "id": "aws_elb_request_error_anomaly",
+    "bucket_span": "15m",
+    "summary_count_field_name": "doc_count",
+    "detectors": [
+     {
+      "function": "high_mean",
+      "field": "metrics.amazonaws.com/AWS/ApplicationELB/HTTPCode_ELB_5XX_Count",
+      "by": "LoadBalancer",
+      "over": null,
+      "partition": "cloud.region"
+     },
+     {
+      "function": "high_mean",
+      "field": "metrics.amazonaws.com/AWS/ApplicationELB/HTTPCode_Target_5XX_Count",
+      "by": "LoadBalancer",
+      "over": null,
+      "partition": "cloud.region"
+     },
+     {
+      "function": "high_mean",
+      "field": "metrics.amazonaws.com/AWS/ApplicationELB/RejectedConnectionCount",
+      "by": "LoadBalancer",
+      "over": null,
+      "partition": "cloud.region"
+     }
+    ],
+    "influencers": [
+     "LoadBalancer",
+     "cloud.region",
+     "cloud.account.id"
+    ]
+   }
+  ],
+  "fields": [
+   "Namespace",
+   "LoadBalancer",
+   "metrics.amazonaws.com/AWS/ApplicationELB/HTTPCode_ELB_5XX_Count",
+   "cloud.region",
+   "metrics.amazonaws.com/AWS/ApplicationELB/HTTPCode_Target_5XX_Count",
+   "metrics.amazonaws.com/AWS/ApplicationELB/RejectedConnectionCount",
+   "cloud.account.id",
+   "stat",
+   "MetricName"
+  ]
+ },
+ "aws_elb_metrics_otel-metrics-ml": {
+  "generators": [
+   "aws_elb_metrics_otel"
+  ],
+  "package": "aws_elb_metrics_otel",
+  "version": "0.12.1",
+  "id": "aws_elb_metrics_otel-metrics-ml",
+  "default_index": "metrics-aws.applicationelb.otel-*",
+  "index_mismatch": true,
+  "discovery_datasets": [
+   "aws.elb.otel",
+   "aws.elb_network.otel",
+   "aws.elb_gateway.otel"
+  ],
+  "query": {
+   "bool": {
+    "filter": [
+     {
+      "term": {
+       "Namespace": "AWS/ApplicationELB"
+      }
+     },
+     {
+      "exists": {
+       "field": "TargetGroup"
+      }
+     }
+    ],
+    "must_not": {
+     "terms": {
+      "_tier": [
+       "data_frozen",
+       "data_cold"
+      ]
+     }
+    }
+   }
+  },
+  "datafeeds": [
+   {
+    "id": "datafeed-aws_elb_target_latency_anomaly",
+    "job_id": "aws_elb_target_latency_anomaly",
+    "query": {
+     "bool": {
+      "filter": [
+       {
+        "term": {
+         "stat": "Average"
+        }
+       },
+       {
+        "terms": {
+         "MetricName": [
+          "TargetResponseTime",
+          "UnHealthyHostCount"
+         ]
+        }
+       },
+       {
+        "exists": {
+         "field": "TargetGroup"
+        }
+       }
+      ]
+     }
+    },
+    "fields": [
+     "stat",
+     "MetricName",
+     "TargetGroup",
+     "LoadBalancer",
+     "cloud.account.id",
+     "cloud.region"
+    ],
+    "aggregated": true
+   }
+  ],
+  "jobs": [
+   {
+    "id": "aws_elb_target_latency_anomaly",
+    "bucket_span": "15m",
+    "summary_count_field_name": "doc_count",
+    "detectors": [
+     {
+      "function": "high_mean",
+      "field": "metrics.amazonaws.com/AWS/ApplicationELB/TargetResponseTime",
+      "by": "TargetGroup",
+      "over": null,
+      "partition": "cloud.region"
+     },
+     {
+      "function": "high_mean",
+      "field": "metrics.amazonaws.com/AWS/ApplicationELB/UnHealthyHostCount",
+      "by": "TargetGroup",
+      "over": null,
+      "partition": "cloud.region"
+     }
+    ],
+    "influencers": [
+     "TargetGroup",
+     "LoadBalancer",
+     "cloud.region",
+     "cloud.account.id"
+    ]
+   }
+  ],
+  "fields": [
+   "Namespace",
+   "TargetGroup",
+   "metrics.amazonaws.com/AWS/ApplicationELB/TargetResponseTime",
+   "cloud.region",
+   "metrics.amazonaws.com/AWS/ApplicationELB/UnHealthyHostCount",
+   "LoadBalancer",
+   "cloud.account.id",
+   "stat",
+   "MetricName"
+  ]
+ },
+ "aws_lambda_otel-activity-ml": {
+  "generators": [
+   "aws_lambda_otel"
+  ],
+  "package": "aws_lambda_otel",
+  "version": "0.12.0",
+  "id": "aws_lambda_otel-activity-ml",
+  "default_index": "metrics-aws.lambda.otel-*",
+  "index_mismatch": false,
+  "discovery_datasets": [
+   "aws.lambda.otel"
+  ],
+  "query": {
+   "bool": {
+    "filter": [
+     {
+      "term": {
+       "Namespace": "AWS/Lambda"
+      }
+     },
+     {
+      "exists": {
+       "field": "FunctionName"
+      }
+     }
+    ],
+    "must_not": {
+     "terms": {
+      "_tier": [
+       "data_frozen",
+       "data_cold"
+      ]
+     }
+    }
+   }
+  },
+  "datafeeds": [
+   {
+    "id": "datafeed-aws_lambda_function_error_anomaly",
+    "job_id": "aws_lambda_function_error_anomaly",
+    "query": {
+     "bool": {
+      "filter": [
+       {
+        "term": {
+         "stat": "Sum"
+        }
+       },
+       {
+        "terms": {
+         "MetricName": [
+          "Errors",
+          "Throttles",
+          "DeadLetterErrors"
+         ]
+        }
+       },
+       {
+        "exists": {
+         "field": "FunctionName"
+        }
+       }
+      ]
+     }
+    },
+    "fields": [
+     "stat",
+     "MetricName",
+     "FunctionName",
+     "cloud.account.id",
+     "cloud.region"
+    ],
+    "aggregated": true
+   }
+  ],
+  "jobs": [
+   {
+    "id": "aws_lambda_function_error_anomaly",
+    "bucket_span": "15m",
+    "summary_count_field_name": "doc_count",
+    "detectors": [
+     {
+      "function": "high_mean",
+      "field": "metrics.amazonaws.com/AWS/Lambda/Errors",
+      "by": "FunctionName",
+      "over": null,
+      "partition": "cloud.region"
+     },
+     {
+      "function": "high_mean",
+      "field": "metrics.amazonaws.com/AWS/Lambda/Throttles",
+      "by": "FunctionName",
+      "over": null,
+      "partition": "cloud.region"
+     },
+     {
+      "function": "high_mean",
+      "field": "metrics.amazonaws.com/AWS/Lambda/DeadLetterErrors",
+      "by": "FunctionName",
+      "over": null,
+      "partition": "cloud.region"
+     }
+    ],
+    "influencers": [
+     "FunctionName",
+     "cloud.region",
+     "cloud.account.id"
+    ]
+   }
+  ],
+  "fields": [
+   "Namespace",
+   "FunctionName",
+   "metrics.amazonaws.com/AWS/Lambda/Errors",
+   "cloud.region",
+   "metrics.amazonaws.com/AWS/Lambda/Throttles",
+   "metrics.amazonaws.com/AWS/Lambda/DeadLetterErrors",
+   "cloud.account.id",
+   "stat",
+   "MetricName"
+  ]
+ },
+ "aws_lambda_otel-metrics-ml": {
+  "generators": [
+   "aws_lambda_otel"
+  ],
+  "package": "aws_lambda_otel",
+  "version": "0.12.0",
+  "id": "aws_lambda_otel-metrics-ml",
+  "default_index": "metrics-aws.lambda.otel-*",
+  "index_mismatch": false,
+  "discovery_datasets": [
+   "aws.lambda.otel"
+  ],
+  "query": {
+   "bool": {
+    "filter": [
+     {
+      "term": {
+       "Namespace": "AWS/Lambda"
+      }
+     },
+     {
+      "exists": {
+       "field": "FunctionName"
+      }
+     }
+    ],
+    "must_not": {
+     "terms": {
+      "_tier": [
+       "data_frozen",
+       "data_cold"
+      ]
+     }
+    }
+   }
+  },
+  "datafeeds": [
+   {
+    "id": "datafeed-aws_lambda_function_performance_anomaly",
+    "job_id": "aws_lambda_function_performance_anomaly",
+    "query": {
+     "bool": {
+      "filter": [
+       {
+        "term": {
+         "stat": "Average"
+        }
+       },
+       {
+        "terms": {
+         "MetricName": [
+          "Duration",
+          "ConcurrentExecutions"
+         ]
+        }
+       },
+       {
+        "exists": {
+         "field": "FunctionName"
+        }
+       }
+      ]
+     }
+    },
+    "fields": [
+     "stat",
+     "MetricName",
+     "FunctionName",
+     "cloud.account.id",
+     "cloud.region"
+    ],
+    "aggregated": true
+   }
+  ],
+  "jobs": [
+   {
+    "id": "aws_lambda_function_performance_anomaly",
+    "bucket_span": "15m",
+    "summary_count_field_name": "doc_count",
+    "detectors": [
+     {
+      "function": "high_mean",
+      "field": "metrics.amazonaws.com/AWS/Lambda/Duration",
+      "by": "FunctionName",
+      "over": null,
+      "partition": "cloud.region"
+     },
+     {
+      "function": "high_mean",
+      "field": "metrics.amazonaws.com/AWS/Lambda/ConcurrentExecutions",
+      "by": "FunctionName",
+      "over": null,
+      "partition": "cloud.region"
+     }
+    ],
+    "influencers": [
+     "FunctionName",
+     "cloud.region",
+     "cloud.account.id"
+    ]
+   }
+  ],
+  "fields": [
+   "Namespace",
+   "FunctionName",
+   "metrics.amazonaws.com/AWS/Lambda/Duration",
+   "cloud.region",
+   "metrics.amazonaws.com/AWS/Lambda/ConcurrentExecutions",
+   "cloud.account.id",
+   "stat",
+   "MetricName"
+  ]
+ },
+ "aws_rds_otel-metrics-ml": {
+  "generators": [
+   "aws_rds_otel"
+  ],
+  "package": "aws_rds_otel",
+  "version": "0.12.0",
+  "id": "aws_rds_otel-metrics-ml",
+  "default_index": "metrics-aws.rds.otel-*",
+  "index_mismatch": false,
+  "discovery_datasets": [
+   "aws.rds.otel"
+  ],
+  "query": {
+   "bool": {
+    "filter": [
+     {
+      "term": {
+       "Namespace": "AWS/RDS"
+      }
+     },
+     {
+      "exists": {
+       "field": "DBInstanceIdentifier"
+      }
+     }
+    ],
+    "must_not": {
+     "terms": {
+      "_tier": [
+       "data_frozen",
+       "data_cold"
+      ]
+     }
+    }
+   }
+  },
+  "datafeeds": [
+   {
+    "id": "datafeed-aws_rds_instance_resource_anomaly",
+    "job_id": "aws_rds_instance_resource_anomaly",
+    "query": {
+     "bool": {
+      "filter": [
+       {
+        "term": {
+         "stat": "Average"
+        }
+       },
+       {
+        "terms": {
+         "MetricName": [
+          "DatabaseConnections",
+          "CPUUtilization",
+          "ReadLatency",
+          "WriteLatency",
+          "FreeableMemory",
+          "DiskQueueDepth"
+         ]
+        }
+       },
+       {
+        "exists": {
+         "field": "DBInstanceIdentifier"
+        }
+       }
+      ]
+     }
+    },
+    "fields": [
+     "stat",
+     "MetricName",
+     "DBInstanceIdentifier",
+     "cloud.account.id",
+     "cloud.region"
+    ],
+    "aggregated": true
+   }
+  ],
+  "jobs": [
+   {
+    "id": "aws_rds_instance_resource_anomaly",
+    "bucket_span": "15m",
+    "summary_count_field_name": "doc_count",
+    "detectors": [
+     {
+      "function": "high_mean",
+      "field": "metrics.amazonaws.com/AWS/RDS/DatabaseConnections",
+      "by": "DBInstanceIdentifier",
+      "over": null,
+      "partition": "cloud.region"
+     },
+     {
+      "function": "high_mean",
+      "field": "metrics.amazonaws.com/AWS/RDS/CPUUtilization",
+      "by": "DBInstanceIdentifier",
+      "over": null,
+      "partition": "cloud.region"
+     },
+     {
+      "function": "high_mean",
+      "field": "metrics.amazonaws.com/AWS/RDS/ReadLatency",
+      "by": "DBInstanceIdentifier",
+      "over": null,
+      "partition": "cloud.region"
+     },
+     {
+      "function": "high_mean",
+      "field": "metrics.amazonaws.com/AWS/RDS/WriteLatency",
+      "by": "DBInstanceIdentifier",
+      "over": null,
+      "partition": "cloud.region"
+     },
+     {
+      "function": "low_mean",
+      "field": "metrics.amazonaws.com/AWS/RDS/FreeableMemory",
+      "by": "DBInstanceIdentifier",
+      "over": null,
+      "partition": "cloud.region"
+     },
+     {
+      "function": "high_mean",
+      "field": "metrics.amazonaws.com/AWS/RDS/DiskQueueDepth",
+      "by": "DBInstanceIdentifier",
+      "over": null,
+      "partition": "cloud.region"
+     }
+    ],
+    "influencers": [
+     "DBInstanceIdentifier",
+     "cloud.region",
+     "cloud.account.id"
+    ]
+   }
+  ],
+  "fields": [
+   "Namespace",
+   "DBInstanceIdentifier",
+   "metrics.amazonaws.com/AWS/RDS/DatabaseConnections",
+   "cloud.region",
+   "metrics.amazonaws.com/AWS/RDS/CPUUtilization",
+   "metrics.amazonaws.com/AWS/RDS/ReadLatency",
+   "metrics.amazonaws.com/AWS/RDS/WriteLatency",
+   "metrics.amazonaws.com/AWS/RDS/FreeableMemory",
+   "metrics.amazonaws.com/AWS/RDS/DiskQueueDepth",
+   "cloud.account.id",
+   "stat",
+   "MetricName"
+  ]
+ },
+ "aws_sqs_otel-metrics-ml": {
+  "generators": [
+   "aws_sqs_otel"
+  ],
+  "package": "aws_sqs_otel",
+  "version": "0.13.0",
+  "id": "aws_sqs_otel-metrics-ml",
+  "default_index": "metrics-aws.sqs.otel-*",
+  "index_mismatch": false,
+  "discovery_datasets": [
+   "aws.sqs.otel"
+  ],
+  "query": {
+   "bool": {
+    "filter": [
+     {
+      "term": {
+       "Namespace": "AWS/SQS"
+      }
+     },
+     {
+      "exists": {
+       "field": "QueueName"
+      }
+     }
+    ],
+    "must_not": {
+     "terms": {
+      "_tier": [
+       "data_frozen",
+       "data_cold"
+      ]
+     }
+    }
+   }
+  },
+  "datafeeds": [
+   {
+    "id": "datafeed-aws_sqs_queue_backlog_anomaly",
+    "job_id": "aws_sqs_queue_backlog_anomaly",
+    "query": {
+     "bool": {
+      "filter": [
+       {
+        "term": {
+         "stat": "Average"
+        }
+       },
+       {
+        "terms": {
+         "MetricName": [
+          "ApproximateNumberOfMessagesVisible",
+          "ApproximateNumberOfMessagesNotVisible",
+          "ApproximateAgeOfOldestMessage"
+         ]
+        }
+       },
+       {
+        "exists": {
+         "field": "QueueName"
+        }
+       }
+      ]
+     }
+    },
+    "fields": [
+     "stat",
+     "MetricName",
+     "QueueName",
+     "cloud.account.id",
+     "cloud.region"
+    ],
+    "aggregated": true
+   }
+  ],
+  "jobs": [
+   {
+    "id": "aws_sqs_queue_backlog_anomaly",
+    "bucket_span": "15m",
+    "summary_count_field_name": "doc_count",
+    "detectors": [
+     {
+      "function": "high_mean",
+      "field": "metrics.amazonaws.com/AWS/SQS/ApproximateNumberOfMessagesVisible",
+      "by": "QueueName",
+      "over": null,
+      "partition": "cloud.region"
+     },
+     {
+      "function": "high_mean",
+      "field": "metrics.amazonaws.com/AWS/SQS/ApproximateNumberOfMessagesNotVisible",
+      "by": "QueueName",
+      "over": null,
+      "partition": "cloud.region"
+     },
+     {
+      "function": "high_mean",
+      "field": "metrics.amazonaws.com/AWS/SQS/ApproximateAgeOfOldestMessage",
+      "by": "QueueName",
+      "over": null,
+      "partition": "cloud.region"
+     }
+    ],
+    "influencers": [
+     "QueueName",
+     "cloud.region",
+     "cloud.account.id"
+    ]
+   }
+  ],
+  "fields": [
+   "Namespace",
+   "QueueName",
+   "metrics.amazonaws.com/AWS/SQS/ApproximateNumberOfMessagesVisible",
+   "cloud.region",
+   "metrics.amazonaws.com/AWS/SQS/ApproximateNumberOfMessagesNotVisible",
+   "metrics.amazonaws.com/AWS/SQS/ApproximateAgeOfOldestMessage",
+   "cloud.account.id",
+   "stat",
+   "MetricName"
+  ]
+ },
+ "kubernetes_otel-events-ml": {
+  "generators": [
+   "kubernetes_otel"
+  ],
+  "package": "kubernetes_otel",
+  "version": "2.6.1",
+  "id": "kubernetes_otel-events-ml",
+  "default_index": "logs-k8seventsreceiver.otel-*",
+  "index_mismatch": false,
+  "discovery_datasets": [
+   "kubeletstatsreceiver.otel",
+   "k8sobjectsreceiver.otel",
+   "k8seventsreceiver.otel",
+   "k8sclusterreceiver.otel"
+  ],
+  "query": {
+   "bool": {
+    "filter": [
+     {
+      "exists": {
+       "field": "k8s.event.reason"
+      }
+     }
+    ],
+    "must_not": {
+     "terms": {
+      "_tier": [
+       "data_frozen",
+       "data_cold"
+      ]
+     }
+    }
+   }
+  },
+  "datafeeds": [
+   {
+    "id": "datafeed-k8s_workload_event_anomaly",
+    "job_id": "k8s_workload_event_anomaly",
+    "query": {
+     "bool": {
+      "filter": [
+       {
+        "term": {
+         "severity_text": "Warning"
+        }
+       },
+       {
+        "exists": {
+         "field": "k8s.object.name"
+        }
+       }
+      ]
+     }
+    },
+    "fields": [
+     "severity_text",
+     "k8s.object.name"
+    ],
+    "aggregated": false
+   }
+  ],
+  "jobs": [
+   {
+    "id": "k8s_workload_event_anomaly",
+    "bucket_span": "15m",
+    "summary_count_field_name": null,
+    "detectors": [
+     {
+      "function": "high_non_zero_count",
+      "field": null,
+      "by": "k8s.event.reason",
+      "over": null,
+      "partition": "k8s.namespace.name"
+     }
+    ],
+    "influencers": [
+     "k8s.namespace.name",
+     "k8s.event.reason",
+     "k8s.object.name"
+    ]
+   }
+  ],
+  "fields": [
+   "k8s.event.reason",
+   "k8s.namespace.name",
+   "k8s.object.name",
+   "severity_text"
+  ]
+ },
+ "kubernetes_otel-metrics-ml": {
+  "generators": [
+   "kubernetes_otel"
+  ],
+  "package": "kubernetes_otel",
+  "version": "2.6.1",
+  "id": "kubernetes_otel-metrics-ml",
+  "default_index": "metrics-kubeletstatsreceiver.otel-*",
+  "index_mismatch": false,
+  "discovery_datasets": [
+   "kubeletstatsreceiver.otel",
+   "k8sobjectsreceiver.otel",
+   "k8seventsreceiver.otel",
+   "k8sclusterreceiver.otel"
+  ],
+  "query": {
+   "bool": {
+    "filter": [
+     {
+      "exists": {
+       "field": "k8s.pod.memory.working_set"
+      }
+     }
+    ],
+    "must_not": {
+     "terms": {
+      "_tier": [
+       "data_frozen",
+       "data_cold"
+      ]
+     }
+    }
+   }
+  },
+  "datafeeds": [
+   {
+    "id": "datafeed-k8s_workload_memory_anomaly",
+    "job_id": "k8s_workload_memory_anomaly",
+    "query": {
+     "bool": {
+      "filter": [
+       {
+        "exists": {
+         "field": "k8s.pod.memory.working_set"
+        }
+       }
+      ],
+      "should": [
+       {
+        "exists": {
+         "field": "k8s.deployment.name"
+        }
+       },
+       {
+        "exists": {
+         "field": "k8s.statefulset.name"
+        }
+       },
+       {
+        "exists": {
+         "field": "k8s.daemonset.name"
+        }
+       }
+      ],
+      "minimum_should_match": 1
+     }
+    },
+    "fields": [
+     "k8s.pod.memory.working_set",
+     "k8s.deployment.name",
+     "k8s.statefulset.name",
+     "k8s.daemonset.name"
+    ],
+    "aggregated": false
+   }
+  ],
+  "jobs": [
+   {
+    "id": "k8s_workload_memory_anomaly",
+    "bucket_span": "15m",
+    "summary_count_field_name": null,
+    "detectors": [
+     {
+      "function": "high_mean",
+      "field": "k8s.pod.memory.working_set",
+      "by": "k8s.deployment.name",
+      "over": null,
+      "partition": "k8s.namespace.name"
+     },
+     {
+      "function": "high_mean",
+      "field": "k8s.pod.memory.working_set",
+      "by": "k8s.statefulset.name",
+      "over": null,
+      "partition": "k8s.namespace.name"
+     },
+     {
+      "function": "high_mean",
+      "field": "k8s.pod.memory.working_set",
+      "by": "k8s.daemonset.name",
+      "over": null,
+      "partition": "k8s.namespace.name"
+     }
+    ],
+    "influencers": [
+     "k8s.deployment.name",
+     "k8s.statefulset.name",
+     "k8s.daemonset.name",
+     "k8s.namespace.name"
+    ]
+   }
+  ],
+  "fields": [
+   "k8s.pod.memory.working_set",
+   "k8s.deployment.name",
+   "k8s.namespace.name",
+   "k8s.statefulset.name",
+   "k8s.daemonset.name"
+  ]
+ }
+}

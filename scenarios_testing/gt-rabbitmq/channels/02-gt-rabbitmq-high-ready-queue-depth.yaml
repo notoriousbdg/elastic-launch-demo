@@ -1,0 +1,37 @@
+name: "GT rabbitmq_otel: high_ready_queue_depth"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-RABBITMQ-HIGH-READY-QUEUE-DEPTH
+sensor_type: impact_key_probe
+affected_services:
+  - gt-rabbitmq-aws-svc-1
+cascade_services:
+  - gt-rabbitmq-aws-svc-2
+description: "Tests impact_key high_ready_queue_depth on generator rabbitmq_otel."
+investigation_notes: |-
+  1. Verify rabbitmq_otel is active and reporting metrics.
+  2. Check that the high_ready_queue_depth metric has reached the trigger value (7500.0).
+  3. Confirm generator_impact for rabbitmq_otel.high_ready_queue_depth is set to 7500.0.
+  4. Look for correlated changes in service gt-rabbitmq-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_high_ready_queue_depth_baseline
+error_message: "GT-PROBE: gen=rabbitmq_otel key=high_ready_queue_depth value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=rabbitmq_otel
+  impact_key: high_ready_queue_depth
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 7500.0
+  svc_name: gt-rabbitmq-aws-svc-1
+rca_clues:
+  gt-rabbitmq-aws-svc-1:
+    probe.generator: rabbitmq_otel
+    probe.impact_key: high_ready_queue_depth
+    probe.trigger_value: 7500.0
+  gt-rabbitmq-aws-svc-2:
+    probe.upstream_generator: rabbitmq_otel
+    probe.upstream_key: high_ready_queue_depth
+generator_impact:
+  rabbitmq_otel:
+    high_ready_queue_depth: 7500.0

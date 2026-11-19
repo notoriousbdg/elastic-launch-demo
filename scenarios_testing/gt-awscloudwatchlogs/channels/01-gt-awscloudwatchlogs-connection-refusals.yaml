@@ -1,0 +1,37 @@
+name: "GT aws_cloudwatch_logs: connection_refusals"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-AWSCLOUDWATCHLOGS-CONNECTION-REFUSALS
+sensor_type: impact_key_probe
+affected_services:
+  - gt-awscloudwatchlogs-aws-svc-1
+cascade_services:
+  - gt-awscloudwatchlogs-aws-svc-2
+description: "Tests impact_key connection_refusals on generator aws_cloudwatch_logs."
+investigation_notes: |-
+  1. Verify aws_cloudwatch_logs is active and writing logs-aws_logs.* documents.
+  2. Check that the connection_refusals signal has reached the trigger value (120).
+  3. Confirm generator_impact for aws_cloudwatch_logs.connection_refusals is set to 120.
+  4. Look for correlated changes in service gt-awscloudwatchlogs-aws-svc-1 logs.
+  5. Restore by deactivating this channel and verifying the logs return to baseline.
+remediation_action: restore_connection_refusals_baseline
+error_message: "GT-PROBE: gen=aws_cloudwatch_logs key=connection_refusals value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=aws_cloudwatch_logs
+  impact_key: connection_refusals
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 120
+  svc_name: gt-awscloudwatchlogs-aws-svc-1
+rca_clues:
+  gt-awscloudwatchlogs-aws-svc-1:
+    probe.generator: aws_cloudwatch_logs
+    probe.impact_key: connection_refusals
+    probe.trigger_value: 120
+  gt-awscloudwatchlogs-aws-svc-2:
+    probe.upstream_generator: aws_cloudwatch_logs
+    probe.upstream_key: connection_refusals
+generator_impact:
+  aws_cloudwatch_logs:
+    connection_refusals: 120

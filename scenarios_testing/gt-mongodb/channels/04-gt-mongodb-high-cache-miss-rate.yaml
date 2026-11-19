@@ -1,0 +1,37 @@
+name: "GT mongodb_otel: high_cache_miss_rate"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-MONGODB-HIGH-CACHE-MISS-RATE
+sensor_type: impact_key_probe
+affected_services:
+  - gt-mongodb-aws-svc-1
+cascade_services:
+  - gt-mongodb-aws-svc-2
+description: "Tests impact_key high_cache_miss_rate on generator mongodb_otel."
+investigation_notes: |-
+  1. Verify mongodb_otel is active and reporting metrics.
+  2. Check that the high_cache_miss_rate metric has reached the trigger value (75.0).
+  3. Confirm generator_impact for mongodb_otel.high_cache_miss_rate is set to 75.0.
+  4. Look for correlated changes in service gt-mongodb-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_high_cache_miss_rate_baseline
+error_message: "GT-PROBE: gen=mongodb_otel key=high_cache_miss_rate value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=mongodb_otel
+  impact_key: high_cache_miss_rate
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 75.0
+  svc_name: gt-mongodb-aws-svc-1
+rca_clues:
+  gt-mongodb-aws-svc-1:
+    probe.generator: mongodb_otel
+    probe.impact_key: high_cache_miss_rate
+    probe.trigger_value: 75.0
+  gt-mongodb-aws-svc-2:
+    probe.upstream_generator: mongodb_otel
+    probe.upstream_key: high_cache_miss_rate
+generator_impact:
+  mongodb_otel:
+    high_cache_miss_rate: 75.0

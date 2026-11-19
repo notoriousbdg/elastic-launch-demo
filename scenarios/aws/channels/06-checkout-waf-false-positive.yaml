@@ -1,0 +1,148 @@
+name: Checkout Waf False Positive
+subsystem: storefront
+vehicle_section: storefront_pipeline
+error_type: WEB-WAF-FALSE-POSITIVE
+sensor_type: health_check
+affected_services: [storefront-web]
+cascade_services: [orders-gateway]
+
+description: >
+  An AWS WAF managed rule group update starts matching SQL injection signatures against legitimate checkout JSON payloads, so storefront-web checkout submissions are blocked at the edge.
+
+investigation_notes: |
+  1. Search body.text for *WEB-WAF-FALSE-POSITIVE* and read the terminating rule ({waf_rule_id}) and rule group ({waf_rule_group}) on the blocked requests.
+  2. Compare the WAF block share ({block_pct}% of {sampled_requests} sampled requests) against the baseline of under 1%; filter the WAF log on action=BLOCK and uri=/api/v1/orders (the checkout submit).
+  3. Inspect the matched payload field ({matched_field}): the blocked bodies are normal cart JSON containing apostrophes and SQL keywords (O'Neil, 'Select' apartments, 'or' in gift notes) in address and gift-note fields, not attack traffic.
+  4. Check CloudTrail for UpdateWebACL shortly before the block rate rose: the rule group statement now pins version {rule_group_version} (AWS only changes the version itself when the ACL tracks the default; here the pin was changed in the ACL).
+  5. Confirm the downstream effect: orders-gateway request volume drops while storefront-web shows checkout 403 responses from the WAF with no matching 5xx from the targets.
+  6. Confirm storefront.waf_blocked_checkout_requests_per_min is high while storefront.checkout_starts_per_min has fallen, and that the rule group version changed from Version_1.2 to {rule_group_version} just before.
+  7. Remediation: `opsctl rollback web-acl/awsorders-storefront --rule-group AWSManagedRulesSQLiRuleSet --to-revision previous` (Version_2.0 back to Version_1.2); UpdateWebACL re-pins the managed rule group to its previous version; the change propagates to the regional ACL in under a minute, blocks stop and checkout recovers in about 60 s.
+
+remediation_action: set_waf_rule_to_count
+remediation_command: |-
+  opsctl rollback web-acl/awsorders-storefront --rule-group AWSManagedRulesSQLiRuleSet --to-revision previous
+
+error_message: |
+  WEB-WAF-FALSE-POSITIVE: AWS WAF blocked checkout request web_acl={web_acl} rule={waf_rule_id} rule_group={waf_rule_group} matched_field={matched_field} block_pct={block_pct}
+
+stack_trace: |
+  === AWS WAF BLOCK REPORT ===
+  web_acl={web_acl}  scope=REGIONAL  region=us-east-1
+  --- TERMINATING RULE ---
+    rule_group={waf_rule_group}  version={rule_group_version}
+    rule={waf_rule_id}  action=BLOCK
+    matched_field={matched_field}  uri=/api/v1/orders
+  --- BLOCK IMPACT ---
+    sampled_requests={sampled_requests}  blocked_pct={block_pct}
+    storefront-web checkout_http_403={checkout_403_count}
+  --- ASSESSMENT ---
+    payload_class=legitimate_customer_json  attack_indicators=none
+  ACTION: set_rule_action=COUNT  alert=WEB-WAF-FALSE-POSITIVE
+
+infrastructure_events:
+  - offset_seconds: -90
+    body: '[CloudTrail] UpdateWebACL: web_acl=awsorders-storefront managed_rule_group=AWSManagedRulesSQLiRuleSet version=Version_2.0 previous_version=Version_1.2 region=us-east-1 event_source=wafv2.amazonaws.com'
+    severity: WARN
+    event_name: aws.cloudtrail.UpdateWebACL
+    service: storefront-web
+    attributes:
+      cloud.provider: aws
+      cloud.service: wafv2
+      aws.cloudtrail.event_name: UpdateWebACL
+      aws.waf.web_acl: awsorders-storefront
+      aws.waf.rule_group_version: Version_2.0
+      aws.waf.rule_group: AWSManagedRulesSQLiRuleSet
+      infrastructure.source: CloudTrail
+
+correlation_attr:
+  key: infra.waf_rule_group_version
+  value: AWSManagedRulesSQLiRuleSet-Version_2.0
+
+fault_params:
+  web_acl: awsorders-storefront
+  waf_rule_group: AWSManagedRulesSQLiRuleSet
+  waf_rule_id: SQLi_BODY
+  rule_group_version: Version_2.0
+  matched_field: {choice: [shipping_address.line2, gift_note, billing_name]}
+  block_pct: {randint: [38, 52]}
+  sampled_requests: {randint: [400, 1200]}
+  checkout_403_count: {randint: [150, 700]}
+
+rca_clues:
+  storefront-web:
+    waf.terminating_rule: SQLi_BODY
+    waf.block_pct: {randint: [38, 52]}
+    checkout.http_403_count: {randint: [150, 700]}
+  orders-gateway:
+    upstream.checkout_requests_dropped_pct: {randint: [30, 50]}
+    gateway.no_5xx_correlation: true
+
+business_impact:
+  - kpi: business.orders_per_min
+    value: {uniform: [120.9, 139.1], round: 0}
+  - kpi: business.revenue_usd_per_min
+    factor: {uniform: [0.4, 0.65]}
+  - kpi: business.error_rate_pct
+    factor: {uniform: [3.0, 6.0]}
+
+generator_impact:
+  aws_waf_otel:
+    block_rate: 0.45
+    records_per_cycle: 80
+# the package streams keep the fault while the scenario's own metrics converge
+generator_hold_seconds: {aws_waf_otel: 60}
+
+cascade_messages:
+  orders-gateway:
+    - severity: WARN
+      message: '[gateway] POST /api/v1/orders volume from storefront-web down sharply versus the 5m baseline; no upstream errors, requests are not reaching the gateway'
+service_lag_seconds:
+  orders-gateway: 15
+fault_scope:
+  cluster: awsorders-eks-use1
+  workloads: [storefront-web]
+remediation_effects:
+  transition_seconds: 60
+  log_events:
+    - service: orders-gateway
+      severity: INFO
+      offset_seconds: 1
+      body: 'cloudtrail: eventSource=wafv2.amazonaws.com eventName=UpdateWebACL userIdentity={actor} requestParameters.name=awsorders-storefront requestParameters.ruleGroup=AWSManagedRulesSQLiRuleSet requestParameters.revision=previous errorCode=none'
+      attributes:
+        operation: command
+        command.target: web-acl/awsorders-storefront
+        aws.cloudtrail.event_name: UpdateWebACL
+    - service: storefront-web
+      severity: INFO
+      offset_seconds: 30
+      body: '[storefront] web_acl=awsorders-storefront rule_group=AWSManagedRulesSQLiRuleSet version=Version_1.2 propagated; POST /api/v1/orders no longer blocked'
+      attributes:
+        operation: waf_update
+        aws.waf.rule_group_version: Version_1.2
+  steady_attributes:
+    storefront-web:
+      aws.waf.rule_group_version: Version_1.2
+  verification:
+    - signal: storefront.waf_blocked_checkout_requests_per_min
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "storefront-web"'
+      field: 'metrics.storefront.waf_blocked_checkout_requests_per_min'
+      expect: 'back in 0-3 (was 40-100)'
+      within_seconds: 90
+    - signal: storefront.checkout_starts_per_min
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "storefront-web"'
+      field: 'metrics.storefront.checkout_starts_per_min'
+      expect: 'back in 40-260 (was 60-105)'
+      within_seconds: 90
+    - signal: WEB-WAF-FALSE-POSITIVE lines
+      from: 'logs.otel.awsorders'
+      where: 'body.text LIKE "*WEB-WAF-FALSE-POSITIVE*"'
+      expect: '0 new lines'
+      within_seconds: 90
+    - signal: WAF managed rule group version
+      from: 'logs.otel.awsorders'
+      where: 'resource.attributes.service.name == "storefront-web"'
+      field: 'attributes.aws.waf.rule_group_version'
+      expect: 'Version_1.2 on every line since the fix; Version_2.0 stops appearing'
+      within_seconds: 90

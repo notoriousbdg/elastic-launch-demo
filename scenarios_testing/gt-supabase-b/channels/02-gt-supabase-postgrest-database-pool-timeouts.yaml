@@ -1,0 +1,37 @@
+name: "GT supabase_otel: postgrest_database_pool_timeouts"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-SUPABASE-POSTGREST-DATABASE-POOL-TIMEOUTS
+sensor_type: impact_key_probe
+affected_services:
+  - gt-supabase-b-aws-svc-1
+cascade_services:
+  - gt-supabase-b-aws-svc-2
+description: "Tests impact_key postgrest_database_pool_timeouts on generator supabase_otel."
+investigation_notes: |-
+  1. Verify supabase_otel is active and reporting metrics.
+  2. Check that the postgrest_database_pool_timeouts metric has reached the trigger value (3.0).
+  3. Confirm generator_impact for supabase_otel.postgrest_database_pool_timeouts is set to 3.0.
+  4. Look for correlated changes in service gt-supabase-b-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_postgrest_database_pool_timeouts_baseline
+error_message: "GT-PROBE: gen=supabase_otel key=postgrest_database_pool_timeouts value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=supabase_otel
+  impact_key: postgrest_database_pool_timeouts
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 3.0
+  svc_name: gt-supabase-b-aws-svc-1
+rca_clues:
+  gt-supabase-b-aws-svc-1:
+    probe.generator: supabase_otel
+    probe.impact_key: postgrest_database_pool_timeouts
+    probe.trigger_value: 3.0
+  gt-supabase-b-aws-svc-2:
+    probe.upstream_generator: supabase_otel
+    probe.upstream_key: postgrest_database_pool_timeouts
+generator_impact:
+  supabase_otel:
+    postgrest_database_pool_timeouts: 3.0

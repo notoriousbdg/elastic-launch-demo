@@ -9,36 +9,42 @@ affected_services:
 cascade_services:
 - clinical-alerts
 - ehr-system
-description: PACS archive storage capacity approaching critical threshold, risking image loss
+description: PACS archive persistent volume free space approaching critical threshold, risking image loss
 investigation_notes: |-
-  Root Cause: PACS storage volumes fill when DICOM image retention policies are not enforced, modality worklists generate excessive preliminary/secondary capture images, or archive migration jobs to long-term storage (VNA) have stalled. High-resolution modalities (CT, MRI) consume 500MB-2GB per study.
-  Remediation: 1) Check the archive migration job status: `pacs-admin archive-status --volume {volume_id}`. 2) Trigger emergency archive migration to VNA: `pacs-admin migrate --volume {volume_id} --older-than 90d --destination VNA-TIER2`. 3) Identify and purge orphaned DICOM objects: `pacs-admin cleanup --volume {volume_id} --orphans-only`. 4) Expand the volume if migration is insufficient: `pacs-admin volume-expand --volume {volume_id} --add-tb 10`. 5) Review retention policies per radiology department guidelines. 6) Enable DICOM compression (JPEG2000 lossless) for new studies to reduce storage consumption.
+  Root cause: the nightly pacs-vna-migration job moves studies older than 90 days from PACS-VOL-01 to the VNA tier. Its schedule was suspended for a VNA maintenance window three days ago and never resumed, so the last successful run was 71-73 hours ago. The volume kept filling at its normal rate and is now at {usage_pct}% against the {threshold_pct}% threshold, with {remaining_gb}GB left on {volume_id}. Study ingest and the secondary capture ratio are normal, so no runaway modality is filling the disk.
+  Confirm:
+    - imaging-service logs [PACS] archive_migration job=pacs-vna-migration state=SUSPENDED last_success_h=71-73 volume=PACS-VOL-01 ... status=CRITICAL (attributes.pacs.archive_job_state, attributes.pacs.archive_migration_last_success_h)
+    - metric imaging.pacs_storage_used_pct climbs from 76-80% past 85% toward 94%
+    - the imaging-service line "job pacs-vna-migration skipped (schedule suspended ...)" comes before the first capacity alarm
+  Remediation: two steps. opsctl patch schedule/pacs-vna-migration --suspend false resumes the nightly schedule, and opsctl run job/pacs-vna-migration starts a run now. As studies move to the VNA, usage falls back under 85% within about 2.5 minutes and to about 79% within 4 minutes; the job shows RUNNING and then SCHEDULED. Expanding the volume or purging studies is wrong: the data belongs on the VNA tier, and purging images breaks retention rules.
 remediation_action: expand_pacs_storage
 error_message: '[PACS] PACS-CAPACITY-CRITICAL: volume={volume_id} usage={usage_pct}% threshold={threshold_pct}% remaining={remaining_gb}GB'
 stack_trace: |-
   === PACS STORAGE VOLUME REPORT ===
   ------------------------------------------------------------------------
-  VOLUME          | TOTAL TB | USED TB | FREE GB | USAGE% | STATUS
+  VOLUME          | TOTAL TB | FREE GB | USAGE% | STATUS
   ------------------------------------------------------------------------
-  {volume_id:15s} | 50.0     | {usage_pct}%  | {remaining_gb}    | {usage_pct}%  | CRITICAL
-  PACS-VOL-02     | 50.0     | 72.3%   | 13850   | 72.3%  | OK
-  PACS-ARCHIVE-01 | 200.0    | 65.1%   | 69800   | 65.1%  | OK
+  {volume_id:15s} | 5.0      | {remaining_gb}     | {usage_pct}%  | CRITICAL
+  PACS-VOL-02     | 50.0     | 13850   | 72.3%  | OK
+  PACS-ARCHIVE-01 | 200.0    | 69800   | 65.1%  | OK
   ------------------------------------------------------------------------
   PACS-CAPACITY-CRITICAL: {volume_id} at {usage_pct}% (threshold: {threshold_pct}%)
   Remaining: {remaining_gb}GB — estimated time to full: <48 hours
   Action required: archive migration or volume expansion
 correlation_attr:
-  key: infra.pacs_storage_controller
-  value: netapp-ontap-9.14.1-patch
+  key: pacs.archive_job_state
+  value: SUSPENDED
 fault_params:
-  volume_id: {choice: [PACS-VOL-01, PACS-VOL-02, PACS-ARCHIVE-01]}
-  usage_pct: {uniform: [88.0, 98.5], round: 1}
+  volume_id: PACS-VOL-01
+  usage_pct: {uniform: [93.0, 95.0], round: 1}
   threshold_pct: 85.0
-  remaining_gb: {randint: [50, 500]}
+  remaining_gb: {randint: [250, 350]}
 rca_clues:
   imaging-service:
     pacs.archive_migration_stalled: true
-    pacs.volume_fill_rate_gb_day: {uniform: [50, 200], round: 0}
+    pacs.archive_migration_last_success_h: {randint: [70, 74]}
+    pacs.secondary_capture_ratio_pct: {uniform: [2, 5], round: 1}
+    pacs.volume_fill_rate_gb_day: {uniform: [250, 600], round: 0}
   data-warehouse:
     etl.imaging_archive_full: true
     etl.vna_migration_pending: {randint: [500, 5000]}
@@ -46,6 +52,84 @@ rca_clues:
     alerts.storage_critical_fired: true
   ehr-system:
     ehr.new_study_routing: blocked
+remediation_command: |-
+  opsctl patch schedule/pacs-vna-migration --suspend false
+  opsctl run job/pacs-vna-migration
+error_services: [imaging-service]
+generator_hold_seconds:
+  kubernetes_otel: 240
+service_lag_seconds:
+  data-warehouse: 30
+  clinical-alerts: 20
+  ehr-system: 40
+cascade_messages:
+  data-warehouse:
+    - severity: WARN
+      message: '[DW] vna_migration_pending volume={volume_id} usage={usage_pct}%; imaging archive ETL waiting on the VNA tier'
+  clinical-alerts:
+    - severity: WARN
+      message: '[CDS] storage_critical volume={volume_id} usage={usage_pct}% remaining={remaining_gb}GB; radiology notified'
+  ehr-system:
+    - severity: WARN
+      message: '[EHR] imaging_routing_warning volume={volume_id} remaining={remaining_gb}GB; new studies may be delayed'
+fault_scope:
+  workloads: [imaging-service]
+infrastructure_events:
+  - service: imaging-service
+    severity: WARN
+    offset_seconds: -120
+    body: '[PACS] scheduler: job pacs-vna-migration skipped (schedule suspended since CHG0031740 by imaging-it, 3 days ago); last_success_h=71'
+    attributes:
+      user.name: imaging-it
+      change.request: CHG0031740
+      operation: schedule_skip
+      pacs.archive_job_state: SUSPENDED
+      change.summary: 'pacs-vna-migration schedule: suspended for VNA maintenance, not resumed'
+remediation_effects:
+  log_taper_seconds: 180
+  log_events:
+    - service: imaging-service
+      severity: INFO
+      offset_seconds: 1
+      body: '[CHG] CHANGE IMPLEMENTED opsctl patch schedule/pacs-vna-migration --suspend false by {actor}: nightly VNA migration schedule resumed'
+      attributes:
+        operation: change_implemented
+        change.target: schedule/pacs-vna-migration
+    - service: imaging-service
+      severity: INFO
+      offset_seconds: 2
+      body: '[CHG] CHANGE IMPLEMENTED opsctl run job/pacs-vna-migration by {actor}: migration started PACS-VOL-01 -> VNA-TIER2'
+      attributes:
+        operation: change_implemented
+        change.target: job/pacs-vna-migration
+    - service: imaging-service
+      severity: INFO
+      offset_seconds: 30
+      body: '[PACS] archive_migration state=RUNNING volume=PACS-VOL-01 target=VNA-TIER2: moving studies older than 90 days'
+      attributes:
+        operation: archive_migration
+        pacs.archive_job_state: RUNNING
+  steady_attributes:
+    imaging-service:
+      pacs.archive_schedule: active
+  verification:
+    - signal: imaging.pacs_storage_used_pct
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "imaging-service"'
+      field: 'metrics.imaging.pacs_storage_used_pct'
+      expect: 'falling steadily and back under 85% (was 93-95%) within about 2.5 minutes, about 79% after 4 minutes'
+      within_seconds: 300
+    - signal: PACS-CAPACITY-CRITICAL lines
+      from: 'logs.otel.healthcare'
+      where: 'body.text LIKE "*PACS-CAPACITY-CRITICAL*"'
+      expect: '0 new lines once the volume is back under the threshold'
+      within_seconds: 300
+    - signal: pacs.archive_job_state
+      from: 'logs.otel.healthcare'
+      where: 'resource.attributes.service.name == "imaging-service"'
+      field: 'attributes.pacs.archive_job_state'
+      expect: 'RUNNING, then SCHEDULED, on the archive_migration lines; SUSPENDED stops appearing'
+      within_seconds: 120
 business_impact:
   - kpi: business.imaging_worklist_size
     factor: {uniform: [2.0, 4.5]}
@@ -55,3 +139,6 @@ business_impact:
     factor: {uniform: [0.30, 0.60]}
   - kpi: business.patient_safety_events_per_min
     factor: {uniform: [1.5, 3.0]}
+generator_impact:
+  kubernetes_otel:
+    persistent_volume_space_low: 10.0

@@ -1,0 +1,37 @@
+name: "GT redisenterprise_otel: database_unexpected_key_evictions"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-REDISENTERPRISE-DATABASE-UNEXPECTED
+sensor_type: impact_key_probe
+affected_services:
+  - gt-redisenterprise-aws-svc-1
+cascade_services:
+  - gt-redisenterprise-aws-svc-2
+description: "Tests impact_key database_unexpected_key_evictions on generator redisenterprise_otel."
+investigation_notes: |-
+  1. Verify redisenterprise_otel is active and reporting metrics.
+  2. Check that the database_unexpected_key_evictions metric has reached the trigger value (50.0).
+  3. Confirm generator_impact for redisenterprise_otel.database_unexpected_key_evictions is set to 50.0.
+  4. Look for correlated changes in service gt-redisenterprise-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_database_unexpected_key_evictions_baseline
+error_message: "GT-PROBE: gen=redisenterprise_otel key=database_unexpected_key_evictions value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=redisenterprise_otel
+  impact_key: database_unexpected_key_evictions
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 50.0
+  svc_name: gt-redisenterprise-aws-svc-1
+rca_clues:
+  gt-redisenterprise-aws-svc-1:
+    probe.generator: redisenterprise_otel
+    probe.impact_key: database_unexpected_key_evictions
+    probe.trigger_value: 50.0
+  gt-redisenterprise-aws-svc-2:
+    probe.upstream_generator: redisenterprise_otel
+    probe.upstream_key: database_unexpected_key_evictions
+generator_impact:
+  redisenterprise_otel:
+    database_unexpected_key_evictions: 50.0

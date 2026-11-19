@@ -36,10 +36,14 @@ subsystem: payments                # short functional area
 language: java                     # python | java | go | dotnet | rust | cpp
 generates_traces: true             # optional; false for infra-only services (no trace spans)
 # ── Topology ───────────────────────────────────────────────────────────────
-topology:                          # outbound calls this service makes
+topology:                          # outbound calls this service makes. Every callee MUST be a defined
+                                   # service (services/<callee>.yaml) - never an external system like a card
+                                   # network; model those as db_operations or log attrs (Check 10b)
   - [fraud-detector, /api/v1/fraud/check, POST]
   - [settlement-processor, /api/v1/settle, POST]
-entry_endpoints:                   # inbound API endpoints (seeds root trace spans)
+entry_endpoints:                   # inbound API endpoints (seeds root trace spans). Give EVERY traced
+                                   # (non-database) service these: a fault channel's affected_services must
+                                   # include an entry service or the ops dashboard never reacts (Check 31)
   - [/api/v1/payment/charge, POST]
   - [/api/v1/payment/status, GET]
 db_operations:                     # DB calls (seeds DB trace spans)
@@ -80,7 +84,7 @@ steps:                             # ordered list; executed once per generate_te
 | Value spec | Resolves to |
 |---|---|
 | `{var: name}` | Current value of sample var or state key `name` |
-| `{expr: "python_expr"}` | Sandboxed Python eval; env includes all vars, state, constants, `rand`, `active` |
+| `{expr: "python_expr"}` | Sandboxed Python eval; env includes all vars, state, constants, `rand`, `active`, `all_active`, `fixed_channels` (see Realism additions) |
 | `{if_active: spec, else: spec}` | First spec during a fault, second spec nominally |
 | `{choice: [a, b, c]}` | `random.choice` — list literal or name of a constant list |
 | `{randint: [lo, hi]}` | `random.randint(lo, hi)` |
@@ -90,6 +94,55 @@ steps:                             # ordered list; executed once per generate_te
 | scalar | Literal string / int / float / bool |
 
 State init specs: `{init: 0}`, `{init: now}`, `{init_per_key: {keys_from: CONST, spec: value_spec}}`.
+
+### Realism additions (schema 1.3)
+
+Reference: `scenarios/k8splatform/services/` (`kubelet.yaml`, `ingress-nginx.yaml`, `kube-apiserver.yaml`).
+
+- **`when: "<expr>"` on any step.** The step runs only when the expression is true, e.g. `when: "13 in all_active"` to log extra reload lines while channel 13's fault is active, or `when: "20 not in all_active"`.
+- **`scope:` on a `log` step.** Narrows the pod or node the record comes from, with the same keys as a channel's `fault_scope`.
+- **`log_identity: pod | node | cluster`** (top level, default `pod`). With a pinned `k8s_topology`, each record takes the resource identity of a pod of the workload mapped to the service; `node` services (kubelet, kernel, journald) rotate across nodes; `cluster` services (a managed control plane such as the EKS API server) carry only the cluster and cloud attributes. `log_identity_pools: [pool, ...]` limits `node` services to some pools outside a fault.
+- **Expression environment.** Besides `active` / `active_channels` (faults affecting this service): `all_active` (every active channel), `fixed_channels` (channels whose `remediation_effects` were applied, so a service can render post-fix values), `elapsed` (`{ch: seconds since trigger}`), `since_fix` (`{ch: seconds since the fix landed}`), `applied` (`{"kind/name": {flag: value, "_verb": verb}}`, the latest applied opsctl flags per target, for any command, fix or not), `pod_ips` (`{workload: [ip, ...]}`), `node_names`, and timestamps `klog_time`, `iso_now`, `epoch_now`. Log messages may also use the runtime placeholders listed in channels.md (`{self_node}`, `{self_pod_ip}`, `{node_count}`, `{klog_time}`, `{nginx_time}`...).
+- **Before / during / after.** See the next section.
+- **Real log formats.** Write each line in the component's own format (klog, nginx, CoreDNS, logfmt, JSON) and no demo bookkeeping attributes. `with_remediation_meta` is still accepted on older specs but no longer stamps anything.
+
+### Before / during / after
+
+Each channel's signal metric reads three ways, fault first, so Nightshift sees the deviation (to find the fault) and the convergence (to confirm the fix). A 1.2-style service that only reads `active` looks the same in all three phases.
+
+| Phase | Condition | Value |
+|---|---|---|
+| During | `N in all_active` | out of band, ramped in with `min(1.0, elapsed.get(N, 0) / <ramp_s>)` |
+| After | `N in fixed_channels` | converging from the fault value to baseline with `min(1.0, since_fix.get(N, 0) / <recovery_s>)` |
+| Before | otherwise | baseline |
+
+The configuration the fix changes (active unit, firmware revision, mode) goes on the subsystem's status log as an attribute keyed on `fixed_channels`, or on `applied` when it should follow the opsctl command itself (a wrong unit selected shows the wrong unit). The channel's `remediation_effects.verification` names that metric (`from: metrics-generic.otel-default`, `field: metrics.<name>`) and attribute (`from: logs.otel.<ns>`); Check 41 warns when no service emits them.
+
+Example (after `scenarios/space/services/fuel-system.yaml`, channel 2):
+
+```yaml
+- sample:
+    lox_pressure_val:
+      expr: "round(265.0 + (rand.uniform(150.0, 195.0) - 265.0) * min(1.0, elapsed.get(2, 0) / 45.0), 2) if 2 in all_active
+        else (round(172.0 + (rand.uniform(250.0, 280.0) - 172.0) * min(1.0, since_fix.get(2, 0) / 60.0), 2) if 2 in fixed_channels
+        else round(rand.uniform(245.0, 285.0), 2)"
+    lox_status:
+      expr: "'ANOMALY' if 2 in all_active or lox_pressure_val < 240.0 else 'NOMINAL'"
+    reg_a_fw:
+      expr: "'fw-4.2.0-rc1' if 2 in all_active else 'fw-4.1.7'"
+- metric:
+    name: fuel_system.lox_pressure
+    value: {var: lox_pressure_val}
+    unit: PSI
+- log:
+    level: INFO
+    message: '[PMS] sensor=lox_pressure tank=LOX-1 reading={lox_pressure_val}PSI firmware={reg_a_fw} status={lox_status}'
+    attrs:
+      sensor.status: {var: lox_status}
+      infra.firmware_rev: {var: reg_a_fw}
+```
+
+To follow the command rather than the fix (for example which redundant unit is selected): `expr: "applied.get('link/x-band', {}).get('active', 'xb-primary')"`.
 
 ### Example: request service
 
@@ -167,8 +220,13 @@ steps:
 
 ### `incr_key` step
 
+The state key **must be a dict** — initialise it with `{init: {}}` or `init_per_key`. `{init: 0}` (a scalar, as
+used by `counter`) crashes the service loop on every tick with `AttributeError: 'int' object has no attribute 'get'`
+(Check 33).
+
 ```yaml
 state:
+  _refunds: {init: {}}                      # per-key counter that starts empty
   _seq: {init_per_key: {keys_from: STREAMS, spec: {randint: [1000000, 5000000]}}}
 
 steps:

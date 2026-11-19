@@ -8,43 +8,126 @@ affected_services:
 cascade_services:
 - scada-gateway
 - oee-analytics
-description: Historian write lag exceeds threshold; risks dropping OT tag data on the floor
+description: The historian's EBS data volume was rightsized to gp3 baseline throughput; compactions saturate the volume, the write path backs up and OT tag data risks being dropped
 investigation_notes: |-
-  Root Cause: Backpressure occurs when the disk-write throughput on the historian archive volume falls below the incoming tag rate — usually due to a stuck compaction job, a snapshot operation blocking the write path, or a degraded RAID volume. Persistent lag risks the in-memory buffer cycling out un-archived points.
-  Remediation: 1) Check disk I/O: `iostat -x 1 5` on `mfg-historian-host`. 2) Check compaction job status: `historian-admin compaction-status`. 3) Pause non-essential snapshots: `historian-admin pause-snapshot --duration 15m`. 4) Force a buffer flush to a secondary volume if available: `historian-admin failover-write --target AR-SECONDARY`. 5) Open an infrastructure ticket if the disk SMART status shows degraded.
+  Root cause: the ot-historian data volume (PVC historian-data-ot-historian-0, EBS gp3) was modified from 500 MiB/s and 6000 IOPS to the gp3 baseline of 125 MiB/s and 3000 IOPS shortly before the first OT-HISTORIAN-BACKPRESSURE, by a cost-rightsizing change (CHG-7360). The average write load fits in 125 MiB/s, but TSM compactions read and rewrite whole shards, so the volume sits at its throughput cap: disk await goes from a few ms to 60-140 ms, compactions queue up, and the write path ({archive_id}) falls behind. The ingest rate itself is normal (about 1,200 points/s from scada-gateway), no snapshot is running, and the EBS volume reports no impairment: the volume is slow because of its configured limit, not because it is failing.
+  Confirm:
+    - ot-historian storage lines show throughput_mibs=125 and iops=3000 (attributes.historian.volume_throughput_mibs); metric historian.disk_throughput_mibs is flat at about 125 and historian.disk_await_ms rises from 2-6 ms to 60-140 ms
+    - the ot-historian ModifyVolume line (CHG-7360) comes before the first backpressure line
+    - historian.write_lag_seconds rises from under 1 s to 12-45 s and historian.buffer_utilization_pct from 10-25% to 76-99%; the InfluxDB integration stream shows the compaction queue growing and storage writer timeouts
+    - scada.tag_update_rate_per_s on scada-gateway is normal, which rules out a tag storm
+  Remediation: restore the volume's provisioned performance with opsctl patch volume/historian-data --throughput 500 --iops 6000. EBS applies the modification while the volume stays attached (state optimizing); throughput is available within about a minute, compactions catch up and the write buffer drains over about 90 s. A buffer flush or failover to another archive would not help while the volume is capped.
 remediation_action: drain_historian_buffer
-error_message: '[HIST] OT-HISTORIAN-BACKPRESSURE: archive={archive_id} buffer_depth={buffer_depth} write_lag_s={write_lag_s}
-  threshold=10s'
+remediation_command: |-
+  opsctl patch volume/historian-data --throughput 500 --iops 6000
+error_message: '[HIST] OT-HISTORIAN-BACKPRESSURE: archive={archive_id} buffer_depth={buffer_depth}/50000 write_lag_s={write_lag_s} threshold=10s disk_await_ms={disk_await_ms} compactions_queued={compactions_queued}'
 stack_trace: |-
   === HISTORIAN WRITE PIPELINE STATUS ===
-  Archive: {archive_id} | Buffer: {buffer_depth}/50000 (high watermark)
+    Archive: {archive_id} | Buffer: {buffer_depth}/50000 (high watermark)
+    Volume: historian-data (EBS gp3, throughput 125 MiB/s, 3000 IOPS)
   ------------------------------------------------------------------------
   STAGE              | STATUS    | LAG (s)  | THROUGHPUT
   ------------------------------------------------------------------------
-  ingest_queue        | OK        | 0.1      | 4200 pts/s
+  ingest_queue        | OK        | 0.1      | 1200 pts/s
   buffer_to_archive   | DEGRADED  | {write_lag_s}      | 350 pts/s
-  compaction          | STALLED   | --       | 0 pts/s
+  compaction          | QUEUED    | --       | {compactions_queued} queued (volume at throughput limit)
   ------------------------------------------------------------------------
   OT-HISTORIAN-BACKPRESSURE: write lag {write_lag_s}s; buffer at {buffer_depth}/50000
 correlation_attr:
-  key: infra.historian_storage_volume
-  value: ar-current-vol-degraded
+  key: historian.volume_throughput_mibs
+  value: '125'
 fault_params:
-  archive_id: {choice: [AR-CURRENT, AR-DAILY-01, AR-DAILY-02]}
-  buffer_depth: {randint: [38000, 50000]}
-  write_lag_s: {randint: [8, 45]}
+  archive_id: AR-CURRENT
+  buffer_depth: {randint: [38000, 49500]}
+  write_lag_s: {randint: [12, 45]}
+  disk_await_ms: {randint: [60, 140]}
+  compactions_queued: {randint: [12, 30]}
 rca_clues:
   ot-historian:
-    historian.write_lag_s: {randint: [8, 45]}
-    historian.compaction_status: stalled
+    historian.compaction_status: queued
+    historian.volume_type: gp3
+    historian.snapshot_active: false
+    historian.ingest_rate_pts_s: {randint: [1100, 1300]}
   scada-gateway:
     scada.write_retry_count: {randint: [10, 200]}
   oee-analytics:
     oee.tag_feed_lag_s: {randint: [5, 30]}
+cascade_messages:
+  scada-gateway:
+    - severity: WARN
+      message: '[SCADA] historian_write POST /api/v1/historian/tag-write -> 429 Too Many Requests (Retry-After: 2); store-and-forward buffer holding tag updates'
+  oee-analytics:
+    - severity: WARN
+      message: '[OEE] tag_feed from ot-historian {write_lag_s}s behind; current window marked provisional'
+fault_scope:
+  cluster: mfg-eks-cluster
+  workloads: [ot-historian]
+infrastructure_events:
+  - service: ot-historian
+    severity: INFO
+    offset_seconds: -180
+    body: '[EBS] ModifyVolume volume=vol-0c4e9a7d21b3f5e86 pvc=historian-data-ot-historian-0 type=gp3 throughput 500 -> 125 MiB/s iops 6000 -> 3000 modificationState=optimizing; requested by finops-rightsizing (CHG-7360)'
+    attributes:
+      operation: config_change
+      user.name: finops-rightsizing
+      change.request: CHG-7360
+      historian.volume_throughput_mibs: 125
+      change.summary: 'historian-data gp3: 500 MiB/s, 6000 IOPS -> 125 MiB/s, 3000 IOPS'
+service_lag_seconds:
+  scada-gateway: 20
+  oee-analytics: 40
+remediation_effects:
+  log_events:
+    - service: ot-historian
+      severity: INFO
+      offset_seconds: 1
+      body: '[CHG] CHANGE APPLIED opsctl patch volume/historian-data --throughput 500 --iops 6000 by {actor}: ModifyVolume vol-0c4e9a7d21b3f5e86 gp3 throughput 125 -> 500 MiB/s, iops 3000 -> 6000'
+      attributes:
+        operation: change_applied
+        change.target: volume/historian-data
+    - service: ot-historian
+      severity: INFO
+      offset_seconds: 90
+      body: '[HIST] write pipeline caught up: buffer 18% write_lag 0.6 s compactions_queued 2'
+      attributes:
+        operation: buffer_status
+  steady_attributes:
+    ot-historian:
+      historian.volume_throughput_mibs: 500
+  log_taper_seconds: 30
+  verification:
+    - signal: historian.disk_await_ms
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "ot-historian"'
+      field: 'metrics.historian.disk_await_ms'
+      expect: 'back under 10 ms (was 60-140 ms)'
+      within_seconds: 120
+    - signal: historian.write_lag_seconds
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "ot-historian"'
+      field: 'metrics.historian.write_lag_seconds'
+      expect: 'back under 1 s (was 12-45 s)'
+      within_seconds: 150
+    - signal: OT-HISTORIAN-BACKPRESSURE lines
+      from: 'logs.otel.mfg'
+      where: 'body.text LIKE "*OT-HISTORIAN-BACKPRESSURE*"'
+      expect: '0 new lines'
+      within_seconds: 120
+    - signal: historian volume throughput
+      from: 'logs.otel.mfg'
+      where: 'resource.attributes.service.name == "ot-historian" AND body.text LIKE "*storage volume=historian-data*"'
+      field: 'attributes.historian.volume_throughput_mibs'
+      expect: '500 on every line logged since the fix; 125 stops appearing'
+      within_seconds: 60
 business_impact:
   - kpi: business.oee_overall_pct
-    factor: {uniform: [0.40, 0.70]}
+    factor: {uniform: [0.4, 0.7]}
   - kpi: business.throughput_units_per_hour
-    factor: {uniform: [0.45, 0.75]}
+    value: {uniform: [273.65, 314.85]}
   - kpi: business.unplanned_downtime_min_per_shift
-    factor: {uniform: [1.5, 3.0]}
+    value: {uniform: [57.1, 65.7], round: 1}
+generator_impact:
+  influxdb_otel:
+    compaction_queue_backlog: 25.0
+    storage_writer_timeouts: 5.0
+generator_hold_seconds: {influxdb_otel: 90}

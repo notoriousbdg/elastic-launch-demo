@@ -9,61 +9,132 @@ affected_services:
 cascade_services:
 - claims-processor
 - policy-manager
-description: Document upload and digital storage service failing affecting claims photos and policy documents
+description: Member document uploads fail because the document vault reaches its storage account over the public endpoint, which the storage firewall denies.
 investigation_notes: |-
-  1. Check S3 upload failure type: S3_WRITE_TIMEOUT indicates network latency to S3 endpoint — verify VPC endpoint configuration and S3 gateway endpoint health in us-east-1.
-  2. BUCKET_QUOTA_EXCEEDED means storage limits hit — check bucket metrics: aws s3api head-bucket --bucket banking-member-docs-prod. Request quota increase or implement lifecycle policy for old documents.
-  3. ENCRYPTION_KEY_ERROR indicates KMS key access issue — verify the document-vault service role has kms:GenerateDataKey and kms:Decrypt permissions. Check KMS key rotation status.
-  4. PII detection pipeline is working (ssn=REDACTED, dob=REDACTED) but uploads are blocking at S3. With 2,847 queued documents and oldest pending 12min, enable local cache fallback to prevent data loss.
-  5. Critical document types: DD214_DISCHARGE and COE_VA_LOAN uploads are time-sensitive for member benefits. Flag these for priority retry when S3 recovers.
-  6. Check virus_scan throughput — ClamAV scanning should not be the bottleneck but verify: kubectl logs -l app=document-vault --tail=100 | grep 'virus_scan' | grep -c 'TIMEOUT'.
-remediation_action: restart_document_service
-error_message: '[DOC] DOC-UPLOAD-FAIL: upload={upload_id} type={doc_type} size_mb={doc_size_mb} member={member_id} error={upload_error}'
+  1. Search logs.otel.banking for body.text containing DOC-UPLOAD-FAIL on document-vault: upload={upload_id} ({doc_type}, {doc_size_mb} MB) fails with error={upload_error} ({http_status}). metrics.document_vault.upload_success_pct normally reads 99.5-99.95% and is near zero, and metrics.document_vault.upload_queue_depth is growing.
+  2. Look at where the requests go: the storage_health line on document-vault carries attributes.document.blob_endpoint_ip and attributes.document.blob_endpoint_resolution. banking-docs-prod.blob.core.windows.net now resolves to the public address {public_ip} instead of the private endpoint 10.3.8.14. The storage account has public network access disabled, so every request from the public path is refused with 403 AuthorizationFailure.
+  3. Rule out credentials and the service: the managed identity token is valid and has Storage Blob Data Contributor, virus scanning and PII redaction complete normally, and reads from the same container also fail, which points at the network path rather than permissions on one blob.
+  4. Find the change: the virtual network link between private DNS zone privatelink.blob.core.windows.net and banking-aks-vnet was deleted by a networking Terraform refactor shortly before the first failure. Without the link, the AKS nodes resolve the public record. Enabling public network access on the storage account would expose member PII and is not acceptable.
+  5. Fix: opsctl restore private-dns-link/privatelink-blob-aks-eastus --vnet banking-aks-vnet. Name resolution switches back to 10.3.8.14 once the cached public answer expires (record TTL 60 s); uploads succeed again and the queue drains over about three minutes.
+  6. Recovery: document.blob_endpoint_resolution reads private-endpoint and blob_endpoint_ip 10.3.8.14, upload_success_pct back above 99.5%, upload_queue_depth draining toward zero, and no new DOC-UPLOAD-FAIL lines. Prioritise queued DD214 and COE uploads; members do not need to re-upload.
+remediation_action: restore_private_dns_link
+remediation_command: |-
+  opsctl restore private-dns-link/privatelink-blob-aks-eastus --vnet banking-aks-vnet
+error_message: '[DOC] DOC-UPLOAD-FAIL: upload={upload_id} type={doc_type} size_mb={doc_size_mb} member={member_id} error={upload_error} status={http_status} endpoint=banking-docs-prod.blob.core.windows.net peer_ip={public_ip}'
 stack_trace: |-
   === DOCUMENT UPLOAD SERVICE ===
   upload={upload_id}  member={member_id}
   --- UPLOAD DETAILS ---
-    type={doc_type}  size={doc_size_mb}MB  format=PDF/JPEG
-    classification=AUTO  sensitivity=PII_DETECTED
+    type={doc_type}  size={doc_size_mb}MB  classification=PII_DETECTED
   --- PROCESSING PIPELINE ---
     STEP                STATUS      DETAIL
     virus_scan          COMPLETE    clean
-    format_validate     COMPLETE    valid
     pii_redaction       COMPLETE    ssn=REDACTED, dob=REDACTED
-    s3_upload           FAILED      {upload_error}  <<< BLOCKED
+    blob_put            FAILED      {http_status} {upload_error}: This request is not authorized to perform this operation.  <<< BLOCKED
     index_metadata      SKIPPED     ---
-    ocr_extract         SKIPPED     ---
-  --- STORAGE HEALTH ---
-    s3_bucket=banking-member-docs-prod  region=us-east-1
-    error={upload_error}  retry=3/3
-    queue_depth=2,847  oldest_pending=12min
-  ACTION: retry_upload=true  enable_local_cache=true  alert=DOC-UPLOAD-FAIL
+  --- STORAGE ---
+    account=banking-docs-prod  container=member-docs  public_network_access=Disabled
+    resolved=banking-docs-prod.blob.core.windows.net -> {public_ip} (expected privatelink 10.3.8.14)
+  ACTION: retry_upload=true  alert=DOC-UPLOAD-FAIL
 correlation_attr:
-  key: deployment.s3_endpoint_config
-  value: vpc-endpoint-v1.3.0-rc2
+  key: document.blob_endpoint_resolution
+  value: public
 fault_params:
   upload_id: {format: "UPL-{n}", n: {randint: [100000, 999999]}}
   doc_type: {choice: [CLAIM_PHOTO, POLICY_DEC_PAGE, ID_VERIFICATION, PROOF_OF_LOSS, COE_VA_LOAN, DD214_DISCHARGE]}
   doc_size_mb: {uniform: [0.5, 25.0], round: 1}
   member_id: {format: "M-{n}", n: {randint: [1000000, 9999999]}}
-  upload_error: {choice: [S3_WRITE_TIMEOUT, BUCKET_QUOTA_EXCEEDED, ENCRYPTION_KEY_ERROR, NETWORK_TIMEOUT]}
+  upload_error: AuthorizationFailure
+  http_status: 403
+  public_ip: 20.60.133.4
 rca_clues:
   document-vault:
-    document.s3_error_type: {choice: [S3_WRITE_TIMEOUT, BUCKET_QUOTA_EXCEEDED, ENCRYPTION_KEY_ERROR]}
-    document.upload_queue_depth: {randint: [1000, 5000]}
+    document.blob_endpoint_ip: 20.60.133.4
+    document.blob_endpoint_resolution: public
+    document.upload_queue_depth: {randint: [1000, 3000]}
   member-portal:
     portal.upload_retry_display: FAILED
     portal.member_docs_pending: {randint: [200, 1000]}
   claims-processor:
     claims.photo_attachment_blocked: true
-    claims.claims_without_docs: {randint: [50, 200]}
   policy-manager:
     policy.dec_page_storage_blocked: true
-    policy.renewal_docs_delayed: {randint: [100, 400]}
+error_services:
+- document-vault
+service_lag_seconds:
+  member-portal: 10
+  claims-processor: 45
+  policy-manager: 45
+cascade_messages:
+  member-portal:
+  - severity: WARN
+    message: '[PORTAL] upload_failed page=/claims/documents upstream=document-vault upstream_status=502 retry_offered=true status=502'
+  claims-processor:
+  - severity: WARN
+    message: '[CLAIMS] attachment_pending type=CLAIM_PHOTO reason=document_vault_upload_failed status=WAITING'
+  policy-manager:
+  - severity: WARN
+    message: '[POLICY] dec_page_store reason=document_vault_upload_failed retry_in_s=60 status=DEFERRED'
+fault_scope:
+  cluster: banking-aks-cluster
+  workloads: [document-vault]
+infrastructure_events:
+- service: document-vault
+  severity: INFO
+  offset_seconds: -90
+  body: '[DOC] azure_activity operation=Microsoft.Network/privateDnsZones/virtualNetworkLinks/delete resource=privatelink.blob.core.windows.net/privatelink-blob-aks-eastus vnet=banking-aks-vnet caller=terraform-network-sp status=Succeeded'
+  attributes:
+    operation: azure_activity
+    azure.activity.operation_name: Microsoft.Network/privateDnsZones/virtualNetworkLinks/delete
+    user.name: terraform-network-sp
+remediation_effects:
+  transition_seconds: 120
+  log_events:
+  - service: document-vault
+    severity: INFO
+    offset_seconds: 1
+    body: '[change-audit] change applied action=restore target=private-dns-link/privatelink-blob-aks-eastus cmd="opsctl restore private-dns-link/privatelink-blob-aks-eastus --vnet banking-aks-vnet" actor={actor} result="virtual network link to banking-aks-vnet created"'
+    attributes:
+      operation: change_applied
+      change.target: private-dns-link/privatelink-blob-aks-eastus
+  - service: document-vault
+    severity: INFO
+    offset_seconds: 60
+    body: '[DOC] storage_health endpoint=banking-docs-prod.blob.core.windows.net resolved=10.3.8.14 via=privatelink blob_put=201 status=NOMINAL'
+    attributes:
+      operation: storage_health
+      document.blob_endpoint_ip: 10.3.8.14
+      document.blob_endpoint_resolution: private-endpoint
+  verification:
+  - signal: document_vault.upload_success_pct
+    from: metrics-generic.otel-default
+    where: resource.attributes.service.name == "document-vault"
+    field: metrics.document_vault.upload_success_pct
+    expect: back above 99.5% (was near zero)
+    within_seconds: 150
+  - signal: document_vault.upload_queue_depth
+    from: metrics-generic.otel-default
+    where: resource.attributes.service.name == "document-vault"
+    field: metrics.document_vault.upload_queue_depth
+    expect: draining back under 40 (was in the thousands)
+    within_seconds: 300
+  - signal: blob endpoint resolution
+    from: logs.otel.banking
+    where: resource.attributes.service.name == "document-vault" AND attributes.operation == "storage_health"
+    field: attributes.document.blob_endpoint_resolution
+    expect: private-endpoint on every line logged after the DNS answer expires; public stops appearing
+    within_seconds: 120
+  - signal: DOC-UPLOAD-FAIL lines
+    from: logs.otel.banking
+    where: body.text LIKE "*DOC-UPLOAD-FAIL*"
+    expect: 0 new lines
+    within_seconds: 150
 business_impact:
   - kpi: business.self_service_deflection_pct
-    factor: {uniform: [0.30, 0.60]}
+    factor: {uniform: [0.3, 0.6]}
   - kpi: business.loan_origination_usd_per_min
-    factor: {uniform: [0.40, 0.70]}
+    value: {uniform: [169260.0, 194740.0], round: 1}
   - kpi: business.complaint_tickets_per_min
     factor: {uniform: [2.0, 4.0]}
+  - kpi: business.active_digital_sessions
+    value: {uniform: [4464.0, 5136.0]}

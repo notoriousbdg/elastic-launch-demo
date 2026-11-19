@@ -5,11 +5,11 @@ scenario_description: Retail banking platform with mobile banking, insurance cla
 namespace: banking
 scenario_icon: 🏦
 sort_order: 6
-schema_version: "1.2"
+schema_version: "1.3"
 nominal_label: NORMAL
 hosts:
 - host.name: banking-aws-host-01
-  host.id: i-0a1b2c3d4e5f67890
+  host.id: i-2789072216007ecee
   host.arch: amd64
   host.type: r6i.2xlarge
   host.image.id: ami-0abcdef1234567890
@@ -31,13 +31,13 @@ hosts:
   cloud.platform: aws_ec2
   cloud.region: us-east-1
   cloud.availability_zone: us-east-1a
-  cloud.account.id: '112233445566'
-  cloud.instance.id: i-0a1b2c3d4e5f67890
+  cloud.account.id: '519536221650'
+  cloud.instance.id: i-2789072216007ecee
   cpu_count: 8
   memory_total_bytes: 68719476736
   disk_total_bytes: 536870912000
 - host.name: banking-gcp-host-01
-  host.id: '4567890123456789012'
+  host.id: '4811907286153260'
   host.arch: amd64
   host.type: n2-standard-8
   host.image.id: projects/ubuntu-os-cloud/global/images/ubuntu-2204-jammy-v20250115
@@ -59,13 +59,13 @@ hosts:
   cloud.platform: gcp_compute_engine
   cloud.region: us-central1
   cloud.availability_zone: us-central1-a
-  cloud.account.id: banking-member-services-prod
-  cloud.instance.id: '4567890123456789012'
+  cloud.account.id: banking-project
+  cloud.instance.id: '4811907286153260'
   cpu_count: 8
   memory_total_bytes: 34359738368
   disk_total_bytes: 274877906944
 - host.name: banking-azure-host-01
-  host.id: /subscriptions/abc-123/resourceGroups/banking-rg/providers/Microsoft.Compute/virtualMachines/banking-vm-01
+  host.id: /subscriptions/ec4c99bc-183f-51d6-998b-6e9dcf68c571/resourceGroups/banking-rg/providers/Microsoft.Compute/virtualMachines/banking-vm-01
   host.arch: amd64
   host.type: Standard_D8s_v5
   host.image.id: Canonical:0001-com-ubuntu-server-jammy:22_04-lts-gen2:latest
@@ -87,7 +87,7 @@ hosts:
   cloud.platform: azure_vm
   cloud.region: eastus
   cloud.availability_zone: eastus-1
-  cloud.account.id: abc-123-def-456
+  cloud.account.id: ec4c99bc-183f-51d6-998b-6e9dcf68c571
   cloud.instance.id: banking-vm-01
   cpu_count: 8
   memory_total_bytes: 34359738368
@@ -136,19 +136,33 @@ agent_config:
   id: banking-ops-analyst
   name: Member Services Operations Analyst
   assessment_tool_name: member_services_assessment
-  system_prompt: 'You are the Member Services Operations Analyst, an expert AI assistant for the retail banking platform.
-    You help operations teams investigate incidents, analyze service health, and provide root cause analysis for fault conditions
-    across 9 member services spanning AWS, GCP, and Azure. You have deep expertise in mobile banking operations, insurance
-    claims processing (FNOL, photo estimation, disbursement), payment processing (ACH, wire, bill pay, card authorization),
-    fraud detection and prevention, biometric authentication, MFA delivery, policy administration, VA home loan underwriting,
-    and document management. You understand military-specific needs including deployment support, PCS (Permanent Change of
-    Station) relocation impacts, SCRA (Servicemembers Civil Relief Act) benefits, DFAS pay processing, and OCONUS member challenges.
-    When investigating incidents, search for these system identifiers in logs: Mobile faults (MOBILE-API-TIMEOUT, MOBILE-DEPOSIT-FAIL,
-    MOBILE-NOTIF-STORM), Payment faults (PAY-ACH-DELAY, PAY-BILLPAY-FAIL, PAY-OFAC-BLOCK, PAY-CARD-AUTH-FAIL), Claims faults
-    (CLAIMS-FNOL-BACKLOG, CLAIMS-PHOTO-EST-TIMEOUT, CLAIMS-DISBURSEMENT-FAIL), Policy faults (POLICY-RENEWAL-FAIL, UW-RULES-ENGINE-ERR,
-    UW-VA-RATELOCK-FAIL), Auth faults (AUTH-BIOMETRIC-DEGRADE, AUTH-MFA-DELIVERY-FAIL), Fraud faults (FRAUD-FP-SURGE), Portal
-    faults (PORTAL-SESSION-CASCADE), Document faults (DOC-UPLOAD-FAIL), and Infrastructure faults (INFRA-DB-REPL-LAG, INFRA-CERT-EXPIRE).
-    Log messages are in body.text — NEVER search the body field alone.'
+  system_prompt: |-
+    You are the Member Services Operations Analyst for a retail bank and insurer serving military members and
+    their families: 9 services across AWS (mobile-gateway, payment-engine, claims-processor), GCP (policy-manager,
+    fraud-sentinel, auth-gateway) and Azure (quote-engine, member-portal, document-vault). You know mobile banking,
+    payments (ACH, wire, bill pay, card authorization), insurance claims (FNOL, photo estimation, disbursement),
+    underwriting and VA home loans, fraud and sanctions screening, authentication, and the military context: PCS
+    relocations, deployments, SCRA protections and DFAS pay dates.
+
+    When an incident is reported:
+    1. Find the change that preceded the first errors: deployments and rollbacks, ConfigMap and feature flag
+       changes, model and ruleset promotions, secret rotations, schema migrations, and cloud audit events
+       (CloudTrail, Azure activity log) in the logs.
+    2. Confirm the cause from the service's status lines and their attributes (operation and the config
+       versions they carry), then from its metrics (metrics-generic.otel-default, by
+       resource.attributes.service.name) against their normal range.
+    3. Recommend the opsctl command from the runbook and the signals that will confirm recovery. Prefer undoing
+       the change over loosening thresholds or adding capacity.
+
+    Fault codes (search body.text): Mobile MOBILE-API-TIMEOUT, MOBILE-DEPOSIT-FAIL, MOBILE-NOTIF-STORM; Payments
+    PAY-ACH-DELAY, PAY-BILLPAY-FAIL, PAY-OFAC-BLOCK, PAY-CARD-AUTH-FAIL; Claims CLAIMS-FNOL-BACKLOG,
+    CLAIMS-PHOTO-EST-TIMEOUT, CLAIMS-DISBURSEMENT-FAIL; Policy and underwriting POLICY-RENEWAL-FAIL,
+    UW-RULES-ENGINE-ERR, UW-VA-RATELOCK-FAIL; Auth AUTH-BIOMETRIC-DEGRADE, AUTH-MFA-DELIVERY-FAIL; Fraud
+    FRAUD-FP-SURGE; Portal PORTAL-SESSION-CASCADE; Documents DOC-UPLOAD-FAIL; Infrastructure INFRA-DB-REPL-LAG,
+    INFRA-CERT-EXPIRE.
+
+    Services downstream of a fault show symptoms too; follow the cascade back to the service that changed.
+    Log messages are in body.text — never search the body field alone.
 assessment_tool_config:
   id: member_services_assessment
   description: 'Comprehensive member services platform health assessment. Evaluates all services against operational readiness
@@ -236,39 +250,50 @@ executive_trend_charts:
   y_label: index
 executive_kpi_emissions:
 - name: business.net_interest_income_usd_per_min
+  better: higher
   value: {uniform: [180000.0, 850000.0], round: 1}
   unit: USD/min
 - name: business.fee_revenue_usd_per_min
+  better: higher
   value: {uniform: [12000.0, 95000.0], round: 1}
   unit: USD/min
 - name: business.loan_origination_usd_per_min
+  better: higher
   value: {uniform: [280000.0, 2100000.0], round: 1}
   unit: USD/min
 - name: business.card_interchange_usd_per_min
+  better: higher
   value: {uniform: [8000.0, 72000.0], round: 1}
   unit: USD/min
 - name: business.wealth_aum_delta_usd_per_min
   value: {uniform: [-45000.0, 180000.0], round: 1}
   unit: USD/min
 - name: business.deposit_growth_usd_per_min
+  better: higher
   value: {uniform: [25000.0, 320000.0], round: 1}
   unit: USD/min
 - name: business.active_digital_sessions
+  better: higher
   value: {randint: [12000, 180000]}
   unit: sessions
 - name: business.mobile_logins_per_min
+  better: higher
   value: {randint: [400, 8500]}
   unit: logins/min
 - name: business.digital_transaction_pct
+  better: higher
   value: {uniform: [62.0, 94.0], round: 2}
   unit: '%'
 - name: business.self_service_deflection_pct
+  better: higher
   value: {uniform: [45.0, 88.0], round: 2}
   unit: '%'
 - name: business.app_session_duration_sec
+  better: higher
   value: {uniform: [95.0, 420.0], round: 1}
   unit: s
 - name: business.api_calls_per_min
+  better: higher
   value: {randint: [22000, 380000]}
   unit: calls/min
 - name: business.fraud_detection_rate_pct
@@ -278,33 +303,42 @@ executive_kpi_emissions:
   value: {uniform: [0.1, 3.8], round: 2}
   unit: alerts/min
 - name: business.aml_flags_per_min
+  better: lower
   value: {uniform: [0.05, 1.2], round: 3}
   unit: flags/min
 - name: business.failed_auth_attempts_per_min
+  better: lower
   value: {randint: [12, 280]}
   unit: attempts/min
 - name: business.chargeback_rate_pct
+  better: lower
   value: {uniform: [0.04, 0.38], round: 3}
   unit: '%'
 - name: business.regulatory_breach_count
+  better: lower
   value: {randint: [0, 2]}
   unit: count
 - name: business.net_satisfaction_proxy_nps
+  better: higher
   value: {uniform: [22.0, 68.0], round: 1}
   unit: score
 - name: business.account_openings_per_min
+  better: higher
   value: {uniform: [0.8, 12.0], round: 2}
   unit: openings/min
 - name: business.account_closures_per_min
   value: {uniform: [0.1, 2.8], round: 2}
   unit: closures/min
 - name: business.churn_risk_index_0_100
+  better: lower
   value: {uniform: [8.0, 35.0], round: 1}
   unit: index
 - name: business.complaint_tickets_per_min
+  better: lower
   value: {uniform: [0.2, 4.5], round: 2}
   unit: tickets/min
 - name: business.csat_score_0_5
+  better: higher
   value: {uniform: [3.2, 4.8], round: 2}
   unit: score
 raw_log_profile:
@@ -392,3 +426,7 @@ trace_attributes:
       document.classification: {choice: [PII, PHI, financial, military_record, general]}
       document.storage_tier: {choice: [hot, warm, archive, compliance_hold]}
       document.encryption_status: {choice: [AES256_KMS, AES256_SSE, client_side_encrypted]}
+
+generators:
+  redis_otel: true
+  kafka_otel: true

@@ -1,0 +1,114 @@
+name: Entra Token Expiry
+subsystem: authentication
+vehicle_section: authentication_pipeline
+error_type: IDENTITY-TOKEN-EXPIRED
+sensor_type: health_check
+affected_services: [identity-broker, assistant-web]
+cascade_services: []
+error_services: [identity-broker]
+
+description: The identity-broker Entra ID client secret has expired, so token acquisition fails and user sign-ins to assistant-web are rejected.
+
+investigation_notes: |-
+  Root cause: client secret secret-2025-10-prod-a41c of app registration {app_id} passed its endDateTime and nobody rotated it, so Entra ID answers every token request from identity-broker with {aad_error_code}. Nothing was deployed; the secret simply aged out, and only this app registration is affected.
+  Confirm:
+    - identity-broker metric identity_broker.token_failure_pct jumps abruptly from about 0.1-1.2% to 96-100% (no ramp) with token_failures_per_min={token_failures_per_min}; identity_broker.credential_days_to_expiry for identity-broker-client-secret is below zero (other secrets stay at 21-180 days)
+    - identity-broker log attribute entra.client_secret_id=secret-2025-10-prod-a41c on the token_stats line, and credential_health shows the expired secret stored in Key Vault {key_vault_name}
+    - the first IDENTITY-TOKEN-EXPIRED comes right after the Key Vault SecretExpired event for identity-broker-client-secret (cause event); the Entra audit shows no client-secret change before it
+    - assistant-web sign-in errors start in the same minute, while the Entra ID service health and the JWKS endpoint are fine
+  Remediation: rotate the client secret with opsctl rotate client-secret/identity-broker. A new secret is created on the app registration, stored in {key_vault_name} and picked up by identity-broker; token failures return to about 0% within about a minute and the credential shows about 180 days to expiry. Restarting identity-broker or retrying does not help, since the old secret stays expired.
+remediation_action: rotate_entra_client_secret
+remediation_command: |-
+  opsctl rotate client-secret/identity-broker
+service_lag_seconds: {assistant-web: 10}
+fault_scope:
+  workloads: [identity-broker, assistant-web]
+
+error_message: 'IDENTITY-TOKEN-EXPIRED: app_id={app_id} error={aad_error_code} failures_per_min={token_failures_per_min}'
+
+stack_trace: |
+  com.microsoft.aad.msal4j.MsalServiceException: {aad_error_code}: The provided client secret keys for app '{app_id}' are expired.
+    at com.microsoft.aad.msal4j.ConfidentialClientApplication.acquireToken(AuthorizationCodeParameters)
+    at IdentityBroker.redeemAuthorizationCode(app_id={app_id})
+  Failures per min: {token_failures_per_min}
+  Secret source:    Key Vault {key_vault_name}
+
+correlation_attr:
+  key: entra.client_secret_id
+  value: secret-2025-10-prod-a41c
+
+fault_params:
+  app_id: 3f2a9c1e-7b44-4d0a-9e61-5c8d2b7a10f4
+  aad_error_code: AADSTS7000222
+  token_failures_per_min: {randint: [300, 1500]}
+  key_vault_name: kv-azureai-identity-prod
+
+cascade_messages:
+  assistant-web:
+    - severity: ERROR
+      message: 'GET /signin/callback 401 sign-in rejected: token acquisition failed for app {app_id} ({aad_error_code}); redirecting to /signin'
+
+infrastructure_events:
+  - service: identity-broker
+    severity: WARN
+    offset_seconds: -120
+    body: 'keyvault-event: eventType=Microsoft.KeyVault.SecretExpired vault=kv-azureai-identity-prod objectName=identity-broker-client-secret objectVersion=a41c07d9e3b2 expiresAt={iso_now} secretId=secret-2025-10-prod-a41c'
+    attributes:
+      cloud.provider: azure
+      event.action: SecretExpired
+      entra.client_secret_id: secret-2025-10-prod-a41c
+      change.summary: 'client secret secret-2025-10-prod-a41c expired; no replacement secret'
+
+remediation_effects:
+  log_events:
+    - service: identity-broker
+      severity: INFO
+      offset_seconds: 1
+      body: 'entra-audit: activityDisplayName="Update application - Certificates and secrets management" category=ApplicationManagement target=client-secret/identity-broker initiatedBy={actor} result=success'
+      attributes:
+        cloud.provider: azure
+        event.action: "Update application - Certificates and secrets management"
+        azure.entra.category: ApplicationManagement
+        azure.entra.target: client-secret/identity-broker
+        operation: client_secret_rotate
+        entra.client_secret_id: secret-2026-11-prod-c93e
+        change.summary: 'client secret secret-2025-10-prod-a41c (expired) -> secret-2026-11-prod-c93e (valid 180 days)'
+  steady_attributes:
+    identity-broker:
+      entra.client_secret_id: secret-2026-11-prod-c93e
+  verification:
+    - signal: identity_broker.token_failure_pct
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "identity-broker"'
+      field: 'metrics.identity_broker.token_failure_pct'
+      expect: 'back below 1.2% (was 96-100%)'
+      within_seconds: 90
+    - signal: identity_broker.credential_days_to_expiry
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "identity-broker"'
+      field: 'metrics.identity_broker.credential_days_to_expiry'
+      expect: 'about 180 days (was below 0)'
+      within_seconds: 90
+    - signal: client secret id
+      from: 'logs.otel.azureai'
+      where: 'resource.attributes.service.name == "identity-broker"'
+      field: 'attributes.entra.client_secret_id'
+      expect: 'secret-2026-11-prod-c93e on every line logged since the fix; secret-2025-10-prod-a41c stops appearing'
+      within_seconds: 90
+
+rca_clues:
+  identity-broker:
+    entra.secret_days_to_expiry: 0
+    entra.token_requests_failed_pct: {uniform: [96.0, 100.0], round: 1}
+    entra.last_successful_token_min_ago: {randint: [5, 120]}
+  assistant-web:
+    auth.signin_failures: {randint: [100, 1500]}
+    auth.redirect_loop_detected: true
+
+business_impact:
+  - kpi: business.throughput_rpm
+    value: {uniform: [604.5, 695.5], round: 0}
+  - kpi: business.availability_pct
+    factor: {uniform: [0.6, 0.85]}
+  - kpi: business.error_rate_pct
+    factor: {uniform: [4.0, 10.0]}

@@ -9,65 +9,140 @@ affected_services:
 cascade_services:
 - mobile-gateway
 - member-portal
-description: Debit card authorization requests failing at Visa/Mastercard network level
+description: Debit card purchases are declined with response code 91 because the bank's own Visa connector answers authorization requests too slowly.
 investigation_notes: |-
-  1. Check the ISO 8583 response code: 05=Do Not Honor, 14=Invalid Card, 51=Insufficient Funds, 54=Expired Card, 61=Exceeds Limit, 91=Issuer Unavailable, 96=System Malfunction.
-  2. Response code 91 (SYSTEM_MALFUNCTION) indicates the card network itself is having issues — check Visa/Mastercard network status pages and recent advisories for regional outages.
-  3. Verify STIP (Stand-In Processing) eligibility — if network_auth fails but STIP is available, the payment-engine should authorize locally using risk parameters and post-authorize later.
-  4. Monitor decline rate by merchant MCC code — elevated declines at military exchanges (MCC 5411, AAFES) or commissaries (DeCA) indicate a pattern requiring immediate network liaison escalation.
-  5. Check fraud-sentinel score — if fraud_score PASS with score 12/100 but network declines, the issue is external. Contact card network operations: Visa (1-800-847-2750) or MC (1-800-307-7309).
-  6. Review retry_eligible flag — if true, implement exponential backoff retry (2s, 4s, 8s) before returning decline to member. Log all retry attempts for chargeback dispute support.
-remediation_action: reset_card_auth_gateway
-error_message: '[PAY] PAY-CARD-AUTH-FAIL: auth={auth_id} card=****{card_last4} amount=${auth_amount} merchant={merchant_name}
-  decline_code={decline_code}'
+  1. Search logs.otel.banking for body.text containing PAY-CARD-AUTH-FAIL on payment-engine: auth={auth_id} at {merchant_name} for ${auth_amount} is declined with decline_code={decline_code} (issuer unavailable or switch inoperative). metrics.payment_engine.card_auth_approval_pct normally reads 94-96.5% and has dropped to 61-74%.
+  2. Code 91 here is about us, not the network: Visa returns it when the issuer host does not answer within its timeout and stand-in is not allowed for the BIN range. metrics.payment_engine.card_auth_response_ms (issuer response time as Visa sees it) normally reads 120-260 ms and is now 2,100-2,600 ms. Visa network status shows no incident and Mastercard traffic is approving normally.
+  3. The checks on our side pass: balance and velocity checks pass and fraud-sentinel scores these transactions low (fraud_score under 25), which separates this from a fraud model problem.
+  4. Find the change: the card_auth_status line on payment-engine carries attributes.card.network_proxy_version and attributes.card.max_inflight_per_session. visa-proxy 1.4.3 rolled out just before the first decline and changed the default max in-flight requests per VisaNet session from 64 to 8, so authorizations queue inside the proxy (visa-proxy logs queue_wait_ms in the thousands) while the payment engine itself is idle.
+  5. Fix: opsctl rollback deployment/visa-proxy -n payments --to-revision previous restores 1.4.2 and its 64 in-flight requests per session. The sessions re-sign-on in about 20s; response time and approvals recover within a minute. Restarting payment-engine or adding proxy replicas does not help, because the VisaNet session count is fixed by the link configuration.
+  6. Recovery: card.network_proxy_version reads 1.4.2 and max_inflight_per_session 64 on the card_auth_status lines, card_auth_response_ms back in 120-260 ms, card_auth_approval_pct back above 94%, and no new PAY-CARD-AUTH-FAIL lines.
+remediation_action: rollback_visa_proxy
+remediation_command: |-
+  opsctl rollback deployment/visa-proxy -n payments --to-revision previous
+error_message: '[PAY] PAY-CARD-AUTH-FAIL: auth={auth_id} card=****{card_last4} amount=${auth_amount} merchant={merchant_name} decline_code={decline_code} issuer_response_ms={issuer_response_ms}'
 stack_trace: |-
   === CARD AUTHORIZATION FAILURE ===
-  auth={auth_id}  card=****{card_last4}  network={card_network}
+  auth={auth_id}  card=****{card_last4}  network=VISA
   --- TRANSACTION ---
     merchant={merchant_name}  mcc={merchant_mcc}
-    amount=${auth_amount}  currency=USD
-    pos_entry=CHIP  pin_verified=true
+    amount=${auth_amount}  currency=USD  pos_entry=CHIP  pin_verified=true
   --- AUTHORIZATION CHAIN ---
-    STEP                STATUS      CODE
+    STEP                STATUS      DETAIL
     velocity_check      PASS        ---
     balance_check       PASS        avail=${available_balance}
-    fraud_score         PASS        score=12/100
-    network_auth        DECLINED    {decline_code}  <<< FAILED
-    stand_in            N/A         STIP not eligible
-  --- NETWORK RESPONSE ---
-    iso8583_rc={decline_code}  response_ms=2340  timeout=false
-    issuer_response=SYSTEM_MALFUNCTION  retry_eligible=true
-  ACTION: retry_network=true  notify_member=true  alert=PAY-CARD-AUTH-FAIL
+    fraud_score         PASS        score={fraud_score}/100
+    network_response    LATE        issuer_response_ms={issuer_response_ms} (visa timeout 2000ms)  <<< FAILED
+    stand_in            N/A         STIP not enabled for BIN range
+  --- VISA-PROXY ---
+    version=1.4.3  sessions=4  max_inflight_per_session=8  queue_wait_ms={queue_wait_ms}
+  iso8583_rc={decline_code}
+  ACTION: alert=PAY-CARD-AUTH-FAIL
 correlation_attr:
-  key: network.card_network_proxy
-  value: visa-proxy-v1.4.3-unstable
+  key: card.network_proxy_version
+  value: visa-proxy-1.4.3
 fault_params:
   auth_id: {format: "AUTH-{n}", n: {randint: [100000, 999999]}}
   card_last4: {randint: [1000, 9999]}
   auth_amount: {uniform: [5.0, 2000.0], round: 2}
-  merchant_name: {choice: [AAFES PX Fort Liberty, Commissary DeCA, Navy Exchange, Shell Gas Station, Amazon.com, Walmart Supercenter]}
-  decline_code: {choice: ['05', '14', '51', '54', '61', '91', '96']}
-  card_network: {choice: [VISA, MASTERCARD, AMEX]}
+  merchant_name: {choice: [AAFES PX Fort Liberty, DeCA Commissary, Navy Exchange Norfolk, Shell Gas Station, Amazon.com, Walmart Supercenter]}
+  decline_code: '91'
   merchant_mcc: {choice: ['5411', '5541', '5912', '5999', '7011', '5311']}
-  available_balance: {uniform: [100.0, 25000.0], round: 2}
+  available_balance: {uniform: [400.0, 25000.0], round: 2}
+  fraud_score: {randint: [4, 24]}
+  issuer_response_ms: {randint: [2100, 2600]}
+  queue_wait_ms: {randint: [1800, 2400]}
 rca_clues:
   payment-engine:
-    payment.iso8583_response_code: {choice: ['05', '91', '96']}
-    payment.network_auth_status: DECLINED
+    card.network_proxy_version: visa-proxy-1.4.3
+    card.max_inflight_per_session: 8
+    card.issuer_response_ms: {randint: [2100, 2600]}
   fraud-sentinel:
-    fraud.card_risk_score: {randint: [5, 25]}
+    fraud.card_risk_score: {randint: [4, 24]}
     fraud.card_screening_result: PASS
   mobile-gateway:
-    gateway.card_decline_display: NETWORK_ERROR
-    gateway.stip_eligible: false
+    gateway.card_decline_display: TRY_AGAIN_LATER
   member-portal:
-    portal.card_decline_notification_sent: true
-    portal.merchant_mcc: {choice: ['5411', '5541', '5999', '7011']}
+    portal.card_decline_notifications: {randint: [200, 900]}
+error_services:
+- payment-engine
+service_lag_seconds:
+  mobile-gateway: 30
+  member-portal: 30
+cascade_messages:
+  fraud-sentinel:
+  - severity: INFO
+    message: '[FRAUD] transaction_scan auth={auth_id} score={fraud_score}/100 decision=ALLOW model=FraudNet-v5.2 network_outcome=DECLINED_91 status=CLEAR'
+  mobile-gateway:
+  - severity: WARN
+    message: '[MOBILE] push_sent type=CARD_DECLINED merchant="{merchant_name}" rc={decline_code} status=SENT'
+  member-portal:
+  - severity: WARN
+    message: '[PORTAL] member_action action=VIEW_CARD_ACTIVITY declined_rc={decline_code} merchant="{merchant_name}" status=COMPLETED'
+fault_scope:
+  cluster: banking-eks-cluster
+  workloads: [payment-engine]
+infrastructure_events:
+- service: payment-engine
+  severity: INFO
+  offset_seconds: -90
+  body: '[PAY] deploy visa-proxy 1.4.2 -> 1.4.3 replicas=2/2 sessions=4 max_inflight_per_session=8 (default changed from 64) applied_by=argocd/payments status=AVAILABLE'
+  attributes:
+    operation: deploy
+    card.network_proxy_version: visa-proxy-1.4.3
+    card.max_inflight_per_session: 8
+    user.name: argocd/payments
+remediation_effects:
+  transition_seconds: 45
+  log_events:
+  - service: payment-engine
+    severity: INFO
+    offset_seconds: 1
+    body: '[change-audit] change applied action=rollback target=deployment/visa-proxy namespace=payments cmd="opsctl rollback deployment/visa-proxy -n payments --to-revision previous" actor={actor} result="1.4.3 -> 1.4.2"'
+    attributes:
+      operation: change_applied
+      change.target: deployment/visa-proxy
+      card.network_proxy_version: visa-proxy-1.4.2
+  - service: payment-engine
+    severity: INFO
+    offset_seconds: 20
+    body: '[PAY] deploy visa-proxy 1.4.2 replicas=2/2 sessions=4/4 signed_on max_inflight_per_session=64 status=AVAILABLE'
+    attributes:
+      operation: deploy
+      card.network_proxy_version: visa-proxy-1.4.2
+      card.max_inflight_per_session: 64
+  steady_attributes:
+    payment-engine:
+      card.network_proxy_version: visa-proxy-1.4.2
+  verification:
+  - signal: payment_engine.card_auth_response_ms
+    from: metrics-generic.otel-default
+    where: resource.attributes.service.name == "payment-engine"
+    field: metrics.payment_engine.card_auth_response_ms
+    expect: back in 120-260 ms (was 2,100-2,600 ms)
+    within_seconds: 90
+  - signal: payment_engine.card_auth_approval_pct
+    from: metrics-generic.otel-default
+    where: resource.attributes.service.name == "payment-engine"
+    field: metrics.payment_engine.card_auth_approval_pct
+    expect: back above 94% (was 61-74%)
+    within_seconds: 90
+  - signal: Visa connector version
+    from: logs.otel.banking
+    where: resource.attributes.service.name == "payment-engine" AND attributes.operation == "card_auth_status"
+    field: attributes.card.network_proxy_version
+    expect: visa-proxy-1.4.2 on every line logged since the fix
+    within_seconds: 60
+  - signal: PAY-CARD-AUTH-FAIL lines
+    from: logs.otel.banking
+    where: body.text LIKE "*PAY-CARD-AUTH-FAIL*"
+    expect: 0 new lines
+    within_seconds: 90
 business_impact:
   - kpi: business.card_interchange_usd_per_min
-    factor: {uniform: [0.15, 0.40]}
+    value: {uniform: [4836.0, 5564.0], round: 1}
   - kpi: business.digital_transaction_pct
-    factor: {uniform: [0.40, 0.65]}
+    factor: {uniform: [0.4, 0.65]}
   - kpi: business.chargeback_rate_pct
     factor: {uniform: [2.0, 4.5]}
   - kpi: business.complaint_tickets_per_min

@@ -181,19 +181,6 @@ def col_count(label="Count", kql_filter=None):
     return col
 
 
-def col_unique_count(source_field, label="Unique"):
-    """Create a unique_count column."""
-    return {
-        "customLabel": True,
-        "dataType": "number",
-        "isBucketed": False,
-        "label": label,
-        "operationType": "unique_count",
-        "params": {"emptyAsNull": True},
-        "scale": "ratio",
-        "sourceField": source_field,
-    }
-
 
 def col_date_histogram(interval="30s", label="@timestamp"):
     """Create a date_histogram column."""
@@ -230,9 +217,13 @@ def col_terms(source_field, label, size=10, order_col_id=None):
     }
 
 
-def col_average(source_field, label="Average"):
-    """Create an average column for gauge metrics."""
-    return {
+def col_average(source_field, label="Average", reduced_time_range=None):
+    """Create an average column for gauge metrics.
+
+    ``reduced_time_range`` (e.g. ``"2m"``) limits the average to the most recent
+    slice of the dashboard window so tiles reflect current state.
+    """
+    col = {
         "customLabel": True,
         "dataType": "number",
         "isBucketed": False,
@@ -242,20 +233,10 @@ def col_average(source_field, label="Average"):
         "scale": "ratio",
         "sourceField": source_field,
     }
+    if reduced_time_range:
+        col["reducedTimeRange"] = reduced_time_range
+    return col
 
-
-def col_last_value(source_field, label="Last Value"):
-    """Create a last_value column for KPI tiles."""
-    return {
-        "customLabel": True,
-        "dataType": "number",
-        "isBucketed": False,
-        "label": label,
-        "operationType": "last_value",
-        "params": {"sortField": "@timestamp"},
-        "scale": "ratio",
-        "sourceField": source_field,
-    }
 
 
 def col_percentile(source_field, percentile, label):
@@ -389,10 +370,16 @@ _LOWER_IS_BETTER_KEYWORDS = (
     "packet_loss", "latency", "downtime", "delay", "backlog", "error",
     "incident", "defect", "dispute", "delinquen", "fraud_loss",
     "fault_events", "bounce_rate", "failed", "outage", "breach",
+    "abandon", "stockout", "escalation", "lead_time", "load_time", "timeout",
+    "missed", "miss_rate", "retry", "queue_depth", "wait_time",
 )
 
 
-def _kpi_is_lower_better(kpi_name: str) -> bool:
+def _kpi_is_lower_better(kpi_name: str, better: "str | None" = None) -> bool:
+    """Direction of a KPI.  An explicit ``better: lower|higher`` on the
+    ``executive_kpi_emissions`` entry wins; the keyword list is only a fallback."""
+    if better in ("lower", "higher"):
+        return better == "lower"
     return any(kw in kpi_name for kw in _LOWER_IS_BETTER_KEYWORDS)
 
 
@@ -407,34 +394,84 @@ def _kpi_nominal_range(value_spec) -> "tuple[float, float] | None":
     return (lo, hi) if hi > lo else None
 
 
-def kpi_palette(kpi_name: str, value_spec) -> "dict | None":
-    """Derive a green/yellow/red palette from a KPI's own nominal range.
+def kpi_band_edges(kpi_name: str, value_spec, better: "str | None" = None) -> "tuple[bool, float, float] | None":
+    """Return ``(lower_is_better, yellow_edge, red_edge)`` for a KPI, or None.
 
-    Returns None when the range can't be derived (e.g. a `choice` spec) so
-    callers can fall back to a flat color rather than a misleading palette.
+    For lower-is-better KPIs, values above ``yellow_edge`` are yellow and above
+    ``red_edge`` are red.  For higher-is-better KPIs, values below
+    ``yellow_edge`` are yellow and below ``red_edge`` are red.  This is the
+    single source of truth shared by ``kpi_palette`` and the scenario verifier.
     """
     bounds = _kpi_nominal_range(value_spec)
     if bounds is None:
         return None
     lo, hi = bounds
     span = hi - lo
-    sentinel = max(hi, lo) * 4 + 1_000_000  # comfortably above any degraded/inflated value
+    if _kpi_is_lower_better(kpi_name, better):
+        return (True, hi + 0.05 * span, hi + 0.30 * span)
+    yellow = lo - 0.05 * span
+    red = lo - 0.30 * span
+    if lo > 0:
+        # Wide nominal ranges (e.g. revenue 50k-250k) would push the red stop
+        # to <= 0 so the tile could never leave green; floor the stops at a
+        # fraction of the low end instead.  Narrow ranges are unaffected.
+        yellow = max(yellow, 0.8 * lo)
+        red = max(red, 0.5 * lo)
+    # Business KPIs are non-negative and palette stops must stay >= rangeMin=0.
+    return (False, max(0.0, yellow), max(0.0, red))
 
-    if _kpi_is_lower_better(kpi_name):
+
+def kpi_band_usable(kpi_name: str, value_spec, better: "str | None" = None) -> bool:
+    """True when a fault can actually turn this KPI's tile yellow/red.
+
+    False for non-derivable ranges and for higher-is-better KPIs whose nominal
+    range reaches zero or below (e.g. NPS -8..68): palette stops are clamped at
+    the tile's rangeMin of 0, so such a tile can never leave green.
+    """
+    edges = kpi_band_edges(kpi_name, value_spec, better)
+    if edges is None:
+        return False
+    lower_better, _yellow, red = edges
+    return lower_better or red > 0
+
+
+def kpi_band(kpi_name: str, value_spec, value: float, better: "str | None" = None) -> "str | None":
+    """Classify *value* as ``green`` / ``yellow`` / ``red`` for this KPI."""
+    edges = kpi_band_edges(kpi_name, value_spec, better)
+    if edges is None:
+        return None
+    lower_better, yellow, red = edges
+    if lower_better:
+        return "red" if value > red else "yellow" if value > yellow else "green"
+    return "red" if value < red else "yellow" if value < yellow else "green"
+
+
+def kpi_palette(kpi_name: str, value_spec, better: "str | None" = None) -> "dict | None":
+    """Derive a green/yellow/red palette from a KPI's own nominal range.
+
+    Returns None when the range can't be derived (e.g. a `choice` spec) so
+    callers can fall back to a flat color rather than a misleading palette.
+    """
+    edges = kpi_band_edges(kpi_name, value_spec, better)
+    if edges is None:
+        return None
+    lower_better, yellow, red = edges
+    bounds = _kpi_nominal_range(value_spec)
+    sentinel = max(bounds) * 4 + 1_000_000  # comfortably above any degraded/inflated value
+
+    if lower_better:
         # Nominal band (up to hi) is green; a fault pushing the raw value
         # above hi (e.g. more errors, more drift) turns the tile yellow/red.
         return make_metric_palette([
-            ("#54B399", hi + 0.05 * span),
-            ("#D6BF57", hi + 0.30 * span),
+            ("#54B399", yellow),
+            ("#D6BF57", red),
             ("#E7664C", sentinel),
         ])
     # Higher-is-better: nominal band (from lo up) is green; a fault dragging
     # the value below lo (e.g. lower conversion, lower uptime) turns it red.
-    # Clamp to 0 since business KPIs are non-negative and palette stops must
-    # stay within the (rangeMin=0) range Kibana expects.
     return make_metric_palette([
-        ("#E7664C", max(0.0, lo - 0.30 * span)),
-        ("#D6BF57", max(0.0, lo - 0.05 * span)),
+        ("#E7664C", red),
+        ("#D6BF57", yellow),
         ("#54B399", sentinel),
     ])
 
@@ -468,7 +505,9 @@ def generate_dashboard_ndjson(scenario) -> str:
     tag_line = _tag_saved_object(namespace) + "\n"
 
     main = _build_dashboard_ndjson(
-        scenario_name, namespace, cloud_groups, dashboard_id, error_types
+        scenario_name, namespace, cloud_groups, dashboard_id, error_types,
+        log_error_services=scenario.dashboard_log_error_services,
+        cluster_health_tiles=scenario.dashboard_cluster_health_tiles,
     )
     biz = _build_business_executive_dashboard_ndjson(scenario)
     return tag_line + main + biz if biz else tag_line + main
@@ -480,6 +519,8 @@ def _build_dashboard_ndjson(
     cloud_groups: list[dict],
     dashboard_id: str,
     error_types: "list[str] | None" = None,
+    log_error_services: "list[str] | None" = None,
+    cluster_health_tiles: bool = False,
 ) -> str:
     """Build the full dashboard NDJSON from parameters."""
     # Override module-level constants so every panel references the deployed,
@@ -507,6 +548,66 @@ def _build_dashboard_ndjson(
             "gridData": {"h": 2, "i": pid, "w": group["col_width"], "x": group["x_start"], "y": 0},
         })
 
+    # ── Overview tiles per cloud column ──────────────────────────────────────
+    # Each column gets a list of tiles. Services with traces show a trace-based
+    # error rate; services listed in log_error_services (infra components with
+    # no traces) show an error-log ratio instead. A column with no services of
+    # its own can show per-cluster infra health tiles (opt-in).
+    log_error_services = set(log_error_services or [])
+    infra_cols = {
+        "n_nodes": ("Nodes", "unique_count(resource.attributes.k8s.node.name)", None),
+        "n_pods": ("Pods", "unique_count(resource.attributes.k8s.pod.name)", None),
+        "restarts": ("Restarts", "max(metrics.k8s.container.restarts)", None),
+        "disk": ("Disk %", "average(metrics.k8s.node.filesystem.utilization)", None),
+        "pod_cpu": ("Pod CPU %", "average(metrics.k8s.pod.cpu.node.utilization)", PALETTE_CPU),
+        "pod_mem": ("Pod Mem %", "average(metrics.k8s.pod.memory.node.utilization)", None),
+        "deploys": (
+            "Deploys Ready",
+            "sum(metrics.k8s.deployment.available) / sum(metrics.k8s.deployment.desired)",
+            None,
+        ),
+    }
+
+    def _group_tiles(group):
+        tiles = []
+        for svc_name in group["services"]:
+            q = f'resource.attributes.service.name: "{svc_name}"'
+            if svc_name in log_error_services:
+                tiles.append({
+                    "title": svc_name, "subtitle": f"{svc_name} \u00b7 logs", "dv": DATA_VIEW_ID_LOGS,
+                    "query": q, "label": "Error Rate",
+                    "formula": "count(kql='severity_text: ERROR') / count()",
+                    "viz": {"palette": PALETTE_ERROR_RATE},
+                })
+            else:
+                tiles.append({
+                    "title": svc_name, "subtitle": svc_name, "dv": DATA_VIEW_ID_TRACES,
+                    "query": q, "label": "Error Rate",
+                    "formula": "count(kql='status.code: Error') / count()",
+                    "viz": {"palette": PALETTE_ERROR_RATE},
+                })
+        if not tiles and cluster_health_tiles and group.get("cluster"):
+            cname = group["cluster"]
+            for title, formula, palette in infra_cols.values():
+                tiles.append({
+                    "title": title, "subtitle": cname, "dv": DATA_VIEW_ID_METRICS,
+                    "query": f'resource.attributes.k8s.cluster.name: "{cname}"',
+                    "label": title, "formula": formula,
+                    "viz": {"palette": palette} if palette else {"color": "#6092C0"},
+                })
+        return tiles
+
+    group_tiles = [_group_tiles(g) for g in cloud_groups]
+
+    # Tiles wrap into extra rows when a column holds more tiles than fit
+    # across its width, so they never spill into the neighbouring column.
+    SVC_ROW_H = 6
+    max_svc_rows = 1
+    for group, tiles in zip(cloud_groups, group_tiles):
+        per_row = max(1, group["col_width"] // TILE_WIDTH)
+        max_svc_rows = max(max_svc_rows, -(-len(tiles) // per_row))
+    row_shift = (max_svc_rows - 1) * SVC_ROW_H  # pushes everything below down
+
     # Vertical separators between cloud columns
     for sep_x in [15, 32]:
         pid = f"p_sep_{sep_x}"
@@ -516,36 +617,40 @@ def _build_dashboard_ndjson(
                 "content": "",
             },
             "panelIndex": pid,
-            "gridData": {"h": 14, "i": pid, "w": 1, "x": sep_x, "y": 0},
+            "gridData": {"h": 14 + row_shift, "i": pid, "w": 1, "x": sep_x, "y": 0},
         })
 
-    # Row 1 (y=2, h=6): 9 Service Health Tiles (error rate per service)
+    # Rows of overview tiles (y=2, 8, ...)
     tile_idx = 0
-    for group in cloud_groups:
-        for svc_offset, svc_name in enumerate(group["services"]):
+    for group, tiles in zip(cloud_groups, group_tiles):
+        per_row = max(1, group["col_width"] // TILE_WIDTH)
+        for t_idx, tile in enumerate(tiles):
+            t_row, t_offset = divmod(t_idx, per_row)
             tile_idx += 1
             pid = f"p_svc_{tile_idx}"
             lid = uid()
             cid = uid()
-            svc_query = f'resource.attributes.service.name: "{svc_name}"'
-            columns = {cid: col_formula("count(kql='status.code: Error') / count()", "Error Rate")}
-            layer = make_layer(lid, [cid], columns, DATA_VIEW_ID_TRACES)
+            columns = {cid: col_formula(tile["formula"], tile["label"])}
+            layer = make_layer(lid, [cid], columns, tile["dv"])
             state = make_state(layer, {
                 "layerId": lid,
                 "layerType": "data",
                 "metricAccessor": cid,
-                "palette": PALETTE_ERROR_RATE,
-                "subtitle": svc_name,
-            }, query=svc_query)
-            x = group["x_start"] + svc_offset * TILE_WIDTH
-            w = TILE_WIDTH if svc_offset < 2 else (group["col_width"] - 2 * TILE_WIDTH)
+                "subtitle": tile["subtitle"],
+                **tile["viz"],
+            }, query=tile["query"])
+            x = group["x_start"] + t_offset * TILE_WIDTH
+            is_row_end = t_offset == per_row - 1 or t_idx == len(tiles) - 1
+            # Last tile in a row stretches to the column edge. A short final row
+            # must be full width, otherwise Kibana floats the K8s tiles up into the gap.
+            w = TILE_WIDTH if not is_row_end else (group["col_width"] - t_offset * TILE_WIDTH)
             panels.append(make_panel(
                 pid,
-                {"h": 6, "i": pid, "w": w, "x": x, "y": 2},
-                svc_name,
+                {"h": SVC_ROW_H, "i": pid, "w": w, "x": x, "y": 2 + t_row * SVC_ROW_H},
+                tile["title"],
                 "lnsMetric",
                 state,
-                [make_ref(DATA_VIEW_ID_TRACES, lid)],
+                [make_ref(tile["dv"], lid)],
             ))
 
     # Row 2 (y=8, h=6): K8s Tiles per Cloud Region
@@ -573,7 +678,7 @@ def _build_dashboard_ndjson(
             "subtitle": "Node CPU",
         }, query=cpu_query)
         panels.append(make_panel(pid,
-            {"h": 6, "i": pid, "w": left_w, "x": x_base, "y": 8},
+            {"h": 6, "i": pid, "w": left_w, "x": x_base, "y": 8 + row_shift},
             "Node CPU", "lnsMetric", state, [make_ref(DATA_VIEW_ID_METRICS, lid)]))
 
         # Node Memory tile (right half of column) — scoped to this cluster
@@ -592,8 +697,10 @@ def _build_dashboard_ndjson(
             "subtitle": "Node Memory",
         }, query=mem_query)
         panels.append(make_panel(pid,
-            {"h": 6, "i": pid, "w": right_w, "x": x_base + left_w, "y": 8},
+            {"h": 6, "i": pid, "w": right_w, "x": x_base + left_w, "y": 8 + row_shift},
             "Node Memory", "lnsMetric", state, [make_ref(DATA_VIEW_ID_METRICS, lid)]))
+
+    below_start = len(panels)
 
     # ── Section 2 (y=14): RED Metrics ──────────────────────────────────────────
 
@@ -931,7 +1038,8 @@ def _build_dashboard_ndjson(
         "metricAccessor": cid,
         "color": "#54B399",
         "subtitle": "VPC flow records",
-    }, query='data_stream.dataset: "aws.vpcflow.otel" OR data_stream.dataset: "gcp.vpcflow.otel"')
+    }, query='data_stream.dataset: "aws.vpcflow.otel" OR data_stream.dataset: "gcp.vpcflow.otel"'
+             ' OR data_stream.dataset: "azure.vnetflow.otel"')
     panels.append(make_panel("p13",
         {"h": 6, "i": "p13", "w": 12, "x": 36, "y": 56},
         "VPC Flow Volume", "lnsMetric", state, [make_ref(DATA_VIEW_ID_LOGS, lid)]))
@@ -1041,7 +1149,8 @@ def _build_dashboard_ndjson(
             "xAccessor": cid_x,
             "splitAccessor": cid_split,
         }],
-    }, query='data_stream.dataset: "aws.vpcflow.otel" OR data_stream.dataset: "gcp.vpcflow.otel"')
+    }, query='data_stream.dataset: "aws.vpcflow.otel" OR data_stream.dataset: "gcp.vpcflow.otel"'
+             ' OR data_stream.dataset: "azure.vnetflow.otel"')
     panels.append(make_panel("p17",
         {"h": 12, "i": "p17", "w": 24, "x": 24, "y": 74},
         "VPC Flow Activity", "lnsXY", state, [make_ref(DATA_VIEW_ID_LOGS, lid)]))
@@ -1263,6 +1372,11 @@ def _build_dashboard_ndjson(
         {"h": 14, "i": "p26", "w": 48, "x": 0, "y": 114},
         "Significant Event Logs", "lnsDatatable", esql_state, []))
 
+    # Shift every section below the cloud overview down by the extra tile rows
+    if row_shift:
+        for panel in panels[below_start:]:
+            panel["gridData"]["y"] += row_shift
+
     # ── Collect all references from panels ───────────────────────────────────
 
     all_refs = []
@@ -1330,18 +1444,25 @@ def _build_business_executive_dashboard_ndjson(scenario) -> str:
         kpi["name"]: kpi.get("value")
         for kpi in getattr(scenario, "_kpi_emissions", [])
     }
+    # Optional explicit direction (`better: lower|higher`) per KPI.
+    kpi_better_by_name = {
+        kpi["name"]: kpi.get("better")
+        for kpi in getattr(scenario, "_kpi_emissions", [])
+    }
 
     panels: list[dict] = []
 
     def _eb_metric_tile(panel_index: str, x: int, y: int, w: int, title: str, source_field: str):
         lid = uid()
         cid = uid()
-        columns = {cid: col_average(source_field, label=title)}
+        columns = {cid: col_average(source_field, label=title, reduced_time_range="2m")}
         layer = make_layer(lid, [cid], columns, DATA_VIEW_ID_METRICS)
         # source_field looks like "metrics.business.foo_pct"; the KPI's own
         # name (as declared in executive_kpi_emissions) drops the "metrics." prefix.
         kpi_name = source_field.removeprefix("metrics.")
-        palette = kpi_palette(kpi_name, kpi_value_spec_by_name.get(kpi_name))
+        palette = kpi_palette(
+            kpi_name, kpi_value_spec_by_name.get(kpi_name), kpi_better_by_name.get(kpi_name),
+        )
         metric_style = {"palette": palette} if palette else {"color": "#00BFB3"}
         state = make_state(
             layer,

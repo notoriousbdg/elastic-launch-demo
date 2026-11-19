@@ -6,18 +6,30 @@ sensor_type: settlement_status
 affected_services:
 - settlement-processor
 - risk-calculator
+error_services:
+- settlement-processor
 cascade_services:
 - compliance-monitor
 - audit-logger
 description: Trade settlement fails due to insufficient securities or funding
+onset_delay_seconds: 15
+service_lag_seconds:
+  risk-calculator: 30
+  compliance-monitor: 45
+  audit-logger: 45
 investigation_notes: |-
-  1. Check settlement-processor logs for SETTLE-FAIL — note trade_id, instrument, quantity, and failure_reason (e.g. insufficient_securities or SSI_mismatch).
-  2. Query FROM logs.otel.financial.* | WHERE body.text LIKE "*SETTLE-FAIL*" | STATS count() BY failure_reason to determine if the cause is systemic.
-  3. Inspect risk-calculator for the counterparty credit exposure — a counterparty_default failure_reason requires immediate credit event notification.
-  4. Check compliance-monitor for SWIFT MT548 processing — confirm the LACK reject code was received and logged for regulatory recordkeeping.
-  5. If auto_borrow=ATTEMPTED and borrow_result=UNAVAILABLE, initiate securities lending desk escalation or recycle the instruction with an extended settlement date.
-remediation_action: initiate_securities_borrow_and_recycle
-error_message: '[SETTLE] SETTLE-FAIL: trade={trade_id} instrument={instrument} qty={quantity} reason={failure_reason} counterparty={counterparty}'
+  Root cause: the EquiLend NGT API key that settlement-processor's auto-borrow client uses (secret equilend-ngt-api-key, version v14) expired; the rotation job that should have issued v15 had been failing for days. Since the expiry every borrow request returns HTTP 401, but the borrow client maps any non-2xx response to borrow_result=UNAVAILABLE, so it looks as if the street has no lendable supply. Shortfalls are no longer covered, deliveries fail with PEND//LACK, and pending LACK fails pile up. Lendable supply is fine: EquiLend reports no outage, the desk can borrow the same securities by hand, deliveries that need no borrow settle normally, and the counterparties have no credit issue (risk.credit_hold_active is false).
+  Confirm:
+    - settlement-processor lines with body.text LIKE "*SETTLE-FAIL*": reason={failure_reason}, auto_borrow=ATTEMPTED borrow_result=UNAVAILABLE; the AUTO-BORROW section of the dump shows HTTP {borrow_http_status} with credential version {secret_version}
+    - metrics.settlement.auto_borrow_failures_per_min on settlement-processor: 0-1 before, 20-60 during (over 5 is a fault); metrics.settlement.lack_fails_pending climbs from under 10
+    - settlement-processor "auto_borrow_client" lines: attributes.borrow.http_status = 401 and attributes.secret.version = v14 behind borrow_result_last=UNAVAILABLE
+    - the settlement-processor external-secrets line "equilend-ngt-api-key: current version v14 expired" (attributes.operation secret_expiry) comes before the first fail
+  Remediation: opsctl rotate secret/equilend-ngt-api-key issues v15 and rolls the consumers. The borrow client reloads the new version in about 20 s and borrows return HTTP 200; auto-borrow failures are back to 0-1 within about 45 s, and the recycle loop settles the pending LACK fails with borrowed shares, back under 10 within about 150 s. Escalating to the securities-lending desk or recycling with an extended settlement date treats the symptom: the HTTP 401 behind UNAVAILABLE says the credential is the problem, not supply.
+remediation_action: rotate_securities_lending_api_key
+remediation_command: |-
+  opsctl rotate secret/equilend-ngt-api-key
+error_message: '[SETTLE] SETTLE-FAIL: trade={trade_id} instrument={instrument} qty={quantity} reason={failure_reason} counterparty={counterparty}
+  auto_borrow=ATTEMPTED borrow_result=UNAVAILABLE'
 stack_trace: |-
   === SWIFT MT548 SETTLEMENT STATUS ===
   :16R:GENL
@@ -25,14 +37,24 @@ stack_trace: |-
   :23G:INST
   :16R:STAT
   :25D::SETT//PEND
-  :24B::PEND//LACK  (reason={failure_reason})
+  :16R:REAS
+  :24B::PEND//LACK
+  :70D::REAS//{failure_reason}
+  :16S:REAS
   :16S:STAT
-  :16R:SETTRAN
-  :35B:ISIN US0378331005  {instrument}
-  :36B::SETT//UNIT/{quantity}
-  :97A::SAFE//DTC-{counterparty}
-  :16S:SETTRAN
   :16S:GENL
+  :16R:SETTRAN
+  :35B:ISIN US0378331005
+  /US/{instrument}
+  :36B::SETT//UNIT/{quantity},
+  :97A::SAFE//0352-001
+  :16R:SETPRTY
+  :95Q::DEAG//{counterparty}
+  :16S:SETPRTY
+  :16S:SETTRAN
+  --- AUTO-BORROW ---
+    provider=EquiLend NGT  request=POST /ngt/v2/borrow-requests  credential=secret/equilend-ngt-api-key version={secret_version}
+    response=HTTP {borrow_http_status}  mapped_to=borrow_result=UNAVAILABLE  lender_inventory=not_queried
   trade={trade_id}  fail_code=LACK  auto_borrow=ATTEMPTED  borrow_result=UNAVAILABLE
   ACTION: recycle_instruction=true  notify_ops=true  alert=SETTLE-FAIL
 correlation_attr: {}
@@ -40,32 +62,123 @@ fault_params:
   trade_id:
     format: "TRD-{n}"
     n: {randint: [100000, 999999]}
-  instrument: {choice: [US.AAPL, US.GOOGL, US.MSFT, US.AMZN, US.TSLA, FX.EURUSD, FX.GBPUSD, FUT.ES, FUT.NQ, OPT.SPX]}
+  instrument: US.AAPL
   quantity: {randint: [100, 50000]}
-  failure_reason: {choice: [insufficient_securities, funding_shortfall, counterparty_default, DTCC_rejection, SSI_mismatch]}
+  failure_reason: insufficient_securities
   counterparty: {choice: [Goldman Sachs, Morgan Stanley, JP Morgan, Citadel Securities, Virtu Financial, Jane Street]}
   settlement_id:
     format: "STL-{n}"
     n: {randint: [100000, 999999]}
+  secret_version: v14
+  borrow_http_status: 401
 rca_clues:
   settlement-processor:
-    settlement.fail_code_lack_count: {randint: [1, 30]}
-    settlement.auto_borrow_failures: {randint: [1, 15]}
+    settlement.fail_code_lack_count: {randint: [20, 400]}
+    settlement.auto_borrow_failures_per_min: {uniform: [20.0, 60.0], round: 1}
+    borrow.http_status: 401
+    secret.version: v14
   risk-calculator:
     risk.counterparty_exposure_usd: {randint: [1000000, 50000000]}
-    risk.credit_hold_active: true
+    risk.credit_hold_active: false
   compliance-monitor:
     compliance.swift_mt548_rejections: {randint: [1, 20]}
     compliance.settle_fail_reg_events: {randint: [1, 10]}
   audit-logger:
     audit.settle_fail_trail_entries: {randint: [3, 30]}
-    audit.recycled_instruction_count: {randint: [0, 5]}
+    audit.recycled_instruction_count: {randint: [1, 5]}
+cascade_messages:
+  risk-calculator:
+    - severity: WARN
+      message: '[RISK] fail-to-deliver exposure: trade={trade_id} {instrument} qty={quantity} PEND//LACK vs {counterparty}, marked
+        to market until delivery'
+  compliance-monitor:
+    - severity: WARN
+      message: '[COMPL] Reg SHO 204 close-out clock started: trade={trade_id} {instrument} qty={quantity} fail_code=LACK counterparty={counterparty}'
+  audit-logger:
+    - severity: INFO
+      message: '[AUDIT] event_logged stream=settlements type=SETTLEMENT_FAIL trade={trade_id} reason=PEND//LACK counterparty={counterparty}'
+fault_scope:
+  cluster: finserv-gke-cluster
+  workloads: [settlement-processor, risk-calculator]
+infrastructure_events:
+  - service: settlement-processor
+    severity: WARN
+    offset_seconds: -150
+    body: 'external-secrets: ExternalSecret settlement/equilend-ngt-api-key: current version v14 expired; no newer version in the
+      store (cronjob secret-rotate-equilend: 6 consecutive failures, last success 6 days ago, CR-4907)'
+    attributes:
+      user.name: external-secrets-operator
+      change.request: CR-4907
+      operation: secret_expiry
+      change.summary: 'equilend-ngt-api-key v14: valid -> expired'
+      secret.name: equilend-ngt-api-key
+      secret.version: v14
+remediation_effects:
+  log_taper_seconds: 45
+  log_events:
+    - service: audit-logger
+      severity: INFO
+      offset_seconds: 1
+      body: '[AUDIT] event_logged stream=change-mgmt type=CHANGE_APPLIED cmd="opsctl rotate secret/equilend-ngt-api-key" actor={actor}: equilend-ngt-api-key v14 (expired) -> v15'
+      attributes:
+        operation: change_applied
+        audit.stream: change-mgmt
+        change.target: secret/equilend-ngt-api-key
+    - service: settlement-processor
+      severity: INFO
+      offset_seconds: 5
+      body: 'external-secrets: ExternalSecret settlement/equilend-ngt-api-key synced: version v15 is current (expires in 90 days)'
+      attributes:
+        operation: secret_sync
+        secret.name: equilend-ngt-api-key
+        secret.version: v15
+    - service: settlement-processor
+      severity: INFO
+      offset_seconds: 20
+      body: '[SETTLE] auto_borrow_client reloaded credential equilend-ngt-api-key version v15; POST /ngt/v2/borrow-requests -> HTTP 200'
+      attributes:
+        operation: auto_borrow_client
+        secret.version: v15
+        borrow.http_status: 200
+    - service: settlement-processor
+      severity: INFO
+      offset_seconds: 140
+      body: '[SETTLE] fail_recycle: pending PEND//LACK deliveries recycled with borrowed shares and settled'
+      attributes:
+        operation: fail_recycle
+  steady_attributes:
+    settlement-processor:
+      secret.version: v15
+  verification:
+    - signal: settlement.auto_borrow_failures_per_min
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "settlement-processor"'
+      field: 'metrics.settlement.auto_borrow_failures_per_min'
+      expect: 'back to 0-1 (was 20-60)'
+      within_seconds: 90
+    - signal: settlement.lack_fails_pending
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "settlement-processor"'
+      field: 'metrics.settlement.lack_fails_pending'
+      expect: 'back under 10 (was climbing by about 38 a minute)'
+      within_seconds: 180
+    - signal: SETTLE-FAIL lines
+      from: 'logs.otel.finserv'
+      where: 'body.text LIKE "*SETTLE-FAIL*"'
+      expect: '0 new lines'
+      within_seconds: 90
+    - signal: borrow client credential version
+      from: 'logs.otel.finserv'
+      where: 'resource.attributes.service.name == "settlement-processor" AND body.text LIKE "*auto_borrow_client*"'
+      field: 'attributes.secret.version'
+      expect: 'v15 on every line since the fix (borrow.http_status 200); v14 stops appearing'
+      within_seconds: 90
 business_impact:
   - kpi: business.settlement_success_rate_pct
     factor: {uniform: [0.55, 0.82]}
   - kpi: business.settlement_fails_in_queue
     factor: {uniform: [2.5, 6.0]}
   - kpi: business.notional_value_usd_per_min
-    factor: {uniform: [0.25, 0.55]}
+    value: {uniform: [1692600.0, 1947400.0], round: 1}
   - kpi: business.counterparty_credit_risk_usd
     factor: {uniform: [2.0, 4.5]}

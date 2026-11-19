@@ -1,0 +1,37 @@
+name: "GT jvm: heap_pressure"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-JVM-HEAP-PRESSURE
+sensor_type: impact_key_probe
+affected_services:
+  - gt-jvm-aws-svc-1
+cascade_services:
+  - gt-jvm-aws-svc-2
+description: "Tests impact_key heap_pressure on generator jvm."
+investigation_notes: |-
+  1. Verify jvm is active and reporting metrics.
+  2. Check that the heap_pressure metric has reached the trigger value (0.85).
+  3. Confirm generator_impact for jvm.heap_pressure is set to 0.85.
+  4. Look for correlated changes in service gt-jvm-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_heap_pressure_baseline
+error_message: "GT-PROBE: gen=jvm key=heap_pressure value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=jvm
+  impact_key: heap_pressure
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 0.85
+  svc_name: gt-jvm-aws-svc-1
+rca_clues:
+  gt-jvm-aws-svc-1:
+    probe.generator: jvm
+    probe.impact_key: heap_pressure
+    probe.trigger_value: 0.85
+  gt-jvm-aws-svc-2:
+    probe.upstream_generator: jvm
+    probe.upstream_key: heap_pressure
+generator_impact:
+  jvm:
+    heap_pressure: 0.85

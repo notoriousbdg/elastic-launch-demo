@@ -9,59 +9,152 @@ affected_services:
 cascade_services:
 - member-portal
 - fraud-sentinel
-description: Push notification system sending duplicate or excessive alerts to members
+description: Members receive bursts of duplicate transaction alerts because the notification dispatcher is replaying the transaction event topic from the beginning.
 investigation_notes: |-
-  1. Check dedup cache status — OVERFLOW at 500K entries means the cache cannot prevent duplicate sends. Inspect Redis memory: redis-cli INFO memory | grep used_memory_human.
-  2. Identify the root_cause event_replay source — transaction_processor is re-emitting events that trigger notifications. Check transaction_processor logs for reprocessing or replay activity.
-  3. Monitor APNS throttling — Apple will rate-limit and eventually block the push certificate if abuse continues. Check APNS feedback service for unregistered device tokens.
-  4. Review member complaint volume — 200+ complaints in a notification storm triggers regulatory attention. CFPB considers excessive notifications a UDAAP (unfair practices) concern.
-  5. Flush and resize the dedup cache immediately, then identify which event types are replaying. Check: SELECT event_type, COUNT(*) FROM notification_events WHERE ts > NOW() - INTERVAL 5 MINUTE GROUP BY event_type.
-remediation_action: flush_notification_queue
-error_message: '[MOBILE] MOBILE-NOTIF-STORM: rate={notif_rate}/min max={notif_max}/min duplicates={notif_dupes} channel={notif_channel}
-  window={notif_window_s}s'
+  1. Search logs.otel.banking for body.text containing MOBILE-NOTIF-STORM on mobile-gateway: the dispatcher sends {notif_rate}/min against a per-member budget of {notif_max}/min, with {notif_dupes} duplicates on {notif_channel}. metrics.mobile_gateway.push_sends_per_min normally reads 90-160 and metrics.mobile_gateway.push_duplicate_pct stays under 0.3%.
+  2. Find the change: notification-dispatcher (namespace digital) was deployed shortly before the first storm line with consumer group notif-dispatcher-v2 and auto.offset.reset=earliest. A new group has no committed offsets, so it starts at the beginning of the 7-day txn-events retention and re-sends alerts for transactions members already saw. The dispatcher status line carries attributes.messaging.consumer.group and the consumer lag of that group (millions of messages, falling as it replays).
+  3. The Redis dedup cache is a victim, not the cause: replayed event ids arrive faster than the 24h-TTL dedup keys can hold, Redis reaches maxmemory and evicts with allkeys-lru (evicted_keys climbing in the Redis metrics), so dedup misses and duplicates go out. Flushing or growing the cache does not stop the replay.
+  4. Follow the cascade: APNs answers 429 TooManyRequests for the hottest device tokens, which also delays auth-gateway's sign-in approval pushes to the same devices; member-portal records complaints and notification opt-outs; fraud-sentinel flags the alert burst as anomalous.
+  5. Fix: roll the dispatcher back to the release that consumes as group notif-dispatcher with its committed offsets: opsctl rollback deployment/notification-dispatcher -n digital --to-revision previous. The replay stops as the new pods take over (about 30s); send rate and duplicate share fall back over about 90s while the in-flight APNs queue drains. Then delete the abandoned consumer group notif-dispatcher-v2 so a later deploy cannot reuse it.
+  6. Recovery: messaging.consumer.group reads notif-dispatcher on the dispatcher lines, push_sends_per_min back in 90-160, push_duplicate_pct under 0.3%, Redis evictions back to zero, and no new MOBILE-NOTIF-STORM lines.
+remediation_action: rollback_notification_dispatcher
+remediation_command: |-
+  opsctl rollback deployment/notification-dispatcher -n digital --to-revision previous
+error_message: '[MOBILE] MOBILE-NOTIF-STORM: rate={notif_rate}/min max={notif_max}/min duplicates={notif_dupes} channel={notif_channel} window={notif_window_s}s consumer_group=notif-dispatcher-v2'
 stack_trace: |-
-  === NOTIFICATION SERVICE STATS ===
-  channel={notif_channel}  window={notif_window_s}s
-  --- DELIVERY METRICS ---
-    CHANNEL          SENT      DELIVERED   FAILED    DUPES
-    APNS             12,450    11,980      470       {notif_dupes}
-    FCM              8,320     8,140       180       {notif_dupes}
-    SMS              2,100     2,085       15        0
-    EMAIL            4,500     4,480       20        0
-  --- RATE ANALYSIS ---
-    current_rate={notif_rate}/min  max_allowed={notif_max}/min
-    dedup_cache=OVERFLOW  cache_size=500000  cache_capacity=500000
-    root_cause=event_replay  source=transaction_processor
-  member_complaints=247  unsubscribes=18  APNS_throttled=true
-  ACTION: throttle_all=true  flush_dedup_cache=true  alert=MOBILE-NOTIF-STORM
+  === NOTIFICATION DISPATCHER STATS ===
+  channel={notif_channel}  window={notif_window_s}s  consumer_group=notif-dispatcher-v2  topic=txn-events
+  --- DELIVERY ---
+    CHANNEL          SENT      DUPES          APNS_429
+    APNS             {notif_rate}      {notif_dupes}          {apns_429}
+    FCM              {fcm_sent}      {fcm_dupes}          ---
+  --- CONSUMER ---
+    group=notif-dispatcher-v2  committed_offsets=none  auto.offset.reset=earliest
+    lag={consumer_lag} messages  oldest_event_age=6d
+  --- DEDUP CACHE (redis) ---
+    used_memory=maxmemory  maxmemory_policy=allkeys-lru  evicted_keys=rising
+  ACTION: alert=MOBILE-NOTIF-STORM
 correlation_attr:
-  key: runtime.notification_broker
-  value: rabbitmq-v3.12.14-hotfix
+  key: messaging.consumer.group
+  value: notif-dispatcher-v2
 fault_params:
-  notif_rate: {randint: [500, 5000]}
+  notif_rate: {randint: [2400, 4800]}
   notif_max: 200
-  notif_dupes: {randint: [100, 2000]}
-  notif_channel: {choice: [APNS, FCM, SMS_GATEWAY, EMAIL_RELAY]}
-  notif_window_s: {randint: [60, 600]}
+  notif_dupes: {randint: [1300, 3600]}
+  notif_channel: APNS
+  notif_window_s: 60
+  apns_429: {randint: [300, 900]}
+  fcm_sent: {randint: [1500, 3200]}
+  fcm_dupes: {randint: [800, 2400]}
+  consumer_lag: {randint: [2100000, 4800000]}
 rca_clues:
   mobile-gateway:
-    gateway.notification_rate_per_min: {randint: [8000, 15000]}
-    gateway.dedup_cache_status: OVERFLOW
+    messaging.consumer.group: notif-dispatcher-v2
+    messaging.kafka.consumer.lag: {randint: [2100000, 4800000]}
+    gateway.dedup_cache_status: EVICTING
   auth-gateway:
-    auth.notification_trigger_source: event_replay
-    auth.apns_throttle_status: RATE_LIMITED
+    auth.apns_status_code: 429
+    auth.signin_push_delay_s: {randint: [40, 180]}
   member-portal:
-    portal.complaint_volume: {randint: [150, 400]}
-    portal.unsubscribe_spike: true
+    portal.notification_complaints: {randint: [150, 400]}
+    portal.push_opt_outs_per_min: {randint: [20, 80]}
   fraud-sentinel:
     fraud.notification_anomaly_detected: true
-    fraud.alert_source: transaction_processor_replay
+error_services:
+- mobile-gateway
+service_lag_seconds:
+  auth-gateway: 30
+  member-portal: 60
+  fraud-sentinel: 60
+cascade_messages:
+  auth-gateway:
+  - severity: WARN
+    message: '[AUTH] push_approval apns_status=429 reason=TooManyRequests retry_after_s=60 method=push_approve status=DELAYED'
+  member-portal:
+  - severity: WARN
+    message: '[PORTAL] member_feedback type=COMPLAINT topic=duplicate_alerts channel=in_app status=OPEN'
+  fraud-sentinel:
+  - severity: INFO
+    message: '[FRAUD] notification_anomaly source=notification-dispatcher alerts_per_member_per_min=14 baseline=0.2 status=FLAGGED'
+fault_scope:
+  cluster: banking-eks-cluster
+  workloads: [mobile-gateway]
+infrastructure_events:
+- service: mobile-gateway
+  severity: INFO
+  offset_seconds: -90
+  body: '[MOBILE] deploy notification-dispatcher 3.4.0 rolled out replicas=4/4 kafka.group.id=notif-dispatcher-v2 auto.offset.reset=earliest topic=txn-events applied_by=argocd/digital status=AVAILABLE'
+  attributes:
+    operation: deploy
+    service.version: 3.4.0
+    messaging.consumer.group: notif-dispatcher-v2
+    user.name: argocd/digital
+- service: mobile-gateway
+  severity: INFO
+  offset_seconds: -60
+  body: '[MOBILE] kafka consumer group=notif-dispatcher-v2 topic=txn-events partitions=24 no committed offset, resetting to earliest offset=0 status=ASSIGNED'
+  attributes:
+    operation: consumer_assign
+    messaging.consumer.group: notif-dispatcher-v2
+remediation_effects:
+  transition_seconds: 90
+  log_events:
+  - service: mobile-gateway
+    severity: INFO
+    offset_seconds: 1
+    body: '[change-audit] change applied action=rollback target=deployment/notification-dispatcher namespace=digital cmd="opsctl rollback deployment/notification-dispatcher -n digital --to-revision previous" actor={actor} result="3.4.0 -> 3.3.2 (group notif-dispatcher)"'
+    attributes:
+      operation: change_applied
+      change.target: deployment/notification-dispatcher
+      service.version: 3.3.2
+  - service: mobile-gateway
+    severity: INFO
+    offset_seconds: 30
+    body: '[MOBILE] deploy notification-dispatcher 3.3.2 rolled out replicas=4/4 kafka.group.id=notif-dispatcher resumed from committed offsets lag=1840 status=AVAILABLE'
+    attributes:
+      operation: deploy
+      service.version: 3.3.2
+      messaging.consumer.group: notif-dispatcher
+  steady_attributes:
+    mobile-gateway:
+      messaging.consumer.group: notif-dispatcher
+  verification:
+  - signal: mobile_gateway.push_sends_per_min
+    from: metrics-generic.otel-default
+    where: resource.attributes.service.name == "mobile-gateway"
+    field: metrics.mobile_gateway.push_sends_per_min
+    expect: back in 90-160 (was 2400-4800)
+    within_seconds: 150
+  - signal: mobile_gateway.push_duplicate_pct
+    from: metrics-generic.otel-default
+    where: resource.attributes.service.name == "mobile-gateway"
+    field: metrics.mobile_gateway.push_duplicate_pct
+    expect: back under 0.3% (was 55-80%)
+    within_seconds: 150
+  - signal: dispatcher consumer group
+    from: logs.otel.banking
+    where: resource.attributes.service.name == "mobile-gateway" AND attributes.operation == "dispatcher_status"
+    field: attributes.messaging.consumer.group
+    expect: notif-dispatcher on every line logged since the fix; notif-dispatcher-v2 stops appearing
+    within_seconds: 90
+  - signal: MOBILE-NOTIF-STORM lines
+    from: logs.otel.banking
+    where: body.text LIKE "*MOBILE-NOTIF-STORM*"
+    expect: 0 new lines
+    within_seconds: 150
+generator_impact:
+  redis_otel:
+    memory_approaching_maxmemory: 95.0
+    high_eviction_rate: 150.0
+generator_hold_seconds:
+  redis_otel: 90
 business_impact:
   - kpi: business.active_digital_sessions
-    factor: {uniform: [0.55, 0.80]}
+    value: {uniform: [4464.0, 5136.0]}
   - kpi: business.app_session_duration_sec
-    factor: {uniform: [0.40, 0.65]}
+    value: {uniform: [58.71, 67.54], round: 1}
   - kpi: business.complaint_tickets_per_min
     factor: {uniform: [3.0, 6.0]}
   - kpi: business.churn_risk_index_0_100
     factor: {uniform: [1.5, 3.0]}
+

@@ -1,0 +1,37 @@
+name: "GT supabase_otel: host_cpu_saturation"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-SUPABASE-HOST-CPU-SATURATION
+sensor_type: impact_key_probe
+affected_services:
+  - gt-supabase-aws-svc-1
+cascade_services:
+  - gt-supabase-aws-svc-2
+description: "Tests impact_key host_cpu_saturation on generator supabase_otel."
+investigation_notes: |-
+  1. Verify supabase_otel is active and reporting metrics.
+  2. Check that the host_cpu_saturation metric has reached the trigger value (0.96).
+  3. Confirm generator_impact for supabase_otel.host_cpu_saturation is set to 0.96.
+  4. Look for correlated changes in service gt-supabase-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_host_cpu_saturation_baseline
+error_message: "GT-PROBE: gen=supabase_otel key=host_cpu_saturation value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=supabase_otel
+  impact_key: host_cpu_saturation
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 0.96
+  svc_name: gt-supabase-aws-svc-1
+rca_clues:
+  gt-supabase-aws-svc-1:
+    probe.generator: supabase_otel
+    probe.impact_key: host_cpu_saturation
+    probe.trigger_value: 0.96
+  gt-supabase-aws-svc-2:
+    probe.upstream_generator: supabase_otel
+    probe.upstream_key: host_cpu_saturation
+generator_impact:
+  supabase_otel:
+    host_cpu_saturation: 0.96

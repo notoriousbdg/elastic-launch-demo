@@ -1,0 +1,72 @@
+service: edge-gateway
+sort_order: 1
+cloud_provider: aws
+cloud_region: us-east-1
+cloud_platform: aws_ec2
+cloud_availability_zone: us-east-1a
+subsystem: ingress
+language: python
+
+topology:
+  - [session-service, /api/v1/session/validate, POST]
+  - [worker-pool, /api/v1/jobs/submit, POST]
+  - [cache-tier, /api/v1/cache/lookup, GET]
+
+entry_endpoints:
+  - [/api/v1/ingest, POST]
+  - [/api/v1/generators/status, GET]
+  - [/api/v1/faults/trigger, POST]
+  - [/api/v1/metrics/synthetic, GET]
+  - [/api/v1/session, POST]
+  - [/health, GET]
+
+db_operations: []
+
+emit_fault_logs: true
+kpi_emitter: true
+
+constants:
+  ROUTES: [/api/v1/ingest, /api/v1/generators/status, /api/v1/faults/trigger, /api/v1/metrics/synthetic]
+
+state:
+  _request_count: {init: 0}
+  _last_summary: {init: now}
+
+steps:
+  - sample:
+      route: {choice: ROUTES}
+      latency_ms:
+        if_active: {uniform: [400.0, 2500.0], round: 1}
+        else: {uniform: [15.0, 120.0], round: 1}
+      status_code:
+        if_active: {choice: [200, 200, 502, 503]}
+        else: {choice: [200, 200, 200, 201]}
+  - counter:
+      state_key: _request_count
+      by: 1
+  - log:
+      level: INFO
+      message: '[edge-gateway] request route={route} latency={latency_ms}ms status={status_code} total={_request_count}'
+      attrs:
+        operation: handle_request
+        gateway.route: {var: route}
+        gateway.latency_ms: {var: latency_ms}
+        gateway.status_code: {var: status_code}
+  - metric:
+      name: edge_gateway.request_latency_ms
+      value: {var: latency_ms}
+      unit: ms
+  - metric:
+      name: edge_gateway.requests_per_sec
+      value: {uniform: [50.0, 700.0], round: 1}
+      unit: req/s
+  - every:
+      seconds: 15
+      state_key: _last_summary
+      steps:
+        - log:
+            level: INFO
+            message: '[edge-gateway] summary total_requests={_request_count} status=NOMINAL'
+            attrs:
+              operation: summary
+              gateway.total_requests: {var: _request_count}

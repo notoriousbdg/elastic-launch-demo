@@ -1,5 +1,6 @@
 version: "1"
 name: __SCENARIO_NAME__ Daily Update Report
+enabled: true
 description: >
   Generate and email a daily system health report using the scenario's
   Agent Builder agent. Triggered manually from the chaos controller UI.

@@ -6,67 +6,152 @@ sensor_type: token_monitor
 affected_services:
 - auth-gateway
 - game-server
+error_services:
+- auth-gateway
 cascade_services:
 - matchmaking-engine
 - chat-service
-description: Mass token refresh requests overwhelm the auth service when tokens expire simultaneously due to clock sync issues
+description: Access-token refreshes arrive in synchronized waves far above the auth-gateway refresh capacity after a token policy change shortened the TTL and removed refresh jitter
+onset_delay_seconds: 15
+ramp_seconds: 45
+service_lag_seconds: {game-server: 15, matchmaking-engine: 20, chat-service: 25}
 investigation_notes: |-
-  Root cause: token TTLs were issued with identical expiry timestamps because the auth service clock was NTP-synchronized during a bulk login wave (e.g., after maintenance). 61.4% of active tokens expire within 5 minutes, creating a thundering herd.
-  1. Check NTP sync: `chronyc tracking` on auth-gateway pods — a clock jump during token issuance would cause all tokens in that window to share the same expiry.
-  2. Review provider breakdown: oauth-google and oauth-discord are OVERLOADED — verify their rate limits haven't been lowered; check provider status pages.
-  3. Inspect JWKS cache: `jwks_cache_age=312s` is stale — if the signing key rotated and the cache is stale, all validations will fail and trigger needless refreshes.
-  4. Remediate: issue `stagger_token_refresh` to add random jitter (0-300s) to expiry times and `extend_token_ttl` to push current expirations out by 5 minutes.
-  5. Implement token refresh jitter at issuance time: TTL = base_ttl + random(0, 300s) to prevent future synchronized expiration storms.
+  Root cause: Argo CD synced auth-token-policy revision r47 to auth-gateway (CHG0052811) about three minutes before the first AUTH-TOKEN-STORM line. The revision shortened the access-token TTL from 60 to 15 minutes and set refresh jitter from 20% to 0%. Most clients received their tokens close together in the post-maintenance login wave, so without jitter they all refresh at the same moment, four times as often: refreshes arrive in waves of up to {refresh_rate}/s against a capacity of {max_refresh_rate}/s on {token_pool_id}, and {failed_refreshes} refreshes fail with 429. The comparison is the same player population before the sync: 300-600 refreshes/s with the 60-minute, 20%-jitter policy (revision r46). The signing key has not rotated and the JWKS cache is {jwks_cache_age_s}s old, so token validation itself is fine.
+  Confirm:
+    - auth-gateway token_policy lines carry attributes.config.token_ttl_min 15 and attributes.config.refresh_jitter_pct 0 (r46 had 60 and 20); the Argo CD sync line with change.request CHG0052811 comes before the first AUTH-TOKEN-STORM line
+    - metrics.auth.token_refresh_rate rises from 300-600/s to 6000-12000/s, in waves about 90 seconds apart
+    - metrics.auth.request_latency_ms (p99) rises from 30-80 ms to 400-1500 ms; auth.active_sessions stays near 84000, so this is refresh load and not new logins
+  Remediation: roll the token policy back with opsctl rollback configmap/auth-token-policy --to-revision previous. Clients that already hold 15-minute tokens refresh one more time and receive 60-minute tokens with 20% jitter, so the herd spreads out over one refresh window: the refresh rate falls back to 300-600/s and the p99 latency to 30-80 ms over about 10 minutes, not at once. Restarting or scaling auth-gateway would not help: every new pod gets the same synchronized refresh waves, and the clients keep the 15-minute tokens until they refresh.
 remediation_action: stagger_token_refresh
+remediation_command: |-
+  opsctl rollback configmap/auth-token-policy --to-revision previous
 error_message: '[Auth] AUTH-TOKEN-STORM: refresh_rate={refresh_rate}/s capacity={max_refresh_rate}/s failures={failed_refreshes}
-  pool={token_pool_id}'
+  pool={token_pool_id} policy={policy_revision} access_ttl={token_ttl_min}m refresh_jitter={refresh_jitter_pct}%'
 stack_trace: |-
   === TOKEN SERVICE METRICS DUMP ===
-  pool={token_pool_id}
+  pool={token_pool_id}  policy=auth-token-policy@{policy_revision}
   ----------- refresh metrics ---------
     refresh_rate    = {refresh_rate}/s
     capacity        = {max_refresh_rate}/s
-    failures        = {failed_refreshes}
-    success_rate    = 14.2%
-    avg_latency     = 4,821ms (target 50ms)
+    failures        = {failed_refreshes} (HTTP 429 refresh_throttled)
+    p99_latency     = 1,180ms (target 80ms)
+  ----------- token policy ------------
+    access_ttl      = {token_ttl_min}m
+    refresh_at      = 80% of ttl
+    refresh_jitter  = {refresh_jitter_pct}%
+    issued_in_wave  = {expiring_pct}% of active tokens issued within the same 5 min
   ----------- token pool state --------
-    active_tokens   = 142,301
-    expiring_5min   = 87,412  (61.4% — clock skew)
-    signing_key     = RS256-prod-2026-02
-    jwks_cache_age  = 312s
-  ----------- provider breakdown ------
-    oauth-google    : 3,201/s (OVERLOADED)
-    oauth-discord   : 2,847/s (OVERLOADED)
-    oauth-steam     : 1,204/s (DEGRADED)
-    email-password  : 891/s   (OK)
+    active_tokens   = 84,000
+    signing_key     = RS256-prod-2026-02 (not rotated)
+    jwks_cache_age  = {jwks_cache_age_s}s
   ----------- action ------------------
-    STAGGER refresh window  EXTEND ttl by 300s
+    THROTTLE refresh  429 Retry-After=5
   AUTH-TOKEN-STORM: refresh rate {refresh_rate}/s exceeds capacity {max_refresh_rate}/s
 correlation_attr:
-  key: infra.ntp_source
-  value: chrony-4.5-gps-backup
+  key: config.token_policy_revision
+  value: r47
 fault_params:
-  refresh_rate: {randint: [5000, 50000]}
-  max_refresh_rate: 2000
-  failed_refreshes: {randint: [100, 5000]}
-  token_pool_id: {choice: [pool-primary, pool-secondary, pool-failover]}
+  refresh_rate: {randint: [6000, 12000]}
+  max_refresh_rate: 4000
+  failed_refreshes: {randint: [1500, 6000]}
+  token_pool_id: pool-primary
+  policy_revision: r47
+  token_ttl_min: 15
+  refresh_jitter_pct: 0
+  expiring_pct: {uniform: [55.0, 75.0], round: 1}
+  jwks_cache_age_s: {randint: [30, 240]}
 rca_clues:
   auth-gateway:
-    auth.expiring_tokens_5min_pct: {uniform: [40.0, 75.0], round: 1}
-    auth.jwks_cache_age_s: {randint: [200, 600]}
+    config.token_ttl_min: 15
+    config.refresh_jitter_pct: 0
+    auth.tokens_issued_same_window_pct: {uniform: [55.0, 75.0], round: 1}
+    auth.signing_key_rotated: false
   game-server:
-    game.session_validation_failures: {randint: [500, 5000]}
-    game.forced_relogin_count: {randint: [100, 1000]}
+    game.session_revalidation_failures: {randint: [500, 5000]}
+cascade_messages:
+  game-server:
+    - severity: WARN
+      message: '[Net] session revalidation failed for {failed_refreshes} players in the last 60s: auth-gateway /oauth/token returned 429 refresh_throttled; clients held in reconnect backoff'
   matchmaking-engine:
-    matchmaking.auth_timeout_pct: {uniform: [10.0, 50.0], round: 1}
+    - severity: WARN
+      message: '[MM] ticket_create rejected: player token refresh pending (auth-gateway 429 refresh_throttled), {failed_refreshes} tickets deferred in the last 60s'
   chat-service:
-    chat.disconnected_users: {randint: [500, 5000]}
+    - severity: WARN
+      message: '[Chat] websocket re-auth failed: auth-gateway token refresh returned 429, {failed_refreshes} sessions reconnecting with backoff'
+fault_scope:
+  cluster: gaming-gke-cluster
+  workloads: [auth-gateway]
+infrastructure_events:
+  - service: auth-gateway
+    severity: INFO
+    offset_seconds: -180
+    body: 'level=info msg="sync operation to 3e91c4d succeeded" application=argocd/auth-gateway dest-namespace=identity resource=ConfigMap/auth-token-policy revision=r47 diff="access_token_ttl: 60m -> 15m, refresh_jitter_pct: 20 -> 0" (CHG0052811)'
+    attributes:
+      operation: config_change
+      change.request: CHG0052811
+      user.name: identity-platform-ci
+      change.summary: 'auth-token-policy access_token_ttl 60m -> 15m, refresh_jitter_pct 20 -> 0'
+      config.token_policy_revision: r47
+      config.token_ttl_min: 15
+      config.refresh_jitter_pct: 0
+remediation_effects:
+  transition_seconds: 600
+  log_taper_seconds: 300
+  log_events:
+    - service: auth-gateway
+      severity: INFO
+      offset_seconds: 1
+      body: 'level=info logger=changelog msg="change applied" cmd="opsctl rollback configmap/auth-token-policy --to-revision previous" actor={actor} result="configmap/auth-token-policy r47 -> r46 (access_token_ttl 60m, refresh_jitter_pct 20)"'
+      attributes:
+        operation: change_applied
+        change.target: configmap/auth-token-policy
+        config.token_policy_revision: r46
+    - service: auth-gateway
+      severity: INFO
+      offset_seconds: 20
+      body: '[Auth] token_policy reloaded revision=r46 access_ttl=60m refresh_jitter=20%; new tokens are issued with the restored policy, outstanding 15m tokens refresh onto it within one window'
+      attributes:
+        operation: config_change
+        config.token_policy_revision: r46
+        config.token_ttl_min: 60
+        config.refresh_jitter_pct: 20
+  steady_attributes:
+    auth-gateway:
+      config.token_ttl_min: 60
+      config.refresh_jitter_pct: 20
+  verification:
+    - signal: auth.token_refresh_rate
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "auth-gateway"'
+      field: 'metrics.auth.token_refresh_rate'
+      expect: 'falling steadily over about 10 minutes back to 300-600/s (was 6000-12000/s in waves)'
+      within_seconds: 660
+    - signal: auth.request_latency_ms
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "auth-gateway"'
+      field: 'metrics.auth.request_latency_ms'
+      expect: 'back in 30-80 ms (was 400-1500 ms)'
+      within_seconds: 660
+    - signal: AUTH-TOKEN-STORM lines
+      from: 'logs.otel.gaming'
+      where: 'body.text LIKE "*AUTH-TOKEN-STORM*"'
+      expect: '0 new lines'
+      within_seconds: 660
+    - signal: token policy TTL
+      from: 'logs.otel.gaming'
+      where: 'resource.attributes.service.name == "auth-gateway" AND attributes.operation == "token_policy_status"'
+      field: 'attributes.config.token_ttl_min'
+      expect: '60 on every token_policy line since the fix, with attributes.config.refresh_jitter_pct 20 (was 15 and 0)'
+      within_seconds: 660
 business_impact:
   - kpi: business.sessions_per_min
-    factor: {uniform: [0.15, 0.40]}
+    value: {uniform: [669.6, 770.4]}
   - kpi: business.daily_active_users
-    factor: {uniform: [0.25, 0.50]}
+    value: {uniform: [16740.0, 19260.0]}
   - kpi: business.new_registrations_per_min
-    factor: {uniform: [0.20, 0.45]}
+    value: {uniform: [7.25, 8.35]}
   - kpi: business.churn_risk_index_0_100
     factor: {uniform: [2.0, 4.0]}
+generator_impact:
+  nginx_otel:
+    high_4xx_error_rate: 600.0

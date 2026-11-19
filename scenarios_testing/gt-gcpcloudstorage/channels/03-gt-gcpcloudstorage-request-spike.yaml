@@ -1,0 +1,37 @@
+name: "GT gcp_cloudstorage_otel: request_spike"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-GCPCLOUDSTORAGE-REQUEST-SPIKE
+sensor_type: impact_key_probe
+affected_services:
+  - gt-gcpcloudstorage-gcp-svc-1
+cascade_services:
+  - gt-gcpcloudstorage-gcp-svc-2
+description: "Tests impact_key request_spike on generator gcp_cloudstorage_otel."
+investigation_notes: |-
+  1. Verify gcp_cloudstorage_otel is active and reporting metrics.
+  2. Check that the request_spike metric has reached the trigger value (10.0).
+  3. Confirm generator_impact for gcp_cloudstorage_otel.request_spike is set to 10.0.
+  4. Look for correlated changes in service gt-gcpcloudstorage-gcp-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_request_spike_baseline
+error_message: "GT-PROBE: gen=gcp_cloudstorage_otel key=request_spike value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=gcp_cloudstorage_otel
+  impact_key: request_spike
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 10.0
+  svc_name: gt-gcpcloudstorage-gcp-svc-1
+rca_clues:
+  gt-gcpcloudstorage-gcp-svc-1:
+    probe.generator: gcp_cloudstorage_otel
+    probe.impact_key: request_spike
+    probe.trigger_value: 10.0
+  gt-gcpcloudstorage-gcp-svc-2:
+    probe.upstream_generator: gcp_cloudstorage_otel
+    probe.upstream_key: request_spike
+generator_impact:
+  gcp_cloudstorage_otel:
+    request_spike: 10.0

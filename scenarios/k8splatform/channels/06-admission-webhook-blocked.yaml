@@ -1,0 +1,110 @@
+name: Admission webhook timeouts blocking pod creation
+subsystem: control-plane
+vehicle_section: kyverno/admission
+error_type: failed calling webhook
+sensor_type: admission_webhook
+affected_services:
+  - kube-apiserver
+cascade_services:
+  - cert-manager
+description: Every create or update that Kyverno validates times out at the admission webhook, so no new pods can be
+  created anywhere. Running pods keep serving; rollouts and scale-ups stall.
+investigation_notes: |-
+  Root cause: a NetworkPolicy default-deny was created in the kyverno namespace (Argo CD, commit {commit_sha}, part of a namespace hardening change). It blocks ingress to the Kyverno admission service, including the EKS control plane's calls to the webhook. The webhook validate.kyverno.svc-fail has failurePolicy Fail, so every request it covers fails after the 10s timeout.
+  Confirm:
+    - kube-apiserver: Internal error occurred: failed calling webhook "validate.kyverno.svc-fail": failed to call webhook: Post "https://kyverno-svc.kyverno.svc:443/validate/fail?timeout=10s": context deadline exceeded
+    - ReplicaSet FailedCreate events; tenant-gateway rollout to v2.15.0 stuck at 0/8 updated pods (ProgressDeadlineExceeded) while k8s.deployment.available stays at desired — the old pods keep serving
+    - the audit shows create networkpolicies/default-deny in kyverno shortly before the first failure
+    - kubectl -n kyverno get networkpolicy ; kubectl get validatingwebhookconfiguration kyverno-resource-validating-webhook-cfg -o yaml | grep failurePolicy
+  Remediation: remove the default-deny policy from the kyverno namespace (roll it back). Re-add it later with an allow rule for the control plane.
+  Follow-up: revert commit c7e20b1 in Git, or pause auto-sync for the Argo CD application, before the next sync; otherwise Argo CD re-applies the change and the fault returns.
+remediation_action: rollback_networkpolicy
+remediation_command: |-
+  opsctl rollback networkpolicy/default-deny -n kyverno
+error_message: 'E{klog_time}      11 dispatcher.go:214] "Unhandled Error" err="Internal error occurred: failed calling webhook
+  \"validate.kyverno.svc-fail\": failed to call webhook: Post \"https://kyverno-svc.kyverno.svc:443/validate/fail?timeout=10s\":
+  context deadline exceeded" logger="UnhandledError" resource="{resource}" namespace="{namespace}"'
+stack_trace: ''
+fault_params:
+  resource: {choice: [pods, pods, replicasets, horizontalpodautoscalers]}
+  namespace: {choice: [tenant-edge, tenant-core, tenant-batch]}
+  commit_sha: c7e20b1
+rca_clues:
+  kube-apiserver:
+    k8s.admission.webhook: validate.kyverno.svc-fail
+    k8s.admission.failure_policy: Fail
+    k8s.admission.timeout_s: 10
+cascade_messages:
+  cert-manager:
+    - severity: ERROR
+      message: 'E{klog_time}       1 controller.go:167] "re-queuing item due to error processing" err="Internal error occurred:
+        failed calling webhook \"validate.kyverno.svc-fail\": failed to call webhook: context deadline exceeded" logger="cert-manager.controller"
+        key="tenant-edge/t-2290-custom-tls"'
+fault_scope:
+  cluster: prod-use1
+  workloads: [tenant-gateway]
+onset_delay_seconds: 30
+infrastructure_events:
+  - service: kube-apiserver
+    severity: INFO
+    offset_seconds: -60
+    body: 'audit: level=RequestResponse stage=ResponseComplete verb=create resource=networkpolicies namespace=kyverno name=default-deny
+      user=system:serviceaccount:argocd:argocd-application-controller code=201 sync.revision=c7e20b1 spec.policyTypes=[Ingress]
+      spec.podSelector={{}}'
+    attributes:
+      k8s.audit.verb: create
+      k8s.audit.resource: networkpolicies
+      k8s.namespace.name: kyverno
+      user.name: system:serviceaccount:argocd:argocd-application-controller
+      vcs.revision: c7e20b1
+  - service: kube-apiserver
+    severity: INFO
+    offset_seconds: 5
+    body: 'audit: level=RequestResponse stage=ResponseComplete verb=patch resource=deployments namespace=tenant-edge name=tenant-gateway
+      user=system:serviceaccount:argocd:argocd-application-controller code=200 sync.revision=e19a0c4 change="image tenant-gateway:v2.14.0
+      -> tenant-gateway:v2.15.0"'
+k8s_events:
+  - type: Warning
+    reason: FailedCreate
+    object: {kind: ReplicaSet, name: tenant-gateway-7c4f9b2d18, namespace: tenant-edge}
+    message: 'Error creating: Internal error occurred: failed calling webhook "validate.kyverno.svc-fail": failed to call webhook:
+      Post "https://kyverno-svc.kyverno.svc:443/validate/fail?timeout=10s": context deadline exceeded'
+    component: replicaset-controller
+    every_seconds: 30
+  - type: Warning
+    reason: ProgressDeadlineExceeded
+    object: {kind: Deployment, name: tenant-gateway, namespace: tenant-edge}
+    message: 'ReplicaSet "tenant-gateway-7c4f9b2d18" has timed out progressing.'
+    component: deployment-controller
+    every_seconds: 300
+remediation_effects:
+  transition_seconds: 120
+  state:
+    kubernetes_otel:
+      workloads:
+        tenant-gateway: {image: 'harbor.example-saas.io/platform/tenant-gateway:v2.15.0'}
+  log_events:
+    - service: kube-apiserver
+      severity: INFO
+      offset_seconds: 2
+      body: 'audit: level=Metadata verb=delete resource=networkpolicies namespace=kyverno name=default-deny user={actor}
+        code=200'
+  verification:
+    - signal: webhook failures
+      from: 'logs.otel.platform'
+      where: 'resource.attributes.service.name == "kube-apiserver" AND body.text LIKE "*failed calling webhook*"'
+      expect: '0 new lines'
+      within_seconds: 60
+    - signal: tenant-gateway image
+      from: 'metrics-k8sclusterreceiver.otel-*'
+      field: 'resource.attributes.container.image.tag'
+      where: 'resource.attributes.k8s.deployment.name == "tenant-gateway" AND resource.attributes.k8s.cluster.name == "prod-use1"'
+      expect: 'container.image.tag = v2.15.0 on all 8 pods (rollout completed)'
+      within_seconds: 180
+business_impact:
+  - kpi: business.deploy_success_rate_pct
+    value: {uniform: [0.0, 5.0], round: 1}
+  - kpi: business.pod_start_p95_s
+    value: {uniform: [55.0, 70.0], round: 1}
+  - kpi: business.cert_renewal_success_pct
+    value: {uniform: [98.8, 98.9], round: 1}

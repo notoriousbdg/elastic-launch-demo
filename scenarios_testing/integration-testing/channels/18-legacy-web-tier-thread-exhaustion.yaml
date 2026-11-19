@@ -1,0 +1,83 @@
+name: Legacy Web Tier Thread Exhaustion
+subsystem: platform
+vehicle_section: platform_pipeline
+error_type: LEGACYWEB-THREAD-EXHAUSTION
+sensor_type: health_check
+affected_services:
+- legacy-web-tier
+cascade_services:
+- billing-service
+description: 'The synthetic Apache/Tomcat/IIS app-server pool behind legacy-web-tier
+  briefly exhausts its thread pool on {app_server_name} under a traffic burst; the
+  platform auto-restarts the worker pool.
+
+  '
+investigation_notes: "1. Search for body.text containing *LEGACYWEB-THREAD-EXHAUSTION*\
+  \ to find the affected server.\n2. Check legacy-web-tier legacyweb.thread_pool_saturation_pct\
+  \ for the spike.\n3. Confirm apache_otel error_rate/worker_saturation, apache_tomcat_otel\n\
+  \   thread_pool_exhaustion/error_rate_multiplier, and iis_otel request_latency_multiplier/\n\
+  \   connection_error_rate all spike together on {app_server_name}.\n4. Check billing-service\
+  \ billing.settlement_latency_ms for a brief cascading delay.\n5. Confirm the auto-restart\
+  \ clears the thread pool and saturation returns to baseline.\n"
+remediation_action: auto_restart_app_server_pool
+error_message: 'LEGACYWEB-THREAD-EXHAUSTION: server={app_server_name} thread_saturation={thread_pool_saturation_pct}%
+  auto_restarted={auto_restarted}
+
+  '
+stack_trace: "LegacyWebThreadExhaustionError: server={app_server_name}\n  at LegacyWebTier.handleRequest()\n\
+  \  thread_saturation={thread_pool_saturation_pct}% auto_restarted={auto_restarted}\n"
+fault_params:
+  app_server_name:
+    choice:
+    - apache_httpd
+    - apache_tomcat
+    - iis
+  thread_pool_saturation_pct:
+    uniform:
+    - 85.0
+    - 99.0
+    round: 1
+  auto_restarted:
+    choice:
+    - true
+rca_clues:
+  legacy-web-tier:
+    legacyweb.thread_pool_saturation_pct:
+      uniform:
+      - 85.0
+      - 99.0
+      round: 1
+    legacyweb.auto_restart_triggered: true
+  billing-service:
+    billing.settlement_latency_ms:
+      uniform:
+      - 200.0
+      - 2500.0
+      round: 1
+    billing.brief_delay_flag: true
+generator_impact:
+  apache_otel:
+    no_requests_received:
+      uniform:
+      - 0.2
+      - 0.7
+    worker_pool_exhaustion: &id001
+      uniform:
+      - 0.7
+      - 0.98
+    high_busy_workers_ratio: *id001
+  apache_tomcat_otel:
+    thread_pool_saturation: true
+    high_request_error_rate:
+      uniform:
+      - 8.0
+      - 30.0
+  iis_otel:
+    request_queue_age_elevated:
+      uniform:
+      - 4.0
+      - 15.0
+    request_rejections_detected:
+      uniform:
+      - 0.2
+      - 0.6

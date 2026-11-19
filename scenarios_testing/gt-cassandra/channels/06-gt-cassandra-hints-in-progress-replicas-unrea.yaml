@@ -1,0 +1,37 @@
+name: "GT cassandra_otel: hints_in_progress_replicas_unreachable"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-CASSANDRA-HINTS-IN-PROGRESS-REPLICA
+sensor_type: impact_key_probe
+affected_services:
+  - gt-cassandra-aws-svc-1
+cascade_services:
+  - gt-cassandra-aws-svc-2
+description: "Tests impact_key hints_in_progress_replicas_unreachable on generator cassandra_otel."
+investigation_notes: |-
+  1. Verify cassandra_otel is active and reporting metrics.
+  2. Check that the hints_in_progress_replicas_unreachable metric has reached the trigger value (50.0).
+  3. Confirm generator_impact for cassandra_otel.hints_in_progress_replicas_unreachable is set to 50.0.
+  4. Look for correlated changes in service gt-cassandra-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_hints_in_progress_replicas_unreachable_baseline
+error_message: "GT-PROBE: gen=cassandra_otel key=hints_in_progress_replicas_unreachable value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=cassandra_otel
+  impact_key: hints_in_progress_replicas_unreachable
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 50.0
+  svc_name: gt-cassandra-aws-svc-1
+rca_clues:
+  gt-cassandra-aws-svc-1:
+    probe.generator: cassandra_otel
+    probe.impact_key: hints_in_progress_replicas_unreachable
+    probe.trigger_value: 50.0
+  gt-cassandra-aws-svc-2:
+    probe.upstream_generator: cassandra_otel
+    probe.upstream_key: hints_in_progress_replicas_unreachable
+generator_impact:
+  cassandra_otel:
+    hints_in_progress_replicas_unreachable: 50.0

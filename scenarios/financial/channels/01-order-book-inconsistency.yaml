@@ -4,59 +4,188 @@ vehicle_section: order_book
 error_type: OMS-BOOK-IMBALANCE
 sensor_type: order_book_integrity
 affected_services:
+- matching-engine
 - order-gateway
+error_services:
 - matching-engine
 cascade_services:
 - risk-calculator
 - audit-logger
-description: Order book bid/ask levels out of sync between primary and replica shards
+description: The partition P-03 hot standby stopped replicating from its primary, so the drop copy book published from the standby diverges from the primary and the OMS flags order book imbalances on P-03 instruments
+onset_delay_seconds: 10
+service_lag_seconds: {order-gateway: 30, risk-calculator: 45, audit-logger: 45}
 investigation_notes: |-
-  1. Check order-gateway logs for OMS-BOOK-IMBALANCE — note book_id, instrument, and bid_ask_spread value.
-  2. Query FROM logs.otel.financial.* | WHERE body.text LIKE "*OMS-BOOK-IMBALANCE*" | STATS count() BY service.name, instrument to identify recurrence.
-  3. Inspect matching-engine replica sync lag — if replica_sync_lag_us > 50000 the book is stale and must be rebuilt from primary.
-  4. Verify market-data-feed is publishing fresh ticks for the affected instrument — a stale feed drives spread widening.
-  5. If book_id shows repeated IMBALANCED state, trigger force_book_resync on matching-engine to rebuild from primary sequence.
-remediation_action: force_book_resync
-error_message: '[OMS] OMS-BOOK-IMBALANCE: instrument={instrument} bid_ask_spread={spread}ticks max_spread={max_spread}ticks
-  book={book_id}'
+  Root cause: the matching-engine 5.2.0 release was rolled out to the partition P-03 primary (matching-engine-p03-0) while its hot standby (matching-engine-p03-1) is still on 5.1.1 (CR-4471). 5.2.0 writes journal schema v14 (OrderReplace v3 fields); the 5.1.1 standby replayer supports up to v13, rejects the first v14 record (seq 88000001) and stops applying. From then on primary_seq - standby_seq grows at the P-03 journal rate (about 350 msgs/s), the standby book checksum no longer matches the primary, and the drop copy, which is published from the standby, misses every P-03 fill. The OMS (order-gateway) reconciles its order state against that drop copy and raises OMS-BOOK-IMBALANCE for P-03 instruments such as {instrument}. The primary book is correct and matching continues normally: P-03 trades still match, market data is fresh, and every other partition (P-01, P-02, P-04 to P-08) runs 5.1.1 on both primary and standby with a standby lag under 5 msgs and matching checksums, which rules out a feed problem, an OMS defect or a network partition.
+  Confirm:
+    - matching-engine "[ME] replication_status partition=P-03" lines show primary_version=5.2.0 standby_version=5.1.1 journal_schema=v14 standby_state=REPLAY_HALTED book_checksum_match=false status=ANOMALY (attributes.deployment.version, attributes.me.journal_schema, attributes.replication.status); the same lines for the other partitions show 5.1.1, v13, IN_SYNC
+    - metrics.matching_engine.standby_seq_lag_msgs for me.partition P-03 climbs from under 10 to tens of thousands (about 350 per second); metrics.order_gateway.drop_copy_breaks rises after it while metrics.order_gateway.orders_per_min stays normal
+    - body.text "*OMS-BOOK-IMBALANCE*" lines from matching-engine carry standby_seq=88000000 (the last v13 record) and reason=unsupported journal schema v14
+    - the matching-engine line "[ME] release 5.2.0 rollout started on statefulset matching-engine-p03" (attributes.operation deployment_rollout, attributes.change.request CR-4471) comes before the first imbalance
+  Remediation: opsctl rollback statefulset/matching-engine-p03 --to-revision previous puts the P-03 primary back on 5.1.1 so it writes v13 again (about 12 s, the standby holds the partition during the restart); then opsctl run job/me-p03-standby-reseed loads a fresh primary snapshot into the standby (about 40 s) and replays the journal written since the snapshot (about 40 s). standby_seq_lag_msgs is back under 10 and checksums match within about 90 s, and the OMS clears the drop copy breaks on its next reconciliation. The rollback alone is not enough: the v14 records already in the journal still cannot be replayed by 5.1.1, so the standby must be reseeded. Restarting the standby or forcing an OMS book resync does not help, because the standby halts on the same record and a resync would copy the stale standby book into the OMS. Rolling the standby forward to 5.2.0 would finish an unvalidated release; redo the release later in reader-first order (standbys before primaries).
+remediation_action: rollback_primary_and_reseed_standby
+remediation_command: |-
+  opsctl rollback statefulset/matching-engine-p03 --to-revision previous
+  opsctl run job/me-p03-standby-reseed
+error_message: '[ME] OMS-BOOK-IMBALANCE partition=P-03 instrument={instrument}: drop copy book from standby matching-engine-p03-1
+  diverged from primary, {seq_detail} standby_replay=HALTED reason=unsupported journal schema v14 (replayer max v13) book_checksum
+  primary={primary_crc} standby={standby_crc}'
 stack_trace: |-
-  === ORDER BOOK SNAPSHOT {book_id} ===
-  instrument={instrument}  status=IMBALANCED
-  --------- BID SIDE ---------  --------- ASK SIDE ---------
-    LEVEL   PRICE     QTY         LEVEL   PRICE     QTY
-    1       244.50    1200         1       244.85    800
-    2       244.48    3400         2       244.90    2100
-    3       244.45    5600         3       244.95    1500
-    4       244.40    2800         4       245.10    4200
-    5       244.35    1100         5       245.25    6700
-  spread={spread}ticks  max_allowed={max_spread}ticks
-  replica_sync=STALE  last_sync_us=48230  primary_seq=8832014  replica_seq=8831997
-  ACTION: halt_matching=true  alert=OMS-BOOK-IMBALANCE
+  === ME REPLICATION CHECK partition=P-03 ===
+  primary  matching-engine-p03-0  version=5.2.0  journal_schema=v14
+  standby  matching-engine-p03-1  version=5.1.1  replayer_max_schema=v13  state=REPLAY_HALTED
+  {seq_detail}
+    last_applied_seq=88000000  rejected_seq=88000001  record=OrderReplace(v3)  error=UnsupportedSchemaVersion(14)
+  book checksum  instrument={instrument}  primary={primary_crc}  standby={standby_crc}  match=false
+  drop copy source=standby  -> OMS reconciliation raised OMS-BOOK-IMBALANCE for P-03 instruments
+  other partitions  P-01 P-02 P-04 P-05 P-06 P-07 P-08  primary=5.1.1 standby=5.1.1 journal=v13 lag<5 IN_SYNC
 correlation_attr: {}
 fault_params:
-  instrument: {choice: [US.AAPL, US.GOOGL, US.MSFT, US.AMZN, US.TSLA, FX.EURUSD, FX.GBPUSD, FUT.ES, FUT.NQ, OPT.SPX]}
-  spread: {randint: [5, 50]}
-  max_spread: 3
-  book_id:
-    format: "BOOK-{t}-{n:02d}"
-    t: {choice: [EQ, FI, FX, DRV]}
-    n: {randint: [1, 50]}
+  instrument: {choice: [US.MSFT, US.AMZN, US.NVDA, US.META]}
+  seq_detail:
+    format: "primary_seq=88{L:06d} standby_seq=88000000 lag_msgs={L}"
+    L: {randint: [5000, 210000]}
+  primary_crc:
+    format: "{n:08x}"
+    n: {randint: [268435456, 4294967295]}
+  standby_crc:
+    format: "{n:08x}"
+    n: {randint: [268435456, 4294967295]}
 rca_clues:
-  order-gateway:
-    oms.book_spread_ticks: {randint: [5, 50]}
-    oms.order_reject_rate_pct: {uniform: [8.0, 45.0], round: 1}
   matching-engine:
-    engine.replica_sync_lag_us: {randint: [40000, 200000]}
-    engine.book_imbalance_count: {randint: [1, 20]}
+    me.standby_seq_lag_msgs: {randint: [5000, 210000]}
+    me.primary_version: 5.2.0
+    me.standby_version: 5.1.1
+    me.journal_schema: v14
+    me.primary_book_valid: true
+  order-gateway:
+    oms.drop_copy_breaks: {randint: [100, 15000]}
+    oms.recon_partition: P-03
+    oms.order_submission_rate_per_s: {randint: [160, 180]}
   risk-calculator:
-    risk.halted_instruments_count: {randint: [1, 10]}
-    risk.stale_book_exposure_usd: {randint: [500000, 5000000]}
+    risk.positions_pending_drop_copy: {randint: [50, 2000]}
   audit-logger:
-    audit.book_event_queue_depth: {randint: [100, 5000]}
-    audit.imbalance_alert_count: {randint: [1, 50]}
+    audit.drop_copy_gap_events: {randint: [50, 2000]}
+cascade_messages:
+  order-gateway:
+    - severity: WARN
+      message: '[OMS] drop copy reconciliation break partition=P-03 instrument={instrument}: order state differs from engine drop copy (fills missing after standby_seq=88000000); orders flagged for review'
+  risk-calculator:
+    - severity: WARN
+      message: '[RISK] drop copy for P-03 instruments stalled at seq 88000000; intraday position for {instrument} taken from OMS fills until the drop copy catches up'
+  audit-logger:
+    - severity: WARN
+      message: '[AUDIT] event_logged stream=trade-reporting type=DROP_COPY_GAP partition=P-03 last_seq=88000000 instrument={instrument}; trade events held pending reconciliation'
+fault_scope:
+  cluster: finserv-eks-cluster
+  workloads: [matching-engine, order-gateway]
+infrastructure_events:
+  - service: matching-engine
+    severity: INFO
+    offset_seconds: -150
+    body: '[ME] release 5.2.0 rollout started on statefulset matching-engine-p03: primary matching-engine-p03-0 restarted on 5.2.0 (journal schema v13 -> v14, adds OrderReplace v3 fields), first v14 journal record seq=88000001; standby matching-engine-p03-1 stays on 5.1.1 until the next wave; rolled out by trading-platform-release (CR-4471)'
+    attributes:
+      user.name: trading-platform-release
+      change.request: CR-4471
+      operation: deployment_rollout
+      change.summary: 'matching-engine-p03 primary: 5.1.1 -> 5.2.0 (journal schema v13 -> v14)'
+      deployment.version: 5.2.0
+      me.partition: P-03
+      me.journal_schema: v14
+  - service: matching-engine
+    severity: WARN
+    offset_seconds: 5
+    body: '[ME] standby matching-engine-p03-1 replay stopped at seq 88000001: journal record schema v14 not supported by replayer 5.1.1 (max v13); standby no longer applying'
+    attributes:
+      operation: replication_status
+      me.partition: P-03
+      me.standby_state: REPLAY_HALTED
+remediation_effects:
+  log_events:
+    - service: audit-logger
+      severity: INFO
+      offset_seconds: 1
+      body: '[AUDIT] event_logged stream=change-mgmt type=CHANGE_APPLIED cmd="opsctl rollback statefulset/matching-engine-p03 --to-revision previous" actor={actor}: matching-engine-p03 primary 5.2.0 -> 5.1.1'
+      attributes:
+        operation: change_applied
+        audit.stream: change-mgmt
+        change.target: statefulset/matching-engine-p03
+    - service: audit-logger
+      severity: INFO
+      offset_seconds: 2
+      body: '[AUDIT] event_logged stream=change-mgmt type=CHANGE_APPLIED cmd="opsctl run job/me-p03-standby-reseed" actor={actor}: P-03 standby reseed from primary snapshot started'
+      attributes:
+        operation: change_applied
+        audit.stream: change-mgmt
+        change.target: job/me-p03-standby-reseed
+    - service: matching-engine
+      severity: INFO
+      offset_seconds: 12
+      body: '[ME] statefulset matching-engine-p03 rolled back: primary matching-engine-p03-0 running 5.1.1, journal schema v13; standby still halted at seq 88000000'
+      attributes:
+        operation: deployment_rollout
+        me.partition: P-03
+        deployment.version: 5.1.1
+    - service: matching-engine
+      severity: INFO
+      offset_seconds: 14
+      body: '[ME] job me-p03-standby-reseed: snapshot of primary P-03 book taken, loading into matching-engine-p03-1'
+      attributes:
+        operation: standby_reseed
+        me.partition: P-03
+        me.standby_state: RESEEDING
+    - service: matching-engine
+      severity: INFO
+      offset_seconds: 40
+      body: '[ME] job me-p03-standby-reseed: snapshot loaded, standby replaying journal from snapshot seq (14000 msgs behind)'
+      attributes:
+        operation: standby_reseed
+        me.partition: P-03
+        me.standby_state: CATCHING_UP
+    - service: matching-engine
+      severity: INFO
+      offset_seconds: 80
+      body: '[ME] job me-p03-standby-reseed completed: standby matching-engine-p03-1 IN_SYNC lag_msgs=3, book checksums match on all P-03 instruments'
+      attributes:
+        operation: standby_reseed
+        me.partition: P-03
+        me.standby_state: IN_SYNC
+    - service: order-gateway
+      severity: INFO
+      offset_seconds: 90
+      body: '[OMS] drop copy reconciliation partition=P-03: breaks cleared after drop copy replay, review flags released'
+      attributes:
+        operation: drop_copy_recon
+        recon.status: NOMINAL
+  steady_attributes:
+    matching-engine:
+      deployment.version: 5.1.1
+  verification:
+    - signal: matching_engine.standby_seq_lag_msgs
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "matching-engine"'
+      field: 'metrics.matching_engine.standby_seq_lag_msgs'
+      expect: 'back under 10 msgs on P-03 after the reseed (was thousands and growing about 350 per second)'
+      within_seconds: 150
+    - signal: order_gateway.drop_copy_breaks
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "order-gateway"'
+      field: 'metrics.order_gateway.drop_copy_breaks'
+      expect: 'back to 0 (was hundreds to thousands on P-03)'
+      within_seconds: 150
+    - signal: OMS-BOOK-IMBALANCE lines
+      from: 'logs.otel.finserv'
+      where: 'body.text LIKE "*OMS-BOOK-IMBALANCE*"'
+      expect: '0 new lines'
+      within_seconds: 150
+    - signal: P-03 primary version
+      from: 'logs.otel.finserv'
+      where: 'resource.attributes.service.name == "matching-engine"'
+      field: 'attributes.deployment.version'
+      expect: '5.1.1 on every line since the fix; 5.2.0 stops appearing'
+      within_seconds: 150
 business_impact:
   - kpi: business.order_flow_per_min
-    factor: {uniform: [0.30, 0.60]}
+    value: {uniform: [513.83, 591.18]}
   - kpi: business.fill_rate_pct
     factor: {uniform: [0.25, 0.55]}
   - kpi: business.rejected_orders_per_min

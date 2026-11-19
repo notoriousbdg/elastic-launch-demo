@@ -1,0 +1,37 @@
+name: "GT supabase_otel: long_running_transaction"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-SUPABASE-LONG-RUNNING-TRANSACTION
+sensor_type: impact_key_probe
+affected_services:
+  - gt-supabase-aws-svc-1
+cascade_services:
+  - gt-supabase-aws-svc-2
+description: "Tests impact_key long_running_transaction on generator supabase_otel."
+investigation_notes: |-
+  1. Verify supabase_otel is active and reporting metrics.
+  2. Check that the long_running_transaction metric has reached the trigger value (1500.0).
+  3. Confirm generator_impact for supabase_otel.long_running_transaction is set to 1500.0.
+  4. Look for correlated changes in service gt-supabase-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_long_running_transaction_baseline
+error_message: "GT-PROBE: gen=supabase_otel key=long_running_transaction value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=supabase_otel
+  impact_key: long_running_transaction
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 1500.0
+  svc_name: gt-supabase-aws-svc-1
+rca_clues:
+  gt-supabase-aws-svc-1:
+    probe.generator: supabase_otel
+    probe.impact_key: long_running_transaction
+    probe.trigger_value: 1500.0
+  gt-supabase-aws-svc-2:
+    probe.upstream_generator: supabase_otel
+    probe.upstream_key: long_running_transaction
+generator_impact:
+  supabase_otel:
+    long_running_transaction: 1500.0

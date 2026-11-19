@@ -9,58 +9,140 @@ affected_services:
 cascade_services:
 - member-portal
 - payment-engine
-description: Mobile banking API requests exceeding response time SLA causing member app failures
+description: Mobile banking API calls time out because a new mobile-gateway release limits its outbound HTTP client to five connections per backend.
 investigation_notes: |-
-  1. Check mobile-gateway connection pool utilization — pool_active near pool_max indicates exhaustion. Run: kubectl exec -it mobile-gateway -- curl localhost:8080/actuator/metrics/hikaricp.connections.active
-  2. Review backend_routing phase — latency spike at this stage points to upstream service degradation, not the gateway itself. Check auth-gateway and payment-engine response times in APM.
-  3. Inspect circuit breaker state: HALF_OPEN means the gateway is testing recovery. If stuck in HALF_OPEN for >60s, the upstream service is intermittently failing. Check: /actuator/health for dependency status.
-  4. Queue depth >2000 indicates backpressure buildup — consider scaling mobile-gateway replicas or enabling request shedding. Check HPA metrics: kubectl get hpa mobile-gateway -n banking-prod.
-  5. Verify CACHE_STALE fallback is returning acceptable data — stale cached responses may show incorrect balances. Review cache TTL settings in mobile-gateway ConfigMap.
-remediation_action: restart_mobile_gateway
-error_message: '[MOBILE] MOBILE-API-TIMEOUT: endpoint={endpoint} latency_ms={latency_ms} sla_ms={sla_ms} member={member_id}
-  device={device_type}'
+  1. Search logs.otel.banking for body.text containing MOBILE-API-TIMEOUT on mobile-gateway: endpoint={endpoint} took {latency_ms} ms against an SLA of {sla_ms} ms for {device_type}. metrics.mobile_gateway.api_latency_ms (p95) normally reads 120-280 ms and is now 4,000-12,000 ms.
+  2. Find where the time goes: the backends are fast. auth-gateway token verification and payment-engine report their own server-side latency in the usual range, yet mobile-gateway's backend_routing phase waits seconds. metrics.mobile_gateway.http_client_pending_leases (requests waiting for an outbound connection) normally reads 0-3 and is now 600-1,400.
+  3. Find the change: the gateway_status line carries attributes.gateway.release and attributes.httpclient.max_per_route. mobile-gateway 2.9.1 rolled out shortly before the first timeout; it moved to the Apache HttpClient 5 connection manager without carrying over the pool settings, so it uses the library default of 5 connections per route (2.9.0 configured 200).
+  4. Rule out capacity: CPU on the gateway pods is low because threads are parked waiting for a connection lease, and adding replicas only adds five connections each. nginx ingress active connections pile up in front of the gateway as members retry.
+  5. Fix: opsctl rollback deployment/mobile-gateway -n digital --to-revision previous restores 2.9.0. The rollout replaces the pods in about 30 s; queued requests drain and p95 latency converges back within a minute. Re-release 2.9.1 with maxConnPerRoute set explicitly.
+  6. Recovery: gateway.release reads 2.9.0 and httpclient.max_per_route 200, api_latency_ms back under 280 ms, http_client_pending_leases back to 0-3, and no new MOBILE-API-TIMEOUT lines.
+remediation_action: rollback_mobile_gateway
+remediation_command: |-
+  opsctl rollback deployment/mobile-gateway -n digital --to-revision previous
+error_message: '[MOBILE] MOBILE-API-TIMEOUT: endpoint={endpoint} latency_ms={latency_ms} sla_ms={sla_ms} member={member_id} device={device_type} phase=backend_routing lease_wait_ms={lease_wait_ms}'
 stack_trace: |-
   === MOBILE GATEWAY LATENCY REPORT ===
-  endpoint={endpoint}  member={member_id}  device={device_type}
+  endpoint={endpoint}  member={member_id}  device={device_type}  release=2.9.1
   --- REQUEST PIPELINE ---
     PHASE                ELAPSED_MS    STATUS
     tls_handshake            42        OK
-    auth_token_verify        180       OK
+    auth_token_verify        {token_verify_ms}       OK (server-side)
     rate_limit_check         12        OK
-    backend_routing          {latency_ms}     TIMEOUT  <<< BOTTLENECK
-    response_serialize       ---       SKIPPED
+    backend_routing          {latency_ms}     TIMEOUT  <<< connection lease wait {lease_wait_ms}ms
+  --- HTTP CLIENT POOL ---
+    max_per_route=5  max_total=25  leased=25  pending={pending_leases}
   total_ms={latency_ms}  sla_ms={sla_ms}  breach=true
-  connection_pool_active=847  pool_max=1000  queue_depth=2340
-  circuit_breaker=HALF_OPEN  retry_count=3  fallback=CACHE_STALE
-  ACTION: circuit_break=true  return_cached=true  alert=MOBILE-API-TIMEOUT
+  ACTION: alert=MOBILE-API-TIMEOUT
 correlation_attr:
-  key: deployment.api_gateway_version
-  value: gateway-v2.9.1-canary
+  key: gateway.release
+  value: 2.9.1
 fault_params:
   endpoint: {choice: [/api/v1/mobile/accounts, /api/v1/mobile/transfer, /api/v1/mobile/deposit, /api/v1/mobile/pay-bills, /api/v1/mobile/claims, /api/v1/mobile/insurance]}
-  latency_ms: {randint: [3000, 30000]}
+  latency_ms: {randint: [4000, 12000]}
   sla_ms: 2000
   member_id: {format: "M-{n}", n: {randint: [1000000, 9999999]}}
   device_type: {choice: [iPhone_15_Pro, Samsung_S24, iPad_Air, Pixel_8, iPhone_14]}
+  lease_wait_ms: {randint: [3800, 11800]}
+  token_verify_ms: {randint: [120, 220]}
+  pending_leases: {randint: [600, 1400]}
 rca_clues:
   mobile-gateway:
-    gateway.connection_pool_active: {randint: [800, 1000]}
-    gateway.backend_routing_phase: stalled
+    gateway.release: 2.9.1
+    httpclient.max_per_route: 5
+    httpclient.pending_leases: {randint: [600, 1400]}
   auth-gateway:
-    auth.token_verify_latency_ms: {randint: [400, 900]}
-    auth.session_cache_hit_rate: {uniform: [0.1, 0.3], round: 2}
+    auth.token_verify_latency_ms: {randint: [120, 220]}
   member-portal:
-    upstream.degraded_dependency: mobile-gateway
-    portal.response_queue_depth: {randint: [1500, 3000]}
+    portal.mobile_api_dependency_timeouts: {randint: [1500, 3000]}
   payment-engine:
-    payment.upstream_timeout_count: {randint: [50, 200]}
-    payment.circuit_breaker_state: HALF_OPEN
+    payment.server_latency_ms: {randint: [40, 90]}
+error_services:
+- mobile-gateway
+service_lag_seconds:
+  auth-gateway: 15
+  member-portal: 30
+  payment-engine: 30
+cascade_messages:
+  auth-gateway:
+  - severity: INFO
+    message: '[AUTH] token_verify caller=mobile-gateway latency_ms=164 client_closed_request=499 status=CANCELLED'
+  member-portal:
+  - severity: WARN
+    message: '[PORTAL] upstream_timeout upstream=mobile-gateway path=/api/v1/mobile/accounts waited_ms=2000 status=504'
+  payment-engine:
+  - severity: INFO
+    message: '[PAY] request_cancelled caller=mobile-gateway server_ms=62 reason=client_disconnected status=499'
+fault_scope:
+  cluster: banking-eks-cluster
+  workloads: [mobile-gateway]
+infrastructure_events:
+- service: mobile-gateway
+  severity: INFO
+  offset_seconds: -90
+  body: '[MOBILE] deploy mobile-gateway 2.9.0 -> 2.9.1 replicas=12/12 change="httpclient 4 -> 5 connection manager" applied_by=argocd/digital status=AVAILABLE'
+  attributes:
+    operation: deploy
+    gateway.release: 2.9.1
+    user.name: argocd/digital
+remediation_effects:
+  transition_seconds: 60
+  log_events:
+  - service: mobile-gateway
+    severity: INFO
+    offset_seconds: 1
+    body: '[change-audit] change applied action=rollback target=deployment/mobile-gateway namespace=digital cmd="opsctl rollback deployment/mobile-gateway -n digital --to-revision previous" actor={actor} result="2.9.1 -> 2.9.0"'
+    attributes:
+      operation: change_applied
+      change.target: deployment/mobile-gateway
+      gateway.release: 2.9.0
+  - service: mobile-gateway
+    severity: INFO
+    offset_seconds: 30
+    body: '[MOBILE] deploy mobile-gateway 2.9.0 replicas=12/12 httpclient.max_per_route=200 status=AVAILABLE'
+    attributes:
+      operation: deploy
+      gateway.release: 2.9.0
+      httpclient.max_per_route: 200
+  steady_attributes:
+    mobile-gateway:
+      gateway.release: 2.9.0
+  verification:
+  - signal: mobile_gateway.api_latency_ms
+    from: metrics-generic.otel-default
+    where: resource.attributes.service.name == "mobile-gateway"
+    field: metrics.mobile_gateway.api_latency_ms
+    expect: back under 280 ms (was 4,000-12,000 ms)
+    within_seconds: 120
+  - signal: mobile_gateway.http_client_pending_leases
+    from: metrics-generic.otel-default
+    where: resource.attributes.service.name == "mobile-gateway"
+    field: metrics.mobile_gateway.http_client_pending_leases
+    expect: back to 0-3 (was 600-1,400)
+    within_seconds: 120
+  - signal: mobile-gateway release
+    from: logs.otel.banking
+    where: resource.attributes.service.name == "mobile-gateway" AND attributes.operation == "gateway_status"
+    field: attributes.gateway.release
+    expect: 2.9.0 on every line logged since the fix; 2.9.1 stops appearing
+    within_seconds: 90
+  - signal: MOBILE-API-TIMEOUT lines
+    from: logs.otel.banking
+    where: body.text LIKE "*MOBILE-API-TIMEOUT*"
+    expect: 0 new lines
+    within_seconds: 120
+generator_impact:
+  nginx_otel:
+    high_active_connections: 400.0
+generator_hold_seconds:
+  nginx_otel: 45
 business_impact:
   - kpi: business.active_digital_sessions
-    factor: {uniform: [0.25, 0.55]}
+    value: {uniform: [4464.0, 5136.0]}
   - kpi: business.mobile_logins_per_min
-    factor: {uniform: [0.20, 0.50]}
+    value: {uniform: [148.8, 171.2]}
   - kpi: business.api_calls_per_min
-    factor: {uniform: [0.15, 0.45]}
+    value: {uniform: [13299.0, 15301.0]}
   - kpi: business.digital_transaction_pct
     factor: {uniform: [0.35, 0.65]}
+

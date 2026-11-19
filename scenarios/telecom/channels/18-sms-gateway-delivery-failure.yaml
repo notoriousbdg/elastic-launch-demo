@@ -1,66 +1,110 @@
 name: SMS Gateway Delivery Failure
 subsystem: notifications
 vehicle_section: sms_channel
-error_type: NOTIF-SMS-FAIL
+error_type: ESME_RINVPASWD
 sensor_type: sms_delivery
 affected_services:
 - notification-service
-cascade_services:
 - activation-service
-description: SMPP gateway connection failure preventing activation confirmation SMS delivery to subscribers
-investigation_notes: |
-  1. Check SMPP connection status — SMPP bind to SMS aggregator failed or connection dropped. Verify: notification-service metrics for smpp.connection_status and smpp.bind_state.
-  2. SMS delivery is required for activation confirmation — subscribers expect an SMS within 60s of successful activation. Delayed SMS causes customer confusion and support calls.
-  3. SMPP aggregator may be throttling — check for ESME_RTHROTTLED responses. Meridian's contracted throughput is 500 SMS/min. Verify current send rate against contract.
-  4. Enable fallback delivery channels: push notification via mobile app, email notification. For Enterprise customers, also trigger webhook notification to their systems.
-  5. OTP/2FA SMS are CRITICAL — if SMS is used for authentication OTP delivery, auth-service must fall back to email OTP or TOTP. Check auth-service MFA configuration.
-remediation_action: reconnect_smpp_gateway
-error_message: '[NOTIF] NOTIF-SMS-FAIL: smpp_status={smpp_status} delivery_rate={sms_delivery_rate}% queued={sms_queued} aggregator={sms_aggregator} error={sms_error}'
-stack_trace: |
-  === SMS GATEWAY STATUS ===
-  aggregator={sms_aggregator}  protocol=SMPPv3.4
-  --- CONNECTION STATUS ---
-    bind_state={smpp_status}  last_bind_attempt=45s_ago
-    error={sms_error}
-    contracted_throughput=500/min  current_rate=0/min
-  --- DELIVERY METRICS ---
-    METRIC              VALUE       TARGET      STATUS
-    delivery_rate       {sms_delivery_rate}%       98%         DEGRADED
-    queued_messages     {sms_queued}       100         OVERFLOW
-    failed_deliveries   {sms_failed}       0           CRITICAL
-    activation_confirms_pending={activation_confirms_pending}
-  --- FALLBACK ---
-    push_notification=AVAILABLE  email=AVAILABLE
-    otp_delivery=BLOCKED  auth_impact=HIGH
-  ACTION: reconnect_smpp=true  enable_fallback=true  alert=NOTIF-SMS-FAIL
-infrastructure_events:
-- body: '[GCP-Monitoring] SMPPConnectionLost: aggregator=twilio-smpp bind_state=UNBOUND last_bind=45s_ago error=CONNECTION_REFUSED region=europe-west3'
-  severity: ERROR
-  event_name: gcp.monitoring.SMPPConnectionLost
-  service: notification-service
-  attributes:
-    cloud.provider: gcp
-    cloud.service: monitoring
-    gcp.resource_type: gke_container
-    infrastructure.source: GCP-Monitoring
+cascade_services: []
+description: Vault rotated the SMPP password for the SMS aggregator account, which the aggregator does not accept, and every SMPP bind fails
+investigation_notes: |-
+  Root cause: a Vault rotation policy enabled on secret smpp-infobip-credentials by mistake rotated the SMPP password about a minute before the first error (version v6 -> v7). External Secrets synced v7 within seconds to notification-service, the SMPP client re-bound with it, and the aggregator (smpp3.infobip.com:2775, system_id meridian_fra) rejects every bind with command_status 0x0000000E ESME_RINVPASWD: the aggregator password can only be changed through its portal. All 8 binds are down and SMS (activation OTPs, welcome and usage messages) queue up; {sms_queue} are waiting. Push, email and webhooks deliver normally, and the aggregator status page shows no incident.
+  Confirm:
+    - the notification-service line "secret smpp-infobip-credentials rotated ... version v6 -> v7" comes before the first ESME_RINVPASWD, and SMPP status lines carry attributes.smpp.credential_version v7
+    - metric notification_service.smpp_binds_active drops from 8 to 0 and notification_service.sms_queue_depth grows by about 900 per minute
+    - metric notification_service.push_delivered_per_min stays near 2,400, which rules out a notification-service-wide problem
+  Remediation: restore the password the aggregator knows with opsctl restore secret/smpp-infobip-credentials --version v6. External Secrets refreshes the pod secret within about 15 seconds and all 8 binds come back; the queue drains at the contracted 3,000 SMS per minute (about 2,100 per minute net). Restarting notification-service would only retry the same rejected password, and too many failed binds can lock the account at the aggregator.
+remediation_action: restore_smpp_credentials
+error_message: 'smpp: bind_transceiver to smpp3.infobip.com:2775 failed: command_status=0x0000000E ESME_RINVPASWD (system_id=meridian_fra bind={bind_id}/8 credential=v7) queue_depth={sms_queue}'
+stack_trace: |-
+  Traceback (most recent call last):
+    File "/app/notify/sms/smpp_pool.py", line 88, in _bind
+      await client.bind_transceiver(system_id=cfg.system_id, password=secret.password)
+    File "/usr/local/lib/python3.12/site-packages/smpplib/client.py", line 248, in bind_transceiver
+      raise exceptions.PDUError(resp.status, "bind_transceiver_resp")
+  smpplib.exceptions.PDUError: (14, 'ESME_RINVPASWD', 'Invalid Password')
 correlation_attr:
-  key: notification.smpp_gateway_version
-  value: smpp-gw-v4.2.0-hotfix
+  key: smpp.credential_version
+  value: v7
 fault_params:
-  smpp_status: {choice: [UNBOUND, BIND_FAILED, CONNECTION_LOST, THROTTLED]}
-  sms_delivery_rate: {uniform: [0.0, 60.0], round: 1}
-  sms_queued: {randint: [500, 5000]}
-  sms_aggregator: {choice: [Nexmo, Twilio, MessageBird, Infobip]}
-  sms_error: {choice: [SMPP_BIND_FAILED, CONNECTION_TIMEOUT, ESME_RTHROTTLED, DELIVERY_FAILED]}
-  sms_failed: {randint: [200, 2000]}
-  activation_confirms_pending: {randint: [100, 1000]}
+  bind_id: {randint: [1, 8]}
+  sms_queue: {randint: [500, 9000]}
+  otp_wait_s: {randint: [120, 600]}
 rca_clues:
   notification-service:
-    notification.smpp_bind_state: UNBOUND
-    notification.sms_queue_depth: {randint: [500, 5000]}
+    smpp.system_id: meridian_fra
+    smpp.credential_version: v7
+    smpp.binds_active: 0
+    smpp.queue_depth: {randint: [500, 9000]}
   activation-service:
-    activation.confirm_sms_pending: {randint: [100, 1000]}
-    activation.notification_timeout: true
+    activation.otp_wait_s: {randint: [120, 600]}
+remediation_command: |-
+  opsctl restore secret/smpp-infobip-credentials --version v6
+fault_scope:
+  cluster: meridian-gke-cluster
+  workloads: [notification-service]
+error_services: [notification-service]
+cascade_messages:
+  activation-service:
+    - severity: WARN
+      message: 'activation OTP not delivered after {otp_wait_s}s (notification-service status=queued channel=sms); customer offered email fallback'
+infrastructure_events:
+  - service: notification-service
+    severity: INFO
+    offset_seconds: -60
+    event_name: secret.rotation
+    body: 'secret smpp-infobip-credentials rotated by vault-rotation/kv-meridian (policy smpp-30d, enabled by secops-automation): version v6 -> v7; ExternalSecret meridian/smpp-infobip-credentials synced'
+    attributes:
+      operation: secret_rotation
+      user.name: vault-rotation/kv-meridian
+      smpp.credential_version: v7
+      change.summary: 'smpp-infobip-credentials v6 -> v7'
+remediation_effects:
+  log_taper_seconds: 15
+  log_events:
+    - service: notification-service
+      severity: INFO
+      offset_seconds: 1
+      body: '[NOC-CHG] executed opsctl restore secret/smpp-infobip-credentials --version v6 actor={actor}: version v7 -> v6; ExternalSecret refresh requested'
+      attributes:
+        operation: change_executed
+        change.target: secret/smpp-infobip-credentials
+        smpp.credential_version: v6
+    - service: notification-service
+      severity: INFO
+      offset_seconds: 15
+      body: 'smpp: 8/8 binds established to smpp3.infobip.com:2775 (bind_transceiver, system_id=meridian_fra, credential=v6)'
+      attributes:
+        operation: smpp_bind
+        smpp.credential_version: v6
+  steady_attributes:
+    notification-service:
+      smpp.credential_version: v6
+  verification:
+    - signal: notification_service.smpp_binds_active
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "notification-service"'
+      field: 'metrics.notification_service.smpp_binds_active'
+      expect: '8 (was 0)'
+      within_seconds: 60
+    - signal: notification_service.sms_queue_depth
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "notification-service"'
+      field: 'metrics.notification_service.sms_queue_depth'
+      expect: 'falling by about 2,100 per minute, back under 200'
+      within_seconds: 300
+    - signal: ESME_RINVPASWD lines
+      from: 'logs.otel.meridian'
+      where: 'body.text LIKE "*ESME_RINVPASWD*"'
+      expect: '0 new lines'
+      within_seconds: 60
+    - signal: SMPP credential version
+      from: 'logs.otel.meridian'
+      where: 'resource.attributes.service.name == "notification-service"'
+      field: 'attributes.smpp.credential_version'
+      expect: 'v6 on every SMPP status line since the restore'
+      within_seconds: 60
 business_impact:
   - kpi: business.activations_per_min
     factor: {uniform: [0.25, 0.55]}
@@ -70,3 +114,4 @@ business_impact:
     factor: {uniform: [2.0, 4.5]}
   - kpi: business.nps
     factor: {uniform: [0.35, 0.65]}
+service_lag_seconds: {activation-service: 60}

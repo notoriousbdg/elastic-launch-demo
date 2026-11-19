@@ -1,78 +1,140 @@
 name: Session Store Redis Saturation
 subsystem: authentication
 vehicle_section: session_store
-error_type: AUTH-SESSION-SATURATE
+error_type: OOM command not allowed when used memory
 sensor_type: session_mgmt
 affected_services:
 - auth-service
-- identity-db
 cascade_services:
 - api-gateway
 - activation-service
-description: Redis session store memory saturation causing session eviction and mass re-authentication storms
-investigation_notes: |
-  1. Check Redis memory usage: redis-cli INFO memory | grep used_memory_human. Memory at 100% triggers LRU eviction of active sessions, causing mass re-authentication.
-  2. Session count growth rate — if new sessions exceed eviction rate, Redis enters thrashing mode. Current session count: redis-cli DBSIZE. Expected baseline: ~500K sessions.
-  3. Thundering herd problem: evicted sessions trigger re-authentication on identity-db, which cannot handle the spike. Auth-service circuit breaker opens at 1000 req/s to protect identity-db.
-  4. Increase Redis maxmemory immediately: redis-cli CONFIG SET maxmemory 8gb. Then investigate why session count exceeded capacity (possible session leak, missing TTL on new session types).
-  5. Review session TTL distribution — sessions without explicit TTL accumulate indefinitely. Ensure all session types have TTL <= 3600s: redis-cli --scan --pattern 'session:*' | head -20 | xargs -I{} redis-cli TTL {}.
-remediation_action: flush_expired_sessions
-error_message: '[AUTH] AUTH-SESSION-SATURATE: memory_used_pct={redis_memory_pct}% sessions={redis_session_count} evictions={redis_evictions}/min reauth_rate={reauth_rate}/min'
-stack_trace: |
-  === REDIS SESSION STORE STATUS ===
-  cluster=auth-redis-cluster  mode=sentinel
-  --- MEMORY STATUS ---
-    used_memory={redis_memory_pct}%  maxmemory=4GB
-    eviction_policy=allkeys-lru  evictions={redis_evictions}/min
-    sessions_active={redis_session_count}  sessions_baseline=500000
-  --- EVICTION CASCADE ---
-    T+0s    memory_threshold_exceeded
-    T+2s    lru_eviction_started  rate={redis_evictions}/min
-    T+5s    reauth_storm  rate={reauth_rate}/min
-    T+8s    identity-db connection spike
-    T+12s   auth-service circuit_breaker=OPEN
-  --- IMPACT ---
-    api-gateway: 401 responses, all segments affected
-    activation-service: blocked on auth, queue building
-  ACTION: increase_maxmemory=true  flush_expired=true  alert=AUTH-SESSION-SATURATE
-infrastructure_events:
-- body: '[AzureHealth] RedisCacheMemorySaturation: resource=meridian-session-cache memory_used_pct=98 eviction_policy=volatile-lru evictions_per_sec=450 region=westeurope'
-  severity: ERROR
-  event_name: azure.health.RedisCacheMemorySaturation
-  service: auth-service
-  attributes:
-    cloud.provider: azure
-    cloud.service: redis_cache
-    azure.health.status: Critical
-    azure.health.cause: MEMORY_SATURATION
-    infrastructure.source: AzureHealth
+description: auth-service 3.8.0 caches token introspection results in the session Redis without a TTL; within minutes the cache filled Redis, the live sessions were evicted and writes are now rejected
+investigation_notes: |-
+  Root cause: auth-service 3.8.0 (Argo CD sync about a minute before memory started to climb; previous 3.7.2) adds an introspection cache: on every token validation it stores the resolved entitlements with SET authz:introspect:<jti> but no EX, so the keys never expire. The key is the token id, not the user, so nothing is reused: about 1,500 new entries per second of about 12 KB each, close to 20 MB/s. The session Redis (meridian-sessions, maxmemory 6 GB, maxmemory-policy volatile-lru, normally about 62% used) reached maxmemory about 2 minutes after the rollout. volatile-lru can only evict keys that have a TTL, which are the user sessions, so Redis evicted almost all of them within about 30 seconds (users logged out), and now that almost no volatile keys are left, writes fail with OOM. There are {cache_keys} authz:introspect keys (none before 3.8.0). Redis CPU, connections and network are normal; this is memory taken by keys that never expire, not traffic.
+  Confirm:
+    - the Argo CD sync line (auth-service 3.7.2 -> 3.8.0) comes before memory started to climb, and auth-service status lines carry attributes.deployment.image_tag auth-service:3.8.0 from the rollout on
+    - metric auth_service.session_store_used_memory_pct climbs from about 62% to 99-100% within about 2 minutes of the rollout, then auth_service.session_store_evicted_keys_per_s spikes to several thousand per second while auth_service.active_sessions collapses, and settles at about {evicted_per_s}/s once the sessions are gone
+    - metric auth_service.introspection_cache_keys climbs from 0 to {cache_keys} and stops growing when writes start failing, which shows the new keys are what fills the memory
+  Remediation: roll auth-service back and delete the keys that have no TTL: opsctl rollback deployment/auth-service --to-revision previous, then opsctl run job/auth-redis-purge-introspection-cache (SCAN + UNLINK of authz:introspect:* keys with TTL -1). The purge frees memory over about 90 seconds; evictions stop once memory is under maxmemory, OOM errors stop within a few seconds of the purge starting, and sessions come back over the next minutes as users log in again. Raising maxmemory would only buy another minute or two, and flushing the whole Redis would log every remaining user out without stopping the leak.
+remediation_action: rollback_auth_service_purge_introspection_cache
+error_message: 'level=error logger=auth.session msg="session write failed" error="OOM command not allowed when used memory > ''maxmemory''." redis=meridian-sessions:6380 used_memory_pct={used_memory_pct} evicted_keys_per_s={evicted_per_s}'
+stack_trace: |-
+  Traceback (most recent call last):
+    File "/app/auth/session.py", line 98, in save_session
+      await self._redis.set("sess:" + session_id, payload, ex=SESSION_TTL)
+    File "/usr/local/lib/python3.12/site-packages/redis/asyncio/client.py", line 612, in execute_command
+      return await conn.retry.call_with_retry(
+    File "/usr/local/lib/python3.12/site-packages/redis/asyncio/connection.py", line 1067, in read_response
+      raise response
+  redis.exceptions.OutOfMemoryError: OOM command not allowed when used memory > 'maxmemory'.
 correlation_attr:
-  key: infra.redis_cluster_config
-  value: redis-7.2.4-sentinel-patch
+  key: deployment.image_tag
+  value: auth-service:3.8.0
 fault_params:
-  redis_memory_pct: {randint: [95, 100]}
-  redis_session_count: {randint: [500000, 1000000]}
-  redis_evictions: {randint: [500, 2000]}
-  reauth_rate: {randint: [1000, 5000]}
+  used_memory_pct: {uniform: [99.2, 100.0], round: 1}
+  evicted_per_s: {randint: [180, 320]}
+  cache_keys: {randint: [210000, 240000]}
 rca_clues:
   auth-service:
-    auth.redis_memory_pct: {randint: [95, 100]}
-    auth.eviction_rate_per_min: {randint: [500, 2000]}
-  identity-db:
-    db.reauth_connection_spike: {randint: [200, 500]}
-    db.connection_pool_stress: true
+    deployment.image_tag: auth-service:3.8.0
+    redis.maxmemory_policy: volatile-lru
+    redis.used_memory_pct: {uniform: [99.2, 100.0], round: 1}
+    redis.keys_without_ttl: {randint: [210000, 240000]}
   api-gateway:
-    gateway.session_failure_rate: {uniform: [0.1, 0.4], round: 2}
-    gateway.thundering_herd: true
+    upstream.degraded_subsystem: authentication
+    gateway.401_rate: {uniform: [0.1, 0.35], round: 2}
   activation-service:
-    activation.auth_dependency_blocked: true
-    activation.queue_building: true
+    upstream.degraded_subsystem: authentication
+remediation_command: |-
+  opsctl rollback deployment/auth-service --to-revision previous
+  opsctl run job/auth-redis-purge-introspection-cache
+fault_scope:
+  cluster: meridian-aks-cluster
+  workloads: [auth-service]
+cascade_messages:
+  api-gateway:
+    - severity: WARN
+      message: 'session expired early for GET /api/v1/customer/status: auth-service returned 401 session_not_found; client redirected to login'
+  activation-service:
+    - severity: WARN
+      message: 'customer session lost during activation checkout (auth-service 401); workflow paused awaiting re-login'
+infrastructure_events:
+  - service: auth-service
+    severity: INFO
+    offset_seconds: -45
+    event_name: argocd.app.sync
+    body: 'argocd-application-controller: Sync operation to 9be07d4 succeeded; app=auth-service namespace=meridian image auth-service:3.7.2 -> auth-service:3.8.0 initiatedBy=argocd-image-updater'
+    attributes:
+      operation: deployment_sync
+      user.name: argocd-image-updater
+      deployment.image_tag: auth-service:3.8.0
+      change.summary: 'auth-service image 3.7.2 -> 3.8.0'
+remediation_effects:
+  log_taper_seconds: 30
+  log_events:
+    - service: auth-service
+      severity: INFO
+      offset_seconds: 1
+      body: '[NOC-CHG] executed opsctl rollback deployment/auth-service --to-revision previous actor={actor}: image auth-service:3.8.0 -> auth-service:3.7.2'
+      attributes:
+        operation: change_executed
+        change.target: deployment/auth-service
+        deployment.image_tag: auth-service:3.7.2
+    - service: auth-service
+      severity: INFO
+      offset_seconds: 3
+      body: '[NOC-CHG] executed opsctl run job/auth-redis-purge-introspection-cache actor={actor}: SCAN MATCH authz:introspect:* TTL -1 -> UNLINK'
+      attributes:
+        operation: change_executed
+        change.target: job/auth-redis-purge-introspection-cache
+    - service: auth-service
+      severity: INFO
+      offset_seconds: 90
+      body: 'job auth-redis-purge-introspection-cache completed: unlinked 226118 keys, used_memory 3.72G of 6.00G'
+      attributes:
+        operation: redis_purge
+        deployment.image_tag: auth-service:3.7.2
+  steady_attributes:
+    auth-service:
+      deployment.image_tag: auth-service:3.7.2
+  verification:
+    - signal: auth_service.session_store_used_memory_pct
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "auth-service"'
+      field: 'metrics.auth_service.session_store_used_memory_pct'
+      expect: 'under 70% (was 99-100%)'
+      within_seconds: 150
+    - signal: auth_service.session_store_evicted_keys_per_s
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "auth-service"'
+      field: 'metrics.auth_service.session_store_evicted_keys_per_s'
+      expect: '0 (was 180-320)'
+      within_seconds: 150
+    - signal: OOM lines
+      from: 'logs.otel.meridian'
+      where: 'body.text LIKE "*OOM command not allowed when used memory*"'
+      expect: '0 new lines'
+      within_seconds: 60
+    - signal: auth-service image
+      from: 'logs.otel.meridian'
+      where: 'resource.attributes.service.name == "auth-service"'
+      field: 'attributes.deployment.image_tag'
+      expect: 'auth-service:3.7.2 on every line logged since the rollback'
+      within_seconds: 90
 business_impact:
   - kpi: business.activations_per_min
-    factor: {uniform: [0.15, 0.45]}
+    value: {uniform: [230.87, 265.63]}
   - kpi: business.revenue_usd_per_min
     factor: {uniform: [0.15, 0.45]}
   - kpi: business.voluntary_churn_rate_pct
     factor: {uniform: [2.0, 5.0]}
   - kpi: business.support_tickets_per_min
     factor: {uniform: [3.0, 6.0]}
+generator_impact:
+  redis_otel:
+    memory_approaching_maxmemory: 99.0
+    high_eviction_rate: 250.0
+generator_hold_seconds:
+  redis_otel: 90
+onset_delay_seconds: 150
+service_lag_seconds: {api-gateway: 10, activation-service: 15}

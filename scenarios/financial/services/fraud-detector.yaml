@@ -20,34 +20,73 @@ constants:
   - LAYERING
   - SPOOFING
   - FRONT_RUNNING
+  FEATURES:
+  - txn_velocity_5m
+  - order_notional_zscore
+  - geo_distance_km
+  - account_age_days
+  - instrument_concentration
 state:
   _scans_total:
     init: 0
   _last_model_report:
     init: now
 steps:
+# fraud-velocity model: v3.2.1 (promoted before the false positive storm) scores txn_velocity_5m
+# on a per-second training scale, so normal flow trips the VELOCITY pattern until v3.2.0 is back.
 - sample:
+    storm_w:
+      expr: "min(1.0, max(0.0, elapsed.get(10, 0) - lag.get(10, 0)) / 30.0) if 10 in all_active
+        else (1.0 - min(1.0, max(0.0, since_fix.get(10, 0) - 20.0) / 40.0) if 10 in fixed_channels else 0.0)"
+    model_ver:
+      expr: "'v3.2.1' if (10 in all_active or (10 in fixed_channels and since_fix.get(10, 0) < 20.0)) else 'v3.2.0'"
+    tp_per_min:
+      uniform: [0.8, 2.8]
+      round: 2
+    base_fp_pct:
+      uniform: [0.5, 3.0]
+      round: 2
+    storm_fp_per_min:
+      gauss: [220.0, 80.0]
+      clamp: [55.0, 480.0]
+      round: 1
+    fp_per_min:
+      expr: "storm_fp_per_min * storm_w + tp_per_min * base_fp_pct / (100.0 - base_fp_pct)"
+    blocked_per_min:
+      expr: "round(tp_per_min + fp_per_min, 1)"
+    fp_rate:
+      expr: "round(base_fp_pct + (100.0 * storm_fp_per_min / (storm_fp_per_min + tp_per_min) - base_fp_pct) * storm_w, 2)
+        if 10 in fixed_channels and 10 not in all_active else round(100.0 * fp_per_min / (tp_per_min + fp_per_min), 2)"
+    velocity_drift:
+      expr: "round(rand.uniform(0.81, 0.99), 3) if model_ver == 'v3.2.1' else round(rand.uniform(0.02, 0.12), 3)"
+    model_status:
+      expr: "'ANOMALY' if (fp_rate > 5.0 or blocked_per_min > 6.0) else 'NOMINAL'"
+    blocking:
+      expr: "rand.random() < storm_w * 0.5"
     score:
-      uniform:
-      - 0.01
-      - 0.35
-      round: 3
+      expr: "round(rand.uniform(0.86, 0.99), 3) if blocking else round(rand.uniform(0.01, 0.35), 3)"
+    decision:
+      expr: "'BLOCK' if blocking else 'ALLOW'"
+    scan_pattern:
+      expr: "'VELOCITY' if blocking else 'NONE'"
 - log:
     level: INFO
-    message: '[COMPL] fraud_scan score={score} decision=ALLOW model=v3.2.1'
+    message: '[COMPL] fraud_scan score={score} decision={decision} pattern={scan_pattern} model=fraud-velocity:{model_ver}'
     attrs:
       operation: fraud_scan
       fraud.score:
         var: score
-      fraud.decision: ALLOW
-      fraud.model_version: 3.2.1
+      fraud.decision:
+        var: decision
+      fraud.pattern:
+        var: scan_pattern
+      fraud.model_version:
+        var: model_ver
 - sample:
     pattern:
       choice: PATTERNS
     matches:
-      randint:
-      - 0
-      - 2
+      expr: "rand.randint(20, 80) if (pattern == 'VELOCITY' and storm_w > 0.3) else rand.randint(0, 2)"
     pattern_status:
       expr: '''CLEAR'' if matches == 0 else ''FLAGGED'''
 - log:
@@ -61,28 +100,61 @@ steps:
         var: matches
       pattern.status:
         var: pattern_status
+- when: "model_status == 'NOMINAL'"
+  log:
+    level: INFO
+    message: '[COMPL] model_monitor model=fraud-velocity version={model_ver} blocked_per_min={blocked_per_min} fp_rate={fp_rate}% drift.txn_velocity_5m={velocity_drift} status={model_status}'
+    attrs:
+      operation: model_monitor
+      fraud.model_version:
+        var: model_ver
+      fraud.false_positive_rate_pct:
+        var: fp_rate
+      fraud.blocked_orders_per_min:
+        var: blocked_per_min
+      fraud.feature_drift_score:
+        var: velocity_drift
+      model.status:
+        var: model_status
+- when: "model_status == 'ANOMALY'"
+  log:
+    level: WARN
+    message: '[COMPL] model_monitor model=fraud-velocity version={model_ver} blocked_per_min={blocked_per_min} fp_rate={fp_rate}% drift.txn_velocity_5m={velocity_drift} status={model_status}'
+    attrs:
+      operation: model_monitor
+      fraud.model_version:
+        var: model_ver
+      fraud.false_positive_rate_pct:
+        var: fp_rate
+      fraud.blocked_orders_per_min:
+        var: blocked_per_min
+      fraud.feature_drift_score:
+        var: velocity_drift
+      model.status:
+        var: model_status
 - every:
     seconds: 12
     state_key: _last_model_report
     steps:
     - sample:
         precision:
-          uniform:
-          - 0.92
-          - 0.99
-          round: 3
+          expr: "round(1.0 - fp_rate / 100.0, 3)"
         recall:
           uniform:
           - 0.85
           - 0.95
           round: 3
         f1:
-          expr: round(2 * precision * recall / (precision + recall), 3)
+          expr: "round(2 * precision * recall / (precision + recall), 3) if precision > 0 else 0.0"
+        perf_status:
+          expr: "'BELOW_TARGET' if precision < 0.9 else 'WITHIN_TARGETS'"
     - log:
         level: INFO
-        message: '[COMPL] model_performance precision={precision} recall={recall} f1={f1} status=WITHIN_TARGETS'
+        message: '[COMPL] model_performance model=fraud-velocity version={model_ver} precision={precision} recall={recall} f1={f1} status={perf_status}'
         attrs:
           operation: model_performance
+          fraud.model_version:
+            var: model_ver
           model.precision:
             var: precision
           model.recall:
@@ -97,27 +169,41 @@ steps:
     value:
       var: _scans_total
     unit: scans
-- sample:
-    fp_rate:
-      if_active:
-        uniform:
-        - 15.0
-        - 50.0
-        round: 2
-      else:
-        uniform:
-        - 0.5
-        - 3.0
-        round: 2
 - metric:
     name: fraud_detector.false_positive_rate
     value:
       var: fp_rate
     unit: '%'
 - metric:
+    name: fraud_detector.blocked_orders_per_min
+    value:
+      var: blocked_per_min
+    unit: orders/min
+- for_each:
+    in: FEATURES
+    as: feature
+    steps:
+    - metric:
+        name: fraud_detector.feature_drift_score
+        value:
+          expr: "velocity_drift if feature == 'txn_velocity_5m' else round(rand.uniform(0.02, 0.12), 3)"
+        unit: score
+        attrs:
+          fraud.feature:
+            var: feature
+- metric:
     name: fraud_detector.model_latency_ms
     value:
-      randint:
-      - 5
-      - 50
+      gauss: [18.0, 6.0]
+      clamp: [5.0, 50.0]
+      round: 1
     unit: ms
+# Orders whose fraud decision waits on the AML screening result (EU screenings slow while the
+# screening routing sends EU to the provider's us-east endpoint); drains once screenings are fast.
+- metric:
+    name: fraud_detector.decisions_pending_aml
+    value:
+      expr: "round(rand.uniform(0, 4) + min(180.0, 2.5 * max(0.0, elapsed.get(12, 0) - lag.get(12, 0)))) if 12 in all_active
+        else (round(rand.uniform(0, 4) + max(0.0, 180.0 - 3.0 * max(0.0, since_fix.get(12, 0) - 10.0))) if 12 in fixed_channels
+        else rand.randint(0, 4))"
+    unit: decisions

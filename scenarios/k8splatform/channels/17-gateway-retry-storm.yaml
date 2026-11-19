@@ -1,0 +1,110 @@
+name: tenant-gateway saturated by a single tenant's retry storm
+subsystem: edge
+vehicle_section: tenant-edge/tenant-gateway
+error_type: response_flags=UO
+sensor_type: gateway_saturation
+affected_services:
+  - tenant-gateway
+cascade_services:
+  - kube-apiserver
+description: tenant-gateway is pinned at its HPA maximum with every replica at its CPU limit, and returns 503 (upstream
+  overflow) for a share of requests. Nearly all the extra traffic comes from one tenant.
+investigation_notes: |-
+  Root cause: a client release from {tenant} retries failed calls immediately with no backoff. Its request rate rose to ~10x its normal share, total gateway traffic is ~4x baseline and ~83% of it is {tenant}. The HPA scaled tenant-gateway to maxReplicas ({hpa_max}); it would need ~28 replicas at the 70% CPU target, so every replica runs at its 2-core limit (request = limit) and Envoy's circuit breakers to the backends overflow.
+  Confirm:
+    - tenant-gateway: 503 ... response_flags=UO, and the access log shows x-tenant-id / tenant={tenant} on most requests
+    - HPA events: New size: 20; reason: cpu resource utilization (percentage of request) above target; condition ScalingLimited TooManyReplicas
+    - k8s.hpa.current_replicas = desired = max = {hpa_max}; k8s.deployment.desired = {hpa_max}; k8s.container.cpu_limit_utilization ~0.96 on every gateway pod
+    - the node pool still has spare CPU (not a capacity problem)
+  Remediation: apply a per-tenant rate limit to {tenant} at the gateway. Raising maxReplicas would only absorb the storm and pass the load to the backends. The HPA scales back down after its 5-minute stabilization window.
+remediation_action: apply_tenant_rate_limit
+remediation_command: |-
+  opsctl apply ratelimit/tenant-4471 -n tenant-edge --rps 200
+error_message: '"POST /v1/payments HTTP/1.1" 503 UO 0 81 {dur_ms} - "198.51.100.{octet}" "acme-billing-sync/4.3" "{req_id}"
+  "api.example-saas.io" "-" response_flags=UO tenant={tenant} upstream_cluster=payments.corp.internal upstream_overflow=true'
+stack_trace: ''
+fault_params:
+  dur_ms: {randint: [2, 9]}
+  octet: {randint: [2, 250]}
+  req_id: {format: '{a}-{b}-4{c}-a{d}-{e}', a: {randint: [10000000, 99999999]}, b: {randint: [1000, 9999]}, c: {randint: [100, 999]}, d: {randint: [100, 999]}, e: {randint: [100000000000, 999999999999]}}
+  tenant: tenant-4471
+  hpa_max: 20
+rca_clues:
+  tenant-gateway:
+    tenant.id: tenant-4471
+    envoy.circuit_breaker: upstream_rq_pending_overflow
+    k8s.hpa.max_replicas: 20
+    k8s.container.cpu_limit_utilization: {uniform: [0.94, 0.99], round: 3}
+cascade_messages:
+  kube-apiserver:
+    - severity: WARN
+      message: 'I{klog_time}      13 horizontal.go:891] "Successfully rescaled" HPA="tenant-edge/tenant-gateway" currentReplicas=20
+        desiredReplicas=20 reason="cpu resource utilization (percentage of request) above target" condition="ScalingLimited: TooManyReplicas:
+        the desired replica count is more than the maximum replica count"'
+fault_scope:
+  cluster: prod-use1
+  workloads: [tenant-gateway]
+onset_delay_seconds: 30
+ramp_seconds: 120
+generator_impact:
+  kubernetes_otel:
+    hpa_at_max_replicas: 4.0
+    container_cpu_throttling: 0.97
+infrastructure_events:
+  - service: tenant-gateway
+    severity: INFO
+    offset_seconds: -45
+    body: 'usage: tenant=tenant-4471 user_agent=acme-billing-sync/4.3 first_seen={iso_now} rps_1m=1180 rps_7d_p50=330 retry_ratio=0.86'
+    attributes:
+      tenant.id: tenant-4471
+      user_agent.original: acme-billing-sync/4.3
+  - service: tenant-gateway
+    severity: WARN
+    offset_seconds: 10
+    body: 'usage: tenant=tenant-4471 rps_1m=3240 rps_7d_p50=330 retry_ratio=0.91 share_of_traffic=0.83'
+    attributes:
+      tenant.id: tenant-4471
+k8s_events:
+  - type: Warning
+    reason: ScalingLimited
+    object: {kind: HorizontalPodAutoscaler, name: tenant-gateway, namespace: tenant-edge}
+    message: 'the desired replica count is more than the maximum replica count'
+    component: horizontal-pod-autoscaler
+    every_seconds: 120
+remediation_effects:
+  transition_seconds: 360
+  log_events:
+    - service: tenant-gateway
+      severity: INFO
+      offset_seconds: 5
+      body: 'rls: descriptor tenant=tenant-4471 limit=200/s applied by {actor}'
+  steady_attributes:
+    tenant-gateway:
+      ratelimit.tenant-4471.rps: 200
+  verification:
+    - signal: 503 UO responses
+      from: 'logs.otel.platform'
+      where: 'resource.attributes.service.name == "tenant-gateway" AND body.text LIKE "*response_flags=UO*"'
+      expect: '0 new lines; tenant-4471 now gets 429 (response_flags=RL)'
+      within_seconds: 90
+    - signal: k8s.hpa.current_replicas
+      from: 'metrics-k8sclusterreceiver.otel-*'
+      field: 'metrics.k8s.hpa.current_replicas'
+      where: 'resource.attributes.k8s.hpa.name == "tenant-gateway" AND resource.attributes.k8s.cluster.name == "prod-use1"'
+      expect: 'drops from 20 to ~8 after the 5-minute scale-down stabilization window; maxReplicas stays 20'
+      within_seconds: 420
+    - signal: k8s.container.cpu_limit_utilization
+      from: 'metrics-kubeletstatsreceiver.otel-*'
+      field: 'metrics.k8s.container.cpu_limit_utilization'
+      where: 'resource.attributes.k8s.deployment.name == "tenant-gateway" AND resource.attributes.k8s.cluster.name == "prod-use1"'
+      expect: 'well below 0.9 (no throttling)'
+      within_seconds: 120
+business_impact:
+  - kpi: business.api_p99_latency_ms
+    value: {uniform: [880.0, 1100.0], round: 0}
+  - kpi: business.api_5xx_rate_pct
+    value: {uniform: [16.0, 20.0], round: 3}
+  - kpi: business.api_availability_pct
+    value: {uniform: [82.0, 84.0], round: 3}
+  - kpi: business.error_budget_burn_rate
+    value: {uniform: [160.0, 200.0], round: 2}

@@ -1,0 +1,63 @@
+service: session-service
+sort_order: 9
+cloud_provider: azure
+cloud_region: eastus
+cloud_platform: azure_vm
+cloud_availability_zone: eastus-3
+subsystem: session_routing
+language: go
+
+topology:
+  - [cache-tier, /api/v1/cache/session-lookup, GET]
+
+db_operations:
+  - [SELECT, session_store, "SELECT session_id, node FROM session_store WHERE user_id = ?"]
+
+emit_fault_logs: true
+kpi_emitter: false
+
+constants:
+  BACKEND_POOLS: [pool-a, pool-b, pool-c]
+
+state:
+  _sessions_routed: {init: 0}
+  _last_summary: {init: now}
+
+steps:
+  - sample:
+      backend_pool: {choice: BACKEND_POOLS}
+      replication_lag_ms:
+        if_active: {uniform: [800.0, 10000.0], round: 1}
+        else: {uniform: [5.0, 80.0], round: 1}
+      pool_exhaustion_pct:
+        if_active: {uniform: [70.0, 98.0], round: 1}
+        else: {uniform: [5.0, 30.0], round: 1}
+  - counter:
+      state_key: _sessions_routed
+      by: 1
+  - log:
+      level: INFO
+      message: '[session-service] session_cycle backend_pool={backend_pool} replication_lag={replication_lag_ms}ms pool_exhaustion={pool_exhaustion_pct}% total={_sessions_routed}'
+      attrs:
+        operation: session_cycle
+        session.backend_pool: {var: backend_pool}
+        session.replication_lag_ms: {var: replication_lag_ms}
+        session.pool_exhaustion_pct: {var: pool_exhaustion_pct}
+  - metric:
+      name: session_service.replication_lag_ms
+      value: {var: replication_lag_ms}
+      unit: ms
+  - metric:
+      name: session_service.pool_exhaustion_pct
+      value: {var: pool_exhaustion_pct}
+      unit: '%'
+  - every:
+      seconds: 15
+      state_key: _last_summary
+      steps:
+        - log:
+            level: INFO
+            message: '[session-service] summary sessions_routed={_sessions_routed} status=NOMINAL'
+            attrs:
+              operation: summary
+              session.sessions_routed: {var: _sessions_routed}

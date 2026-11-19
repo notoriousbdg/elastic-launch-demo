@@ -1,7 +1,7 @@
-name: RDS Automated Maintenance Spike
+name: Subscriber DB Parameter Group Reset
 subsystem: database
 vehicle_section: subscriber_data
-error_type: DB-RDS-MAINTENANCE
+error_type: canceling statement due to statement timeout
 sensor_type: db_latency
 affected_services:
 - subscriber-db
@@ -9,75 +9,171 @@ affected_services:
 cascade_services:
 - activation-service
 - bss-billing
-description: AWS RDS automated maintenance on subscriber-db causing 200x latency increase on query operations
-investigation_notes: |
-  1. Check CloudTrail for ModifyDBInstance events — RDS maintenance windows trigger VACUUM ANALYZE on the subscribers table (45M rows), causing 15-25 minute lock periods with 100-200x latency increase.
-  2. Monitor subscriber-db query latency: baseline 15-25ms should not exceed 500ms. Current readings above 4000ms indicate active maintenance lock on the subscribers table.
-  3. Historical pattern: 2025-08-14 (12K failed activations), 2025-11-02 (28min outage), 2026-01-18 (8min degradation). All correlated with RDS maintenance window events.
-  4. Provisioning-service HikariCP connection timeout is 3000ms — once DB latency exceeds this, all provisioning requests fail, creating a cascade to activation-service and api-gateway.
-  5. Immediate action: Cancel active maintenance via AWS CLI: aws rds modify-db-instance --db-instance-identifier subscriber-db --no-apply-immediately. Monitor latency recovery (typically 2-5min).
-remediation_action: cancel_rds_maintenance
-error_message: '[DB] DB-RDS-MAINTENANCE: latency_ms={db_latency_ms} baseline_ms={db_baseline_ms} event={rds_event} duration_min={maintenance_duration_min} table=subscribers'
-stack_trace: |
-  === RDS MAINTENANCE EVENT REPORT ===
-  instance=subscriber-db  engine=PostgreSQL 15.4  table=subscribers (45M rows)
-  --- CLOUDTRAIL EVENT ---
-    event_name=ModifyDBInstance  source=rds.amazonaws.com
-    event_time={event_time}  region=eu-central-1
-    operation=VACUUM ANALYZE  target_table=subscribers
-  --- LATENCY IMPACT ---
-    METRIC              BASELINE     CURRENT      MULTIPLIER
-    query_latency_ms    {db_baseline_ms}          {db_latency_ms}         {latency_multiplier}x
-    connections_active  45           98           2.2x
-    lock_wait_ms        0            {db_latency_ms}         ---
-  --- SUBSCRIBER IMPACT ---
-    failed_activations={failed_activations}  affected_subscribers=~{affected_subscribers}
-    duration={maintenance_duration_min}min  estimated_remaining=5-10min
-  ACTION: cancel_maintenance=true  monitor_latency_recovery=true  alert=DB-RDS-MAINTENANCE
-infrastructure_events:
-- body: '[CloudTrail] ModifyDBInstance: instance=subscriber-db engine=PostgreSQL operation=VACUUM_ANALYZE initiated_by=RDSAutoMaintenance region=eu-central-1 event_source=rds.amazonaws.com'
-  severity: WARN
-  event_name: aws.cloudtrail.ModifyDBInstance
-  service: subscriber-db
-  attributes:
-    cloud.provider: aws
-    cloud.service: rds
-    aws.cloudtrail.event_name: ModifyDBInstance
-    aws.rds.instance: subscriber-db
-    aws.rds.operation: VACUUM_ANALYZE
-    infrastructure.source: CloudTrail
+description: subscriber-db came back from its maintenance-window reboot on the default parameter group and the planner switched account lookups to sequential scans
+investigation_notes: |-
+  Root cause: a Terraform apply about 25 minutes before the incident dropped the custom parameter group from meridian-subscriber-db (module upgrade, ModifyDBInstance dBParameterGroupName=default.postgres15, applyImmediately=false). Associating a parameter group needs a reboot, so the change stayed pending until the maintenance-window reboot at the start of the incident (about 25 seconds of downtime). default.postgres15 sets random_page_cost=4 (meridian-pg15-subscriber uses 1.1 for gp3) and work_mem=4MB (64MB), so the planner now reads subscriber_profiles (45M rows) with sequential scans for account_id lookups. p99 query latency is {db_p99_ms} ms, every lookup hits the 5 s statement_timeout, and CPU sits at {db_cpu_pct}%.
+  Confirm:
+    - the RDS event "Finished applying modification to DB parameter group" / "DB instance restarted" comes before the first "canceling statement due to statement timeout", and the CloudTrail ModifyDBInstance record shows dBParameterGroupName=default.postgres15
+    - subscriber-db status lines carry attributes.db.parameter_group default.postgres15 from the reboot on (meridian-pg15-subscriber before it, while the change was pending)
+    - metric subscriber_db.seq_scans_per_s jumps from about 2 to {seq_scans_per_s} and subscriber_db.query_latency_p99_ms from about 20 ms to {db_p99_ms} ms, while subscriber_db.connections stays near its normal 180, which rules out a connection storm
+  Remediation: put the custom parameter group back and reboot to apply it: opsctl patch db-instance/meridian-subscriber-db --db-parameter-group meridian-pg15-subscriber, then opsctl restart db-instance/meridian-subscriber-db. The reboot takes about 25 seconds; after it, p99 latency starts around 150 ms while the buffer cache warms up and falls back to about 20 ms within roughly 2 minutes. Cancelling queries or adding read replicas does not help, because every replica would use the same plan.
+remediation_action: restore_subscriber_db_parameter_group
+error_message: 'org.postgresql.util.PSQLException: ERROR: canceling statement due to statement timeout (statement_timeout=5000ms, query=SubscriberRepository.findByAccountId, db=meridian-subscriber-db)'
+stack_trace: |-
+  org.postgresql.util.PSQLException: ERROR: canceling statement due to statement timeout
+  	at org.postgresql.core.v3.QueryExecutorImpl.receiveErrorResponse(QueryExecutorImpl.java:2713)
+  	at org.postgresql.core.v3.QueryExecutorImpl.processResults(QueryExecutorImpl.java:2401)
+  	at org.postgresql.core.v3.QueryExecutorImpl.execute(QueryExecutorImpl.java:368)
+  	at org.postgresql.jdbc.PgStatement.executeInternal(PgStatement.java:498)
+  	at org.postgresql.jdbc.PgPreparedStatement.executeQuery(PgPreparedStatement.java:134)
+  	at com.zaxxer.hikari.pool.HikariProxyPreparedStatement.executeQuery(HikariProxyPreparedStatement.java)
+  	at eu.meridian.provisioning.subscriber.SubscriberRepository.findByAccountId(SubscriberRepository.java:57)
+  	at eu.meridian.provisioning.api.ProvisionController.provision(ProvisionController.java:54)
 correlation_attr:
-  key: infra.rds_param_group
-  value: pg15-custom-v2.3.1
+  key: db.parameter_group
+  value: default.postgres15
 fault_params:
-  db_latency_ms: {randint: [2000, 4500]}
-  db_baseline_ms: {randint: [15, 25]}
-  rds_event: ModifyDBInstance
-  maintenance_duration_min: {randint: [5, 25]}
-  event_time: 2026-03-08T07:12:00Z
-  latency_multiplier: {randint: [100, 210]}
-  failed_activations: {randint: [500, 5000]}
-  affected_subscribers: {randint: [5000, 15000]}
+  db_p99_ms: {randint: [4600, 5000]}
+  db_cpu_pct: {uniform: [88.0, 97.0], round: 1}
+  seq_scans_per_s: {randint: [120, 180]}
+  scan_ms: {uniform: [5000.1, 5000.9], round: 3}
 rca_clues:
   subscriber-db:
-    db.maintenance_active: true
-    db.vacuum_table: subscribers
-    db.latency_multiplier: {randint: [100, 210]}
+    db.parameter_group: default.postgres15
+    db.random_page_cost: 4
+    db.seq_scans_per_s: {randint: [120, 180]}
+    db.cpu_utilization_pct: {uniform: [88.0, 97.0], round: 1}
   provisioning-service:
-    upstream.db_latency_ms: {randint: [3000, 4500]}
-    upstream.connection_timeout: true
+    db.statement_timeout_ms: 5000
+    db.query: SubscriberRepository.findByAccountId
   activation-service:
-    activation.503_count: {randint: [200, 1000]}
-    activation.retry_storm: true
+    upstream.degraded_subsystem: provisioning
   bss-billing:
-    billing.subscriber_lookup_blocked: true
-    billing.pending_activations: {randint: [50, 300]}
+    upstream.degraded_subsystem: subscriber-db
+    billing.account_lookup_p99_ms: {randint: [4600, 5000]}
+remediation_command: |-
+  opsctl patch db-instance/meridian-subscriber-db --db-parameter-group meridian-pg15-subscriber
+  opsctl restart db-instance/meridian-subscriber-db
+fault_scope:
+  workloads: [subscriber-db]
+error_services: [provisioning-service]
+cascade_messages:
+  subscriber-db:
+    - severity: ERROR
+      message: '{iso_now}:10.42.7.31(52210):provisioning@subscribers:[51877]:ERROR:  canceling statement due to statement timeout'
+    - severity: INFO
+      message: '{iso_now}:10.42.7.31(52210):provisioning@subscribers:[51877]:STATEMENT:  SELECT msisdn, account_id, plan_code, data_quota_gb, voice_quota_min FROM subscriber_profiles WHERE account_id = $1'
+  activation-service:
+    - severity: WARN
+      message: 'POST http://provisioning-service/api/v1/provision took {scan_ms} ms (p99 budget 2000 ms); activation step provision_sim retried'
+  bss-billing:
+    - severity: WARN
+      message: 'account lookup on subscriber-db exceeded 5000 ms for account batch; invoice run paused (retry in 60s)'
+infrastructure_events:
+  - service: subscriber-db
+    severity: INFO
+    offset_seconds: -1500
+    event_name: aws.cloudtrail.ModifyDBInstance
+    body: 'cloudtrail: eventSource=rds.amazonaws.com eventName=ModifyDBInstance userIdentity=assumed-role/meridian-terraform-ci/atlantis requestParameters.dBInstanceIdentifier=meridian-subscriber-db requestParameters.dBParameterGroupName=default.postgres15 requestParameters.applyImmediately=false errorCode=none'
+    attributes:
+      cloud.provider: aws
+      aws.cloudtrail.event_source: rds.amazonaws.com
+      aws.cloudtrail.event_name: ModifyDBInstance
+      user.name: assumed-role/meridian-terraform-ci/atlantis
+      db.pending_parameter_group: default.postgres15
+  - service: subscriber-db
+    severity: INFO
+    offset_seconds: -5
+    event_name: aws.rds.event
+    body: 'rds-event: source=meridian-subscriber-db category=availability message="DB instance shutdown" event_id=RDS-EVENT-0004 reason=maintenance-window'
+    attributes:
+      aws.rds.instance: meridian-subscriber-db
+      operation: rds_event
+  - service: subscriber-db
+    severity: INFO
+    offset_seconds: 25
+    event_name: aws.rds.event
+    body: 'rds-event: source=meridian-subscriber-db category=configuration change message="Finished applying modification to DB parameter group" parameter_group=default.postgres15 status=in-sync'
+    attributes:
+      aws.rds.instance: meridian-subscriber-db
+      db.parameter_group: default.postgres15
+      operation: rds_event
+  - service: subscriber-db
+    severity: INFO
+    offset_seconds: 25
+    event_name: aws.rds.event
+    body: 'rds-event: source=meridian-subscriber-db category=availability message="DB instance restarted" event_id=RDS-EVENT-0006 reason=maintenance-window'
+    attributes:
+      aws.rds.instance: meridian-subscriber-db
+      operation: rds_event
+remediation_effects:
+  log_taper_seconds: 30
+  log_events:
+    - service: subscriber-db
+      severity: INFO
+      offset_seconds: 1
+      body: 'cloudtrail: eventSource=rds.amazonaws.com eventName=ModifyDBInstance userIdentity={actor} requestParameters.dBInstanceIdentifier=meridian-subscriber-db requestParameters.dBParameterGroupName=meridian-pg15-subscriber requestParameters.applyImmediately=true errorCode=none'
+      attributes:
+        cloud.provider: aws
+        aws.cloudtrail.event_name: ModifyDBInstance
+        db.parameter_group: meridian-pg15-subscriber
+    - service: subscriber-db
+      severity: INFO
+      offset_seconds: 3
+      body: 'cloudtrail: eventSource=rds.amazonaws.com eventName=RebootDBInstance userIdentity={actor} requestParameters.dBInstanceIdentifier=meridian-subscriber-db errorCode=none'
+      attributes:
+        cloud.provider: aws
+        aws.cloudtrail.event_name: RebootDBInstance
+    - service: subscriber-db
+      severity: INFO
+      offset_seconds: 28
+      body: 'rds-event: source=meridian-subscriber-db category=availability message="DB instance restarted" event_id=RDS-EVENT-0006 parameter_group=meridian-pg15-subscriber status=in-sync'
+      attributes:
+        aws.rds.instance: meridian-subscriber-db
+        db.parameter_group: meridian-pg15-subscriber
+        operation: rds_event
+  steady_attributes:
+    subscriber-db:
+      db.parameter_group: meridian-pg15-subscriber
+  verification:
+    - signal: subscriber_db.query_latency_p99_ms
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "subscriber-db"'
+      field: 'metrics.subscriber_db.query_latency_p99_ms'
+      expect: 'under 50 ms after cache warm-up (was 4,600-5,000 ms)'
+      within_seconds: 180
+    - signal: subscriber_db.seq_scans_per_s
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "subscriber-db"'
+      field: 'metrics.subscriber_db.seq_scans_per_s'
+      expect: 'back near 2 (was 120-180)'
+      within_seconds: 90
+    - signal: statement timeout lines
+      from: 'logs.otel.meridian'
+      where: 'resource.attributes.service.name == "provisioning-service" AND body.text LIKE "*canceling statement due to statement timeout*"'
+      expect: '0 new lines after the reboot'
+      within_seconds: 90
+    - signal: subscriber-db parameter group
+      from: 'logs.otel.meridian'
+      where: 'resource.attributes.service.name == "subscriber-db"'
+      field: 'attributes.db.parameter_group'
+      expect: 'meridian-pg15-subscriber on every status line since the reboot'
+      within_seconds: 90
 business_impact:
   - kpi: business.activations_per_min
-    factor: {uniform: [0.15, 0.45]}
+    value: {uniform: [141.36, 162.64]}
   - kpi: business.revenue_usd_per_min
-    factor: {uniform: [0.20, 0.50]}
+    factor: {uniform: [0.2, 0.5]}
   - kpi: business.esim_provisions_per_min
-    factor: {uniform: [0.20, 0.50]}
+    value: {uniform: [120.9, 139.1]}
   - kpi: business.support_tickets_per_min
     factor: {uniform: [2.5, 5.0]}
+generator_impact:
+  aws_rds_otel:
+    read_latency_high: 2.0
+    write_latency_high: 2.0
+    cpu_utilization_high: 90.0
+generator_hold_seconds:
+  aws_rds_otel: 90
+onset_delay_seconds: 25
+service_lag_seconds: {provisioning-service: 5, activation-service: 15, bss-billing: 30}

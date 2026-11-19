@@ -43,6 +43,14 @@ constants:
   FIX_SESSIONS:
   - FIX-NYSE-01
   - FIX-NSDQ-01
+  - FIX-NSDQ-07
+  - FIX-CBOE-01
+  - FIX-CME-01
+  - FIX-BATS-01
+  # sessions served by the main order-gateway deployment (FIX-NSDQ-07 has its own)
+  OTHER_SESSIONS:
+  - FIX-NYSE-01
+  - FIX-NSDQ-01
   - FIX-CBOE-01
   - FIX-CME-01
   - FIX-BATS-01
@@ -60,6 +68,10 @@ state:
     init: 0
   _last_throughput_report:
     init: now
+  _fh_peak:
+    init: 0
+  _dc_peak:
+    init: 0
 steps:
 - sample:
     side:
@@ -140,25 +152,196 @@ steps:
 - sample:
     active_fix_count:
       expr: len(FIX_SESSIONS)
+    # client order flow is ~170 orders/s; it stays at that rate in every incident
+    orders_per_min:
+      expr: "round(max(8800.0, rand.gauss(10200.0, 350.0)))"
 - metric:
     name: order_gateway.active_fix_sessions
     value:
       var: active_fix_count
     unit: sessions
+- metric:
+    name: order_gateway.orders_per_min
+    value:
+      var: orders_per_min
+    unit: orders/min
+# Ch 19: the 3.5.0 canary pod serving FIX-NSDQ-07 runs with LANG=de_DE.UTF-8 and formats
+# prices with a decimal comma (44=244,52); Nasdaq answers each NewOrderSingle with a
+# session-level Reject (35=3, 373=6). The rollback replaces the pod in ~30 s; the
+# per-minute reject rate then rolls off over ~30 s.
 - sample:
+    fx_r:
+      expr: "min(1.0, max(0.0, elapsed.get(19, 0) - lag.get(19, 0)) / 20.0) if 19 in all_active else ((1.0 if since_fix.get(19, 0) < 30 else max(0.0, 1.0 - (since_fix.get(19, 0) - 30.0) / 30.0)) if 19 in fixed_channels else 0.0)"
+    fx_bad:
+      expr: "19 in all_active or (19 in fixed_channels and since_fix.get(19, 0) < 30)"
+    fx_rejects:
+      expr: "round(min(900.0, min(1, max(0, round(rand.gauss(0.2, 0.4)))) + fx_r * max(300.0, min(900.0, rand.gauss(600.0, 140.0)))))"
+    fx_version:
+      expr: "'3.5.0' if fx_bad else '3.4.1'"
+    fx_locale:
+      expr: "'de_DE.UTF-8' if fx_bad else 'C.UTF-8'"
+    fx_price_sample:
+      expr: "'244,52' if fx_bad else '244.52'"
+    fx_status:
+      expr: "'ANOMALY' if fx_rejects > 5 else 'NOMINAL'"
+    cmp_session:
+      choice: OTHER_SESSIONS
+    cmp_rejects:
+      expr: "min(1, max(0, round(rand.gauss(0.2, 0.4))))"
+- metric:
+    name: order_gateway.fix_session_rejects_per_min
+    value:
+      var: fx_rejects
+    unit: msgs/min
+    attrs:
+      fix.session: FIX-NSDQ-07
+- metric:
+    name: order_gateway.fix_session_rejects_per_min
+    value:
+      var: cmp_rejects
+    unit: msgs/min
+    attrs:
+      fix.session:
+        var: cmp_session
+- log:
+    level: INFO
+    message: '[OMS] fix_session_status session=FIX-NSDQ-07 deployment=order-gateway-fix-nsdq version={fx_version} locale={fx_locale}
+      price_format_check={fx_price_sample} session_rejects_per_min={fx_rejects} status={fx_status}'
+    attrs:
+      operation: fix_session_status
+      fix.session: FIX-NSDQ-07
+      deployment.version:
+        var: fx_version
+      process.locale:
+        var: fx_locale
+      fix.session_rejects_per_min:
+        var: fx_rejects
+      session.status:
+        var: fx_status
+- log:
+    level: INFO
+    message: '[OMS] fix_session_status session={cmp_session} deployment=order-gateway version=3.4.1 locale=C.UTF-8
+      price_format_check=244.52 session_rejects_per_min={cmp_rejects} status=NOMINAL'
+    attrs:
+      operation: fix_session_status
+      fix.session:
+        var: cmp_session
+      deployment.version: 3.4.1
+      process.locale: C.UTF-8
+      fix.session_rejects_per_min:
+        var: cmp_rejects
+      session.status: NOMINAL
+# Ch 4: the EQ-PROP kill switch engages on a limit that is 10x too small and blocks the
+# desk's new orders; the reloaded limits release it at ~10 s and the rate rolls off.
+# Ch 10: orders the fraud model flags are held for review; the queue drains at analyst +
+# auto-release speed after the model rollback. Ch 13: orders resting on sessions the portal
+# lost are cancelled on session expiry.
+- sample:
+    ks_r:
+      expr: "min(1.0, max(0.0, elapsed.get(4, 0) - max(15.0, lag.get(4, 0))) / 15.0) if 4 in all_active else ((1.0 if since_fix.get(4, 0) < 10 else max(0.0, 1.0 - (since_fix.get(4, 0) - 10.0) / 30.0)) if 4 in fixed_channels else 0.0)"
+    ks_blocked:
+      expr: "round(min(2, max(0, round(rand.gauss(0.6, 0.6)))) + ks_r * max(150.0, min(400.0, rand.gauss(260.0, 55.0))))"
+    ks_state:
+      expr: "'ENGAGED' if ks_blocked > 10 else 'ARMED'"
+    fh_base:
+      expr: "min(5, max(0, round(rand.gauss(1.5, 1.2))))"
+    fh_depth:
+      expr: "round(min(440.0, 1.1 * max(0.0, elapsed.get(10, 0) - lag.get(10, 0))) * max(0.94, min(1.06, 1.0 + rand.gauss(0, 0.02))) + fh_base) if 10 in all_active else (round((_fh_peak if _fh_peak > 50 else 400.0) * max(0.0, 1.0 - since_fix.get(10, 0) / 75.0) + fh_base) if 10 in fixed_channels else fh_base)"
+    se_r:
+      expr: "min(1.0, max(0.0, elapsed.get(13, 0) - lag.get(13, 0)) / 20.0) if 13 in all_active else (max(0.0, 1.0 - since_fix.get(13, 0) / 25.0) if 13 in fixed_channels else 0.0)"
+    se_cancels:
+      expr: "round(min(2, max(0, round(rand.gauss(0.5, 0.6)))) + se_r * max(20.0, min(120.0, rand.gauss(65.0, 20.0))))"
+- counter:
+    state_key: _fh_peak
+    by:
+      expr: "(fh_depth - _fh_peak) if 10 in all_active else 0"
+- metric:
+    name: order_gateway.kill_switch_blocked_per_min
+    value:
+      var: ks_blocked
+    unit: orders/min
+    attrs:
+      risk.desk: EQ-PROP
+- metric:
+    name: order_gateway.fraud_hold_queue_depth
+    value:
+      var: fh_depth
+    unit: orders
+- metric:
+    name: order_gateway.session_expire_cancels_per_min
+    value:
+      var: se_cancels
+    unit: orders/min
+# Ch 1: the OMS reconciles its order state against the drop copy published from each
+# partition's standby. The P-03 standby stopped applying, so every P-03 fill since then
+# (~6% of the 350 msgs/s journal) is a break; they clear once the reseeded standby replays.
+# Ch 16: order acks wait on the P-07 match, so the ack p99 follows the engine's latency.
+- sample:
+    dc_s:
+      expr: "since_fix.get(1, 0) if (1 in fixed_channels and 1 not in all_active) else -1.0"
+    dc_breaks:
+      expr: "round(min(15000.0, 21.0 * max(0.0, elapsed.get(1, 0) - lag.get(1, 0)))) if 1 in all_active else (round(_dc_peak if _dc_peak > 100 else 9000.0) if 0 <= dc_s < 45 else (round((_dc_peak if _dc_peak > 100 else 9000.0) * (1.0 - (dc_s - 45.0) / 40.0)) if 0 <= dc_s < 85 else 0))"
+    dc_status:
+      expr: "'ANOMALY' if dc_breaks > 0 else 'NOMINAL'"
+    ack_r:
+      expr: "min(1.0, max(0.0, elapsed.get(16, 0) - lag.get(16, 0)) / 30.0) if 16 in all_active else (max(0.0, 1.0 - max(0.0, since_fix.get(16, 0) - 20.0) / 30.0) if 16 in fixed_channels else 0.0)"
+    ack_p99:
+      expr: "round(max(150.0, min(400.0, rand.gauss(260.0, 40.0))) + ack_r * min(50000.0, 12700.0 + abs(rand.gauss(0, 14000.0))))"
+- counter:
+    state_key: _dc_peak
+    by:
+      expr: "(dc_breaks - _dc_peak) if 1 in all_active else 0"
+- metric:
+    name: order_gateway.drop_copy_breaks
+    value:
+      var: dc_breaks
+    unit: orders
+- metric:
+    name: order_gateway.ack_latency_p99_us
+    value:
+      var: ack_p99
+    unit: us
+- log:
+    level: INFO
+    message: '[OMS] drop_copy_recon source=matching-engine standby drop copy breaks_p03={dc_breaks} breaks_other_partitions=0
+      status={dc_status}'
+    attrs:
+      operation: drop_copy_recon
+      oms.drop_copy_breaks:
+        var: dc_breaks
+      recon.status:
+        var: dc_status
+# Rejected orders per minute from every source, over the ~10,200 orders/min of client flow.
+- sample:
+    aml_r:
+      expr: "min(1.0, max(0.0, elapsed.get(12, 0) - lag.get(12, 0)) / 30.0) if 12 in all_active else (max(0.0, 1.0 - since_fix.get(12, 0) / 45.0) if 12 in fixed_channels else 0.0)"
+    dp_r:
+      expr: "min(1.0, max(0.0, elapsed.get(20, 0) - lag.get(20, 0)) / 20.0) if 20 in all_active else ((1.0 if since_fix.get(20, 0) < 10 else max(0.0, 1.0 - (since_fix.get(20, 0) - 10.0) / 30.0)) if 20 in fixed_channels else 0.0)"
+    # SIGMA-X child rejects; about half of their parents are IOC and come back rejected
+    dp_rejects_og:
+      expr: "dp_r * max(40.0, min(120.0, rand.gauss(80.0, 18.0)))"
+    rejects_per_min:
+      expr: "ks_blocked + 0.25 * fh_depth + se_cancels + fx_rejects + aml_r * rand.uniform(30.0, 90.0) + ack_r * rand.uniform(40.0, 120.0) + 0.5 * dp_rejects_og"
     reject_rate:
-      if_active:
-        uniform:
-        - 8.0
-        - 25.0
-        round: 2
-      else:
-        uniform:
-        - 0.1
-        - 2.5
-        round: 2
+      expr: "round(max(0.1, min(2.5, rand.gauss(1.0, 0.4))) + 100.0 * rejects_per_min / orders_per_min, 2)"
 - metric:
     name: order_gateway.reject_rate
     value:
       var: reject_rate
     unit: '%'
+- log:
+    level: INFO
+    message: '[OMS] pretrade_gate kill_switch_desk=EQ-PROP kill_switch={ks_state} kill_switch_blocked_per_min={ks_blocked}
+      fraud_hold_queue={fh_depth} session_expire_cancels_per_min={se_cancels} reject_rate_pct={reject_rate}'
+    attrs:
+      operation: pretrade_gate
+      oms.kill_switch_state:
+        var: ks_state
+      oms.kill_switch_blocked_per_min:
+        var: ks_blocked
+      oms.fraud_hold_queue_depth:
+        var: fh_depth
+      oms.session_expire_cancels_per_min:
+        var: se_cancels
+      oms.reject_rate_pct:
+        var: reject_rate

@@ -9,16 +9,18 @@ affected_services:
 cascade_services:
 - member-portal
 - document-vault
-description: VA home loan rate lock requests failing due to secondary market pricing feed disruption
+description: VA home loan rate locks are refused because the MBS pricing feed rejects the bank's credential and prices go stale.
 investigation_notes: |-
-  1. Check GNMA (Ginnie Mae) MBS pricing feed status — STALE data 47min old means the secondary market pricing API is not responding. Verify connectivity to the pricing vendor feed.
-  2. Secondary market conditions: 10yr Treasury at 4.28% with HIGH volatility means MBS prices are moving rapidly. Stale pricing creates risk of locking at incorrect rates.
-  3. VA loan rate locks require current GNMA MBS pricing because VA loans are pooled into Ginnie Mae securities. Without accurate MBS pricing, the bank cannot calculate its margin correctly.
-  4. Honor the quoted rate for members who received a rate quote before the feed went down — this is both regulatory best practice and member trust policy. Queue locks for execution when feed recovers.
-  5. Check Certificate of Eligibility (COE) verification — ensure the VA eligibility service is still operational even if rate locking is paused. Members can continue applications without locking.
-  6. Monitor the VA funding fee calculation — first-time use vs subsequent use rates differ, and disabled veterans may qualify for fee exemption. These calculations don't depend on MBS pricing.
-remediation_action: restart_ratelock_service
-error_message: '[UW] UW-VA-RATELOCK-FAIL: loan={loan_id} rate={va_rate}% lock_period={lock_days}d member={member_id} error={ratelock_error}'
+  1. Search logs.otel.banking for body.text containing UW-VA-RATELOCK-FAIL on quote-engine: loan={loan_id} at {va_rate}% for a {lock_days}-day lock is refused with error={ratelock_error}. metrics.quote_engine.rate_lock_success_pct normally reads 98.5-99.8% and is near zero.
+  2. Check price freshness: metrics.quote_engine.mbs_price_age_s (age of the last Ginnie Mae MBS price the lock desk received) normally reads 1-12 s and has been growing by one second per second; locks are refused once prices are older than 120 s. The pricing_feed_status line carries attributes.pricing.feed_status, which reads AUTH_FAILED_401.
+  3. The vendor is up and the network path works: the feed answers within 80 ms, with HTTP 401 Unauthorized. Find the change: the vendor API key was rotated by the scheduled 90-day secret rotation shortly before the first refusal (secret mbs-pricing-feed, version v17 -> v18) and the vendor revoked v17. The adapter still presents v17 (attributes.pricing.feed_credential_version) because ExternalSecret mbs-pricing-feed-credentials only refreshes every 24 hours.
+  4. Rule out the rest of the VA flow: Certificate of Eligibility checks, credit pulls and VA funding fee calculations do not depend on MBS pricing and keep working. Restarting the adapter does not help: it would read the same stale Kubernetes secret.
+  5. Fix: opsctl sync externalsecret/mbs-pricing-feed-credentials -n underwriting pulls v18 into the Kubernetes secret; the adapter watches the mounted file and re-authenticates within about 10 s. Prices refresh on the next tick and locks succeed again within about 30 s. Shorten the ExternalSecret refresh interval so the next rotation does not repeat this.
+  6. Recovery: pricing.feed_credential_version reads v18 and pricing.feed_status OK, mbs_price_age_s back under 15 s, rate_lock_success_pct back above 98.5%, and no new UW-VA-RATELOCK-FAIL lines. Lock queued requests at the rate quoted before the outage, per lock desk policy.
+remediation_action: sync_pricing_feed_credentials
+remediation_command: |-
+  opsctl sync externalsecret/mbs-pricing-feed-credentials -n underwriting
+error_message: '[UW] UW-VA-RATELOCK-FAIL: loan={loan_id} rate={va_rate}% lock_period={lock_days}d member={member_id} error={ratelock_error} price_age_s={price_age_s} feed_http=401'
 stack_trace: |-
   === VA LOAN RATE LOCK STATUS ===
   loan={loan_id}  member={member_id}
@@ -30,43 +32,122 @@ stack_trace: |-
     STEP                    STATUS      DETAIL
     coe_validation          COMPLETE    certificate_of_eligibility=valid
     credit_pull             COMPLETE    score=748, dti=32%
-    secondary_market_price  FAILED      {ratelock_error}  <<< FEED DOWN
-    margin_calculation      SKIPPED     ---
+    secondary_market_price  FAILED      {ratelock_error}: last price {price_age_s}s old (max 120s)  <<< STALE
     lock_confirmation       SKIPPED     ---
-  --- MARKET CONDITIONS ---
-    10yr_treasury=4.28%  spread=1.72%  volatility=HIGH
-    gnma_mbs_price=STALE  last_update=47min_ago
+  --- FEED ---
+    vendor=mbs-pricing  http_status=401 Unauthorized  credential_version=v17  latency_ms=78
   ACTION: queue_lock=true  honor_quoted_rate=true  alert=UW-VA-RATELOCK-FAIL
 correlation_attr:
-  key: infra.mbs_pricing_feed
-  value: gnma-feed-adapter-v2.0.3-patch
+  key: pricing.feed_credential_version
+  value: v17
 fault_params:
   loan_id: {format: "VA-{n}", n: {randint: [100000, 999999]}}
-  va_rate: {uniform: [5.5, 7.5], round: 3}
+  va_rate: {uniform: [5.5, 7.0], round: 3}
   lock_days: {choice: [30, 45, 60]}
   member_id: {format: "M-{n}", n: {randint: [1000000, 9999999]}}
-  ratelock_error: {choice: [GNMA_MBS_FEED_DOWN, SECONDARY_MARKET_CLOSED, PRICING_ENGINE_TIMEOUT, RATE_SHEET_EXPIRED]}
+  ratelock_error: GNMA_MBS_PRICE_STALE
   loan_amount: {uniform: [150000, 750000], round: 0}
-  va_funding_fee: {uniform: [1.25, 3.3], round: 2}
+  va_funding_fee: {choice: [1.25, 1.5, 2.15, 3.3]}
+  price_age_s: {randint: [150, 900]}
 rca_clues:
   quote-engine:
-    quote.gnma_mbs_feed_age_min: {randint: [30, 120]}
-    quote.secondary_market_status: STALE
+    pricing.feed_status: AUTH_FAILED_401
+    pricing.feed_credential_version: v17
+    quote.mbs_price_age_s: {randint: [150, 900]}
   payment-engine:
-    payment.va_funding_fee_calc_status: OK
     payment.escrow_setup_blocked: true
   member-portal:
-    portal.rate_quote_display: UNAVAILABLE
-    portal.coe_verification_status: VALID
+    portal.rate_quote_display: LOCK_UNAVAILABLE
   document-vault:
-    document.coe_document_on_file: true
-    document.loan_package_generation: BLOCKED
+    document.loan_package_generation: DEFERRED
+error_services:
+- quote-engine
+service_lag_seconds:
+  payment-engine: 30
+  member-portal: 30
+  document-vault: 60
+cascade_messages:
+  payment-engine:
+  - severity: INFO
+    message: '[PAY] escrow_setup loan={loan_id} reason=rate_not_locked status=DEFERRED'
+  member-portal:
+  - severity: WARN
+    message: '[PORTAL] page_view page=/loans/va/rate-lock loan={loan_id} lock_status=UNAVAILABLE status=200'
+  document-vault:
+  - severity: INFO
+    message: '[DOC] loan_package loan={loan_id} reason=rate_not_locked status=DEFERRED'
+fault_scope:
+  cluster: banking-aks-cluster
+  workloads: [quote-engine]
+infrastructure_events:
+- service: quote-engine
+  severity: INFO
+  offset_seconds: -150
+  body: '[UW] secret_rotation secret=mbs-pricing-feed store=key-vault version v17 -> v18 schedule=90d vendor_key_v17=REVOKED rotated_by=secret-rotation-job status=ROTATED'
+  attributes:
+    operation: secret_rotation
+    pricing.secret_store_version: v18
+    user.name: secret-rotation-job
+- service: quote-engine
+  severity: WARN
+  offset_seconds: -140
+  body: '[UW] pricing_feed vendor=mbs-pricing http_status=401 message="invalid or revoked API key" credential_version=v17 retry_in_s=5 status=AUTH_FAILED_401'
+  attributes:
+    operation: pricing_feed_status
+    pricing.feed_status: AUTH_FAILED_401
+    pricing.feed_credential_version: v17
+remediation_effects:
+  transition_seconds: 30
+  log_events:
+  - service: quote-engine
+    severity: INFO
+    offset_seconds: 1
+    body: '[change-audit] change applied action=sync target=externalsecret/mbs-pricing-feed-credentials namespace=underwriting cmd="opsctl sync externalsecret/mbs-pricing-feed-credentials -n underwriting" actor={actor} result="secret refreshed to v18"'
+    attributes:
+      operation: change_applied
+      change.target: externalsecret/mbs-pricing-feed-credentials
+      pricing.feed_credential_version: v18
+  - service: quote-engine
+    severity: INFO
+    offset_seconds: 10
+    body: '[UW] pricing_feed vendor=mbs-pricing http_status=200 credential_version=v18 reauthenticated=true status=OK'
+    attributes:
+      operation: pricing_feed_status
+      pricing.feed_status: OK
+      pricing.feed_credential_version: v18
+  steady_attributes:
+    quote-engine:
+      pricing.feed_credential_version: v18
+  verification:
+  - signal: quote_engine.mbs_price_age_s
+    from: metrics-generic.otel-default
+    where: resource.attributes.service.name == "quote-engine"
+    field: metrics.quote_engine.mbs_price_age_s
+    expect: back under 15 s (was growing past 150 s)
+    within_seconds: 60
+  - signal: quote_engine.rate_lock_success_pct
+    from: metrics-generic.otel-default
+    where: resource.attributes.service.name == "quote-engine"
+    field: metrics.quote_engine.rate_lock_success_pct
+    expect: back in 98.5-99.8% (was near zero)
+    within_seconds: 90
+  - signal: pricing feed credential
+    from: logs.otel.banking
+    where: resource.attributes.service.name == "quote-engine" AND attributes.operation == "pricing_feed_status"
+    field: attributes.pricing.feed_credential_version
+    expect: v18 with pricing.feed_status OK on every line logged since the fix
+    within_seconds: 60
+  - signal: UW-VA-RATELOCK-FAIL lines
+    from: logs.otel.banking
+    where: body.text LIKE "*UW-VA-RATELOCK-FAIL*"
+    expect: 0 new lines
+    within_seconds: 90
 business_impact:
   - kpi: business.loan_origination_usd_per_min
-    factor: {uniform: [0.15, 0.40]}
+    value: {uniform: [104160.0, 119840.0], round: 1}
   - kpi: business.net_interest_income_usd_per_min
-    factor: {uniform: [0.55, 0.80]}
+    value: {uniform: [66960.0, 77040.0], round: 1}
   - kpi: business.fee_revenue_usd_per_min
-    factor: {uniform: [0.25, 0.55]}
+    value: {uniform: [4464.0, 5136.0], round: 1}
   - kpi: business.account_openings_per_min
-    factor: {uniform: [0.20, 0.50]}
+    value: {uniform: [0.48, 0.56], round: 2}

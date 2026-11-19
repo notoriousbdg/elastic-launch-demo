@@ -79,6 +79,14 @@ state:
     init: 0
   _last_census_report:
     init: now
+# Before / during / after (schema 1.3):
+#   ch 1  ADT-INBOUND rev r42 strict v2.5.1 validation: AE ACKs ramp to 35-45% in ~30s; after the
+#         rollback the queued 2.3.1 messages are accepted again and the rate falls back over ~60s.
+#   ch 7  EMPI weights v3.2: auto-link rate drops to 42-58% in ~45s; back to 92-97% ~60s after rollback.
+#   ch 17 ADT-FEED-02 queue threads 8 -> 1: drain 0.2-0.8/s against 2-6/s inbound, lag climbs to
+#         300-420s in ~90s; with 8 threads the backlog drains at ~3x inbound and lag is back under 3s
+#         in ~150s. ADT-FEED-01 and -03 stay current.
+#   ch 18 leaked ETL connections hold source DB slots: chart query latency x4, recovers in ~90s.
 steps:
 - sample:
     dept:
@@ -123,6 +131,147 @@ steps:
         var: provider
       chart.latency_ms:
         var: latency_ms
+# ── ch 1: ADT-INBOUND interface channel ────────────────────────────────────
+- sample:
+    hl7_received_1m:
+      expr: "int(1000 + rand.gauss(0, 40))"
+    hl7_ae_pct:
+      expr: "round(0.2 + (rand.uniform(35.0, 45.0) - 0.2) * min(1.0, elapsed.get(1, 0) / 30.0), 2) if 1 in all_active
+        else (round(40.0 + (rand.uniform(0.0, 0.4) - 40.0) * min(1.0, since_fix.get(1, 0) / 60.0), 2) if 1 in fixed_channels
+        else round(rand.uniform(0.0, 0.4), 2))"
+    hl7_ae_1m:
+      expr: "int(round(hl7_received_1m * hl7_ae_pct / 100.0))"
+    hl7_rev:
+      expr: "'r42' if 1 in all_active else 'r41'"
+    hl7_validation:
+      expr: "'strict-2.5.1' if 1 in all_active else 'lenient'"
+    hl7_status:
+      expr: "'DEGRADED' if 1 in all_active or hl7_ae_pct > 2.0 else 'OK'"
+- metric:
+    name: ehr.hl7_ack_ae_pct
+    value:
+      var: hl7_ae_pct
+    unit: '%'
+- log:
+    level: INFO
+    message: '[EHR] hl7_interface channel=ADT-INBOUND revision={hl7_rev} validation={hl7_validation} received_1m={hl7_received_1m} ack_ae_1m={hl7_ae_1m} ae_pct={hl7_ae_pct}% status={hl7_status}'
+    attrs: &hl7_attrs
+      operation: interface_status
+      hl7.channel: ADT-INBOUND
+      hl7.channel_revision:
+        var: hl7_rev
+      hl7.inbound_validation:
+        var: hl7_validation
+      hl7.ack_ae_pct:
+        var: hl7_ae_pct
+      interface.status:
+        var: hl7_status
+  when: "hl7_status == 'OK'"
+- log:
+    level: WARN
+    message: '[EHR] hl7_interface channel=ADT-INBOUND revision={hl7_rev} validation={hl7_validation} received_1m={hl7_received_1m} ack_ae_1m={hl7_ae_1m} ae_pct={hl7_ae_pct}% status={hl7_status}'
+    attrs: *hl7_attrs
+  when: "hl7_status != 'OK'"
+# ── ch 7: EMPI matching ────────────────────────────────────────────────────
+- sample:
+    empi_registrations_1m:
+      expr: "int(24 + rand.gauss(0, 2))"
+    empi_autolink_pct:
+      expr: "round(94.5 + (rand.uniform(42.0, 58.0) - 94.5) * min(1.0, elapsed.get(7, 0) / 45.0), 1) if 7 in all_active
+        else (round(50.0 + (max(92.0, min(97.0, rand.gauss(94.5, 1.0))) - 50.0) * min(1.0, since_fix.get(7, 0) / 60.0), 1) if 7 in fixed_channels
+        else round(max(92.0, min(97.0, rand.gauss(94.5, 1.0))), 1))"
+    empi_review_1m:
+      expr: "int(round(empi_registrations_1m * (100.0 - empi_autolink_pct) / 100.0))"
+    empi_config:
+      expr: "'jaro-winkler-tuned-v3.2' if 7 in all_active else 'jaro-winkler-v3.1'"
+    empi_status:
+      expr: "'DEGRADED' if 7 in all_active or empi_autolink_pct < 90.0 else 'OK'"
+- metric:
+    name: ehr.empi_auto_link_pct
+    value:
+      var: empi_autolink_pct
+    unit: '%'
+- log:
+    level: INFO
+    message: '[EHR] empi_match_summary config={empi_config} threshold=85 registrations_1m={empi_registrations_1m} auto_linked_pct={empi_autolink_pct}% review_tasks_1m={empi_review_1m} status={empi_status}'
+    attrs: &empi_attrs
+      operation: empi_summary
+      deployment.empi_algorithm_config:
+        var: empi_config
+      empi.threshold_pct: 85
+      empi.auto_link_pct:
+        var: empi_autolink_pct
+      empi.review_tasks_per_min:
+        var: empi_review_1m
+      empi.status:
+        var: empi_status
+  when: "empi_status == 'OK'"
+- log:
+    level: WARN
+    message: '[EHR] empi_match_summary config={empi_config} threshold=85 registrations_1m={empi_registrations_1m} auto_linked_pct={empi_autolink_pct}% review_tasks_1m={empi_review_1m} status={empi_status}'
+    attrs: *empi_attrs
+  when: "empi_status != 'OK'"
+# ── ch 17: ADT feed processors ─────────────────────────────────────────────
+- sample:
+    adt_inbound_s:
+      expr: "round(rand.uniform(2.0, 6.0), 1)"
+    adt_lag_s:
+      expr: "round(2.0 + (rand.uniform(300.0, 420.0) - 2.0) * min(1.0, elapsed.get(17, 0) / 90.0), 1) if 17 in all_active
+        else (round(360.0 + (rand.uniform(0.5, 3.0) - 360.0) * min(1.0, since_fix.get(17, 0) / 150.0), 1) if 17 in fixed_channels
+        else round(rand.uniform(0.5, 3.0), 1))"
+    adt_drain_s:
+      expr: "round(rand.uniform(0.2, 0.8), 1) if 17 in all_active
+        else (round(adt_inbound_s * 3.0, 1) if 17 in fixed_channels and since_fix.get(17, 0) < 150 else adt_inbound_s)"
+    adt_depth:
+      expr: "int(adt_lag_s * adt_inbound_s)"
+    adt_threads:
+      expr: "1 if 17 in all_active else 8"
+    adt_status:
+      expr: "'LAGGING' if 17 in all_active or adt_lag_s > 30.0 else 'CURRENT'"
+    adt_other_lag_s:
+      expr: "round(rand.uniform(0.5, 3.0), 1)"
+    adt_other_feed:
+      choice: [ADT-FEED-01, ADT-FEED-03]
+- metric:
+    name: ehr.adt_feed_lag_seconds
+    value:
+      var: adt_lag_s
+    unit: s
+- log:
+    level: INFO
+    message: '[EHR] adt_feed feed=ADT-FEED-02 queue_threads={adt_threads} inbound={adt_inbound_s}/s drained={adt_drain_s}/s depth={adt_depth} lag={adt_lag_s}s status={adt_status}'
+    attrs: &adt_attrs
+      operation: adt_feed_status
+      adt.feed_id: ADT-FEED-02
+      adt.queue_threads:
+        var: adt_threads
+      adt.inbound_event_rate_per_s:
+        var: adt_inbound_s
+      adt.queue_drain_rate_per_s:
+        var: adt_drain_s
+      adt.queue_depth:
+        var: adt_depth
+      adt.lag_seconds:
+        var: adt_lag_s
+      adt.status:
+        var: adt_status
+  when: "adt_status == 'CURRENT'"
+- log:
+    level: WARN
+    message: '[EHR] adt_feed feed=ADT-FEED-02 queue_threads={adt_threads} inbound={adt_inbound_s}/s drained={adt_drain_s}/s depth={adt_depth} lag={adt_lag_s}s status={adt_status}'
+    attrs: *adt_attrs
+  when: "adt_status != 'CURRENT'"
+- log:
+    level: INFO
+    message: '[EHR] adt_feed feed={adt_other_feed} queue_threads=8 inbound={adt_inbound_s}/s drained={adt_inbound_s}/s depth=3 lag={adt_other_lag_s}s status=CURRENT'
+    attrs:
+      operation: adt_feed_status
+      adt.feed_id:
+        var: adt_other_feed
+      adt.queue_threads: 8
+      adt.lag_seconds:
+        var: adt_other_lag_s
+      adt.status: CURRENT
 - every:
     seconds: 10
     state_key: _last_census_report
@@ -132,15 +281,18 @@ steps:
           randint:
           - 180
           - 350
+        census_adt_sync:
+          expr: "'LAGGING' if adt_status != 'CURRENT' else 'CURRENT'"
     - log:
         level: INFO
-        message: '[EHR] census_snapshot patients={total_patients} departments=6 adt_sync=CURRENT status=NOMINAL'
+        message: '[EHR] census_snapshot patients={total_patients} departments=6 adt_sync={census_adt_sync}'
         attrs:
           operation: census_snapshot
           census.total_patients:
             var: total_patients
           census.departments: 6
-          census.status: NOMINAL
+          census.adt_sync:
+            var: census_adt_sync
 - counter:
     state_key: _encounters_total
     by: 1
@@ -158,14 +310,9 @@ steps:
     unit: sessions
 - sample:
     query_ms:
-      if_active:
-        randint:
-        - 800
-        - 5000
-      else:
-        randint:
-        - 5
-        - 80
+      expr: "int(rand.randint(5, 80) * (1.0 + 3.0 * min(1.0, elapsed.get(18, 0) / 60.0))) if 18 in all_active
+        else (int(rand.randint(5, 80) * (1.0 + 3.0 * max(0.0, 1.0 - since_fix.get(18, 0) / 90.0))) if 18 in fixed_channels
+        else rand.randint(5, 80))"
 - metric:
     name: ehr.query_latency_ms
     value:

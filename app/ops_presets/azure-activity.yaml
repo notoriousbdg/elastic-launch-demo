@@ -1,0 +1,21 @@
+# Azure Activity Log style records. Scenario-neutral: map your kinds to it with
+# `kinds: {<kind>: {audit: azure_activity, azure: {provider: Microsoft.Compute/virtualMachines, operation: {_: write}}}}`.
+audit:
+  formats:
+    azure_activity:
+      vars:
+        az: "kind_info.get('azure') or {}"
+        az_ops: "az.get('operation') or {}"
+        az_provider: "az.get('provider') or ('Microsoft.Resources/' + kind)"
+        operation_name: "az_provider + '/' + (az_ops.get(verb) or az_ops.get('_') or 'write')"
+      body: "azure-activity: operationName={operation_name} resourceId=/{az_provider}/{=name or kind} caller={actor} status=Succeeded category=Administrative change_id={change_id}"
+      attributes:
+        cloud.provider: azure
+        azure.activity.operation_name: "{operation_name}"
+        azure.activity.resource_provider: "{az_provider}"
+        user.name: "{actor}"
+        change.id: "{change_id}"
+        event.action: "{operation_name}"
+      match:
+        prefix: "azure-activity:"
+        tokens: ["operationName={operation_name}"]

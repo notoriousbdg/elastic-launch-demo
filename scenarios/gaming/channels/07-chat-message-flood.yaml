@@ -6,56 +6,126 @@ sensor_type: rate_limiter
 affected_services:
 - chat-service
 - moderation-engine
-cascade_services:
-- auth-gateway
-description: Chat channels experiencing message floods that overwhelm rate limiters and moderation pipelines
+error_services:
+- chat-service
+cascade_services: []
+description: A chat rate-limit ConfigMap revision removed the per-channel aggregate limit, so a bot swarm that stays under the per-user limit floods global-en and the automod pipeline falls behind
+onset_delay_seconds: 10
+ramp_seconds: 30
+service_lag_seconds: {moderation-engine: 20}
 investigation_notes: |-
-  Root cause: coordinated bot accounts are flooding public chat channels at rates far exceeding per-user rate limits — the attack uses distributed bot networks where each bot stays just under individual limits but the aggregate overwhelms channel capacity.
-  1. Check top senders: PLR-482910 and PLR-109284 flagged as BOT_SUSPECT — verify account age, friend count, and purchase history via `player-admin lookup <player_id>`.
-  2. Review moderation queue: {pending_moderation} pending scans with 421 dropped means the automod NLP classifier is CPU-saturated; check GPU inference pod health.
-  3. Inspect rate limiter config: per-user limit may be set correctly but channel-level aggregate limit is missing — add `channel_rate_limit` to the chat gateway config.
-  4. Remediate: issue `restart_chat_service` to reset connection pools and apply updated rate limits; then `flush_message_queue` to clear the backed-up moderation pipeline.
-  5. Ban confirmed bot accounts immediately and enable CAPTCHA challenges for accounts younger than 24 hours attempting to post in public channels.
-remediation_action: restart_chat_service
-error_message: '[Chat] CHAT-FLOOD-DETECT: channel={channel_id} rate={message_rate}msg/s threshold={rate_limit}msg/s pending_mod={pending_moderation}'
+  Root cause: Argo CD synced ConfigMap chat-ratelimits revision r42 (CHG0071207) to chat-service about two and a half minutes before the first CHAT-FLOOD-DETECT line. r42 removed the per-channel aggregate limit (500 msg/s) and kept only the per-user limit of {per_user_limit} msg/s. A swarm of {unique_senders} bot accounts, each just under the per-user limit, now floods {channel_id} at {message_rate} msg/s, and the automod scanners in moderation-engine fall behind ({pending_moderation} pending scans, {dropped_scans} dropped). The other chat channels (guild-12345, match-lobby, trade-market, lfg-ranked) stay at their usual rates, which rules out a platform-wide traffic surge or a gateway fault.
+  Confirm:
+    - chat-service logs the Argo CD sync of ConfigMap/chat-ratelimits r41 -> r42 (attributes.change.request CHG0071207) before the first CHAT-FLOOD-DETECT line; its ratelimit_status lines carry attributes.config.ratelimit_revision r42 and channel_aggregate_limit=none (r41 and 500msg/s before)
+    - metrics.chat.message_rate for attributes.chat.channel global-en is 3000-8000 msg/s (baseline 40-120) while the other channels stay at 5-200 msg/s
+    - metrics.chat.ratelimit.rejections_per_s falls to 0 (baseline 5-30): the limiter rejects nothing, so it is not overloaded, it has no channel limit to enforce
+  Remediation: opsctl rollback configmap/chat-ratelimits --to-revision previous restores r41. The chat pods reload the ConfigMap within seconds, so global-en is capped at 500 msg/s at once and rejections jump to 3000-6000 per second while the bots keep sending; as the swarm backs off both settle back to baseline (40-120 msg/s, 5-30 rejections per second) within about 90 seconds, and the automod backlog drains. Restarting chat-service would not help, because the pods come back with the same r42 ConfigMap, and banning accounts one by one cannot keep up with {unique_senders} senders.
+remediation_action: rollback_chat_ratelimits
+remediation_command: |-
+  opsctl rollback configmap/chat-ratelimits --to-revision previous
+error_message: '[Chat] CHAT-FLOOD-DETECT: channel={channel_id} rate={message_rate}msg/s aggregate_limit=none per_user_limit={per_user_limit}msg/s
+  senders={unique_senders} pending_mod={pending_moderation}'
 stack_trace: |-
   === CHAT RATE LIMITER STATE DUMP ===
-  channel={channel_id}
+  channel={channel_id}  configmap=chat-ratelimits revision=r42
   ----------- rate metrics ------------
-    current_rate   = {message_rate} msg/s
-    threshold      = {rate_limit} msg/s
-    burst_window   = 5s
-    burst_peak     = {message_rate} msg/s
+    current_rate          = {message_rate} msg/s
+    channel_aggregate_lim = none
+    per_user_limit        = {per_user_limit} msg/s
+    unique_senders_60s    = {unique_senders}
+    rejected_last_60s     = 0
   ----------- moderation queue --------
     pending        = {pending_moderation}
-    avg_scan_ms    = 12.4
-    automod_queue  = 87% full
-    dropped_scans  = 421
+    dropped_scans  = {dropped_scans}
   ----------- top senders -------------
-    PLR-482910  : 47 msg/s (BOT_SUSPECT)
-    PLR-109284  : 31 msg/s (BOT_SUSPECT)
-    PLR-773201  : 28 msg/s (NORMAL)
+    PLR-482910  : 4.9 msg/s (account age 2d, per-user limit {per_user_limit})
+    PLR-109284  : 4.8 msg/s (account age 2d, per-user limit {per_user_limit})
+    PLR-773201  : 4.9 msg/s (account age 3d, per-user limit {per_user_limit})
   ----------- action ------------------
-    THROTTLE channel to {rate_limit} msg/s  QUEUE moderation backlog
-  CHAT-FLOOD-DETECT: channel {channel_id} rate {message_rate}msg/s exceeds threshold
+    no channel limit configured; per-user limits not exceeded
+  CHAT-FLOOD-DETECT: channel {channel_id} rate {message_rate}msg/s with no aggregate limit
 correlation_attr:
-  key: network.rate_limiter_config
-  value: rl-config-v3.2-relaxed
+  key: config.ratelimit_revision
+  value: r42
 fault_params:
-  channel_id: {choice: [global-en, guild-12345, match-lobby, trade-market]}
-  message_rate: {randint: [500, 5000]}
-  rate_limit: 200
-  pending_moderation: {randint: [1000, 20000]}
+  channel_id: global-en
+  message_rate: {randint: [3000, 8000]}
+  per_user_limit: 5
+  unique_senders: {randint: [600, 1500]}
+  pending_moderation: {randint: [8000, 40000]}
+  dropped_scans: {randint: [500, 3000]}
 rca_clues:
   chat-service:
-    chat.bot_suspect_accounts: {randint: [5, 50]}
-    chat.channel_aggregate_rate: {randint: [500, 2000]}
+    chat.bot_suspect_accounts: {randint: [600, 1500]}
+    chat.channel_aggregate_rate: {randint: [3000, 8000]}
+    chat.ratelimit.channel_aggregate_limit: none
   moderation-engine:
-    moderation.automod_cpu_pct: {uniform: [85.0, 99.0], round: 1}
-    moderation.dropped_scans: {randint: [100, 1000]}
-  auth-gateway:
-    auth.new_account_rate: {randint: [50, 200]}
-    auth.captcha_challenge_rate: {uniform: [0.1, 5.0], round: 1}
+    moderation.scan_backlog: {randint: [8000, 40000]}
+    moderation.dropped_scans: {randint: [500, 3000]}
+cascade_messages:
+  moderation-engine:
+    - severity: WARN
+      message: 'automod-scanner: scan backlog for chat channel {channel_id} pending={pending_moderation} dropped={dropped_scans} inbound={message_rate}msg/s from chat-service; oldest pending scan 45s'
+fault_scope:
+  cluster: gaming-gke-cluster
+  workloads: [chat-service]
+infrastructure_events:
+  - service: chat-service
+    severity: INFO
+    offset_seconds: -150
+    body: 'time="{iso_now}" level=info msg="Sync operation to r42 succeeded" application=argocd/chat-service dest-namespace=chat resource=ConfigMap/chat-ratelimits change=CHG0071207'
+    attributes:
+      operation: config_change
+      change.request: CHG0071207
+      user.name: social-platform-ci
+      change.summary: 'chat-ratelimits r41 -> r42: channel_aggregate_limit 500 msg/s -> removed (per_user_limit 5 msg/s kept)'
+      config.key: ratelimit.channel_aggregate_limit
+      config.ratelimit_revision: r42
+remediation_effects:
+  transition_seconds: 90
+  log_events:
+    - service: chat-service
+      severity: INFO
+      offset_seconds: 1
+      body: 'level=info logger=changelog msg="change applied" cmd="opsctl rollback configmap/chat-ratelimits --to-revision previous" actor={actor} result="revision r42 -> r41, channel_aggregate_limit=500msg/s restored"'
+      attributes:
+        operation: change_applied
+        change.target: configmap/chat-ratelimits
+        config.ratelimit_revision: r41
+    - service: chat-service
+      severity: INFO
+      offset_seconds: 8
+      body: '[Chat] ratelimit config reloaded configmap=chat-ratelimits revision=r41 channel_aggregate_limit=500msg/s per_user_limit=5msg/s pods=12/12'
+      attributes:
+        operation: config_reload
+        config.ratelimit_revision: r41
+  steady_attributes:
+    chat-service:
+      config.ratelimit_revision: r41
+  verification:
+    - signal: chat.message_rate on global-en
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "chat-service" AND attributes.chat.channel == "global-en"'
+      field: 'metrics.chat.message_rate'
+      expect: 'capped at 500 msg/s right after the rollback, then back in 40-120 msg/s within about 90 seconds (was 3000-8000 msg/s)'
+      within_seconds: 120
+    - signal: chat.ratelimit.rejections_per_s
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "chat-service"'
+      field: 'metrics.chat.ratelimit.rejections_per_s'
+      expect: 'a burst of 3000-6000 per second right after the rollback (was 0 during the flood), back in 5-30 within about 90 seconds'
+      within_seconds: 120
+    - signal: CHAT-FLOOD-DETECT lines
+      from: 'logs.otel.gaming'
+      where: 'body.text LIKE "*CHAT-FLOOD-DETECT*"'
+      expect: '0 new lines'
+      within_seconds: 120
+    - signal: chat-ratelimits revision
+      from: 'logs.otel.gaming'
+      where: 'resource.attributes.service.name == "chat-service"'
+      field: 'attributes.config.ratelimit_revision'
+      expect: 'r41 on every line since the fix (was r42)'
+      within_seconds: 120
 business_impact:
   - kpi: business.chat_messages_per_min
     factor: {uniform: [2.5, 5.0]}

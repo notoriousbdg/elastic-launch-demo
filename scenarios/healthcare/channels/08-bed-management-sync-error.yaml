@@ -8,10 +8,14 @@ affected_services:
 - ehr-system
 cascade_services:
 - clinical-alerts
-description: Bed management system loses synchronization with ADT events, showing stale census data
+description: Bed management system loses synchronization with ADT events as its Kafka consumer lags on hot ADT partitions, showing stale census data
 investigation_notes: |-
-  Root Cause: The bed board receives ADT A01 (admit), A02 (transfer), and A03 (discharge) events via HL7 interface. Sync lag occurs when the ADT feed queue backs up or the bed board API fails to process events in order, causing census discrepancies between the bed board UI and actual patient locations.
-  Remediation: 1) Check the ADT-to-bed-board interface queue: `bed-admin queue-status --unit {nursing_unit}`. 2) Force a census resync from the ADT master: `bed-admin resync --unit {nursing_unit} --source ADT-MASTER`. 3) Restart the bed board sync service: `systemctl restart bed-management-sync`. 4) Verify the HL7 ADT listener port is accepting connections: `netstat -an | grep 2575`. 5) Manually update conflicting bed status via charge nurse console if patient safety is at risk. 6) Review the bed board event processing log for out-of-order sequence numbers.
+  Root cause: bed-board-sync adt-bridge-v1.9.4-unstable was rolled out shortly before the first SCHED-BED-MGMT-FAIL. It raised the consumer max.poll.records from 500 to 5000, so each poll batch takes longer than max.poll.interval.ms. The bed-board-sync consumer group keeps rebalancing (8-14 rebalances per 5 minutes) and falls behind on the adt-events topic. The bed board is {sync_lag_seconds}s behind ADT: bed {bed_id} on {nursing_unit} still shows {bed_status} after the {adt_event}. Out-of-order events are 0 and the EHR ADT feeds are current, so the lag is in the bed board consumer, not upstream.
+  Confirm:
+    - scheduling-api logs [SCHED] bed_board_consumer topic=adt-events group=bed-board-sync build=adt-bridge-v1.9.4-unstable max_poll_records=5000 ... status=LAGGING (attributes.infra.bed_board_sync_driver, attributes.kafka.max_poll_records)
+    - metric scheduling.bed_board_adt_lag_seconds rises from 1-5s to 240-360s after the rollout; Kafka consumer lag on adt-events climbs
+    - the scheduling-api line "bed-board-sync rolled out adt-bridge-v1.9.4-unstable" comes before the first sync failure
+  Remediation: roll the consumer back with opsctl rollback deployment/bed-board-sync --to-revision previous (v1.9.3, max_poll_records 500). Rebalancing stops and the consumer works off the backlog: lag is back under 10 seconds within about 150 seconds. A census resync without the rollback is wrong, because the consumer falls behind again within minutes.
 remediation_action: resync_bed_board
 error_message: '[SCHED] SCHED-BED-MGMT-FAIL: unit={nursing_unit} bed={bed_id} status={bed_status} adt_event={adt_event} sync_lag={sync_lag_seconds}s'
 stack_trace: |-
@@ -36,29 +40,101 @@ fault_params:
   bed_id:
     format: "{ward}-{num}"
     ward: {choice: [A, B, C, D]}
-    num: {randint: [101, 450]}
-  bed_status: {choice: [occupied, vacant, cleaning, blocked]}
-  adt_event: {choice: [discharge, transfer, admit]}
-  sync_lag_seconds: {randint: [60, 600]}
+    num: {randint: [400, 450]}
+  bed_status: occupied
+  adt_event: {choice: [discharge, transfer]}
+  sync_lag_seconds: {randint: [240, 360]}
   patient_id:
     format: "PT-{n}"
     n: {randint: [100000, 999999]}
 rca_clues:
   scheduling-api:
-    bed_board.adt_queue_lag_s: {randint: [60, 600]}
+    bed_board.adt_queue_lag_s: {randint: [240, 360]}
     bed_board.stale_census_count: {randint: [3, 15]}
+    bed_board.out_of_order_events: 0
   ehr-system:
     ehr.adt_event_backlog: {randint: [20, 100]}
     ehr.census_accuracy_pct: {uniform: [70, 90], round: 1}
   clinical-alerts:
     alerts.patient_location_stale: true
     alerts.affected_units: {randint: [1, 4]}
+remediation_command: |-
+  opsctl rollback deployment/bed-board-sync --to-revision previous
+error_services: [scheduling-api]
+generator_hold_seconds:
+  kafka_otel: 150
+service_lag_seconds:
+  ehr-system: 20
+  clinical-alerts: 40
+cascade_messages:
+  ehr-system:
+    - severity: WARN
+      message: '[EHR] census_mismatch unit={nursing_unit} bed={bed_id} adt_event={adt_event} bed_board_state={bed_status} lag={sync_lag_seconds}s'
+  clinical-alerts:
+    - severity: WARN
+      message: '[CDS] patient_location_stale patient={patient_id} unit={nursing_unit} bed={bed_id}; alerts routed to last known bed'
+fault_scope:
+  workloads: [scheduling-api]
+infrastructure_events:
+  - service: scheduling-api
+    severity: INFO
+    offset_seconds: -120
+    body: '[SCHED] deployment bed-board-sync rolled out adt-bridge-v1.9.4-unstable (was adt-bridge-v1.9.3): consumer max.poll.records 500 -> 5000 by patient-flow-release (CHG0032103)'
+    attributes:
+      user.name: patient-flow-release
+      change.request: CHG0032103
+      operation: deployment
+      infra.bed_board_sync_driver: adt-bridge-v1.9.4-unstable
+      kafka.max_poll_records: 5000
+      change.summary: 'bed-board-sync: adt-bridge-v1.9.3 -> adt-bridge-v1.9.4-unstable'
+remediation_effects:
+  log_taper_seconds: 90
+  log_events:
+    - service: scheduling-api
+      severity: INFO
+      offset_seconds: 1
+      body: '[CHG] CHANGE IMPLEMENTED opsctl rollback deployment/bed-board-sync --to-revision previous by {actor}: adt-bridge-v1.9.4-unstable -> adt-bridge-v1.9.3, max.poll.records 500'
+      attributes:
+        operation: change_implemented
+        change.target: deployment/bed-board-sync
+    - service: scheduling-api
+      severity: INFO
+      offset_seconds: 30
+      body: '[SCHED] bed_board_consumer group=bed-board-sync build=adt-bridge-v1.9.3 max_poll_records=500: partitions assigned, rebalance complete; catching up on adt-events'
+      attributes:
+        operation: bed_board_sync
+        infra.bed_board_sync_driver: adt-bridge-v1.9.3
+        kafka.max_poll_records: 500
+  steady_attributes:
+    scheduling-api:
+      infra.bed_board_sync_driver: adt-bridge-v1.9.3
+  verification:
+    - signal: scheduling.bed_board_adt_lag_seconds
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "scheduling-api"'
+      field: 'metrics.scheduling.bed_board_adt_lag_seconds'
+      expect: 'back under 10 seconds (was 240-360s) within about 150 seconds as the backlog drains'
+      within_seconds: 240
+    - signal: SCHED-BED-MGMT-FAIL lines
+      from: 'logs.otel.healthcare'
+      where: 'body.text LIKE "*SCHED-BED-MGMT-FAIL*"'
+      expect: '0 new lines'
+      within_seconds: 240
+    - signal: infra.bed_board_sync_driver
+      from: 'logs.otel.healthcare'
+      where: 'resource.attributes.service.name == "scheduling-api"'
+      field: 'attributes.infra.bed_board_sync_driver'
+      expect: 'adt-bridge-v1.9.3 on every bed_board_consumer line since the fix; v1.9.4-unstable stops appearing'
+      within_seconds: 120
 business_impact:
   - kpi: business.admits_per_min
-    factor: {uniform: [0.20, 0.50]}
+    value: {uniform: [0.48, 0.56], round: 2}
   - kpi: business.discharges_per_min
     factor: {uniform: [0.25, 0.55]}
   - kpi: business.ed_door_to_provider_min
     factor: {uniform: [1.5, 3.0]}
   - kpi: business.hcahps_proxy_score
-    factor: {uniform: [0.30, 0.60]}
+    factor: {uniform: [0.3, 0.6]}
+generator_impact:
+  kafka_otel:
+    high_consumer_lag_per_partition: 12000.0

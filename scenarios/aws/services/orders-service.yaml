@@ -1,0 +1,143 @@
+service: orders-service
+sort_order: 3
+cloud_provider: aws
+cloud_region: us-east-1
+cloud_platform: aws_ec2
+cloud_availability_zone: us-east-1c
+subsystem: order_management
+language: java
+
+topology:
+  - [payment-processor, /api/v1/payments/charge, POST]
+  - [inventory-service, /api/v1/inventory/reserve, POST]
+  - [fulfillment-worker, /api/v1/fulfillment/enqueue, POST]
+
+entry_endpoints:
+  - [/api/v1/orders, POST]
+  - [/api/v1/orders/status, GET]
+
+db_operations:
+  - [INSERT, orders, "INSERT INTO orders (customer_id, cart_id, total_usd, currency, status, created_at) VALUES (?, ?, ?, 'USD', 'PENDING', NOW())"]
+  - [INSERT, order_items, "INSERT INTO order_items (order_id, sku, quantity, unit_price_usd) VALUES (?, ?, ?, ?)"]
+  - [SELECT, orders, "SELECT order_id, status, total_usd, created_at FROM orders WHERE customer_id = ? ORDER BY created_at DESC LIMIT 20"]
+  - [SELECT, order_items, "SELECT oi.sku, oi.quantity, oi.unit_price_usd FROM order_items oi WHERE oi.order_id = ?"]
+  - [UPDATE, orders, "UPDATE orders SET status = ?, payment_id = ?, updated_at = NOW() WHERE order_id = ?"]
+
+emit_fault_logs: true
+kpi_emitter: true
+
+state:
+  _orders_total: {init: 0}
+  _last_summary: {init: now}
+
+steps:
+  - sample:
+      # Per-channel intensity: ramps in while the channel is active, converges back after its fix.
+      f1: {expr: "min(1.0, max(0.0, elapsed.get(1, 0) - lag.get(1, 0)) / 60.0) if 1 in all_active else (max(0.0, 1.0 - since_fix.get(1, 0) / 90.0) if 1 in fixed_channels else 0.0)"}
+      f4: {expr: "min(1.0, elapsed.get(4, 0) / 90.0) if 4 in all_active else (max(0.0, 1.0 - since_fix.get(4, 0) / 90.0) if 4 in fixed_channels else 0.0)"}
+      f8: {expr: "min(1.0, elapsed.get(8, 0) / 60.0) if 8 in all_active else (max(0.0, 1.0 - since_fix.get(8, 0) / 60.0) if 8 in fixed_channels else 0.0)"}
+      f13: {expr: "min(1.0, elapsed.get(13, 0) / 30.0) if 13 in all_active else (max(0.0, 1.0 - since_fix.get(13, 0) / 90.0) if 13 in fixed_channels else 0.0)"}
+      # dependency channels degrade order placement while active and recover as their fix settles
+      f_dep: {expr: "max((0.8 * min(1.0, max(0.0, elapsed.get(3, 0) - lag.get(3, 0)) / 45.0) if 3 in all_active else (0.8 * max(0.0, 1.0 - since_fix.get(3, 0) / 90.0) if 3 in fixed_channels else 0.0)), (0.8 * min(1.0, max(0.0, elapsed.get(7, 0) - lag.get(7, 0)) / 45.0) if 7 in all_active else (0.8 * max(0.0, 1.0 - since_fix.get(7, 0) / 90.0) if 7 in fixed_channels else 0.0)), (0.8 * min(1.0, max(0.0, elapsed.get(11, 0) - lag.get(11, 0)) / 45.0) if 11 in all_active else (0.8 * max(0.0, 1.0 - since_fix.get(11, 0) / 90.0) if 11 in fixed_channels else 0.0)), (0.8 * min(1.0, max(0.0, elapsed.get(12, 0) - lag.get(12, 0)) / 45.0) if 12 in all_active else (0.8 * max(0.0, 1.0 - since_fix.get(12, 0) / 90.0) if 12 in fixed_channels else 0.0)), (0.8 * min(1.0, max(0.0, elapsed.get(15, 0) - lag.get(15, 0)) / 45.0) if 15 in all_active else (0.8 * max(0.0, 1.0 - since_fix.get(15, 0) / 90.0) if 15 in fixed_channels else 0.0)), (0.8 * min(1.0, max(0.0, elapsed.get(16, 0) - lag.get(16, 0)) / 45.0) if 16 in all_active else (0.8 * max(0.0, 1.0 - since_fix.get(16, 0) / 90.0) if 16 in fixed_channels else 0.0)), (0.8 * min(1.0, max(0.0, elapsed.get(18, 0) - lag.get(18, 0)) / 45.0) if 18 in all_active else (0.8 * max(0.0, 1.0 - since_fix.get(18, 0) / 90.0) if 18 in fixed_channels else 0.0)))"}
+      # business degradation from the channels that actually break order placement
+      sev: {expr: "max(f1, f4 * 0.7, f8 * 0.7, f13 * 0.6, f_dep)"}
+      orders_per_min: {expr: "round(rand.uniform(180.0, 520.0) * (1.0 - sev) + max(40.0, min(160.0, 100.0 + rand.gauss(0, 6.0))) * sev, 1)"}
+      checkout_success_pct: {expr: "round(rand.uniform(97.0, 99.7) * (1.0 - sev) + max(62.0, min(88.0, 75.0 + rand.gauss(0, 2.5))) * sev, 2)"}
+      revenue_usd_per_min: {expr: "round(rand.uniform(9500.0, 41000.0) * (1.0 - sev) + max(1800.0, min(7500.0, 4500.0 + rand.gauss(0, 250.0))) * sev, 2)"}
+      avg_order_value_usd: {uniform: [42.0, 168.0], round: 2}
+      fulfillment_backlog: {expr: "int(round(rand.uniform(5.0, 90.0) * (1.0 - sev) + max(400.0, min(3200.0, 1700.0 + rand.gauss(0, 90.0))) * sev))"}
+      order_latency_ms: {expr: "round(rand.uniform(60.0, 260.0) * (1.0 - sev) + max(1400.0, min(8500.0, 4200.0 + rand.gauss(0, 250.0))) * sev, 1)"}
+      # ch1 signal: HikariCP pool (maximumPoolSize 70 per task) fills with leaked connections on the leaking release; 6 tasks x 67 ~ the 402-connection ceiling on orders-db
+      db_pool_active: {expr: "int(round(rand.uniform(14.0, 46.0) * (1.0 - f1) + max(62.0, min(67.0, 65.0 + rand.gauss(0, 0.8))) * f1))"}
+      # ch4 signal: JVM heap climbs on the cache rework image
+      jvm_heap_used_pct: {expr: "round(rand.uniform(42.0, 66.0) * (1.0 - f4) + max(88.0, min(98.0, 93.0 + rand.gauss(0, 2.0))) * f4, 1)"}
+      # ch8 signal: connect timeouts to the database port
+      db_connect_errors: {expr: "int(round(rand.uniform(0.0, 1.4) * (1.0 - f8) + max(200.0, min(900.0, 520.0 + rand.gauss(0, 30.0))) * f8))"}
+      # ch13 signal: new connections rejected with the stale credential
+      db_auth_failures: {expr: "int(round(rand.uniform(0.0, 1.4) * (1.0 - f13) + max(80.0, min(400.0, 220.0 + rand.gauss(0, 12.0))) * f13))"}
+      svc_version: {expr: "'2026.10.3' if 1 in all_active else '2026.10.2'"}
+      image_tag: {expr: "'2026.10.3-cache-rework' if 4 in all_active else '2026.10.2'"}
+      sg_rule: {expr: "'tcp/5432 revoked' if 8 in all_active else 'tcp/5432 allowed from awsorders-orders-service'"}
+      # tasks cache the credential at startup: before the rotation and during the fault they hold e41c07b2 (AWSCURRENT, then AWSPREVIOUS); only a restart after the fix loads c9a2f6d1
+      cred_version: {expr: "'c9a2f6d1-52b7-4e08-8d3a-0f61b7e4a2c5' if (13 in fixed_channels and 13 not in all_active) else 'e41c07b2-8a3d-4f15-9b60-7d2a1c5e93f8'"}
+      cred_stage: {expr: "'AWSPREVIOUS' if 13 in all_active else 'AWSCURRENT'"}
+      svc_status: {expr: "'ANOMALY' if ((1 in all_active and elapsed.get(1, 0) >= lag.get(1, 0)) or (1 in fixed_channels and since_fix.get(1, 0) < 90.0) or 4 in all_active or (4 in fixed_channels and since_fix.get(4, 0) < 90.0) or 8 in all_active or (8 in fixed_channels and since_fix.get(8, 0) < 60.0) or 13 in all_active or (13 in fixed_channels and since_fix.get(13, 0) < 90.0) or f_dep > 0.5) else 'NOMINAL'"}
+      order_id: {format: "ORD-{n}", n: {randint: [1000000, 9999999]}}
+      payment_status: {choice: [CAPTURED, CAPTURED, CAPTURED, CAPTURED, AUTHORIZED]}
+  - counter:
+      state_key: _orders_total
+      by: 1
+  - metric:
+      name: orders.per_minute
+      value: {var: orders_per_min}
+      unit: '{orders}/min'
+  - metric:
+      name: orders.checkout_success_pct
+      value: {var: checkout_success_pct}
+      unit: '%'
+  - metric:
+      name: orders.revenue_usd_per_min
+      value: {var: revenue_usd_per_min}
+      unit: USD/min
+  - metric:
+      name: orders.avg_order_value_usd
+      value: {var: avg_order_value_usd}
+      unit: USD
+  - metric:
+      name: orders.fulfillment_backlog
+      value: {var: fulfillment_backlog}
+      unit: '{orders}'
+  - metric:
+      name: orders.create_latency_ms
+      value: {var: order_latency_ms}
+      unit: ms
+  - metric:
+      name: orders.db_pool_active_connections
+      value: {var: db_pool_active}
+      unit: '{connections}'
+  - metric:
+      name: orders.jvm_heap_used_pct
+      value: {var: jvm_heap_used_pct}
+      unit: '%'
+  - metric:
+      name: orders.db_connect_errors_per_min
+      value: {var: db_connect_errors}
+      unit: '{errors}/min'
+  - metric:
+      name: orders.db_auth_failures_per_min
+      value: {var: db_auth_failures}
+      unit: '{failures}/min'
+  - log:
+      level: INFO
+      message: "[orders] order placed order_id={order_id} total_usd={avg_order_value_usd} payment_status={payment_status} latency={order_latency_ms}ms"
+      attrs:
+        operation: create_order
+        orders.order_id: {var: order_id}
+        orders.total_usd: {var: avg_order_value_usd}
+        orders.payment_status: {var: payment_status}
+        orders.latency_ms: {var: order_latency_ms}
+        service.version: {var: svc_version}
+        container.image.tag: {var: image_tag}
+        aws.vpc.sg_rule: {var: sg_rule}
+        db.credential_version: {var: cred_version}
+        db.credential_stage: {var: cred_stage}
+  - every:
+      seconds: 30
+      state_key: _last_summary
+      steps:
+        - log:
+            level: INFO
+            message: "[orders] kpi orders_per_min={orders_per_min} checkout_success={checkout_success_pct}% revenue_usd_per_min={revenue_usd_per_min} fulfillment_backlog={fulfillment_backlog} sqs_queue=fulfillment-orders db_pool_active={db_pool_active}/70 jvm_heap={jvm_heap_used_pct}% db_connect_errors={db_connect_errors}/min db_auth_failures={db_auth_failures}/min status={svc_status}"
+            attrs:
+              operation: kpi_summary
+              orders.total: {var: _orders_total}
+              orders.per_minute: {var: orders_per_min}
+              orders.checkout_success_pct: {var: checkout_success_pct}
+              orders.revenue_usd_per_min: {var: revenue_usd_per_min}
+              orders.fulfillment_backlog: {var: fulfillment_backlog}
+              orders.status: {var: svc_status}
+              service.version: {var: svc_version}
+              container.image.tag: {var: image_tag}
+              aws.vpc.sg_rule: {var: sg_rule}
+              db.credential_version: {var: cred_version}
+              db.credential_stage: {var: cred_stage}

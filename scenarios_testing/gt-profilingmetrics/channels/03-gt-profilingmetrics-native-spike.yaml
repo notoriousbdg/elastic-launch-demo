@@ -1,0 +1,37 @@
+name: "GT profilingmetrics_otel: native_spike"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-PROFILINGMETRICS-NATIVE-SPIKE
+sensor_type: impact_key_probe
+affected_services:
+  - gt-profilingmetrics-azure-svc-1
+cascade_services:
+  - gt-profilingmetrics-azure-svc-2
+description: "Tests impact_key native_spike on generator profilingmetrics_otel."
+investigation_notes: |-
+  1. Verify profilingmetrics_otel is active and reporting metrics.
+  2. Check that the native_spike metric has reached the trigger value (8.0).
+  3. Confirm generator_impact for profilingmetrics_otel.native_spike is set to 8.0.
+  4. Look for correlated changes in service gt-profilingmetrics-azure-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_native_spike_baseline
+error_message: "GT-PROBE: gen=profilingmetrics_otel key=native_spike value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=profilingmetrics_otel
+  impact_key: native_spike
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 8.0
+  svc_name: gt-profilingmetrics-azure-svc-1
+rca_clues:
+  gt-profilingmetrics-azure-svc-1:
+    probe.generator: profilingmetrics_otel
+    probe.impact_key: native_spike
+    probe.trigger_value: 8.0
+  gt-profilingmetrics-azure-svc-2:
+    probe.upstream_generator: profilingmetrics_otel
+    probe.upstream_key: native_spike
+generator_impact:
+  profilingmetrics_otel:
+    native_spike: 8.0

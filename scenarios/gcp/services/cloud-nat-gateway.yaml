@@ -32,103 +32,477 @@ constants:
   - 34.72.100.12
   - 34.86.50.20
   - 34.86.50.21
+  - 35.195.10.30
+  - 35.195.10.31
 steps:
+# ---- gcpnet-nat-central1 (us-central1) ----
 - sample:
-    gw:
-      choice: GATEWAYS
-    used_ports:
-      if_active:
-        randint:
-        - 60000
-        - 64000
-      else:
-        randint:
-        - 20000
-        - 45000
-- sample:
-    util_pct:
-      expr: round(used_ports / 64512 * 100, 1)
+    sev7_c:
+      expr: "min(1.0, elapsed.get(7, 0) / 45.0) if 7 in all_active else (1.0 - min(1.0, since_fix.get(7, 0) / 60.0) if 7 in fixed_channels else 0.0)"
+    sev8_c:
+      expr: "min(1.0, elapsed.get(8, 0) / 45.0) if 8 in all_active else (1.0 - min(1.0, since_fix.get(8, 0) / 60.0) if 8 in fixed_channels else 0.0)"
+    min_ports_c:
+      expr: "64 if 7 in all_active else 1024"
+    base_util_c:
+      expr: "round(max(21.0, min(39.0, 30.0 + rand.gauss(0, 3.0))), 1)"
+    util_c:
+      expr: "round(base_util_c + (rand.uniform(93.8, 99.2) - base_util_c) * sev7_c, 1) if 7 in all_active else (round(6.0 + (base_util_c - 6.0) * min(1.0, since_fix.get(7, 0) / 60.0), 1) if 7 in fixed_channels else round(base_util_c + 12.0 * sev8_c, 1))"
+    used_c:
+      expr: "int(round(min_ports_c * util_c / 100.0))"
+    nat_status_c:
+      expr: "'ANOMALY' if 7 in all_active else 'NOMINAL'"
+    base_drop_c:
+      randint: [0, 5]
+    dropped_c:
+      expr: "int(round(base_drop_c + (rand.randint(50, 500) - base_drop_c) * max(sev7_c, sev8_c)))"
+    mapping_fail_c:
+      expr: "int(round((1 if rand.randint(1, 10) == 1 else 0) + rand.randint(100, 2000) * sev8_c))"
+    eim_c:
+      expr: "True if 8 in all_active else False"
+    map_status_c:
+      expr: "'ANOMALY' if 8 in all_active else 'NOMINAL'"
+    pending_c:
+      expr: "int(round(rand.randint(2, 8) * 0.0))"
+    quota_c:
+      expr: "6"
+    alloc_ips_c:
+      expr: "5"
+    pool_status_c:
+      expr: "'ANOMALY' if False else 'NOMINAL'"
+    new_conns_c:
+      randint: [1000, 10000]
+    active_mappings_c:
+      randint: [5000, 30000]
+    nat_ip_c:
+      choice: [34.72.100.10, 34.72.100.11, 34.72.100.12]
 - metric:
     name: nat.ports_used
     value:
-      var: used_ports
-    unit: ports
+      var: used_c
+    unit: 'ports'
+    attrs: {gateway: gcpnet-nat-central1, nat.region: us-central1, vm: gke-node-pool-a-001}
 - metric:
     name: nat.ports_total
-    value: 64512
-    unit: ports
+    value:
+      var: min_ports_c
+    unit: 'ports'
+    attrs: {gateway: gcpnet-nat-central1, nat.region: us-central1, vm: gke-node-pool-a-001}
 - metric:
     name: nat.port_utilization_pct
     value:
-      var: util_pct
+      var: util_c
     unit: '%'
-- log:
-    level: INFO
-    message: 'cloudnat: gateway={gw} ports_used={used_ports}/64512 utilization={util_pct}% min_ports_per_vm=64'
-    attrs:
-      operation: port_allocation
-      nat.gateway:
-        var: gw
-      nat.ports_used:
-        var: used_ports
-      nat.utilization:
-        var: util_pct
-- sample:
-    new_conns:
-      randint:
-      - 1000
-      - 10000
-    dropped_conns:
-      if_active:
-        randint:
-        - 50
-        - 500
-      else:
-        randint:
-        - 0
-        - 5
+    attrs: {gateway: gcpnet-nat-central1, nat.region: us-central1, vm: gke-node-pool-a-001}
+- metric:
+    name: nat.min_ports_per_vm
+    value:
+      var: min_ports_c
+    unit: 'ports'
+    attrs: {gateway: gcpnet-nat-central1, nat.region: us-central1}
 - metric:
     name: nat.new_connections
     value:
-      var: new_conns
-    unit: conn/s
+      var: new_conns_c
+    unit: 'conn/s'
+    attrs: {gateway: gcpnet-nat-central1, nat.region: us-central1}
 - metric:
     name: nat.dropped_connections
     value:
-      var: dropped_conns
-    unit: conn/s
-- log:
-    level: INFO
-    message: 'cloudnat: gateway={gw} new_conns={new_conns}/s dropped={dropped_conns}/s protocol=TCP+UDP'
-    attrs:
-      operation: connection_stats
-      nat.new_connections:
-        var: new_conns
-      nat.dropped_connections:
-        var: dropped_conns
-- sample:
-    nat_ip:
-      choice: NAT_IPS
-    active_mappings:
-      randint:
-      - 5000
-      - 30000
+      var: dropped_c
+    unit: 'conn/s'
+    attrs: {gateway: gcpnet-nat-central1, nat.region: us-central1}
+- metric:
+    name: nat.mapping_failures
+    value:
+      var: mapping_fail_c
+    unit: 'conn/s'
+    attrs: {gateway: gcpnet-nat-central1, nat.region: us-central1}
 - metric:
     name: nat.allocated_ips
-    value: 5
-    unit: addresses
+    value:
+      var: alloc_ips_c
+    unit: 'addresses'
+    attrs: {gateway: gcpnet-nat-central1, nat.region: us-central1}
+- metric:
+    name: nat.pending_ip_allocations
+    value:
+      var: pending_c
+    unit: 'addresses'
+    attrs: {gateway: gcpnet-nat-central1, nat.region: us-central1}
+- metric:
+    name: nat.static_address_quota_used
+    value:
+      var: quota_c
+    unit: 'addresses'
+    attrs: {gateway: gcpnet-nat-central1, nat.region: us-central1}
 - metric:
     name: nat.active_mappings
     value:
-      var: active_mappings
-    unit: mappings
+      var: active_mappings_c
+    unit: 'mappings'
+    attrs: {gateway: gcpnet-nat-central1, nat.region: us-central1}
 - log:
     level: INFO
-    message: 'cloudnat: gateway={gw} nat_ip={nat_ip} allocated_ips=5 active_mappings={active_mappings}'
+    message: 'cloudnat: gateway=gcpnet-nat-central1 region=us-central1 vm=gke-node-pool-a-001 ports_used={used_c}/{min_ports_c} utilization={util_c}% min_ports_per_vm={min_ports_c} dynamic_port_allocation=false status={nat_status_c}'
+    attrs:
+      operation: port_allocation
+      nat.gateway: gcpnet-nat-central1
+      nat.region: us-central1
+      nat.vm: gke-node-pool-a-001
+      nat.dynamic_port_allocation: false
+      nat.ports_used:
+        var: used_c
+      nat.utilization:
+        var: util_c
+      nat.min_ports_per_vm:
+        var: min_ports_c
+      nat.status:
+        var: nat_status_c
+- log:
+    level: INFO
+    message: 'cloudnat: gateway=gcpnet-nat-central1 region=us-central1 new_conns={new_conns_c}/s dropped={dropped_c}/s mapping_failures={mapping_fail_c}/s endpoint_independent_mapping={eim_c} protocol=TCP+UDP status={map_status_c}'
+    attrs:
+      operation: connection_stats
+      nat.gateway: gcpnet-nat-central1
+      nat.region: us-central1
+      nat.new_connections:
+        var: new_conns_c
+      nat.dropped_connections:
+        var: dropped_c
+      nat.mapping_failures:
+        var: mapping_fail_c
+      nat.endpoint_independent_mapping:
+        var: eim_c
+      nat.status:
+        var: map_status_c
+- log:
+    level: INFO
+    message: 'cloudnat: gateway=gcpnet-nat-central1 region=us-central1 nat_ip={nat_ip_c} allocated_ips={alloc_ips_c} pending_ip_allocations={pending_c} static_address_quota_used={quota_c}/10 active_mappings={active_mappings_c} status={pool_status_c}'
     attrs:
       operation: ip_pool_status
+      nat.gateway: gcpnet-nat-central1
+      nat.region: us-central1
       nat.nat_ip:
-        var: nat_ip
-      nat.allocated_ips: 5
+        var: nat_ip_c
+      nat.allocated_ips:
+        var: alloc_ips_c
+      nat.pending_ip_allocations:
+        var: pending_c
+      nat.static_address_quota_used:
+        var: quota_c
       nat.active_mappings:
-        var: active_mappings
+        var: active_mappings_c
+      nat.status:
+        var: pool_status_c
+# ---- gcpnet-nat-east1 (us-east1) ----
+- sample:
+    sev9_e:
+      expr: "min(1.0, elapsed.get(9, 0) / 45.0) if 9 in all_active else (1.0 - min(1.0, since_fix.get(9, 0) / 60.0) if 9 in fixed_channels else 0.0)"
+    min_ports_e:
+      expr: "1024"
+    base_util_e:
+      expr: "round(max(21.0, min(39.0, 30.0 + rand.gauss(0, 3.0))), 1)"
+    util_e:
+      expr: "round(base_util_e + (rand.uniform(93.8, 99.2) - base_util_e) * 0.0, 1)"
+    used_e:
+      expr: "int(round(min_ports_e * util_e / 100.0))"
+    nat_status_e:
+      expr: "'ANOMALY' if False else 'NOMINAL'"
+    base_drop_e:
+      randint: [0, 5]
+    dropped_e:
+      expr: "int(round(base_drop_e + (rand.randint(50, 500) - base_drop_e) * max(0.0, 0.0)))"
+    mapping_fail_e:
+      expr: "int(round((1 if rand.randint(1, 10) == 1 else 0) + rand.randint(100, 2000) * 0.0))"
+    eim_e:
+      expr: "False"
+    map_status_e:
+      expr: "'ANOMALY' if False else 'NOMINAL'"
+    pending_e:
+      expr: "int(round(3 * sev9_e))"
+    alloc_ips_e:
+      expr: "5 + int(round(3 * min(1.0, since_fix.get(9, 0) / 60.0))) if 9 in fixed_channels else 5"
+    quota_e:
+      expr: "10 if 9 in all_active else 6 + (alloc_ips_e - 5)"
+    pool_status_e:
+      expr: "'ANOMALY' if 9 in all_active else 'NOMINAL'"
+    new_conns_e:
+      randint: [1000, 10000]
+    active_mappings_e:
+      randint: [5000, 30000]
+    nat_ip_e:
+      choice: [34.86.50.20, 34.86.50.21]
+- metric:
+    name: nat.ports_used
+    value:
+      var: used_e
+    unit: 'ports'
+    attrs: {gateway: gcpnet-nat-east1, nat.region: us-east1, vm: gke-node-pool-a-014}
+- metric:
+    name: nat.ports_total
+    value:
+      var: min_ports_e
+    unit: 'ports'
+    attrs: {gateway: gcpnet-nat-east1, nat.region: us-east1, vm: gke-node-pool-a-014}
+- metric:
+    name: nat.port_utilization_pct
+    value:
+      var: util_e
+    unit: '%'
+    attrs: {gateway: gcpnet-nat-east1, nat.region: us-east1, vm: gke-node-pool-a-014}
+- metric:
+    name: nat.min_ports_per_vm
+    value:
+      var: min_ports_e
+    unit: 'ports'
+    attrs: {gateway: gcpnet-nat-east1, nat.region: us-east1}
+- metric:
+    name: nat.new_connections
+    value:
+      var: new_conns_e
+    unit: 'conn/s'
+    attrs: {gateway: gcpnet-nat-east1, nat.region: us-east1}
+- metric:
+    name: nat.dropped_connections
+    value:
+      var: dropped_e
+    unit: 'conn/s'
+    attrs: {gateway: gcpnet-nat-east1, nat.region: us-east1}
+- metric:
+    name: nat.mapping_failures
+    value:
+      var: mapping_fail_e
+    unit: 'conn/s'
+    attrs: {gateway: gcpnet-nat-east1, nat.region: us-east1}
+- metric:
+    name: nat.allocated_ips
+    value:
+      var: alloc_ips_e
+    unit: 'addresses'
+    attrs: {gateway: gcpnet-nat-east1, nat.region: us-east1}
+- metric:
+    name: nat.pending_ip_allocations
+    value:
+      var: pending_e
+    unit: 'addresses'
+    attrs: {gateway: gcpnet-nat-east1, nat.region: us-east1}
+- metric:
+    name: nat.static_address_quota_used
+    value:
+      var: quota_e
+    unit: 'addresses'
+    attrs: {gateway: gcpnet-nat-east1, nat.region: us-east1}
+- metric:
+    name: nat.active_mappings
+    value:
+      var: active_mappings_e
+    unit: 'mappings'
+    attrs: {gateway: gcpnet-nat-east1, nat.region: us-east1}
+- log:
+    level: INFO
+    message: 'cloudnat: gateway=gcpnet-nat-east1 region=us-east1 vm=gke-node-pool-a-014 ports_used={used_e}/{min_ports_e} utilization={util_e}% min_ports_per_vm={min_ports_e} dynamic_port_allocation=false status={nat_status_e}'
+    attrs:
+      operation: port_allocation
+      nat.gateway: gcpnet-nat-east1
+      nat.region: us-east1
+      nat.vm: gke-node-pool-a-014
+      nat.dynamic_port_allocation: false
+      nat.ports_used:
+        var: used_e
+      nat.utilization:
+        var: util_e
+      nat.min_ports_per_vm:
+        var: min_ports_e
+      nat.status:
+        var: nat_status_e
+- log:
+    level: INFO
+    message: 'cloudnat: gateway=gcpnet-nat-east1 region=us-east1 new_conns={new_conns_e}/s dropped={dropped_e}/s mapping_failures={mapping_fail_e}/s endpoint_independent_mapping={eim_e} protocol=TCP+UDP status={map_status_e}'
+    attrs:
+      operation: connection_stats
+      nat.gateway: gcpnet-nat-east1
+      nat.region: us-east1
+      nat.new_connections:
+        var: new_conns_e
+      nat.dropped_connections:
+        var: dropped_e
+      nat.mapping_failures:
+        var: mapping_fail_e
+      nat.endpoint_independent_mapping:
+        var: eim_e
+      nat.status:
+        var: map_status_e
+- log:
+    level: INFO
+    message: 'cloudnat: gateway=gcpnet-nat-east1 region=us-east1 nat_ip={nat_ip_e} allocated_ips={alloc_ips_e} pending_ip_allocations={pending_e} static_address_quota_used={quota_e}/10 active_mappings={active_mappings_e} status={pool_status_e}'
+    attrs:
+      operation: ip_pool_status
+      nat.gateway: gcpnet-nat-east1
+      nat.region: us-east1
+      nat.nat_ip:
+        var: nat_ip_e
+      nat.allocated_ips:
+        var: alloc_ips_e
+      nat.pending_ip_allocations:
+        var: pending_e
+      nat.static_address_quota_used:
+        var: quota_e
+      nat.active_mappings:
+        var: active_mappings_e
+      nat.status:
+        var: pool_status_e
+# ---- gcpnet-nat-europe1 (europe-west1) ----
+- sample:
+    min_ports_u:
+      expr: "1024"
+    base_util_u:
+      expr: "round(max(21.0, min(39.0, 30.0 + rand.gauss(0, 3.0))), 1)"
+    util_u:
+      expr: "round(base_util_u + (rand.uniform(93.8, 99.2) - base_util_u) * 0.0, 1)"
+    used_u:
+      expr: "int(round(min_ports_u * util_u / 100.0))"
+    nat_status_u:
+      expr: "'ANOMALY' if False else 'NOMINAL'"
+    base_drop_u:
+      randint: [0, 5]
+    dropped_u:
+      expr: "int(round(base_drop_u + (rand.randint(50, 500) - base_drop_u) * max(0.0, 0.0)))"
+    mapping_fail_u:
+      expr: "int(round((1 if rand.randint(1, 10) == 1 else 0) + rand.randint(100, 2000) * 0.0))"
+    eim_u:
+      expr: "False"
+    map_status_u:
+      expr: "'ANOMALY' if False else 'NOMINAL'"
+    pending_u:
+      expr: "int(round(rand.randint(2, 8) * 0.0))"
+    quota_u:
+      expr: "6"
+    alloc_ips_u:
+      expr: "5"
+    pool_status_u:
+      expr: "'ANOMALY' if False else 'NOMINAL'"
+    new_conns_u:
+      randint: [1000, 10000]
+    active_mappings_u:
+      randint: [5000, 30000]
+    nat_ip_u:
+      choice: [35.195.10.30, 35.195.10.31]
+- metric:
+    name: nat.ports_used
+    value:
+      var: used_u
+    unit: 'ports'
+    attrs: {gateway: gcpnet-nat-europe1, nat.region: europe-west1, vm: gke-node-pool-a-027}
+- metric:
+    name: nat.ports_total
+    value:
+      var: min_ports_u
+    unit: 'ports'
+    attrs: {gateway: gcpnet-nat-europe1, nat.region: europe-west1, vm: gke-node-pool-a-027}
+- metric:
+    name: nat.port_utilization_pct
+    value:
+      var: util_u
+    unit: '%'
+    attrs: {gateway: gcpnet-nat-europe1, nat.region: europe-west1, vm: gke-node-pool-a-027}
+- metric:
+    name: nat.min_ports_per_vm
+    value:
+      var: min_ports_u
+    unit: 'ports'
+    attrs: {gateway: gcpnet-nat-europe1, nat.region: europe-west1}
+- metric:
+    name: nat.new_connections
+    value:
+      var: new_conns_u
+    unit: 'conn/s'
+    attrs: {gateway: gcpnet-nat-europe1, nat.region: europe-west1}
+- metric:
+    name: nat.dropped_connections
+    value:
+      var: dropped_u
+    unit: 'conn/s'
+    attrs: {gateway: gcpnet-nat-europe1, nat.region: europe-west1}
+- metric:
+    name: nat.mapping_failures
+    value:
+      var: mapping_fail_u
+    unit: 'conn/s'
+    attrs: {gateway: gcpnet-nat-europe1, nat.region: europe-west1}
+- metric:
+    name: nat.allocated_ips
+    value:
+      var: alloc_ips_u
+    unit: 'addresses'
+    attrs: {gateway: gcpnet-nat-europe1, nat.region: europe-west1}
+- metric:
+    name: nat.pending_ip_allocations
+    value:
+      var: pending_u
+    unit: 'addresses'
+    attrs: {gateway: gcpnet-nat-europe1, nat.region: europe-west1}
+- metric:
+    name: nat.static_address_quota_used
+    value:
+      var: quota_u
+    unit: 'addresses'
+    attrs: {gateway: gcpnet-nat-europe1, nat.region: europe-west1}
+- metric:
+    name: nat.active_mappings
+    value:
+      var: active_mappings_u
+    unit: 'mappings'
+    attrs: {gateway: gcpnet-nat-europe1, nat.region: europe-west1}
+- log:
+    level: INFO
+    message: 'cloudnat: gateway=gcpnet-nat-europe1 region=europe-west1 vm=gke-node-pool-a-027 ports_used={used_u}/{min_ports_u} utilization={util_u}% min_ports_per_vm={min_ports_u} dynamic_port_allocation=false status={nat_status_u}'
+    attrs:
+      operation: port_allocation
+      nat.gateway: gcpnet-nat-europe1
+      nat.region: europe-west1
+      nat.vm: gke-node-pool-a-027
+      nat.dynamic_port_allocation: false
+      nat.ports_used:
+        var: used_u
+      nat.utilization:
+        var: util_u
+      nat.min_ports_per_vm:
+        var: min_ports_u
+      nat.status:
+        var: nat_status_u
+- log:
+    level: INFO
+    message: 'cloudnat: gateway=gcpnet-nat-europe1 region=europe-west1 new_conns={new_conns_u}/s dropped={dropped_u}/s mapping_failures={mapping_fail_u}/s endpoint_independent_mapping={eim_u} protocol=TCP+UDP status={map_status_u}'
+    attrs:
+      operation: connection_stats
+      nat.gateway: gcpnet-nat-europe1
+      nat.region: europe-west1
+      nat.new_connections:
+        var: new_conns_u
+      nat.dropped_connections:
+        var: dropped_u
+      nat.mapping_failures:
+        var: mapping_fail_u
+      nat.endpoint_independent_mapping:
+        var: eim_u
+      nat.status:
+        var: map_status_u
+- log:
+    level: INFO
+    message: 'cloudnat: gateway=gcpnet-nat-europe1 region=europe-west1 nat_ip={nat_ip_u} allocated_ips={alloc_ips_u} pending_ip_allocations={pending_u} static_address_quota_used={quota_u}/10 active_mappings={active_mappings_u} status={pool_status_u}'
+    attrs:
+      operation: ip_pool_status
+      nat.gateway: gcpnet-nat-europe1
+      nat.region: europe-west1
+      nat.nat_ip:
+        var: nat_ip_u
+      nat.allocated_ips:
+        var: alloc_ips_u
+      nat.pending_ip_allocations:
+        var: pending_u
+      nat.static_address_quota_used:
+        var: quota_u
+      nat.active_mappings:
+        var: active_mappings_u
+      nat.status:
+        var: pool_status_u

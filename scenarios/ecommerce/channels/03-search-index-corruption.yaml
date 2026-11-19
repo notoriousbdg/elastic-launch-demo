@@ -8,48 +8,145 @@ affected_services:
 cascade_services:
 - storefront-gateway
 - recommendation-engine
-description: Product search index corrupted or partially rebuilt, returning incomplete or incorrect results
+description: Product search returns no results for about a quarter of queries because the nightly reindex aborted at 76% and its alias swap still pointed the products alias at the incomplete products-v13 index.
+onset_delay_seconds: 0
 investigation_notes: |-
-  1. Check product-catalog logs for CATALOG-INDEX-CORRUPT — note the affected shard ({shard_id}) and document count mismatch.
-  2. Run an index health check: GET /_cluster/health — red/yellow status with unassigned shards confirms corruption.
-  3. Check for partial writes during a previous index rebuild: `show index stats` — a rebuild that aborted midway leaves an inconsistent index.
-  4. Identify affected categories: query `catalog.items_indexed` metric — a drop below {expected_items} items indicates missing documents.
-  5. Do not trigger a full rebuild during peak traffic — it will consume all indexing throughput and further degrade search latency.
-  6. Roll back to the last known-good snapshot and replay the indexing changelog from that point forward.
+  Root cause: the nightly catalog reindex (CR-5127) copies the products table into a fresh index, products-v13, and then moves the products alias to it. Tonight the bulk load aborted at 76% ({actual_items} of {expected_items} documents): the indexing node rejected bulk requests with circuit_breaking_exception. The job's alias-swap step is not gated on the document count, so it still moved the products alias from products-v12 to the incomplete products-v13. Every search now runs against an index that is missing {doc_delta} products, so about one search in four returns zero hits. This is an incomplete index, not Lucene corruption: all shards are green, no shard is unassigned and there is no CorruptIndexException, and products-v12 is intact with all {expected_items} documents. Search traffic is unchanged (catalog.search_rps steady, catalog.search_latency_ms normal), which rules out an outage or a traffic spike. Do not start a full rebuild at peak: it takes the same indexing throughput that just tripped the breaker, and it leaves search broken until it finishes.
+  Confirm:
+    - product-catalog "index health" lines show attributes.catalog.index_version products-v13 (products-v12 before the incident) with docs.count about 912,000 against source_rows=1200000; metrics.catalog.items_indexed dropped from about 1,200,000 to about 912,000 in one step
+    - metrics.catalog.zero_result_pct rose from about 3% to about 28% while metrics.catalog.search_rps stayed near 780 rps
+    - the product-catalog ReindexJob lines come before the first CATALOG-INDEX-CORRUPT line: "aborted at 76%" with circuit_breaking_exception, then "alias swap products: products-v12 -> products-v13 ... doc-count gate: disabled" (attributes.change.request CR-5127)
+    - storefront-gateway logs zero-result search pages and recommendation-engine logs catalog lookups that miss product ids
+  Remediation: point the alias back at the complete index with opsctl rollback alias/products --to-revision previous. The _aliases update is atomic, so metrics.catalog.items_indexed returns to about 1,200,000 immediately; zero-result pages cached from products-v13 expire over the 60s query result cache TTL, so metrics.catalog.zero_result_pct falls back to about 3% within about 60s. Then rerun the reindex off-peak with the alias swap gated on the document count.
 remediation_action: rebuild_search_index
-error_message: '[ProductCatalog] CATALOG-INDEX-CORRUPT: shard={shard_id} expected_docs={expected_items} actual_docs={actual_items}
-  delta={doc_delta} affected_categories={affected_categories} last_clean_snapshot={snapshot_age_min}m ago'
-stack_trace: "com.ecommerce.catalog.IndexException: CATALOG-INDEX-CORRUPT\n\tat com.ecommerce.catalog.SearchIndexManager.validateShard(SearchIndexManager.java:312)\n\
-  \tat com.ecommerce.catalog.SearchIndexManager.healthCheck(SearchIndexManager.java:245)\n\tat com.ecommerce.catalog.CatalogService.serveSearchRequest(CatalogService.java:189)\n\
-  Shard:           {shard_id}\nExpected docs:   {expected_items}\nActual docs:     {actual_items}\nDelta:           -{doc_delta}\n\
-  Affected cats:   {affected_categories}\nSnapshot age:    {snapshot_age_min}m"
+remediation_command: |-
+  opsctl rollback alias/products --to-revision previous
+error_message: '[search-worker-{search_thread}] ERROR c.e.catalog.search.IndexIntegrityCheck - CATALOG-INDEX-CORRUPT alias=products
+  index={bad_index} docs.count={actual_items} source_rows={expected_items} missing={doc_delta} last_reindex=ABORTED progress=76%
+  query="{search_query}" hits=0 request_id={request_id}'
+stack_trace: |-
+  com.ecommerce.catalog.search.IndexIntegrityException: CATALOG-INDEX-CORRUPT alias products resolves to {bad_index} with docs.count {actual_items} < source_rows {expected_items} (missing {doc_delta})
+  	at com.ecommerce.catalog.search.IndexIntegrityCheck.verifyCoverage(IndexIntegrityCheck.java:142)
+  	at com.ecommerce.catalog.search.CatalogSearchService.search(CatalogSearchService.java:211)
+  	at com.ecommerce.catalog.api.SearchController.search(SearchController.java:67)
+  	at org.springframework.web.servlet.mvc.method.annotation.ServletInvocableHandlerMethod.invokeAndHandle(ServletInvocableHandlerMethod.java:118)
+  	at org.springframework.web.servlet.DispatcherServlet.doDispatch(DispatcherServlet.java:1089)
 correlation_attr:
-  key: catalog.index_unhealthy
-  value: true
+  key: catalog.index_version
+  value: products-v13
 fault_params:
-  shard_id: {format: "shard-{n}", n: {randint: [0, 7]}}
-  expected_items: {randint: [500000, 2000000]}
-  actual_items: {randint: [100000, 400000]}
-  doc_delta: {randint: [100000, 1600000]}
-  affected_categories: {choice: ["electronics,apparel", "home,beauty", "sports,books", all_categories]}
-  snapshot_age_min: {randint: [60, 480]}
+  bad_index: products-v13
+  expected_items: 1200000
+  actual_items: 912000
+  doc_delta: 288000
+  search_query: {choice: ["wireless earbuds", "running shoes", "air fryer", "standing desk", "yoga mat", "4k monitor", "rain jacket"]}
+  search_thread: {randint: [1, 32]}
+  request_id: {format: "req-{n}", n: {randint: [10000000, 99999999]}}
 rca_clues:
   product-catalog:
-    catalog.shard_health: RED
-    catalog.missing_docs_pct: {uniform: [5, 40], round: 1}
-    catalog.search_accuracy_pct: {uniform: [40, 80], round: 1}
+    catalog.index_version: products-v13
+    catalog.items_indexed: 912000
+    catalog.missing_docs_pct: 24.0
+    catalog.last_reindex_status: ABORTED
+    catalog.reindex_progress_pct: 76.0
+    catalog.zero_result_pct: {uniform: [25.0, 31.0], round: 1}
+    catalog.shard_health: GREEN
+    catalog.previous_index_docs: 1200000
   storefront-gateway:
-    storefront.search_zero_results_pct: {uniform: [20, 60], round: 1}
-    storefront.search_fallback_active: true
+    storefront.search_zero_results_pct: {uniform: [24.0, 32.0], round: 1}
   recommendation-engine:
-    reco.catalog_data_stale: true
-    reco.fallback_to_trending: true
+    reco.catalog_lookup_miss_pct: {uniform: [22.0, 26.0], round: 1}
+cascade_messages:
+  storefront-gateway:
+    - severity: WARN
+      message: 'WARNING storefront.search: zero-result search query="{search_query}" catalog_status=200 hits=0 took_ms=38; rendering empty results page request_id={request_id}'
+  recommendation-engine:
+    - severity: WARN
+      message: 'WARNING reco.candidates: catalog lookup missed product ids for similar-items request (24 of 100 candidates not found in products index); filling with trending items'
+fault_scope:
+  cluster: ecommerce-eks-cluster
+  workloads: [product-catalog]
+infrastructure_events:
+  - service: product-catalog
+    severity: WARN
+    offset_seconds: -75
+    body: '[reindex-job] WARN  c.e.catalog.reindex.ReindexJob - reindex products-v12 -> products-v13 aborted at 76% (912000/1200000 docs):
+      bulk rejected by es-catalog-data-2 circuit_breaking_exception [parent] Data too large; partial index products-v13 left in place
+      (CR-5127)'
+    attributes:
+      user.name: catalog-reindex-cron
+      change.request: CR-5127
+      operation: index_reindex
+      catalog.reindex_progress_pct: 76.0
+      catalog.items_indexed: 912000
+  - service: product-catalog
+    severity: INFO
+    offset_seconds: -60
+    body: '[reindex-job] INFO  c.e.catalog.reindex.ReindexJob - step 4/4 alias swap products: products-v12 -> products-v13 completed
+      (doc-count gate: disabled) (CR-5127)'
+    attributes:
+      user.name: catalog-reindex-cron
+      change.request: CR-5127
+      operation: alias_swap
+      catalog.index_version: products-v13
+remediation_effects:
+  log_taper_seconds: 10
+  log_events:
+    - service: product-catalog
+      severity: INFO
+      offset_seconds: 1
+      body: '[CHG] CHANGE APPLIED opsctl rollback alias/products --to-revision previous by {actor}: alias products moved products-v13
+        -> products-v12 in one _aliases update (products-v13 kept for analysis)'
+      attributes:
+        operation: change_applied
+        change.target: alias/products
+    - service: product-catalog
+      severity: INFO
+      offset_seconds: 5
+      body: '[index-health-1] INFO  c.e.catalog.search.IndexHealthMonitor - alias products -> products-v12 docs.count=1200000 source_rows=1200000
+        cluster_status=green'
+      attributes:
+        operation: index_health
+        catalog.index_version: products-v12
+    - service: product-catalog
+      severity: INFO
+      offset_seconds: 62
+      body: '[cache-evictor] INFO  c.e.catalog.search.QueryResultCache - result pages cached from products-v13 expired (ttl=60s); serving
+        products-v12 results only'
+      attributes:
+        operation: query_cache
+  verification:
+    - signal: catalog.zero_result_pct
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "product-catalog"'
+      field: 'metrics.catalog.zero_result_pct'
+      expect: 'falls from about 28% back to about 3% as cached result pages expire (60s TTL)'
+      within_seconds: 120
+    - signal: catalog.items_indexed
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "product-catalog"'
+      field: 'metrics.catalog.items_indexed'
+      expect: 'back to about 1,200,000 right after the alias moves (was about 912,000)'
+      within_seconds: 60
+    - signal: CATALOG-INDEX-CORRUPT lines
+      from: 'logs.otel.ecommerce'
+      where: 'body.text LIKE "*CATALOG-INDEX-CORRUPT*"'
+      expect: 'no new lines within about 10s of the alias rollback'
+      within_seconds: 60
+    - signal: search index version
+      from: 'logs.otel.ecommerce'
+      where: 'resource.attributes.service.name == "product-catalog"'
+      field: 'attributes.catalog.index_version'
+      expect: 'products-v12 on every index health line (was products-v13)'
+      within_seconds: 60
 business_impact:
   - kpi: business.search_queries_per_min
-    factor: {uniform: [0.25, 0.50]}
+    value: {uniform: [230.64, 265.36]}
   - kpi: business.sessions_per_min
-    factor: {uniform: [0.30, 0.55]}
+    value: {uniform: [725.4, 834.6]}
   - kpi: business.conversion_rate_pct
-    factor: {uniform: [0.25, 0.50]}
+    value: {uniform: [0.67, 0.77], round: 2}
   - kpi: business.page_views_per_min
-    factor: {uniform: [0.30, 0.55]}
+    factor: {uniform: [0.3, 0.55]}
+# dependents degrade after the component at fault, in dependency order
+service_lag_seconds: {storefront-gateway: 20, recommendation-engine: 30}

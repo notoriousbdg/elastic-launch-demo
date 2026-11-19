@@ -1,80 +1,123 @@
 name: SIM Profile Provisioning Stall
 subsystem: provisioning
 vehicle_section: sim_management
-error_type: PROV-SIM-STALL
+error_type: HLR registration timed out after
 sensor_type: sim_provisioning
 affected_services:
 - provisioning-service
-- subscriber-db
 cascade_services:
 - activation-service
 - notification-service
-description: OTA SIM profile provisioning pipeline stalled due to HSS/HLR registration queue overflow
-investigation_notes: |
-  1. Check HSS registration queue depth — queue above 5000 indicates HLR is not processing registrations fast enough. Monitor: provisioning-service metrics for hlr.registration_queue_depth.
-  2. SIM OTA provisioning requires: ICCID validation → subscriber-db profile lookup → HLR registration → SIM profile download. The stall is at HLR registration step.
-  3. Review HLR processing rate — baseline 200 registrations/min should handle normal activation volume. If processing rate drops below 50/min, check HLR backend connectivity.
-  4. eSIM activations are also affected — remote SIM provisioning (RSP) uses the same HLR registration path. eSIM QR code generation succeeds but profile activation fails.
-  5. Subscriber-db writes are queuing because provisioning-service cannot complete the activation cycle. Monitor activation_log table for INSERT queue growth.
-remediation_action: restart_hlr_registration
-error_message: '[PROV] PROV-SIM-STALL: iccid={sim_iccid} msisdn={msisdn} hlr_queue={hlr_queue_depth} processing_rate={hlr_processing_rate}/min stage={sim_stage}'
-stack_trace: |
-  === SIM PROVISIONING PIPELINE ===
-  msisdn={msisdn}  iccid={sim_iccid}  type={sim_type}
-  --- PROVISIONING STAGES ---
-    STAGE                STATUS      ELAPSED_MS
-    iccid_validation     COMPLETE    45
-    subscriber_lookup    COMPLETE    120
-    profile_generation   COMPLETE    350
-    hlr_registration     STALLED     {hlr_stall_ms}  <<< QUEUE OVERFLOW
-    sim_ota_download     PENDING     ---
-    activation_confirm   PENDING     ---
-  --- HLR STATUS ---
-    queue_depth={hlr_queue_depth}  processing_rate={hlr_processing_rate}/min
-    baseline_rate=200/min  deficit={hlr_deficit}/min
-    esim_affected=true  physical_sim_affected=true
-  ACTION: scale_hlr_workers=true  drain_queue=true  alert=PROV-SIM-STALL
-infrastructure_events:
-- body: '[GCP-Monitoring] HLRProvisioningStall: queue_depth=5000 processing_rate=0/min hlr_connection=TIMEOUT target=subscriber-db region=europe-west3'
-  severity: ERROR
-  event_name: gcp.monitoring.HLRProvisioningStall
-  service: provisioning-service
-  attributes:
-    cloud.provider: gcp
-    cloud.service: monitoring
-    gcp.resource_type: gke_container
-    infrastructure.source: GCP-Monitoring
+description: the HLR front-end connector was reconfigured to a single session and SIM registrations queue up behind it
+investigation_notes: |-
+  Root cause: a connector configuration change about 30 seconds before the first timeout (CR-88240, copied from the lab profile) set max-sessions on connector hlr-fe-fra from 16 to 1. provisioning-service sends every SIM registration (IMSI/Ki binding, service profile) through this connector, so registrations are now processed one at a time: about 40 per minute against the roughly 200 per minute that arrive. The HLR queue grows by about 160 per minute ({hlr_queue} now) and requests that wait longer than 30 s time out. The HLR front end itself responds normally (per-request latency about 1.4 s), and the subscriber database is not involved.
+  Confirm:
+    - the provisioning-service line "connector hlr-fe-fra reconfigured ... max-sessions 16 -> 1" comes before the first "HLR registration timed out after", and HLR status lines carry attributes.hlr.max_sessions 1
+    - metric provisioning_service.hlr_queue_depth grows steadily from about 20 and provisioning_service.hlr_sessions_in_use is pinned at 1 (normally 5-8 of 16)
+    - metric provisioning_service.hlr_request_latency_ms stays near 1,400 ms, which rules out a slow HLR
+  Remediation: restore the session limit with opsctl patch connector/hlr-fe-fra --max-sessions 16. The connector opens the extra sessions within a few seconds; throughput goes back to about 650 per minute, so the backlog drains at roughly 450 per minute and new registrations stop timing out at once. Restarting provisioning-service would drop the queued registrations.
+remediation_action: restore_hlr_connector_sessions
+error_message: 'HLR registration timed out after 30000 ms imsi=26203{imsi_suffix} connector=hlr-fe-fra sessions={hlr_sessions}/{hlr_sessions} queue_depth={hlr_queue} op=INSERT_SUBSCRIBER'
+stack_trace: |-
+  eu.meridian.provisioning.hlr.HlrTimeoutException: HLR registration timed out after 30000 ms (connector=hlr-fe-fra, sessions={hlr_sessions}/{hlr_sessions}, queue_depth={hlr_queue})
+  	at eu.meridian.provisioning.hlr.HlrConnector.await(HlrConnector.java:211)
+  	at eu.meridian.provisioning.hlr.HlrConnector.insertSubscriber(HlrConnector.java:118)
+  	at eu.meridian.provisioning.sim.SimRegistrationService.register(SimRegistrationService.java:74)
+  	at eu.meridian.provisioning.api.ProvisionController.provision(ProvisionController.java:66)
 correlation_attr:
-  key: provisioning.hlr_connector_version
-  value: hlr-conn-v6.0.1-beta
+  key: hlr.max_sessions
+  value: '1'
 fault_params:
-  sim_iccid: {format: "8949{n}", n: {randint: [1000000000000000, 9999999999999999]}}
-  msisdn: {choice: ['+4915110000000', '+4916010000000', '+4917010000000']}
-  hlr_queue_depth: {randint: [3000, 8000]}
-  hlr_processing_rate: {randint: [20, 80]}
-  sim_stage: {choice: [hlr_registration, profile_download, ota_activation]}
-  sim_type: {choice: [physical_sim, esim, embedded_sim]}
-  hlr_stall_ms: {randint: [10000, 60000]}
-  hlr_deficit: {randint: [100, 180]}
+  imsi_suffix: {randint: [1000000000, 1999999999]}
+  hlr_sessions: 1
+  hlr_queue: {randint: [100, 1700]}
+  welcome_sms_wait_s: {randint: [300, 1500]}
 rca_clues:
   provisioning-service:
-    provisioning.hlr_queue_depth: {randint: [3000, 8000]}
-    provisioning.hlr_processing_rate: {randint: [20, 80]}
-  subscriber-db:
-    db.activation_log_insert_queue: {randint: [500, 2000]}
-    db.pending_status_updates: {randint: [200, 1000]}
+    hlr.connector: hlr-fe-fra
+    hlr.max_sessions: 1
+    hlr.queue_depth: {randint: [100, 1700]}
+    hlr.request_latency_ms: {randint: [1200, 1600]}
   activation-service:
-    activation.provisioning_timeout: true
-    activation.sim_activation_blocked: true
+    upstream.degraded_subsystem: provisioning
+    activation.pending_sim_registration: {randint: [300, 900]}
   notification-service:
-    notification.activation_confirm_delayed: true
-    notification.queue_depth: {randint: [500, 2000]}
+    notification.welcome_sms_wait_s: {randint: [300, 1500]}
+remediation_command: |-
+  opsctl patch connector/hlr-fe-fra --max-sessions 16
+fault_scope:
+  cluster: meridian-gke-cluster
+  workloads: [provisioning-service]
+cascade_messages:
+  activation-service:
+    - severity: WARN
+      message: 'activation workflow waiting on sim_registration for more than 30s; provisioning-service returned 504 (HLR)'
+  notification-service:
+    - severity: INFO
+      message: 'welcome SMS held: SIM not yet registered in HLR (waiting {welcome_sms_wait_s}s)'
+infrastructure_events:
+  - service: provisioning-service
+    severity: INFO
+    offset_seconds: -30
+    event_name: connector.config_change
+    body: 'connector hlr-fe-fra reconfigured by provisioning-ops/s.keller CR-88240: max-sessions 16 -> 1, keepalive 30s, endpoint hlr-fe-fra-01.core.meridian.internal:7766'
+    attributes:
+      operation: connector_config
+      user.name: provisioning-ops/s.keller
+      change.request: CR-88240
+      hlr.max_sessions: 1
+      change.summary: 'hlr-fe-fra max-sessions 16 -> 1'
+remediation_effects:
+  log_events:
+    - service: provisioning-service
+      severity: INFO
+      offset_seconds: 1
+      body: '[NOC-CHG] executed opsctl patch connector/hlr-fe-fra --max-sessions 16 actor={actor}: max-sessions 1 -> 16'
+      attributes:
+        operation: change_executed
+        change.target: connector/hlr-fe-fra
+        hlr.max_sessions: 16
+    - service: provisioning-service
+      severity: INFO
+      offset_seconds: 6
+      body: 'connector hlr-fe-fra: 16/16 sessions bound to hlr-fe-fra-01.core.meridian.internal:7766'
+      attributes:
+        operation: connector_config
+        hlr.max_sessions: 16
+  steady_attributes:
+    provisioning-service:
+      hlr.max_sessions: 16
+  verification:
+    - signal: provisioning_service.hlr_queue_depth
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "provisioning-service"'
+      field: 'metrics.provisioning_service.hlr_queue_depth'
+      expect: 'falling by about 450 per minute, back under 50'
+      within_seconds: 300
+    - signal: provisioning_service.hlr_sessions_in_use
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "provisioning-service"'
+      field: 'metrics.provisioning_service.hlr_sessions_in_use'
+      expect: 'above 1 while the backlog drains (16 of 16), then 5-8'
+      within_seconds: 60
+    - signal: HLR timeout lines
+      from: 'logs.otel.meridian'
+      where: 'body.text LIKE "*HLR registration timed out after*"'
+      expect: '0 new lines'
+      within_seconds: 60
+    - signal: HLR connector session limit
+      from: 'logs.otel.meridian'
+      where: 'resource.attributes.service.name == "provisioning-service"'
+      field: 'attributes.hlr.max_sessions'
+      expect: '16 on every HLR status line since the patch'
+      within_seconds: 60
 business_impact:
   - kpi: business.activations_per_min
-    factor: {uniform: [0.15, 0.40]}
+    value: {uniform: [141.36, 162.64]}
   - kpi: business.esim_provisions_per_min
-    factor: {uniform: [0.10, 0.35]}
+    value: {uniform: [74.4, 85.6]}
   - kpi: business.port_ins_per_min
-    factor: {uniform: [0.25, 0.55]}
+    value: {uniform: [76.73, 88.28]}
   - kpi: business.support_tickets_per_min
     factor: {uniform: [2.0, 4.5]}
+service_lag_seconds: {activation-service: 15, notification-service: 45}

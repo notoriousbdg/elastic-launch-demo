@@ -6,61 +6,169 @@ sensor_type: fraud_classifier
 affected_services:
 - fraud-detector
 - order-gateway
+error_services:
+- fraud-detector
 cascade_services:
 - compliance-monitor
 - customer-portal
 description: Fraud detection model generating excessive false positive alerts blocking legitimate orders
+onset_delay_seconds: 15
+service_lag_seconds: {order-gateway: 30, compliance-monitor: 45, customer-portal: 60}
 investigation_notes: |-
-  1. Check fraud-detector logs for COMPL-FRAUD-FP-STORM — note pattern_id, fp_rate, blocked_orders, and feature_drift score.
-  2. Query FROM logs.otel.financial.* | WHERE body.text LIKE "*COMPL-FRAUD-FP-STORM*" | STATS count(), avg(fp_rate) BY pattern_id to identify which pattern is misfiring.
-  3. Inspect the feature drift report — if top_feature=txn_velocity_5m and drift_score > 0.8 the model has encountered an out-of-distribution trading session (e.g. options expiry).
-  4. Check order-gateway for the queue of blocked legitimate orders — assess revenue_impact and determine if manual approval bypass is warranted.
-  5. Raise the fraud classification threshold for the affected pattern_id and route blocked orders to manual review queue; retrain the model on recent clean data after session close.
-remediation_action: raise_fraud_threshold_and_queue_manual_review
-error_message: '[COMPL] COMPL-FRAUD-FP-STORM: blocked={blocked_orders} window={window_s}s fp_rate={fp_rate}% pattern={pattern_id}'
+  Root cause: the fraud-velocity model was promoted from v3.2.0 to v3.2.1 in the model registry by ml-platform (CR-5352) shortly before the first COMPL-FRAUD-FP-STORM. v3.2.1 was trained with txn_velocity_5m computed per second, while the serving feature store computes it per 5-minute window, so the value the model sees at serving time is about {velocity_scale}x its training scale and pattern {pattern_id} fires on normal order flow. The false positive rate (FP / alerts) climbs from a 0.5-3% baseline to {fp_rate}% and fraud-detector blocks {blocked_orders} orders per minute against 0-3 normally, while true fraud holds stay at 1-3 per minute. Only txn_velocity_5m drifts (drift score {drift_score}, above 0.8); order_notional_zscore, geo_distance_km, account_age_days and instrument_concentration stay below 0.15 and the model latency is normal. That rules out an out-of-distribution session such as options expiry, which would shift several features together: this is a feature-scale mismatch between training and serving.
+  Confirm:
+    - fraud-detector "[COMPL] model_monitor model=fraud-velocity version=v3.2.1 ... status=ANOMALY" lines (attributes.fraud.model_version, attributes.model.status); metrics.fraud_detector.false_positive_rate above 90% and metrics.fraud_detector.blocked_orders_per_min at 50-500
+    - metrics.fraud_detector.feature_drift_score is 0.81-0.99 only where attributes.fraud.feature is txn_velocity_5m
+    - the fraud-detector line "[COMPL] model_registry promotion model=fraud-velocity version=v3.2.1 (was v3.2.0)" with attributes.operation model_promotion comes before the first COMPL-FRAUD-FP-STORM line
+    - order-gateway holds orders for fraud review (metrics.order_gateway.fraud_hold_queue_depth rises after the promotion)
+  Remediation: opsctl rollback model/fraud-velocity --to-revision previous. The registry points Production back at v3.2.0 and the model server hot-swaps it in about 20 seconds; held orders are re-scored and released through the review queue, and the false positive rate is back under 3% within about 60 seconds of the rollback. Raising the VELOCITY threshold or bypassing fraud review only hides the misfire (and lets real fraud through); v3.2.1 needs retraining on the serving feature definition before it is promoted again.
+remediation_action: rollback_fraud_model
+remediation_command: |-
+  opsctl rollback model/fraud-velocity --to-revision previous
+error_message: '[COMPL] COMPL-FRAUD-FP-STORM: blocked={blocked_orders} window=60s fp_rate={fp_rate}% pattern={pattern_id} model=fraud-velocity:v3.2.1 top_feature=txn_velocity_5m drift={drift_score}'
 stack_trace: |-
   === FRAUD DETECTION MODEL STATS ===
-  pattern={pattern_id}  window={window_s}s  model=v3.2.1
-  --- CLASSIFICATION MATRIX ---
+  model=fraud-velocity:v3.2.1  pattern={pattern_id}  window=60s
+  --- CLASSIFICATION MATRIX (last 60s) ---
                   PREDICTED_FRAUD   PREDICTED_LEGIT
-    ACTUAL_FRAUD       12               2
-    ACTUAL_LEGIT      {blocked_orders}              4,210
+    ACTUAL_FRAUD       2                0
+    ACTUAL_LEGIT      {blocked_orders}              {passed_orders}
   --- RATES ---
-    true_positive_rate   85.7%
-    false_positive_rate  {fp_rate}%  <<< STORM THRESHOLD EXCEEDED
-    precision            2.8%
+    false_positive_rate  {fp_rate}% (FP / alerts)  <<< STORM THRESHOLD 10% EXCEEDED
     orders_blocked       {blocked_orders}
-    revenue_impact       $1,247,000/hr
-  feature_drift=DETECTED  top_feature=txn_velocity_5m  drift_score=0.847
-  ACTION: raise_threshold=true  queue_manual_review=true  alert=COMPL-FRAUD-FP-STORM
-correlation_attr: {}
+  --- FEATURE DRIFT (serving vs training) ---
+    txn_velocity_5m           drift={drift_score}  serving/training scale={velocity_scale}x  <<< DRIFT
+    order_notional_zscore     drift=0.06
+    geo_distance_km           drift=0.04
+    account_age_days          drift=0.03
+    instrument_concentration  drift=0.08
+  feature_store=online-fs txn_velocity_5m window=300s  training_set=fraud-velocity-v3.2.1 txn_velocity_5m unit=per_second
+correlation_attr:
+  key: fraud.model_version
+  value: v3.2.1
 fault_params:
   blocked_orders: {randint: [50, 500]}
-  window_s: {randint: [30, 300]}
-  fp_rate: {uniform: [15.0, 85.0], round: 1}
+  passed_orders: {randint: [850, 4200]}
+  fp_rate: {uniform: [95.5, 99.5], round: 1}
+  drift_score: {uniform: [0.81, 0.99], round: 3}
+  velocity_scale: {randint: [290, 310]}
   pattern_id:
     format: "FRD-{t}-{n:02d}"
-    t: {choice: [VELOCITY, GEOLOC, AMOUNT, PATTERN, WASH]}
+    t: VELOCITY
     n: {randint: [1, 99]}
 rca_clues:
   fraud-detector:
-    fraud.false_positive_rate_pct: {uniform: [15.0, 85.0], round: 1}
-    fraud.feature_drift_score: {uniform: [0.70, 0.99], round: 3}
+    fraud.false_positive_rate_pct: {uniform: [95.5, 99.5], round: 1}
+    fraud.feature_drift_score: {uniform: [0.81, 0.99], round: 3}
+    fraud.top_drift_feature: txn_velocity_5m
+    fraud.other_features_max_drift: {uniform: [0.03, 0.12], round: 3}
   order-gateway:
     oms.blocked_legitimate_orders: {randint: [50, 500]}
-    oms.fraud_hold_queue_depth: {randint: [10, 300]}
+    oms.fraud_hold_queue_depth: {randint: [100, 900]}
   compliance-monitor:
-    compliance.fraud_fp_storm_active: true
-    compliance.manual_review_queue_depth: {randint: [50, 1000]}
+    compliance.manual_review_queue_depth: {randint: [200, 1000]}
   customer-portal:
     portal.order_rejection_complaints: {randint: [5, 100]}
     portal.blocked_revenue_usd_hr: {randint: [100000, 2000000]}
+cascade_messages:
+  order-gateway:
+    - severity: WARN
+      message: '[OMS] order_held reason=FRAUD_REVIEW pattern={pattern_id} model=fraud-velocity:v3.2.1 blocked_last_60s={blocked_orders} status=HELD'
+  compliance-monitor:
+    - severity: WARN
+      message: '[COMPL] fraud_alert_review queue=fraud-manual-review source=fraud-velocity pattern={pattern_id} new_alerts_60s={blocked_orders} status=BACKLOG'
+  customer-portal:
+    - severity: WARN
+      message: '[PORTAL] client_action action=order_status latency_ms=180 http_status=200 order_state=HELD_FRAUD_REVIEW reason=pattern {pattern_id}'
+fault_scope:
+  cluster: finserv-gke-cluster
+  workloads: [fraud-detector, order-gateway]
+infrastructure_events:
+  - service: fraud-detector
+    severity: INFO
+    offset_seconds: -120
+    body: '[COMPL] model_registry promotion model=fraud-velocity version=v3.2.1 (was v3.2.0) stage=Production; model server hot-swap complete on 6/6 replicas; promoted by ml-platform (CR-5352)'
+    attributes:
+      user.name: ml-platform
+      change.request: CR-5352
+      operation: model_promotion
+      change.summary: 'fraud-velocity: v3.2.0 -> v3.2.1'
+      fraud.model_version: v3.2.1
+      model.name: fraud-velocity
+  - service: fraud-detector
+    severity: WARN
+    offset_seconds: 40
+    body: '[COMPL] feature_monitor drift_alert model=fraud-velocity version=v3.2.1 feature=txn_velocity_5m drift=0.93 threshold=0.30 other_features=OK'
+    attributes:
+      operation: feature_monitor
+      fraud.model_version: v3.2.1
+      fraud.feature: txn_velocity_5m
+      fraud.feature_drift_score: 0.93
+remediation_effects:
+  log_events:
+    - service: audit-logger
+      severity: INFO
+      offset_seconds: 1
+      body: '[AUDIT] event_logged stream=change-mgmt type=CHANGE_APPLIED cmd="opsctl rollback model/fraud-velocity --to-revision previous" actor={actor}: fraud-velocity Production v3.2.1 -> v3.2.0'
+      attributes:
+        operation: change_applied
+        audit.stream: change-mgmt
+        change.target: model/fraud-velocity
+    - service: fraud-detector
+      severity: INFO
+      offset_seconds: 3
+      body: '[COMPL] model_registry rollback model=fraud-velocity version=v3.2.0 (was v3.2.1) stage=Production; model server loading v3.2.0'
+      attributes:
+        operation: model_rollback
+        fraud.model_version: v3.2.0
+        model.name: fraud-velocity
+    - service: fraud-detector
+      severity: INFO
+      offset_seconds: 20
+      body: '[COMPL] model_server hot-swap complete model=fraud-velocity version=v3.2.0 replicas=6/6; txn_velocity_5m drift=0.05'
+      attributes:
+        operation: model_hot_swap
+        fraud.model_version: v3.2.0
+        model.name: fraud-velocity
+    - service: order-gateway
+      severity: INFO
+      offset_seconds: 35
+      body: '[OMS] fraud_hold_review held orders re-scored under fraud-velocity:v3.2.0; cleared orders released to routing, true fraud holds kept'
+      attributes:
+        operation: fraud_hold_release
+  steady_attributes:
+    fraud-detector:
+      fraud.model_version: v3.2.0
+  verification:
+    - signal: fraud_detector.false_positive_rate
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "fraud-detector"'
+      field: 'metrics.fraud_detector.false_positive_rate'
+      expect: 'back under 3% about 60s after the rollback (was 95-99%)'
+      within_seconds: 120
+    - signal: fraud_detector.blocked_orders_per_min
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "fraud-detector"'
+      field: 'metrics.fraud_detector.blocked_orders_per_min'
+      expect: 'back to 0-3 per minute (was 50-500)'
+      within_seconds: 120
+    - signal: COMPL-FRAUD-FP-STORM lines
+      from: 'logs.otel.finserv'
+      where: 'body.text LIKE "*COMPL-FRAUD-FP-STORM*"'
+      expect: '0 new lines'
+      within_seconds: 120
+    - signal: fraud-velocity model version
+      from: 'logs.otel.finserv'
+      where: 'resource.attributes.service.name == "fraud-detector"'
+      field: 'attributes.fraud.model_version'
+      expect: 'v3.2.0 on every line from the hot-swap (about 20s after the fix); v3.2.1 stops appearing'
+      within_seconds: 120
 business_impact:
   - kpi: business.order_flow_per_min
-    factor: {uniform: [0.20, 0.50]}
+    value: {uniform: [316.2, 363.8]}
   - kpi: business.rejected_orders_per_min
     factor: {uniform: [3.0, 8.0]}
   - kpi: business.fill_rate_pct
     factor: {uniform: [0.25, 0.55]}
   - kpi: business.notional_value_usd_per_min
-    factor: {uniform: [0.20, 0.45]}
+    value: {uniform: [1692600.0, 1947400.0], round: 1}

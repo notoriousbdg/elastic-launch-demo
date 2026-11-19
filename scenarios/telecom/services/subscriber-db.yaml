@@ -26,149 +26,134 @@ db_operations:
 - - SELECT
   - number_inventory
   - SELECT msisdn, portability_status, carrier_id, port_date FROM number_inventory WHERE msisdn = $1
-constants:
-  DB_TABLES:
-  - subscriber_profiles
-  - number_inventory
-  - sim_inventory
-  - data_usage
-  SUBSCRIBER_SEGMENTS:
-  - consumer_prepaid
-  - consumer_postpaid
-  - enterprise
-  - mvno
 steps:
+# RDS PostgreSQL 15, db.r6g.2xlarge, max_connections 600, parameter group meridian-pg15-subscriber.
+#   ch 1  connections held idle in transaction by provisioning-service 2.14.0: ramps in over ~60s,
+#         falls pod by pod over the ~60s rolling rollback.
+#   ch 2  maintenance reboot at the trigger (~25s, no samples), then default.postgres15: seq scans
+#         and the 5s statement timeout; the fix reboots (~25s, no samples) and the cache warms up over ~120s.
 - sample:
-    table:
-      choice: DB_TABLES
-    conn_pool_used:
-      if_active:
-        randint:
-        - 175
-        - 200
-      else:
-        randint:
-        - 40
-        - 120
-    conn_pool_max: 200
-    conn_utilization_pct:
-      expr: round(conn_pool_used / conn_pool_max * 100, 1)
+    r1:
+      expr: "min(1.0, elapsed.get(1, 0) / 60.0) if 1 in all_active else (max(0.0, 1.0 - since_fix.get(1, 0) / 60.0) if 1 in fixed_channels else 0.0)"
+    r2:
+      expr: "min(1.0, max(0.0, elapsed.get(2, 0) - 25.0) / 20.0) if 2 in all_active else 0.0"
+    rebooting:
+      expr: "bool((2 in all_active and elapsed.get(2, 0) < 25) or (2 in fixed_channels and since_fix.get(2, 0) < 25))"
+    warm:
+      expr: "max(0.0, 1.0 - (since_fix.get(2, 0) - 25) / 120.0) if (2 in fixed_channels and not rebooting) else 0.0"
+    idle_in_tx:
+      expr: "max(0, int(3 + 277 * r1 + rand.gauss(0, 1 + 4 * r1)))"
+    lock_waits:
+      expr: "max(0, int(90 * r1 + rand.gauss(0, 0.3 + 3 * r1)))"
+    connections:
+      expr: "int(180 + 110 * r1 + 15 * r2 + rand.gauss(0, 4))"
+    p99_center:
+      expr: "22.0 + 4778.0 * r2 + 130.0 * warm + 40.0 * r1"
+    p99_ms:
+      expr: "round(min(5000.0, p99_center + rand.gauss(0, 0.03 * p99_center)), 1)"
+    p50_ms:
+      expr: "round(max(0.4, 1.8 + 900.0 * r2 + 12.0 * warm + rand.gauss(0, 0.15)), 2)"
+    seq_scans:
+      expr: "round(max(0.0, 2.0 + 148.0 * r2 + rand.gauss(0, 0.3 + 6.0 * r2)), 1)"
+    cpu_pct:
+      expr: "round(min(99.5, 30.0 + 63.0 * r2 + 15.0 * warm + 4.0 * r1 + rand.gauss(0, 1.2)), 1)"
+    cache_hit:
+      expr: "round(min(99.9, 99.2 - 8.0 * r2 - 6.0 * warm + rand.gauss(0, 0.08)), 2)"
+    qps:
+      expr: "int((4200 - 1500 * r2 - 900 * r1) * (1.0 + rand.gauss(0, 0.02)))"
+    param_group:
+      expr: "'default.postgres15' if 2 in all_active else 'meridian-pg15-subscriber'"
+    random_page_cost:
+      expr: "4.0 if 2 in all_active else 1.1"
+    db_status:
+      expr: "'ANOMALY' if (1 in all_active or 2 in all_active) else 'NORMAL'"
 - metric:
-    name: subscriber_db.connection_pool_used
-    value:
-      var: conn_pool_used
+    name: subscriber_db.connections
+    value: {var: connections}
     unit: connections
+  when: "not rebooting"
 - metric:
-    name: subscriber_db.connection_pool_utilization_pct
-    value:
-      var: conn_utilization_pct
-    unit: '%'
-- log:
-    level: INFO
-    message: 'postgresql[subscriberdb]: connections_active={conn_pool_used}/200 utilization={conn_utilization_pct}% status=OK'
-    attrs:
-      operation: connection_health
-      db.connections_active:
-        var: conn_pool_used
-      db.connections_max: 200
-      db.utilization_pct:
-        var: conn_utilization_pct
-- sample:
-    segment:
-      choice: SUBSCRIBER_SEGMENTS
-    query_latency_p50_ms:
-      if_active:
-        uniform:
-        - 500.0
-        - 5000.0
-        round: 1
-      else:
-        uniform:
-        - 2.0
-        - 15.0
-        round: 1
-    query_latency_p99_ms:
-      if_active:
-        uniform:
-        - 5000.0
-        - 30000.0
-        round: 1
-      else:
-        uniform:
-        - 10.0
-        - 80.0
-        round: 1
-    throughput_qps:
-      randint:
-      - 1000
-      - 8000
+    name: subscriber_db.idle_in_transaction_sessions
+    value: {var: idle_in_tx}
+    unit: sessions
+  when: "not rebooting"
 - metric:
-    name: subscriber_db.query_latency_p50_ms
-    value:
-      var: query_latency_p50_ms
-    unit: ms
+    name: subscriber_db.lock_waits
+    value: {var: lock_waits}
+    unit: waits
+  when: "not rebooting"
 - metric:
     name: subscriber_db.query_latency_p99_ms
-    value:
-      var: query_latency_p99_ms
+    value: {var: p99_ms}
     unit: ms
+  when: "not rebooting"
 - metric:
-    name: subscriber_db.throughput_qps
-    value:
-      var: throughput_qps
-    unit: qps
-- log:
-    level: INFO
-    message: 'postgresql[subscriberdb]: query_stats table={table} segment={segment} qps={throughput_qps} p50={query_latency_p50_ms}ms p99={query_latency_p99_ms}ms'
-    attrs:
-      operation: query_stats
-      db.table:
-        var: table
-      db.segment:
-        var: segment
-      db.qps:
-        var: throughput_qps
-      db.latency_p50_ms:
-        var: query_latency_p50_ms
-      db.latency_p99_ms:
-        var: query_latency_p99_ms
-- sample:
-    cache_hit_ratio:
-      if_active:
-        uniform:
-        - 0.65
-        - 0.80
-        round: 3
-      else:
-        uniform:
-        - 0.93
-        - 0.98
-        round: 3
-    slow_queries:
-      if_active:
-        randint:
-        - 20
-        - 100
-      else:
-        randint:
-        - 0
-        - 3
+    name: subscriber_db.query_latency_p50_ms
+    value: {var: p50_ms}
+    unit: ms
+  when: "not rebooting"
+- metric:
+    name: subscriber_db.seq_scans_per_s
+    value: {var: seq_scans}
+    unit: scans/s
+  when: "not rebooting"
+- metric:
+    name: subscriber_db.cpu_utilization_pct
+    value: {var: cpu_pct}
+    unit: '%'
+  when: "not rebooting"
 - metric:
     name: subscriber_db.buffer_cache_hit_ratio
-    value:
-      var: cache_hit_ratio
-    unit: ratio
+    value: {var: cache_hit}
+    unit: '%'
+  when: "not rebooting"
 - metric:
-    name: subscriber_db.slow_query_count
-    value:
-      var: slow_queries
-    unit: queries
+    name: subscriber_db.throughput_qps
+    value: {var: qps}
+    unit: queries/s
+  when: "not rebooting"
 - log:
     level: INFO
-    message: 'postgresql[subscriberdb]: perf_health cache_hit={cache_hit_ratio} slow_queries={slow_queries}/min rds_status=available'
+    message: 'pg-stat-collector db=meridian-subscriber-db connections={connections}/600 idle_in_transaction={idle_in_tx} lock_waits={lock_waits} qps={qps} p50_ms={p50_ms} p99_ms={p99_ms} seq_scan_per_s={seq_scans} cpu={cpu_pct}% cache_hit={cache_hit}% parameter_group={param_group} status={db_status}'
     attrs:
-      operation: perf_health
-      db.cache_hit_ratio:
-        var: cache_hit_ratio
-      db.slow_queries:
-        var: slow_queries
+      operation: db_stats
+      aws.rds.instance: meridian-subscriber-db
+      db.connections: {var: connections}
+      db.idle_in_transaction_sessions: {var: idle_in_tx}
+      db.lock_waits: {var: lock_waits}
+      db.query_latency_p99_ms: {var: p99_ms}
+      db.seq_scans_per_s: {var: seq_scans}
+      db.cpu_utilization_pct: {var: cpu_pct}
+      db.parameter_group: {var: param_group}
+      db.random_page_cost: {var: random_page_cost}
+      db.status: {var: db_status}
+  when: "not rebooting"
+- log:
+    level: WARN
+    message: 'pg-stat-collector db=meridian-subscriber-db unreachable: connection refused (instance status=rebooting)'
+    attrs:
+      operation: db_stats
+      aws.rds.instance: meridian-subscriber-db
+      db.status: REBOOTING
+  when: "rebooting"
+- sample:
+    table:
+      choice: [subscriber_profiles, number_inventory, sim_inventory, data_usage]
+    autovac_dead:
+      randint: [1200, 48000]
+    vac_pid:
+      randint: [20000, 69000]
+- every:
+    seconds: 60
+    state_key: _last_vacuum
+    steps:
+    - log:
+        level: INFO
+        message: '{iso_now}:[local]:rdsadmin@rdsadmin:[{vac_pid}]:LOG:  automatic vacuum of table "subscribers.public.{table}": index scans: 1, tuples: {autovac_dead} removed'
+        attrs:
+          operation: autovacuum
+          db.table: {var: table}
+      when: "not rebooting"
+state:
+  _last_vacuum:
+    init: now

@@ -1,0 +1,130 @@
+name: Azure OpenAI Quota Exhaustion
+subsystem: orchestration
+vehicle_section: orchestration_pipeline
+error_type: OPENAI-QUOTA-EXHAUSTED
+sensor_type: health_check
+affected_services: [chat-orchestrator]
+cascade_services: [assistant-web]
+
+description: A quota rebalance cut the capacity of the chat-orchestrator Azure OpenAI deployment from 600K to 450K tokens per minute, so it exhausts its quota, returns 429 errors and completion latency rises.
+
+investigation_notes: |
+  Root cause: the capacity of Azure OpenAI deployment {deployment_name} was lowered from 600K to 450K TPM by a quota rebalance shortly before the first OPENAI-QUOTA-EXHAUSTED. Normal traffic of about tpm_used={tpm_used} TPM now meets tpm_quota={tpm_quota}, so the deployment answers 429 with Retry-After {retry_after_s}s and chat turns queue behind the throttle. Nothing in the application changed.
+  Confirm:
+    - metric chat.openai_quota_headroom_pct falls from about 25% to 0-2%; chat-orchestrator logs "chat.quota_status" with attributes.openai.capacity_tpm=450000 and status=ANOMALY; chat.turn_latency_ms and chat.retries_per_conversation rise
+    - the Activity Log write on Microsoft.CognitiveServices/accounts/deployments/{deployment_name} (capacity 600 -> 450) comes minutes before the first 429
+    - model-router metric throttled_429_count rises on the same deployment while the standby deployment in {standby_region} has more than 50% of its quota free
+    - request volume to chat-orchestrator is unchanged, which rules out a traffic spike or a runaway agent
+  Remediation: restore the capacity with opsctl patch openai-deployment/chat-gpt4o-eastus --capacity 600 (quota 450000 -> 600000 TPM). Headroom returns to about 25% and 429s stop within about 90 seconds. Failing traffic over to {standby_region} moves the load without fixing the cut capacity and is not needed.
+
+remediation_action: fail_over_openai_deployment
+remediation_command: |-
+  opsctl patch openai-deployment/chat-gpt4o-eastus --capacity 600
+
+error_message: |
+  OPENAI-QUOTA-EXHAUSTED: RateLimitReached deployment={deployment_name} status=429 tpm_used={tpm_used} tpm_quota={tpm_quota} retry_after={retry_after_s}s
+
+stack_trace: |
+  RateLimitError: Azure OpenAI deployment {deployment_name} exceeded token rate limit
+    at AzureOpenAI.chat.completions.create(model={deployment_name})
+    at ChatOrchestrator.complete(model={deployment_name})
+  Status:         429 Too Many Requests
+  TPM used:       {tpm_used}
+  TPM quota:      {tpm_quota}
+  Retry-After:    {retry_after_s}s
+  Standby region: {standby_region}
+
+correlation_attr:
+  key: azure.openai.deployment_version
+  value: gpt-4o-2024-11-20-tpm-450k
+
+fault_params:
+  deployment_name: chat-gpt4o-eastus
+  tpm_used: {randint: [446000, 450000]}
+  tpm_quota: 450000
+  retry_after_s: {randint: [5, 45]}
+  standby_region: eastus2
+
+rca_clues:
+  chat-orchestrator:
+    openai.quota_remaining_pct: {uniform: [0.0, 2.0], round: 1}
+    openai.throttled_requests_per_min: {randint: [300, 2500]}
+    openai.retry_backoff_ms: {randint: [2000, 30000]}
+    openai.standby_quota_remaining_pct: {uniform: [55.0, 80.0], round: 1}
+  assistant-web:
+    chat.response_timeouts: {randint: [40, 600]}
+    chat.upstream_status: 429
+
+cascade_messages:
+  assistant-web:
+    - severity: WARN
+      message: 'chat.upstream_error status=429 upstream=chat-orchestrator deployment={deployment_name} retry_after={retry_after_s}s; stream delayed, first token slow'
+
+service_lag_seconds: {assistant-web: 20}
+fault_scope:
+  workloads: [chat-orchestrator]
+
+infrastructure_events:
+  - service: chat-orchestrator
+    severity: INFO
+    offset_seconds: -120
+    body: 'azure-activity: operationName=Microsoft.CognitiveServices/accounts/deployments/write resourceId=/subscriptions/38514ecc-371c-5d0a-9c14-ab99a396027d/resourceGroups/azureai-rg/providers/Microsoft.CognitiveServices/accounts/deployments/chat-gpt4o-eastus caller=quota-rebalance@contoso-demo.onmicrosoft.com status=Succeeded category=Administrative'
+    attributes:
+      user.name: quota-rebalance@contoso-demo.onmicrosoft.com
+      operation: capacity_update
+      openai.capacity_tpm: 450000
+      change.summary: 'chat-gpt4o-eastus capacity 600 -> 450 (K TPM)'
+
+remediation_effects:
+  log_events:
+    - service: chat-orchestrator
+      severity: INFO
+      offset_seconds: 1
+      body: 'azure-activity: operationName=Microsoft.CognitiveServices/accounts/deployments/write resourceId=/subscriptions/38514ecc-371c-5d0a-9c14-ab99a396027d/resourceGroups/azureai-rg/providers/Microsoft.CognitiveServices/accounts/deployments/chat-gpt4o-eastus caller={actor} status=Succeeded category=Administrative'
+      attributes:
+        operation: capacity_update
+        openai.capacity_tpm: 600000
+        change.summary: 'chat-gpt4o-eastus capacity 450 -> 600 (K TPM)'
+  steady_attributes:
+    chat-orchestrator:
+      openai.capacity_tpm: 600000
+  verification:
+    - signal: chat.openai_quota_headroom_pct
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "chat-orchestrator"'
+      field: 'metrics.chat.openai_quota_headroom_pct'
+      expect: 'back near 25% (was 0-2%)'
+      within_seconds: 120
+    - signal: model_router.throttled_429_count
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "model-router"'
+      field: 'metrics.model_router.throttled_429_count'
+      expect: 'back near 0 (was rising)'
+      within_seconds: 120
+    - signal: Azure OpenAI deployment capacity
+      from: 'logs.otel.azureai'
+      where: 'resource.attributes.service.name == "chat-orchestrator"'
+      field: 'attributes.openai.capacity_tpm'
+      expect: '600000 on every line logged since the fix; 450000 stops appearing'
+      within_seconds: 120
+
+business_impact:
+- kpi: business.throttled_requests_per_min
+  factor:
+    uniform: [20.0, 60.0]
+    round: 1
+- kpi: business.openai_quota_headroom_pct
+  factor:
+    uniform: [0.0, 0.1]
+    round: 2
+- kpi: business.throughput_rpm
+  factor:
+    uniform: [0.35, 0.65]
+- kpi: business.latency_p99_ms
+  factor:
+    uniform: [3.0, 6.0]
+generator_impact:
+  azure_openai:
+    quota_error_rates_above_threshold: 1.0
+    latency_high: 8000.0
+generator_hold_seconds: {azure_openai: 90}

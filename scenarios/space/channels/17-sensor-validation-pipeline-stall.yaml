@@ -8,16 +8,23 @@ affected_services:
 cascade_services:
 - mission-control
 - telemetry-relay
-description: Sensor validation pipeline stalled, readings not being validated
-investigation_notes: 'Root cause: JVM garbage collection pressure causing stop-the-world pauses that stall the validation
-  pipeline. Heap usage at 89% with GC pause of 120ms confirms the V&V processor is thrashing between GC cycles. All 8 worker
-  threads are busy but throughput has collapsed because each thread blocks during GC pauses. Queue depth climbing rapidly
-  indicates ingest rate exceeds processing capacity during GC storms. Check for memory leaks in the calibration correlation
-  stage — retained object count should be <500K per checkpoint. Remediation: trigger manual GC compaction (VV_GC_COMPACT),
-  then increase JVM heap size (VV_HEAP_RESIZE 12G) to reduce GC frequency. If queue depth exceeds 5000, enable upstream backpressure
-  (VV_BACKPRESSURE ENABLE) to prevent data loss. For long-term fix, migrate to G1GC with -XX:MaxGCPauseMillis=20 to cap pause
-  times.'
+description: Sensor validation pipeline stalled, V&V consumer group lagging on the sensor telemetry Kafka topic and readings not being validated
+investigation_notes: 'Root cause: .NET garbage collection pressure in the V&V processor. The process runs without a GC heap
+  hard limit and its gen2 heap has grown to 11.8G with heavy fragmentation; Sensor Validator logged blocking gen2 collections
+  with pauses above 4 seconds shortly before the stall. Each stop-the-world pause blocks all 8 worker threads, so throughput has
+  collapsed to {rate}/s (threshold {min_rate}/s) and the ingest queue climbs to {queue_depth}. Heap usage at 89% confirms the
+  processor is thrashing between GC cycles. Check for memory leaks in the calibration correlation stage — retained object count
+  should be <500K per checkpoint. The pipeline_status log shows rate, queue_depth, gc_pause and heap_limit. Remediation: run a
+  manual compacting collection (opsctl run job/vv-gc-compact), then set a 12g GC heap hard limit (opsctl patch
+  service/sensor-validator --heap-limit=12g, DOTNET_GCHeapHardLimit) so the GC collects before the heap fragments that far again.
+  Recovery: GC pauses drop back to tens of milliseconds, the rate returns to 55-65/s and the queue (metrics.sensor_validator.queue_depth)
+  drains back to below 20 within about a minute; pipeline_status shows heap_limit=12g status=NOMINAL and the VV-PIPELINE-HALT
+  errors stop. For long-term fix, fix the retention leak and keep Server GC with concurrent (background) GC (DOTNET_gcServer=1,
+  DOTNET_gcConcurrent=1) to shorten blocking pauses.'
 remediation_action: reset_validation_pipeline
+remediation_command: |-
+  opsctl run job/vv-gc-compact
+  opsctl patch service/sensor-validator --heap-limit=12g
 error_message: '[VV] VV-PIPELINE-HALT: stage=validation queue_depth={queue_depth} rate={rate}/s threshold={min_rate}/s'
 stack_trace: |-
   == VALIDATION PIPELINE STATUS == V&V PROCESSOR ==
@@ -29,12 +36,12 @@ stack_trace: |-
   CORRELATION    8        48.7/s    45.0/s      NOMINAL
   OUTPUT         3        51.2/s    50.0/s      NOMINAL
   ---------------------------------------------------------------
-  WORKER_THREADS: 8/8 busy | HEAP_USAGE: 89% | GC_PAUSE: 120ms
+  WORKER_THREADS: 8/8 busy | HEAP_USAGE: 89% | GC_HEAP: 11.8G | GC_PAUSE: 4600ms
   VV-PIPELINE-HALT: Processing rate {rate}/s below {min_rate}/s, queue depth {queue_depth}
-  ACTION: Scale worker pool, investigate upstream data burst
+  ACTION: Compact the GC heap, check the GC heap limit
 correlation_attr:
   key: runtime.heap_config
-  value: jvm-12g-g1gc-experimental
+  value: dotnet8-servergc-12g-experimental
 fault_params:
   queue_depth: {randint: [500, 5000]}
   rate: {uniform: [1.0, 10.0], round: 1}
@@ -42,7 +49,8 @@ fault_params:
 rca_clues:
   sensor-validator:
     validation.heap_usage_pct: {uniform: [85.0, 97.0], round: 0}
-    validation.gc_pause_ms: {randint: [80, 250]}
+    validation.gc_pause_ms: {randint: [4100, 6400]}
+    validation.retained_objects: {randint: [650000, 1500000]}
   mission-control:
     upstream.degraded_subsystem: validation
     telemetry.validation_status: stalled
@@ -57,3 +65,67 @@ business_impact:
     factor: {uniform: [0.50, 0.75]}
   - kpi: business.fault_events_per_min
     factor: {uniform: [3.5, 7.0]}
+generator_impact:
+  kafka_otel:
+    high_consumer_lag_by_topic: 80000.0
+cascade_messages:
+  mission-control:
+  - severity: WARN
+    message: '[MCC] validated telemetry stale: V&V rate {rate}/s below {min_rate}/s, {queue_depth} readings waiting'
+  telemetry-relay:
+  - severity: WARN
+    message: '[RLY] upstream backpressure from sensor-validator: forwards to /api/v1/validate/batch throttled, queue_depth={queue_depth}'
+fault_scope:
+  workloads: [sensor-validator]
+infrastructure_events:
+- service: sensor-validator
+  severity: WARN
+  offset_seconds: -120
+  body: '[VV] GC gen2 blocking collection pause=4600ms heap=11.8G fragmentation=38% heap_limit=unset runtime=dotnet8-servergc-12g-experimental'
+  attributes:
+    operation: pipeline_health
+    validation.gc_pause_ms: 4600
+    validation.heap_limit: unset
+    runtime.heap_config: dotnet8-servergc-12g-experimental
+remediation_effects:
+  log_taper_seconds: 60
+  log_events:
+  - service: mission-control
+    severity: INFO
+    offset_seconds: 1
+    body: '[MCC] CMD ACCEPTED opsctl run job/vv-gc-compact from {actor}: compacting GC on the V&V processor'
+  - service: mission-control
+    severity: INFO
+    offset_seconds: 5
+    body: '[MCC] CMD ACCEPTED opsctl patch service/sensor-validator --heap-limit=12g from {actor}: GC heap hard limit unset -> 12g'
+  - service: sensor-validator
+    severity: INFO
+    offset_seconds: 40
+    body: '[VV] GC compaction complete heap=4.1G heap_limit=12g gc_pause=35ms; ingest queue draining status=NOMINAL'
+    attributes:
+      operation: pipeline_health
+      validation.heap_limit: 12g
+  verification:
+  - signal: sensor_validator.queue_depth
+    from: metrics-generic.otel-default
+    where: resource.attributes.service.name == "sensor-validator"
+    field: metrics.sensor_validator.queue_depth
+    expect: 'drained back below 20; was 1500-4800'
+    within_seconds: 150
+  - signal: sensor_validator.validations_per_sec
+    from: metrics-generic.otel-default
+    where: resource.attributes.service.name == "sensor-validator"
+    field: metrics.sensor_validator.validations_per_sec
+    expect: 'back to 45-65/s; was 1-10/s'
+    within_seconds: 150
+  - signal: VV-PIPELINE-HALT errors
+    from: logs.otel.nova7
+    where: body.text LIKE "*VV-PIPELINE-HALT*"
+    expect: '0 new lines'
+    within_seconds: 150
+  - signal: V&V GC heap limit
+    from: logs.otel.nova7
+    where: resource.attributes.service.name == "sensor-validator"
+    field: attributes.validation.heap_limit
+    expect: '12g on the latest pipeline_status lines'
+    within_seconds: 150

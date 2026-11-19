@@ -1,0 +1,37 @@
+name: "GT kafka_otel: under_replicated_partitions"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-KAFKA-UNDER-REPLICATED-PARTITIONS
+sensor_type: impact_key_probe
+affected_services:
+  - gt-kafka-aws-svc-1
+cascade_services:
+  - gt-kafka-aws-svc-2
+description: "Tests impact_key under_replicated_partitions on generator kafka_otel."
+investigation_notes: |-
+  1. Verify kafka_otel is active and reporting metrics.
+  2. Check that the under_replicated_partitions metric has reached the trigger value (0.8).
+  3. Confirm generator_impact for kafka_otel.under_replicated_partitions is set to 0.8.
+  4. Look for correlated changes in service gt-kafka-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_under_replicated_partitions_baseline
+error_message: "GT-PROBE: gen=kafka_otel key=under_replicated_partitions value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=kafka_otel
+  impact_key: under_replicated_partitions
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 0.8
+  svc_name: gt-kafka-aws-svc-1
+rca_clues:
+  gt-kafka-aws-svc-1:
+    probe.generator: kafka_otel
+    probe.impact_key: under_replicated_partitions
+    probe.trigger_value: 0.8
+  gt-kafka-aws-svc-2:
+    probe.upstream_generator: kafka_otel
+    probe.upstream_key: under_replicated_partitions
+generator_impact:
+  kafka_otel:
+    under_replicated_partitions: 0.8

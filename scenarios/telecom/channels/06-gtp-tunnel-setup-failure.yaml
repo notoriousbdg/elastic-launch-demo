@@ -1,73 +1,115 @@
 name: GTP Tunnel Setup Failure
 subsystem: network
 vehicle_section: packet_core
-error_type: NET-GTP-TUNNEL-FAIL
+error_type: All dynamic addresses are occupied
 sensor_type: tunnel_setup
 affected_services:
 - network-core
 cascade_services:
 - activation-service
 - bss-billing
-description: GTP-C/GTP-U tunnel establishment failing between SGW and PGW causing data path setup failures
-investigation_notes: |
-  1. Check PGW GTP-C response status — Create Session Response with cause NOT_ACCEPTED indicates PGW resource exhaustion. Monitor: pgw.active_pdp_contexts and pgw.gtp_tunnel_count.
-  2. GTP tunnel setup requires TEID (Tunnel Endpoint Identifier) allocation on both SGW and PGW. TEID pool exhaustion on either node prevents new tunnel creation.
-  3. Review GTP path failure detection — GTP echo request/response timeout (3x missed) triggers path failure, tearing down all tunnels on the affected path. Check for intermittent network connectivity.
-  4. APN configuration mismatch can cause tunnel setup rejection — verify APN 'internet.meridian.eu' is correctly configured on both SGW and PGW. Check: show apn configuration internet.meridian.eu.
-  5. Impact assessment: GTP tunnel failure prevents data connectivity for activated subscribers. Bearer allocation succeeds (radio path OK) but user plane data cannot flow without the GTP tunnel.
-remediation_action: reset_gtp_tunnels
-error_message: '[NET] NET-GTP-TUNNEL-FAIL: tunnel_id={tunnel_id} sgw={sgw_id} pgw={pgw_id} cause={gtp_cause} teid_pool_util={teid_util_pct}%'
-stack_trace: |
-  === GTP TUNNEL SETUP FAILURE ===
-  tunnel_id={tunnel_id}  apn=internet.meridian.eu
-  --- TUNNEL SETUP SEQUENCE ---
-    STEP                        STATUS      DETAIL
-    create_session_request       SENT        sgw={sgw_id} → pgw={pgw_id}
-    teid_allocation_sgw          COMPLETE    teid_sgw=0x{teid_sgw}
-    teid_allocation_pgw          FAILED      {gtp_cause}  <<< REJECTED
-    create_session_response      ERROR       cause=RESOURCE_UNAVAILABLE
-    gtp_u_path_setup             SKIPPED     ---
-  --- NODE STATUS ---
-    sgw_id={sgw_id}  active_tunnels=48,200  capacity=50,000
-    pgw_id={pgw_id}  teid_pool_util={teid_util_pct}%  pdp_contexts=SATURATED
-    gtp_echo_status=OK  path_failure=false
-  ACTION: clear_stale_tunnels=true  scale_pgw=true  alert=NET-GTP-TUNNEL-FAIL
-infrastructure_events:
-- body: '[GCP-Monitoring] GTPTunnelSetupFailure: tunnel_type=GTPv2-C failure_rate=35% cause=RESOURCE_UNAVAILABLE pgw=network-core-pgw region=europe-west3'
-  severity: ERROR
-  event_name: gcp.monitoring.GTPTunnelSetupFailure
-  service: network-core
-  attributes:
-    cloud.provider: gcp
-    cloud.service: monitoring
-    gcp.resource_type: gke_container
-    infrastructure.source: GCP-Monitoring
+description: a P-GW configuration change shrank the consumer APN's UE IP pool from a /14 to a /20 and new data sessions get no address
+investigation_notes: |-
+  Root cause: a packet core configuration change about 90 seconds before the first rejection (CR-88301, "add enterprise pool") replaced the range of UE IP pool meridian-internet-v4 on pgw-fra-02 with 100.64.0.0/20 instead of 100.64.0.0/14, so the pool has 4,094 addresses instead of 262,142. Sessions that existed before the change keep their addresses, but every address released since then is outside the new range; new sessions took all {pool_size} addresses in range within about 90 seconds, and there are none left. Create Session Requests for APN internet.meridian.eu are rejected with GTPv2 cause 84; enterprise.meridian.eu and iot.meridian.eu use other pools and are normal.
+  Confirm:
+    - the network-core line "config pgw-fra-02 revision ... meridian-internet-v4 100.64.0.0/14 -> 100.64.0.0/20" comes before the first cause 84, and P-GW status lines carry attributes.pgw.ue_pool_cidr 100.64.0.0/20 from the change on
+    - metric network_core.ue_ip_pool_utilization_pct (of the configured range) drops from about 61% to nearly 0 at the change, reaches 100% about 90 seconds later, and network_core.create_session_rejects_per_min rises from 0 to about {rejects_per_min}
+    - metric network_core.gtp_tunnels_active drifts down from about 160,000 as sessions end and cannot be re-established, while network_core.prb_utilization_pct and network_core.mme_cpu_pct stay normal, which rules out the RAN and the MME
+  Remediation: revert the P-GW configuration with opsctl rollback config/pgw-fra-02 --to-revision previous. The pool range is restored on commit; rejects stop within about 10 seconds and UEs re-establish their sessions on the next attempt, so active tunnels recover to about 160,000 within roughly 2 minutes. Restarting the P-GW would drop all 160,000 existing sessions.
+remediation_action: restore_pgw_ue_pool
+error_message: 'pgw-fra-02 gtpv2-c: Create Session Response cause=84 (All dynamic addresses are occupied) apn=internet.meridian.eu pool=meridian-internet-v4 free=0/{pool_size} rejects_last_min={rejects_per_min}'
+stack_trace: |-
+  GTPv2-C Create Session Response
+    Cause: All dynamic addresses are occupied (84)
+    APN: internet.meridian.eu
+    PDN Type: IPv4
+  ue-ip-pool meridian-internet-v4 range=100.64.0.0/20 size={pool_size} allocated={pool_size} free=0
 correlation_attr:
-  key: network.pgw_config_version
-  value: pgw-5g-v3.1.0-patch
+  key: pgw.ue_pool_cidr
+  value: 100.64.0.0/20
 fault_params:
-  tunnel_id: {format: "TUN-{n}", n: {randint: [100000, 999999]}}
-  sgw_id: {format: "SGW-FRA-{n:02d}", n: {randint: [1, 4]}}
-  pgw_id: {format: "PGW-FRA-{n:02d}", n: {randint: [1, 4]}}
-  gtp_cause: {choice: [RESOURCE_UNAVAILABLE, TEID_POOL_EXHAUSTED, PGW_OVERLOADED, APN_MISMATCH]}
-  teid_util_pct: {randint: [90, 99]}
-  teid_sgw: {format: "{n:08X}", n: {randint: [268435456, 4294967295]}}
+  pool_size: 4094
+  rejects_per_min: {randint: [900, 1500]}
 rca_clues:
   network-core:
-    network.teid_pool_util_pct: {randint: [90, 99]}
-    network.pgw_status: RESOURCE_UNAVAILABLE
+    pgw.ue_pool: meridian-internet-v4
+    pgw.ue_pool_cidr: 100.64.0.0/20
+    pgw.ue_pool_free: 0
+    pgw.create_session_rejects_per_min: {randint: [900, 1500]}
   activation-service:
-    activation.data_path_setup_failed: true
-    activation.bearer_ok_tunnel_fail: true
+    upstream.degraded_subsystem: network
   bss-billing:
-    billing.activation_incomplete: true
-    billing.data_usage_tracking: BLOCKED
+    billing.data_cdr_volume_drop_pct: {uniform: [15.0, 35.0], round: 1}
+remediation_command: |-
+  opsctl rollback config/pgw-fra-02 --to-revision previous
+fault_scope:
+  cluster: meridian-gke-cluster
+  workloads: [network-core]
+cascade_messages:
+  activation-service:
+    - severity: WARN
+      message: 'activation data_test failed for new subscriber: PDN connection rejected by network (apn=internet.meridian.eu); customer told to restart device'
+  bss-billing:
+    - severity: WARN
+      message: 'mediation: data CDR volume for apn internet.meridian.eu 24% below the same hour last week; voice and SMS CDR volume normal'
+infrastructure_events:
+  - service: network-core
+    severity: INFO
+    offset_seconds: -20
+    event_name: oss.cm.change
+    body: 'oss-cm: config pgw-fra-02 revision core-pgw-r143 (was core-pgw-r142) applied by core-netops/m.dupont CR-88301: ue-ip-pool meridian-internet-v4 range 100.64.0.0/14 -> 100.64.0.0/20; ue-ip-pool meridian-enterprise-v4 added'
+    attributes:
+      operation: cm_change
+      user.name: core-netops/m.dupont
+      change.request: CR-88301
+      pgw.ue_pool_cidr: 100.64.0.0/20
+      change.summary: 'meridian-internet-v4 100.64.0.0/14 -> 100.64.0.0/20'
+remediation_effects:
+  log_taper_seconds: 10
+  log_events:
+    - service: network-core
+      severity: INFO
+      offset_seconds: 1
+      body: '[NOC-CHG] executed opsctl rollback config/pgw-fra-02 --to-revision previous actor={actor}: revision core-pgw-r143 -> core-pgw-r142 (meridian-internet-v4 100.64.0.0/14)'
+      attributes:
+        operation: change_executed
+        change.target: config/pgw-fra-02
+        pgw.ue_pool_cidr: 100.64.0.0/14
+  steady_attributes:
+    network-core:
+      pgw.ue_pool_cidr: 100.64.0.0/14
+  verification:
+    - signal: network_core.ue_ip_pool_utilization_pct
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "network-core"'
+      field: 'metrics.network_core.ue_ip_pool_utilization_pct'
+      expect: 'about 61% (was 100%)'
+      within_seconds: 60
+    - signal: network_core.create_session_rejects_per_min
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "network-core"'
+      field: 'metrics.network_core.create_session_rejects_per_min'
+      expect: '0 (was 900-1,500)'
+      within_seconds: 60
+    - signal: All dynamic addresses are occupied lines
+      from: 'logs.otel.meridian'
+      where: 'body.text LIKE "*All dynamic addresses are occupied*"'
+      expect: '0 new lines'
+      within_seconds: 60
+    - signal: UE IP pool range
+      from: 'logs.otel.meridian'
+      where: 'resource.attributes.service.name == "network-core"'
+      field: 'attributes.pgw.ue_pool_cidr'
+      expect: '100.64.0.0/14 on every P-GW status line since the rollback'
+      within_seconds: 60
 business_impact:
   - kpi: business.data_session_success_pct
     factor: {uniform: [0.15, 0.45]}
   - kpi: business.throughput_p50_mbps
-    factor: {uniform: [0.10, 0.40]}
+    factor: {uniform: [0.1, 0.4]}
   - kpi: business.revenue_usd_per_min
-    factor: {uniform: [0.20, 0.50]}
+    factor: {uniform: [0.2, 0.5]}
   - kpi: business.data_overage_charges_usd_per_min
     factor: {uniform: [0.15, 0.45]}
+onset_delay_seconds: 90
+service_lag_seconds: {activation-service: 20, bss-billing: 60}

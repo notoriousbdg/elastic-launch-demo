@@ -5,57 +5,149 @@ error_type: SSL-CERT-EXPIRY
 sensor_type: certificate
 affected_services:
 - storefront-gateway
+error_services: [storefront-gateway]
 cascade_services:
 - order-management
 - payment-processor
-description: TLS certificate for storefront domain expiring soon or expired — browsers will show security warnings and block
-  HTTPS connections
+description: Browsers fail the TLS handshake to shop.example.com because certificate shop-example-com expired after an IAM cleanup removed the cert-manager Route 53 permission and every DNS-01 renewal failed
+onset_delay_seconds: 0
 investigation_notes: |-
-  1. Check storefront-gateway logs for SSL-CERT-EXPIRY — cert_days_remaining={cert_days_remaining} days for domain {cert_domain}.
-  2. Verify current certificate details: `openssl s_client -connect {cert_domain}:443 | openssl x509 -noout -dates` — check NotAfter field.
-  3. Check auto-renewal status: if using Let's Encrypt/ACME, verify the renewal cron job ran successfully in the last 60 days.
-  4. Identify all domains covered by this cert (SANs): `openssl x509 -noout -text | grep DNS:` — all listed domains are affected.
-  5. Payment processor integrations may reject requests if the cert is expired — PCI DSS requires valid TLS for cardholder data environments.
-  6. Emergency renewal: use `certbot renew --force-renewal --cert-name {cert_domain}` or renew via your CA portal and deploy immediately.
+  Root cause: an IAM cleanup 31 days ago (CR-3987, platform-iam) removed route53:ChangeResourceRecordSets from the cert-manager-route53 policy. cert-manager renews the Let's Encrypt certificate {cert_name} ({cert_domain} with SANs checkout.example.com and api.example.com) 30 days before expiry, and since then every DNS-01 challenge has failed with AccessDenied because cert-manager can no longer write the _acme-challenge TXT record. The certificate has now passed its notAfter, so browsers, the mobile app and Stripe webhooks fail the TLS handshake (storefront.tls_handshake_failure_pct from about 0.05% to about 94%; the rest are clients that ignore expiry). Forcing a renewal on its own fails again with the same AccessDenied; the permission has to come back first. This is not a Let's Encrypt or ingress problem: other certificates on the same ingress-nginx controller are valid, and no traffic spike or deploy preceded the failures.
+  Confirm:
+    - storefront-gateway "storefront.tls host={cert_domain}" lines show serial {cert_serial} (attributes.tls.cert_serial), days_remaining=0 (metrics.storefront.cert_days_remaining, 1 the day before), cert_ready=False and status=ANOMALY; metrics.storefront.tls_handshake_failure_pct is about 94
+    - cert-manager lines on storefront-gateway "Failed to present DNS-01 challenge ... AccessDenied ... not authorized to perform: route53:ChangeResourceRecordSets" (attributes.change.request CR-3987) repeat before the "certificate {cert_name} expired (notAfter ...)" line, which comes just before the first SSL-CERT-EXPIRY line
+    - order-management checkout traffic drops to about {order_rps} rps (normally about 184) because web and app clients fail TLS before reaching the gateway, and payment-processor reports Stripe webhook deliveries to https://checkout.example.com/webhooks/stripe failing with certificate expired
+  Remediation: restore the permission with opsctl rollback policy/cert-manager-route53 --to-revision previous, then re-issue the certificate with opsctl renew certificate/{cert_name}. cert-manager creates a new ACME order, the DNS-01 challenges validate after about 20 seconds, the certificate is ready at about 30 seconds and ingress-nginx reloads with the new secret at about 32 seconds. Handshake failures fall back to about 0.05% within about 15 seconds of the reload, storefront.cert_days_remaining reads 89 and the status line shows the new serial.
 remediation_action: renew_ssl_certificate
-error_message: '[StorefrontGateway] SSL-CERT-EXPIRY: domain={cert_domain} cert_serial={cert_serial} days_remaining={cert_days_remaining}
-  issuer={cert_issuer} san_count={cert_san_count} auto_renewal_status={auto_renewal_status}'
-stack_trace: |-
-  SSLCertificateException: SSL-CERT-EXPIRY
-    at TlsTerminator.validateCertificate(domain={cert_domain})
-    at StorefrontGateway.handleRequest(host={cert_domain})
-  Domain:           {cert_domain}
-  Serial:           {cert_serial}
-  Days remaining:   {cert_days_remaining}
-  Issuer:           {cert_issuer}
-  SANs covered:     {cert_san_count}
-  Auto-renewal:     {auto_renewal_status}
+remediation_command: |-
+  opsctl rollback policy/cert-manager-route53 --to-revision previous
+  opsctl renew certificate/shop-example-com
+error_message: 'ERROR storefront.tls.cert_monitor [SSL-CERT-EXPIRY] certificate {cert_name} for {cert_domain} has expired: serial={cert_serial} issuer=R11 sans=checkout.example.com,api.example.com handshake_failures_last_min={tls_failures_per_min} last_renewal_error=AccessDenied'
+stack_trace: ""
 correlation_attr:
-  key: storefront.cert_expiring
-  value: true
+  key: tls.cert_serial
+  value: 04f1a9c27e3b5d8812c6e2f94a7b13d5e0a1
 fault_params:
-  cert_domain: {choice: [shop.example.com, checkout.example.com, api.example.com]}
-  cert_serial: {format: "{n:X}", n: {randint: [10000000, 99999999]}}
-  cert_days_remaining: {randint: [0, 7]}
-  cert_issuer: {choice: ["Let's Encrypt", DigiCert, Comodo]}
-  cert_san_count: {randint: [3, 15]}
-  auto_renewal_status: {choice: [FAILED, NOT_CONFIGURED, EXPIRED]}
+  cert_domain: shop.example.com
+  cert_name: shop-example-com
+  cert_serial: 04f1a9c27e3b5d8812c6e2f94a7b13d5e0a1
+  tls_failures_per_min: {randint: [118000, 136000]}
+  order_rps: {randint: [6, 14]}
 rca_clues:
   storefront-gateway:
-    tls.cert_days_remaining: {randint: [0, 7]}
-    tls.browser_warning_triggered: true
+    tls.cert_days_remaining: 0
+    tls.cert_ready: 'False'
+    tls.renewal_failing_days: 31
+    tls.last_renewal_error: AccessDenied route53:ChangeResourceRecordSets
   order-management:
-    order.https_errors_count: {randint: [10, 500]}
-    order.mixed_content_warnings: {randint: [5, 50]}
+    order.checkout_rps: {randint: [6, 14]}
+    order.checkout_rps_baseline: 184
   payment-processor:
-    payment.pci_tls_validation_failed: true
-    payment.secure_channel_degraded: true
+    payment.stripe_webhook_failures_per_min: {randint: [40, 90]}
+cascade_messages:
+  order-management:
+    - severity: WARN
+      message: 'level=warn ts={iso_now} caller=checkout/handler.go:212 msg="checkout traffic far below baseline" rps={order_rps} baseline_rps=184 upstream=storefront-gateway note="clients failing TLS to checkout.example.com and api.example.com before reaching the gateway"'
+  payment-processor:
+    - severity: WARN
+      message: 'warn: Payments.Webhooks.StripeWebhookMonitor[0] Stripe webhook delivery to https://checkout.example.com/webhooks/stripe failing: TLS error, certificate has expired; Stripe retrying with backoff'
+fault_scope:
+  cluster: ecommerce-eks-cluster
+  workloads: [storefront-gateway]
+infrastructure_events:
+  - service: storefront-gateway
+    severity: ERROR
+    offset_seconds: -150
+    body: 'E{klog_time}       1 sync.go:190] "Failed to present DNS-01 challenge" err="failed to change Route 53 record set: operation error Route 53: ChangeResourceRecordSets, https response error StatusCode: 403, api error AccessDenied: User: arn:aws:sts::412381745231:assumed-role/cert-manager-route53/cert-manager is not authorized to perform: route53:ChangeResourceRecordSets on resource: arn:aws:route53:::hostedzone/Z04517273AB1CDEFG2HIJ because no identity-based policy allows the route53:ChangeResourceRecordSets action" resource_kind="Challenge" resource_name="shop-example-com-1-3170421993-2461978810" resource_namespace="storefront" dnsName="_acme-challenge.shop.example.com"'
+    attributes:
+      user.name: platform-iam
+      change.request: CR-3987
+      operation: acme_challenge
+      change.summary: 'IAM cleanup removed route53:ChangeResourceRecordSets from policy cert-manager-route53 (31 days ago)'
+      tls.cert_serial: 04f1a9c27e3b5d8812c6e2f94a7b13d5e0a1
+  - service: storefront-gateway
+    severity: WARN
+    offset_seconds: -20
+    body: 'W{klog_time}       1 trigger_controller.go:194] "certificate shop-example-com expired (notAfter {iso_now}); renewal has been failing for 31 days" resource_kind="Certificate" resource_name="shop-example-com" resource_namespace="storefront" serial="04f1a9c27e3b5d8812c6e2f94a7b13d5e0a1"'
+    attributes:
+      operation: certificate_status
+      tls.cert_serial: 04f1a9c27e3b5d8812c6e2f94a7b13d5e0a1
+      tls.cert_ready: 'False'
+remediation_effects:
+  log_taper_seconds: 40
+  log_events:
+    - service: storefront-gateway
+      severity: INFO
+      offset_seconds: 0
+      body: '[CHG] CHANGE APPLIED opsctl rollback policy/cert-manager-route53 --to-revision previous by {actor}: IAM policy cert-manager-route53 reverted from v7 to v6 (route53:ChangeResourceRecordSets on hostedzone/Z04517273AB1CDEFG2HIJ restored)'
+      attributes:
+        operation: change_applied
+        change.target: policy/cert-manager-route53
+    - service: storefront-gateway
+      severity: INFO
+      offset_seconds: 2
+      body: '[CHG] CHANGE APPLIED opsctl renew certificate/shop-example-com by {actor}: cert-manager re-issue requested for shop-example-com (shop.example.com, checkout.example.com, api.example.com)'
+      attributes:
+        operation: change_applied
+        change.target: certificate/shop-example-com
+    - service: storefront-gateway
+      severity: INFO
+      offset_seconds: 6
+      body: 'I{klog_time}       1 acmeorders.go:211] "ACME order created" resource_kind="Order" resource_name="shop-example-com-2-1840237116" resource_namespace="storefront" identifiers="shop.example.com,checkout.example.com,api.example.com"'
+      attributes:
+        operation: acme_order
+    - service: storefront-gateway
+      severity: INFO
+      offset_seconds: 22
+      body: 'I{klog_time}       1 sync.go:375] "Challenge has transitioned to valid state" resource_kind="Challenge" resource_name="shop-example-com-2-1840237116-3311075902" resource_namespace="storefront" type="DNS-01" dnsName="shop.example.com"'
+      attributes:
+        operation: acme_challenge
+    - service: storefront-gateway
+      severity: INFO
+      offset_seconds: 30
+      body: 'I{klog_time}       1 conditions.go:192] "Certificate is ready" resource_kind="Certificate" resource_name="shop-example-com" resource_namespace="storefront" reason="Ready" message="Certificate is up to date and has not expired" serial="03b7e25d9c41a6f0e8d2c3b14f6a9e7d2c58"'
+      attributes:
+        operation: certificate_status
+        tls.cert_serial: 03b7e25d9c41a6f0e8d2c3b14f6a9e7d2c58
+        tls.cert_ready: 'True'
+    - service: storefront-gateway
+      severity: INFO
+      offset_seconds: 32
+      body: 'I{klog_time}       7 controller.go:213] "Backend successfully reloaded" ingress-nginx updated SSL certificate secret storefront/shop-example-com-tls for shop.example.com, checkout.example.com, api.example.com'
+      attributes:
+        operation: ingress_reload
+  verification:
+    - signal: storefront.tls_handshake_failure_pct
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "storefront-gateway"'
+      field: 'metrics.storefront.tls_handshake_failure_pct'
+      expect: 'stays about 94% until the ingress reloads (about 32s after the fix), then falls back to about 0.05% within about 15s'
+      within_seconds: 120
+    - signal: storefront.cert_days_remaining
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "storefront-gateway"'
+      field: 'metrics.storefront.cert_days_remaining'
+      expect: '89 once the new certificate is ready (was 0)'
+      within_seconds: 90
+    - signal: SSL-CERT-EXPIRY lines
+      from: 'logs.otel.ecommerce'
+      where: 'body.text LIKE "*SSL-CERT-EXPIRY*"'
+      expect: 'no new lines about 40s after the fix'
+      within_seconds: 120
+    - signal: served certificate serial
+      from: 'logs.otel.ecommerce'
+      where: 'resource.attributes.service.name == "storefront-gateway"'
+      field: 'attributes.tls.cert_serial'
+      expect: '04f1a9c27e3b5d8812c6e2f94a7b13d5e0a1 (expired) before; 03b7e25d9c41a6f0e8d2c3b14f6a9e7d2c58 once the certificate is ready'
+      within_seconds: 90
 business_impact:
   - kpi: business.sessions_per_min
-    factor: {uniform: [0.10, 0.30]}
+    value: {uniform: [725.4, 834.6]}
   - kpi: business.conversion_rate_pct
-    factor: {uniform: [0.10, 0.25]}
+    factor: {uniform: [0.1, 0.25]}
   - kpi: business.orders_placed_per_min
-    factor: {uniform: [0.10, 0.25]}
+    factor: {uniform: [0.1, 0.25]}
   - kpi: business.gmv_usd_per_min
-    factor: {uniform: [0.10, 0.25]}
+    value: {uniform: [31620.0, 36380.0], round: 1}
+# dependents degrade after the component at fault, in dependency order
+service_lag_seconds: {order-management: 20, payment-processor: 30}

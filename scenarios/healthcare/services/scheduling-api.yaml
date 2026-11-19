@@ -51,6 +51,16 @@ state:
     init: 0
   _last_bed_census:
     init: now
+# Before / during / after (schema 1.3):
+#   ch 8  bed-board-sync v1.9.4 (max.poll.records=5000, one REST call per record) overruns
+#         max.poll.interval.ms: the consumer group rebalances every ~30s and ADT lag climbs to
+#         240-360s in ~120s. After the rollback (500 records per poll) the backlog drains in ~150s.
+#   ch 9  flag booking-lock-v2 (optimistic-lock-v2.1-exp): 2-8 double bookings/min in ~30s; once the
+#         flag is off, in-flight requests finish and double bookings stop within ~15s.
+#   ch 12 or-scheduler config raised the OR block cache TTL 60s -> 3600s: cache age 900s and rising,
+#         2-5 conflicts/h. After the rollback and the cache reload the age resets and stays under 60s.
+#   ch 8 / ch 17 discharges and transfers reach the board late, so displayed occupancy sits ~4 points
+#         high until the backlog drains.
 steps:
 - sample:
     appt_patient_id:
@@ -82,6 +92,49 @@ steps:
       scheduling.time_slot:
         var: slot
       scheduling.status: CONFIRMED
+# ── ch 8: bed board ADT consumer ───────────────────────────────────────────
+- sample:
+    bb_lag_s:
+      expr: "round(3.0 + (rand.uniform(240.0, 360.0) - 3.0) * min(1.0, elapsed.get(8, 0) / 120.0), 1) if 8 in all_active
+        else (round(300.0 + (rand.uniform(1.0, 5.0) - 300.0) * min(1.0, since_fix.get(8, 0) / 150.0), 1) if 8 in fixed_channels
+        else round(rand.uniform(1.0, 5.0), 1))"
+    bb_lag_events:
+      expr: "int(bb_lag_s * 4)"
+    bb_rebalances_5m:
+      expr: "rand.randint(8, 14) if 8 in all_active else 0"
+    bb_max_poll:
+      expr: "5000 if 8 in all_active else 500"
+    bb_build:
+      expr: "'adt-bridge-v1.9.4-unstable' if 8 in all_active else 'adt-bridge-v1.9.3'"
+    bb_sync:
+      expr: "'LAGGING' if 8 in all_active or bb_lag_s > 30.0 else 'OK'"
+- metric:
+    name: scheduling.bed_board_adt_lag_seconds
+    value:
+      var: bb_lag_s
+    unit: s
+- log:
+    level: INFO
+    message: '[SCHED] bed_board_consumer topic=adt-events group=bed-board-sync build={bb_build} max_poll_records={bb_max_poll} lag_events={bb_lag_events} lag={bb_lag_s}s rebalances_5m={bb_rebalances_5m} status={bb_sync}'
+    attrs: &bb_attrs
+      operation: adt_consumer_status
+      kafka.consumer_group: bed-board-sync
+      kafka.max_poll_records:
+        var: bb_max_poll
+      kafka.rebalances_5m:
+        var: bb_rebalances_5m
+      bed_board.adt_queue_lag_s:
+        var: bb_lag_s
+      infra.bed_board_sync_driver:
+        var: bb_build
+      bed_board.sync_status:
+        var: bb_sync
+  when: "bb_sync == 'OK'"
+- log:
+    level: WARN
+    message: '[SCHED] bed_board_consumer topic=adt-events group=bed-board-sync build={bb_build} max_poll_records={bb_max_poll} lag_events={bb_lag_events} lag={bb_lag_s}s rebalances_5m={bb_rebalances_5m} status={bb_sync}'
+    attrs: *bb_attrs
+  when: "bb_sync != 'OK'"
 - sample:
     bed_unit:
       choice: UNITS
@@ -98,7 +151,7 @@ steps:
       expr: f'{bed_wing}-{bed_num}'
 - log:
     level: INFO
-    message: '[SCHED] bed_update unit={bed_unit} bed={bed} new_status={bed_status} adt_sync=OK'
+    message: '[SCHED] bed_update unit={bed_unit} bed={bed} new_status={bed_status} adt_sync={bb_sync}'
     attrs:
       operation: bed_update
       bed.unit:
@@ -107,21 +160,109 @@ steps:
         var: bed
       bed.status:
         var: bed_status
+# ── ch 9: clinic booking engine ────────────────────────────────────────────
+- sample:
+    dbl_bookings_1m:
+      expr: "int(round(rand.uniform(2.0, 8.0) * min(1.0, elapsed.get(9, 0) / 30.0))) if 9 in all_active
+        else ((rand.randint(1, 3) if since_fix.get(9, 0) < 15 else 0) if 9 in fixed_channels else 0)"
+    lock_conflicts_1m:
+      expr: "rand.randint(5, 30) if 9 in all_active else rand.randint(0, 2)"
+    lock_mode:
+      expr: "'optimistic-lock-v2.1-exp' if 9 in all_active else 'slot-row-lock-v2.0'"
+    lock_flag:
+      expr: "'on' if 9 in all_active else 'off'"
+    sched_pool_pct:
+      expr: "rand.randint(30, 60)"
+    booking_status:
+      expr: "'CONFLICTS' if dbl_bookings_1m > 0 else 'OK'"
+- metric:
+    name: scheduling.double_bookings_per_min
+    value:
+      var: dbl_bookings_1m
+    unit: bookings/min
+- log:
+    level: INFO
+    message: '[SCHED] booking_engine flag=booking-lock-v2:{lock_flag} lock_mode={lock_mode} lock_conflicts_1m={lock_conflicts_1m} double_bookings_1m={dbl_bookings_1m} db_pool_active={sched_pool_pct}% status={booking_status}'
+    attrs: &booking_attrs
+      operation: booking_engine_status
+      deployment.scheduler_lock_mode:
+        var: lock_mode
+      sched.flag_booking_lock_v2:
+        var: lock_flag
+      sched.optimistic_lock_conflicts:
+        var: lock_conflicts_1m
+      sched.double_bookings_per_min:
+        var: dbl_bookings_1m
+      sched.db_pool_active_pct:
+        var: sched_pool_pct
+  when: "booking_status == 'OK'"
+- log:
+    level: WARN
+    message: '[SCHED] booking_engine flag=booking-lock-v2:{lock_flag} lock_mode={lock_mode} lock_conflicts_1m={lock_conflicts_1m} double_bookings_1m={dbl_bookings_1m} db_pool_active={sched_pool_pct}% status={booking_status}'
+    attrs: *booking_attrs
+  when: "booking_status != 'OK'"
+# ── ch 12: OR block schedule cache ─────────────────────────────────────────
+- sample:
+    or_cache_age_s:
+      expr: "int(min(3600, 900 + elapsed.get(12, 0)) + rand.randint(-20, 20)) if 12 in all_active
+        else (int(min(60.0, since_fix.get(12, 0)) * rand.uniform(0.5, 1.0)) if 12 in fixed_channels
+        else rand.randint(5, 60))"
+    or_cache_ttl:
+      expr: "3600 if 12 in all_active else 60"
+    or_conflicts_1h:
+      expr: "rand.randint(2, 5) if 12 in all_active else 0"
+    or_config:
+      expr: "'block-mgmt-v3.2.0-beta' if 12 in all_active else 'block-mgmt-v3.1.4'"
+    or_cache_status:
+      expr: "'STALE' if or_cache_age_s > 300 else 'OK'"
+- metric:
+    name: scheduling.or_block_cache_age_seconds
+    value:
+      var: or_cache_age_s
+    unit: s
+- log:
+    level: INFO
+    message: '[SCHED] or_block_cache rooms=12 entries=312 ttl={or_cache_ttl}s age={or_cache_age_s}s conflicts_1h={or_conflicts_1h} config={or_config} status={or_cache_status}'
+    attrs: &or_attrs
+      operation: or_block_cache_status
+      sched.or_block_cache_ttl_s:
+        var: or_cache_ttl
+      sched.or_block_cache_age_s:
+        var: or_cache_age_s
+      sched.or_conflicts_per_hour:
+        var: or_conflicts_1h
+      infra.or_scheduler_config:
+        var: or_config
+      sched.or_block_cache_status:
+        var: or_cache_status
+  when: "or_cache_status == 'OK'"
+- log:
+    level: WARN
+    message: '[SCHED] or_block_cache rooms=12 entries=312 ttl={or_cache_ttl}s age={or_cache_age_s}s conflicts_1h={or_conflicts_1h} config={or_config} status={or_cache_status}'
+    attrs: *or_attrs
+  when: "or_cache_status != 'OK'"
+# ── displayed occupancy (late discharges from ch 8 / ch 17) ────────────────
+- sample:
+    stale_frac:
+      expr: "max(min(1.0, elapsed.get(8, 0) / 120.0) if 8 in all_active else (max(0.0, 1.0 - since_fix.get(8, 0) / 150.0) if 8 in fixed_channels else 0.0),
+        min(1.0, elapsed.get(17, 0) / 120.0) if 17 in all_active else (max(0.0, 1.0 - since_fix.get(17, 0) / 150.0) if 17 in fixed_channels else 0.0))"
+    occupancy:
+      expr: "round(87.0 + rand.gauss(0, 0.4) + 4.0 * stale_frac, 1)"
+    census_adt_sync:
+      expr: "'LAGGING' if stale_frac > 0.1 else 'CURRENT'"
 - every:
     seconds: 10
     state_key: _last_bed_census
     steps:
     - sample:
         total_beds:
-          randint:
-          - 280
-          - 350
+          expr: "320"
     - sample:
         occupied:
-          expr: int(total_beds * rand.uniform(0.78, 0.95))
+          expr: int(total_beds * occupancy / 100.0)
     - log:
         level: INFO
-        message: '[SCHED] bed_census occupied={occupied}/{total_beds} units=6 adt_sync=CURRENT'
+        message: '[SCHED] bed_census occupied={occupied}/{total_beds} units=6 adt_sync={census_adt_sync}'
         attrs:
           operation: bed_census
           census.total_beds:
@@ -129,7 +270,8 @@ steps:
           census.occupied:
             var: occupied
           census.units: 6
-          census.adt_sync: CURRENT
+          census.adt_sync:
+            var: census_adt_sync
 - counter:
     state_key: _appointments_booked
     by: 1
@@ -138,18 +280,6 @@ steps:
     value:
       var: _appointments_booked
     unit: appointments
-- sample:
-    occupancy:
-      if_active:
-        uniform:
-        - 97.0
-        - 100.0
-        round: 1
-      else:
-        uniform:
-        - 75.0
-        - 96.0
-        round: 1
 - metric:
     name: scheduling.bed_occupancy_pct
     value:

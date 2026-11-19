@@ -11,16 +11,16 @@ cascade_services:
 - network-intelligence
 description: Cloud VPN tunnel losing connectivity to remote peer
 investigation_notes: |-
-  Root cause: VPN tunnel has transitioned to DOWN state, meaning IPsec SA (Security Association) has expired or been torn down. Common causes: remote peer IP changed, pre-shared key mismatch after rotation, IKE SA lifetime expired without successful rekey, or remote gateway is unreachable due to internet path failure. Diagnose:
-    gcloud compute vpn-tunnels describe <tunnel> --region=<region> --format='value(status,detailedStatus)'
-    gcloud compute vpn-tunnels list --filter='status!=ESTABLISHED' --format='table(name,region,status,peerIp)'
-    Console > Hybrid Connectivity > VPN > <tunnel> > Status tab (IKE logs)
-  Remediation: Reset the VPN tunnel to force IKE renegotiation:
-    gcloud compute vpn-tunnels delete <tunnel> --region=<region>
-    gcloud compute vpn-tunnels create <tunnel> --region=<region> --peer-address=<peer-ip> --shared-secret=<secret> --ike-version=2 --router=<router> --vpn-gateway=<gw> --interface=0
-  Verify the remote peer is reachable: ping <peer-ip> from a VM in the same region. Check if the remote side has rotated the pre-shared key.
+  Root cause: the on-premises side rotated the VPN pre-shared key (change psk-rotate-2026q4-batch2) but {vpn_tunnel_name} on {vpn_gateway_name} still holds the old secret (psk_version psk-2026q3-b1). IKE authentication fails (AUTHENTICATION_FAILED, pre-shared key), the IPsec SA expires without a successful rekey and the tunnel goes to {vpn_status}. The peer {vpn_peer_ip} answers ping (vpn.peer_icmp_reachable true) and its IP has not changed (vpn.peer_ip_changed false), which rules out a path failure or a peer address change; gcpnet-vpn-tunnel-01 and gcpnet-vpn-tunnel-03 are not affected by this.
+  Confirm:
+    - cloud-vpn-gateway metrics.vpn.tunnel_02_established goes 1 -> 0 and metrics.vpn.tunnel_02_ike_auth_failures rises from 0 to 6-14
+    - cloud-vpn log "tunnel_status" for {vpn_tunnel_name}: attributes.vpn.status AUTHORIZATION_ERROR, attributes.vpn.psk_version psk-2026q3-b1, attributes.vpn.health ANOMALY
+    - the cause event psk-rotate-2026q4-batch2 precedes the first VPN-TUNNEL-DOWN line
+  Remediation: rotate the tunnel secret to the version the peer now uses: opsctl rotate vpn-tunnel/{vpn_tunnel_name} --region europe-west1 --secret-version psk-2026q4-b2. The tunnel re-establishes about 30-60 seconds after the change, auth failures drop to 0 and psk_version reads psk-2026q4-b2.
 remediation_action: reset_vpn_tunnel
-error_message: '[CloudVPN] VPN-TUNNEL-DOWN tunnel={vpn_tunnel_name} gateway={vpn_gateway_name} peer={vpn_peer_ip} status=DOWN
+remediation_command: |-
+  opsctl rotate vpn-tunnel/gcpnet-vpn-tunnel-02 --region europe-west1 --secret-version psk-2026q4-b2
+error_message: '[CloudVPN] VPN-TUNNEL-DOWN tunnel={vpn_tunnel_name} gateway={vpn_gateway_name} peer={vpn_peer_ip} status={vpn_status}
   since {vpn_down_sec}s ike_version={vpn_ike_version} last_handshake={vpn_last_handshake_sec}s ago'
 stack_trace: |-
   Cloud VPN Tunnel Report
@@ -28,25 +28,31 @@ stack_trace: |-
   Tunnel:          {vpn_tunnel_name}
   Gateway:         {vpn_gateway_name}
   Peer IP:         {vpn_peer_ip}
-  Status:          DOWN
+  Status:          {vpn_status}
   Down Since:      {vpn_down_sec}s
   IKE Version:     {vpn_ike_version}
   Last Handshake:  {vpn_last_handshake_sec}s ago
-  Action: Verify peer gateway and IKE configuration
+  PSK Version:     psk-2026q3-b1
+  Last IKE Error:  AUTHENTICATION_FAILED (pre-shared key)
+  Action: Rotate the tunnel secret to the peer's current version
 correlation_attr:
   key: infra.vpn_psk_rotation
-  value: psk-rotate-2024q4-batch2
+  value: psk-rotate-2026q4-batch2
 fault_params:
-  vpn_tunnel_name: {choice: [gcpnet-vpn-tunnel-01, gcpnet-vpn-tunnel-02, gcpnet-vpn-tunnel-03]}
-  vpn_gateway_name: {choice: [gcpnet-vpn-gw-europe1, gcpnet-vpn-gw-central1]}
-  vpn_peer_ip: {format: "203.0.113.{a}", a: {randint: [1, 254]}}
-  vpn_down_sec: {randint: [10, 300]}
-  vpn_ike_version: {choice: [IKEv2, IKEv1]}
-  vpn_last_handshake_sec: {randint: [60, 600]}
+  vpn_tunnel_name: gcpnet-vpn-tunnel-02
+  vpn_gateway_name: gcpnet-vpn-gw-europe1
+  vpn_peer_ip: 203.0.113.42
+  vpn_status: AUTHORIZATION_ERROR
+  vpn_down_sec: 120
+  vpn_ike_version: IKEv2
+  vpn_last_handshake_sec: 240
 rca_clues:
   cloud-vpn-gateway:
     vpn.ipsec_sa_status: EXPIRED
     vpn.last_rekey_sec_ago: {randint: [300, 3600]}
+    vpn.ike_auth_result: AUTHENTICATION_FAILED
+    vpn.peer_icmp_reachable: true
+    vpn.peer_ip_changed: false
   cloud-interconnect:
     interconnect.vpn_backup_needed: true
     interconnect.capacity_headroom_pct: {uniform: [5, 30], round: 1}
@@ -56,12 +62,71 @@ rca_clues:
   network-intelligence:
     ni.vpn_path_test: DOWN
     ni.latency_via_backup_ms: {randint: [20, 120]}
+cascade_messages:
+  vpc-network-manager:
+    - severity: WARN
+      message: 'vpc-network-manager: routes via VPN tunnel {vpn_tunnel_name} withdrawn after tunnel went {vpn_status}'
+fault_scope:
+  cluster: gcpnet-gke-europe1
+  workloads: [cloud-vpn-gateway]
+infrastructure_events:
+  - service: cloud-vpn-gateway
+    severity: INFO
+    offset_seconds: -90
+    body: 'cloud-vpn: on-prem peer {vpn_peer_ip} rotated pre-shared key (change psk-rotate-2026q4-batch2, version psk-2026q4-b2) by netops-onprem; tunnel {vpn_tunnel_name} still uses psk-2026q3-b1'
+    attributes:
+      user.name: netops-onprem
+      change.request: psk-rotate-2026q4-batch2
+      operation: psk_rotation
+      infra.vpn_psk_rotation: psk-rotate-2026q4-batch2
+      change.summary: 'on-prem PSK psk-2026q3-b1 -> psk-2026q4-b2'
+remediation_effects:
+  transition_seconds: 60
+  log_events:
+    - service: vpc-network-manager
+      severity: INFO
+      offset_seconds: 2
+      body: 'gcp-audit: logName=cloudaudit.googleapis.com/activity serviceName=compute.googleapis.com methodName=v1.compute.vpnTunnels.insert resourceName=projects/gcpnet-prod-001/regions/europe-west1/vpnTunnels/gcpnet-vpn-tunnel-02 principalEmail={actor} status=OK'
+      attributes:
+        operation: command
+        command.target: vpn-tunnel/gcpnet-vpn-tunnel-02
+    - service: cloud-vpn-gateway
+      severity: INFO
+      offset_seconds: 40
+      body: 'cloud-vpn: tunnel=gcpnet-vpn-tunnel-02 IKE SA established with psk_version=psk-2026q4-b2, status=ESTABLISHED'
+      attributes:
+        operation: tunnel_status
+        vpn.tunnel: gcpnet-vpn-tunnel-02
+        vpn.psk_version: psk-2026q4-b2
+  steady_attributes:
+    cloud-vpn-gateway:
+      vpn.psk_version: psk-2026q4-b2
+  log_taper_seconds: 60
+  verification:
+    - signal: vpn.tunnel_02_established
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "cloud-vpn-gateway"'
+      field: 'metrics.vpn.tunnel_02_established'
+      expect: '1 within about 60 s (was 0)'
+      within_seconds: 120
+    - signal: vpn.tunnel_02_ike_auth_failures
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "cloud-vpn-gateway"'
+      field: 'metrics.vpn.tunnel_02_ike_auth_failures'
+      expect: '0 (was 6-14)'
+      within_seconds: 120
+    - signal: tunnel PSK version
+      from: 'logs.otel.gcpnet'
+      where: 'resource.attributes.service.name == "cloud-vpn-gateway" AND attributes.vpn.tunnel == "gcpnet-vpn-tunnel-02"'
+      field: 'attributes.vpn.psk_version'
+      expect: 'psk-2026q4-b2 on every line logged since the fix (was psk-2026q3-b1)'
+      within_seconds: 120
 business_impact:
   - kpi: business.interconnect_utilization_pct
-    factor: {uniform: [1.5, 3.0]}
+    value: {uniform: [8.18, 9.42], round: 2}
   - kpi: business.network_sla_compliance_pct
-    factor: {uniform: [0.55, 0.80]}
+    factor: {uniform: [0.55, 0.8]}
   - kpi: business.bytes_egress_gib_per_min
-    factor: {uniform: [0.40, 0.70]}
+    value: {uniform: [10881.0, 12519.0], round: 1}
   - kpi: business.incident_mttr_min
     factor: {uniform: [2.5, 5.5]}

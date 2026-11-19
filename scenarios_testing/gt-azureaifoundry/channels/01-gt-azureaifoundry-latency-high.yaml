@@ -1,0 +1,37 @@
+name: "GT azure_ai_foundry: latency_high"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-AZUREAIFOUNDRY-LATENCY-HIGH
+sensor_type: impact_key_probe
+affected_services:
+  - gt-azureaifoundry-aws-svc-1
+cascade_services:
+  - gt-azureaifoundry-aws-svc-2
+description: "Tests impact_key latency_high on generator azure_ai_foundry."
+investigation_notes: |-
+  1. Verify azure_ai_foundry is active and reporting metrics.
+  2. Check that the latency_high metric has reached the trigger value (37500.0).
+  3. Confirm generator_impact for azure_ai_foundry.latency_high is set to 37500.0.
+  4. Look for correlated changes in service gt-azureaifoundry-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_latency_high_baseline
+error_message: "GT-PROBE: gen=azure_ai_foundry key=latency_high value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=azure_ai_foundry
+  impact_key: latency_high
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 37500.0
+  svc_name: gt-azureaifoundry-aws-svc-1
+rca_clues:
+  gt-azureaifoundry-aws-svc-1:
+    probe.generator: azure_ai_foundry
+    probe.impact_key: latency_high
+    probe.trigger_value: 37500.0
+  gt-azureaifoundry-aws-svc-2:
+    probe.upstream_generator: azure_ai_foundry
+    probe.upstream_key: latency_high
+generator_impact:
+  azure_ai_foundry:
+    latency_high: 37500.0

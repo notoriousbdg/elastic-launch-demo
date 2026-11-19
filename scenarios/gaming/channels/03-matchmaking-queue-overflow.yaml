@@ -6,65 +6,179 @@ sensor_type: queue_monitor
 affected_services:
 - matchmaking-engine
 - game-server
-cascade_services:
-- auth-gateway
-- analytics-pipeline
-description: Matchmaking queue depth exceeds capacity causing player wait times to spike beyond acceptable thresholds
+error_services: [matchmaking-engine]
+cascade_services: []
+description: Matchmaking queue depth exceeds capacity because there are no ready game servers to place matches on; the game-server HPA sits at max replicas while new pods stay Pending
+onset_delay_seconds: 10
+ramp_seconds: 45
 investigation_notes: |-
-  Root cause: inflow rate (enqueue/s) far exceeds outflow (dequeue/s), typically caused by a game server allocation bottleneck — the matchmaker finds groups but cannot place them because server provisioning is lagging behind demand.
-  1. Check server pool: query `kubectl get pods -l app=game-server` on the EKS cluster to verify available game server instances; if pool is exhausted, scale the fleet.
-  2. Review per-tier breakdown: diamond+ queues with 891 waiting is normal, but bronze-silver at 4201 indicates a systemic issue, not a thin-population problem.
-  3. Inspect matchmaker logs for `EXPAND mmr_range` actions — repeated range expansions with no matches means the issue is server supply, not rating spread.
-  4. Remediate: issue `restart_matchmaker` to clear stale queue entries and reset internal timers; simultaneously scale game-server pods to increase placement capacity.
-  5. If region-locked, temporarily relax region constraints to allow cross-region placement while new servers spin up.
-remediation_action: restart_matchmaker
-error_message: '[MM] MM-QUEUE-OVERFLOW: pool={queue_name} queue={queue_depth} max={max_capacity} wait_p99={wait_time_ms}ms
-  region={region}'
+  Root cause: a FinOps Terraform apply (CHG0071403) lowered the max size of the EKS node group gs-c5-2xlarge on gaming-eks-cluster from 120 to 80 nodes during the evening peak. The node group shrank to 80 nodes, the game server pods on the removed nodes were rescheduled, and about 150 of them stay Pending (FailedScheduling: 0/80 nodes are available: 80 Insufficient cpu; the cluster autoscaler reports max node group size reached). The game-server HPA is at its 600-replica maximum, but only 400-430 servers are Ready, so the matchmaker forms matches it cannot allocate (NoReadyGameServer) and pool {queue_name} grows to {queue_depth} waiting players (threshold {max_capacity}), with p99 wait {wait_time_ms} ms. The matchmaker itself is healthy: it keeps forming matches, and allocations fail only for lack of servers.
+  Confirm:
+    - game-server `[Fleet] fleet-status` lines carry attributes.infra.nodegroup_max_size 80 (was 120) and nodes=80/80, and they follow the Terraform apply line with change.request CHG0071403
+    - metric game_server.fleet.ready_servers reads 400-430 (baseline 560-600 of 600) and game_server.fleet.pending_pods reads 140-170 (baseline 0-2); the k8s events show FailedScheduling Insufficient cpu and NotTriggerScaleUp max node group size reached
+    - metric matchmaking.queue_depth reads 3000-6000 (baseline 80-400) and matchmaking.avg_wait_time_s 120-300 s (baseline 8-25), with allocation failures reason NoReadyGameServer on the MM-QUEUE-OVERFLOW lines
+  Remediation: raise the node group limit back with opsctl patch nodegroup/gs-c5-2xlarge --max-size 120. The cluster autoscaler then adds nodes, which join over about 180 seconds; pending_pods falls to 0-2 and ready_servers climbs back to 560-600 over that time, and the queue drains back under 400 over about 240 seconds as matches are allocated again. Restarting the matchmaker would drop the waiting players' tickets and not add a single server; scaling the HPA up does nothing because it is already at max and the extra pods would be Pending too.
+remediation_action: raise_nodegroup_max_size
+remediation_command: |-
+  opsctl patch nodegroup/gs-c5-2xlarge --max-size 120
+error_message: '[MM] MM-QUEUE-OVERFLOW: pool={queue_name} queue={queue_depth} max={max_capacity} wait_p99={wait_time_ms}ms region={region}
+  allocations_failed_1m={alloc_failed} reason=NoReadyGameServer'
 stack_trace: |-
   === MATCHMAKING QUEUE STATE DUMP ===
   pool={queue_name}  region={region}
   ----------- queue metrics -----------
     depth       = {queue_depth}  (max {max_capacity})
-    wait_p50    = 12400ms
-    wait_p95    = 87200ms
     wait_p99    = {wait_time_ms}ms
     enqueue/s   = 342
     dequeue/s   = 89
     drain_eta   = NEVER (inflow > outflow)
-  ----------- pool breakdown ----------
-    bronze-silver  : 4201 waiting
-    gold-platinum  : 2847 waiting
-    diamond+       : 891 waiting
+  ----------- allocation --------------
+    matches_formed_1m      = 410
+    allocations_failed_1m  = {alloc_failed}  reason=NoReadyGameServer
+    fleet                  = game-server  ready={ready_servers}  pending={pending_pods}
   ----------- action ------------------
-    EXPAND mmr_range +200  RELAX region_lock
+    HOLD tickets  RETRY allocation in 5s
   MM-QUEUE-OVERFLOW: pool {queue_name} saturated at {queue_depth}/{max_capacity}
 correlation_attr:
-  key: deployment.matchmaker_config
-  value: mm-config-v4.1.0-experimental
+  key: infra.nodegroup_max_size
+  value: 80
 fault_params:
   queue_name: {choice: [ranked-solo, ranked-duo, casual-squad, tournament-5v5]}
-  queue_depth: {randint: [5000, 50000]}
+  queue_depth: {randint: [3000, 6000]}
   max_capacity: 3000
-  wait_time_ms: {randint: [30000, 300000]}
-  region: {choice: [us-east-1, us-west-2, eu-west-1, ap-southeast-1]}
+  wait_time_ms: {randint: [120000, 300000]}
+  region: us-east-1
+  alloc_failed: {randint: [250, 420]}
+  ready_servers: {randint: [400, 430]}
+  pending_pods: {randint: [140, 170]}
 rca_clues:
   matchmaking-engine:
-    matchmaking.enqueue_rate: {randint: [200, 500]}
-    matchmaking.dequeue_rate: {randint: [50, 100]}
+    matchmaking.allocation_failure_reason: NoReadyGameServer
+    matchmaking.allocations_failed_per_min: {randint: [250, 420]}
+    matchmaking.matches_formed_per_min: {randint: [380, 440]}
   game-server:
-    game.server_pool_available: {randint: [0, 5]}
-    game.allocation_lag_ms: {randint: [2000, 8000]}
-  auth-gateway:
-    auth.login_surge_detected: true
-    auth.concurrent_sessions: {randint: [50000, 150000]}
-  analytics-pipeline:
-    analytics.queue_depth_trend: exponential_growth
+    infra.nodegroup_max_size: 80
+    fleet.ready_servers: {randint: [400, 430]}
+    fleet.pending_pods: {randint: [140, 170]}
+    fleet.hpa_replicas: 600
+cascade_messages:
+  game-server:
+    - severity: WARN
+      message: '[Fleet] allocator: GameServerAllocation unallocated fleet=game-server ready=0 allocated={ready_servers} pending_pods={pending_pods} hpa_replicas=600/600'
+    - severity: WARN
+      message: '[Fleet] scale-up blocked: hpa=game-server at max replicas 600, {pending_pods} pods Pending (Insufficient cpu)'
+k8s_events:
+  - type: Warning
+    reason: FailedScheduling
+    object: {kind: Pod, name: game-server-6d8f9c7b54-q7kzt, namespace: game-servers}
+    message: '0/80 nodes are available: 80 Insufficient cpu. preemption: 0/80 nodes are available: 80 No preemption victims found for incoming pod.'
+    component: default-scheduler
+    every_seconds: 30
+  - type: Normal
+    reason: NotTriggerScaleUp
+    object: {kind: Pod, name: game-server-6d8f9c7b54-q7kzt, namespace: game-servers}
+    message: "pod didn't trigger scale-up: 1 max node group size reached"
+    component: cluster-autoscaler
+    every_seconds: 60
+  - type: Warning
+    reason: ScalingLimited
+    object: {kind: HorizontalPodAutoscaler, name: game-server, namespace: game-servers}
+    message: 'the desired replica count is more than the maximum replica count'
+    component: horizontal-pod-autoscaler
+    every_seconds: 120
+fault_scope:
+  cluster: gaming-eks-cluster
+  workloads: [game-server, matchmaking-engine]
+service_lag_seconds: {matchmaking-engine: 30}
+infrastructure_events:
+  - service: game-server
+    severity: INFO
+    offset_seconds: -180
+    body: 'module.eks_gaming.aws_eks_node_group.gs_c5_2xlarge: Modifications complete after 38s [id=gaming-eks-cluster:gs-c5-2xlarge] (scaling_config.max_size 120 -> 80, workspace=gaming-eks-prod, run=run-q8Zt3LmV)'
+    attributes:
+      operation: config_change
+      change.request: CHG0071403
+      user.name: finops-terraform
+      change.summary: 'gs-c5-2xlarge scaling_config.max_size: 120 -> 80'
+      infra.nodegroup: gs-c5-2xlarge
+      infra.nodegroup_max_size: 80
+  - service: game-server
+    severity: INFO
+    offset_seconds: -120
+    body: 'eks: nodegroup gs-c5-2xlarge update Successful (type=ConfigUpdate, maxSize=80, desiredSize=80), 40 instances terminating'
+    attributes:
+      operation: config_change
+      change.request: CHG0071403
+      infra.nodegroup: gs-c5-2xlarge
+      infra.nodegroup_max_size: 80
+remediation_effects:
+  transition_seconds: 240
+  log_taper_seconds: 200
+  log_events:
+    - service: game-server
+      severity: INFO
+      offset_seconds: 1
+      body: 'level=info logger=changelog msg="change applied" cmd="opsctl patch nodegroup/gs-c5-2xlarge --max-size 120" actor={actor} result="nodegroup/gs-c5-2xlarge scaling_config.max_size 80 -> 120"'
+      attributes:
+        operation: change_applied
+        change.target: nodegroup/gs-c5-2xlarge
+        infra.nodegroup_max_size: 120
+    - service: game-server
+      severity: INFO
+      offset_seconds: 20
+      body: 'cluster-autoscaler: Scale-up: setting group gs-c5-2xlarge size to 117 instead of 80 (max: 120)'
+      attributes:
+        operation: node_scale_up
+        infra.nodegroup: gs-c5-2xlarge
+        infra.nodegroup_max_size: 120
+    - service: game-server
+      severity: INFO
+      offset_seconds: 180
+      body: '[Fleet] scale-up complete: nodegroup=gs-c5-2xlarge nodes=117/120 pending_pods=0 hpa=game-server replicas=600/600'
+      attributes:
+        operation: fleet_status
+        infra.nodegroup: gs-c5-2xlarge
+        infra.nodegroup_max_size: 120
+  steady_attributes:
+    game-server:
+      infra.nodegroup_max_size: 120
+  verification:
+    - signal: Pending game server pods
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "game-server"'
+      field: 'metrics.game_server.fleet.pending_pods'
+      expect: 'back to 0-2 (was 140-170) as the new nodes join over about 180 seconds'
+      within_seconds: 240
+    - signal: ready game servers
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "game-server"'
+      field: 'metrics.game_server.fleet.ready_servers'
+      expect: 'back in 560-600 (was 400-430) within about 180 seconds'
+      within_seconds: 240
+    - signal: matchmaking queue depth
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "matchmaking-engine"'
+      field: 'metrics.matchmaking.queue_depth'
+      expect: 'draining back under 400 (was 3000-6000) over about 240 seconds'
+      within_seconds: 300
+    - signal: node group max size
+      from: 'logs.otel.gaming'
+      where: 'resource.attributes.service.name == "game-server" AND attributes.operation == "fleet_status"'
+      field: 'attributes.infra.nodegroup_max_size'
+      expect: '120 on every fleet-status line since the patch (was 80)'
+      within_seconds: 240
 business_impact:
   - kpi: business.matches_played_per_min
-    factor: {uniform: [0.10, 0.35]}
+    value: {uniform: [141.36, 162.64]}
   - kpi: business.sessions_per_min
-    factor: {uniform: [0.25, 0.50]}
+    value: {uniform: [1088.0, 1252.0]}
   - kpi: business.churn_risk_index_0_100
     factor: {uniform: [1.8, 3.5]}
   - kpi: business.net_satisfaction_proxy_nps
-    factor: {uniform: [0.20, 0.45]}
+    value: {uniform: [9.3, 10.7], round: 1}
+generator_impact:
+  kubernetes_otel:
+    hpa_at_max_replicas: 1.0
+    pods_stuck_in_pending_phase: 0.8
+# kube-state-metrics keeps the Pending pods and HPA-at-max until the new nodes have joined
+generator_hold_seconds: {kubernetes_otel: 180}

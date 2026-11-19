@@ -6,63 +6,144 @@ sensor_type: accuracy_monitor
 affected_services:
 - moderation-engine
 - chat-service
-cascade_services:
-- analytics-pipeline
-description: Automated content moderation system producing excessive false positives, silencing legitimate player communication
+error_services:
+- moderation-engine
+cascade_services: []
+description: A newly promoted automod model with a lower hate_speech threshold actions large numbers of legitimate chat messages,
+  silencing players and flooding appeals
+onset_delay_seconds: 10
+ramp_seconds: 30
 investigation_notes: |-
-  Root cause: the automod NLP classifier model was updated to a new version that has dramatically higher sensitivity for the hate_speech category (fp_rate jumped from 2.1% to 34.8%), likely due to training data contamination or threshold miscalibration.
-  1. Check model versioning: compare precision/recall between current and previous model version — if recall stayed at 0.95 but precision dropped to 0.42, the decision threshold was lowered too aggressively during the update.
-  2. Review silenced players: {affected_players} wrongly silenced players with 847 pending appeals — prioritize unsilencing by checking if their messages match known-good patterns.
-  3. Inspect category breakdown: hate_speech fp_rate of 34.8% is the primary driver — this category likely needs a higher confidence threshold (0.85 instead of 0.60).
-  4. Remediate: issue `rollback_automod_model` to revert to the previous model version and `unsilence_affected_players` to restore communication for falsely flagged accounts.
-  5. Implement canary model deployment: route 5% of traffic to new model versions and compare fp_rate before full rollout; add automated rollback on fp_rate >5%.
+  Root cause: the model registry promoted automod-text {model_version} to Production (CHG0061717) about three minutes before the first error. {model_version} ships with hate_speech_threshold {hs_threshold} instead of 0.85 in {previous_version}, so messages that score 0.55-0.84 for hate_speech, which {previous_version} left alone, are now actioned. Actions jump to {actions_per_min} per minute and most of them are overturned on appeal ({fp_rate_pct}%). The other categories (harassment, cheating, spam) are unchanged and serving is healthy (12/12 replicas, normal scan latency), so the cause is the model's threshold, not the infrastructure or a rise in real abuse.
+  Confirm:
+    - the moderation-engine automod-serving lines carry attributes.model.version = v6.2 and attributes.model.hate_speech_threshold = 0.55 (was v6.1 and 0.85); the model-registry promotion line with change.request CHG0061717 comes before the first MOD-FALSE-POS-STORM line
+    - metrics.moderation.actions_taken is 2000-5000 per minute (baseline 50-150) and metrics.moderation.false_positive_rate (appeal overturn rate) is 30-60% (baseline 1-4%)
+    - content_scan lines show FLAGGED hate_speech verdicts with confidence 0.55-0.84, and chat-service logs messages withheld by moderation-engine (score {withheld_score}, withheld_1m={withheld_per_min}, appeals_opened_1m={appeals_per_min})
+  Remediation: run `opsctl rollback model/automod-text --to-revision previous`. The serving replicas reload {previous_version} within about 20 s, so actions are back in 50-150 per minute within about 30 s. The appeal overturn rate is measured on decided appeals and still counts the {model_version} actions for a while, so it falls back to 1-4% over about 300 s. Restarting moderation-engine would not help: it reloads the Production version, which is still {model_version}. Adding replicas only applies the same threshold to more traffic.
 remediation_action: rollback_automod_model
-error_message: '[T&S] MOD-FALSE-POS-STORM: flagged={false_positive_count} window={window_minutes}min fp_rate={fp_rate_pct}%
-  model={model_version} affected_players={affected_players}'
+remediation_command: |-
+  opsctl rollback model/automod-text --to-revision previous
+error_message: '[T&S] MOD-FALSE-POS-STORM: model=automod-text version={model_version} category=hate_speech actions_1m={actions_per_min}
+  appeal_overturn_rate={fp_rate_pct}% silenced_players={affected_players} hate_speech_threshold={hs_threshold}'
 stack_trace: |-
-  === AUTOMOD ACCURACY METRICS ===
-  model={model_version}  window={window_minutes}min
-  ----------- classification stats ----
-    total_scanned    = 84,201
-    true_positives   = 412
-    false_positives  = {false_positive_count}
-    false_negatives  = 23
-    fp_rate          = {fp_rate_pct}%
-    precision        = 0.42
-    recall           = 0.95
-  ----------- category breakdown ------
-    harassment   : fp_rate=12.1%  (normal: 1.2%)
-    hate_speech  : fp_rate=34.8%  (normal: 2.1%)  <<< SPIKE
-    spam         : fp_rate=8.4%   (normal: 3.1%)
-    exploits     : fp_rate=2.1%   (normal: 0.8%)
-  ----------- affected players --------
-    silenced    = {affected_players}
-    appeals     = 847 (pending)
-    overturned  = 0 (queue backed up)
-  ----------- action ------------------
-    ROLLBACK to {model_version}-prev  UNSILENCE affected players
-  MOD-FALSE-POS-STORM: {false_positive_count} false positives at {fp_rate_pct}% rate
+  === AUTOMOD ACCURACY MONITOR model=automod-text version={model_version} ===
+  --- actions (last 15 min) ---
+    actions_1m        = {actions_per_min} (baseline 50-150)
+    silenced_players  = {affected_players}
+  --- appeals decided (last 15 min) ---
+    overturn_rate     = {fp_rate_pct}% (baseline 1-4%)
+  --- by category ---
+    hate_speech  : 91% of actions, most overturned actions scored 0.55-0.84
+    harassment   : unchanged
+    cheating     : unchanged
+    spam         : unchanged
+  --- serving ---
+    hate_speech_threshold = {hs_threshold}
+    replicas              = 12/12
+  MOD-FALSE-POS-STORM: appeal overturn rate {fp_rate_pct}% on automod-text {model_version}
 correlation_attr:
-  key: deployment.automod_model
-  value: nlp-classifier-v4.0-beta-sensitive
+  key: model.version
+  value: v6.2
 fault_params:
-  false_positive_count: {randint: [100, 5000]}
-  window_minutes: {randint: [5, 60]}
-  fp_rate_pct: {uniform: [15.0, 45.0], round: 1}
-  model_version:
-    format: "automod-v{major}.{minor}"
-    major: {randint: [3, 7]}
-    minor: {randint: [0, 9]}
-  affected_players: {randint: [50, 2000]}
+  model_version: v6.2
+  previous_version: v6.1
+  hs_threshold: 0.55
+  actions_per_min: {randint: [2000, 5000]}
+  fp_rate_pct: {uniform: [30.0, 60.0], round: 1}
+  affected_players: {randint: [800, 3000]}
+  withheld_score: {uniform: [0.55, 0.84], round: 2}
+  withheld_per_min: {randint: [1500, 4000]}
+  appeals_per_min: {randint: [200, 800]}
 rca_clues:
   moderation-engine:
+    model.version: v6.2
+    model.hate_speech_threshold: 0.55
+    moderation.hate_speech_action_share_pct: {randint: [85, 95]}
     moderation.model_precision: {uniform: [0.30, 0.50], round: 2}
-    moderation.hate_speech_fp_rate_pct: {uniform: [20.0, 45.0], round: 1}
   chat-service:
-    chat.silenced_players: {randint: [500, 5000]}
-    chat.appeal_queue_depth: {randint: [200, 2000]}
-  analytics-pipeline:
-    analytics.moderation_accuracy_alert: true
+    chat.messages_withheld_per_min: {randint: [1500, 4000]}
+    chat.appeals_opened_per_min: {randint: [200, 800]}
+cascade_messages:
+  chat-service:
+    - severity: WARN
+      message: '[Chat] message withheld by moderation-engine verdict=FLAGGED category=hate_speech score={withheld_score};
+        withheld_1m={withheld_per_min} appeals_opened_1m={appeals_per_min}'
+fault_scope:
+  cluster: gaming-aks-cluster
+  workloads: [moderation-engine]
+service_lag_seconds: {chat-service: 10}
+infrastructure_events:
+  - service: moderation-engine
+    severity: INFO
+    offset_seconds: -180
+    body: 'model-registry: model automod-text version 6.2 transitioned Staging -> Production by ml-release (archived version 6.1);
+      params hate_speech_threshold=0.55 (was 0.85) CHG0061717'
+    attributes:
+      operation: deployment_rollout
+      change.request: CHG0061717
+      user.name: ml-release
+      change.summary: 'automod-text v6.1 -> v6.2 (hate_speech_threshold 0.85 -> 0.55)'
+      model.name: automod-text
+      model.version: v6.2
+      model.hate_speech_threshold: 0.55
+  - service: moderation-engine
+    severity: INFO
+    offset_seconds: -60
+    body: '[T&S] model-loader: automod-text v6.2 loaded on 12/12 serving replicas (hate_speech_threshold=0.55)'
+    attributes:
+      operation: deployment_rollout
+      change.request: CHG0061717
+      model.name: automod-text
+      model.version: v6.2
+remediation_effects:
+  transition_seconds: 300
+  log_events:
+    - service: moderation-engine
+      severity: INFO
+      offset_seconds: 1
+      body: 'level=info logger=changelog msg="change applied" cmd="opsctl rollback model/automod-text --to-revision previous"
+        actor={actor} result="model/automod-text Production v6.2 -> v6.1 (hate_speech_threshold 0.55 -> 0.85)"'
+      attributes:
+        operation: change_applied
+        event.action: rollback
+        change.target: model/automod-text
+        user.name: '{actor}'
+        model.version: v6.1
+    - service: moderation-engine
+      severity: INFO
+      offset_seconds: 20
+      body: '[T&S] model-loader: automod-text v6.1 loaded on 12/12 serving replicas (hate_speech_threshold=0.85)'
+      attributes:
+        operation: deployment_rollout
+        model.name: automod-text
+        model.version: v6.1
+  steady_attributes:
+    moderation-engine:
+      model.version: v6.1
+  verification:
+    - signal: automod actions per minute
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "moderation-engine"'
+      field: 'metrics.moderation.actions_taken'
+      expect: 'back in 50-150 per minute within about 30 s (was 2000-5000)'
+      within_seconds: 120
+    - signal: appeal overturn rate
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "moderation-engine"'
+      field: 'metrics.moderation.false_positive_rate'
+      expect: 'falling steadily, back in 1-4% within about 300 s as the appeals of v6.2 actions are decided (was 30-60%)'
+      within_seconds: 360
+    - signal: MOD-FALSE-POS-STORM lines
+      from: 'logs.otel.gaming'
+      where: 'body.text LIKE "*MOD-FALSE-POS-STORM*"'
+      expect: '0 new lines'
+      within_seconds: 120
+    - signal: serving model version
+      from: 'logs.otel.gaming'
+      where: 'resource.attributes.service.name == "moderation-engine" AND attributes.operation == "automod_status"'
+      field: 'attributes.model.version'
+      expect: 'v6.1 on every automod-serving line since the rollback (was v6.2)'
+      within_seconds: 120
 business_impact:
   - kpi: business.chat_messages_per_min
     factor: {uniform: [0.25, 0.55]}

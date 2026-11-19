@@ -1,0 +1,37 @@
+name: "GT ibmmq_otel: cpu_load_high"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-IBMMQ-CPU-LOAD-HIGH
+sensor_type: impact_key_probe
+affected_services:
+  - gt-ibmmq-aws-svc-1
+cascade_services:
+  - gt-ibmmq-aws-svc-2
+description: "Tests impact_key cpu_load_high on generator ibmmq_otel."
+investigation_notes: |-
+  1. Verify ibmmq_otel is active and reporting metrics.
+  2. Check that the cpu_load_high metric has reached the trigger value (637.0).
+  3. Confirm generator_impact for ibmmq_otel.cpu_load_high is set to 637.0.
+  4. Look for correlated changes in service gt-ibmmq-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_cpu_load_high_baseline
+error_message: "GT-PROBE: gen=ibmmq_otel key=cpu_load_high value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=ibmmq_otel
+  impact_key: cpu_load_high
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 637.0
+  svc_name: gt-ibmmq-aws-svc-1
+rca_clues:
+  gt-ibmmq-aws-svc-1:
+    probe.generator: ibmmq_otel
+    probe.impact_key: cpu_load_high
+    probe.trigger_value: 637.0
+  gt-ibmmq-aws-svc-2:
+    probe.upstream_generator: ibmmq_otel
+    probe.upstream_key: cpu_load_high
+generator_impact:
+  ibmmq_otel:
+    cpu_load_high: 637.0

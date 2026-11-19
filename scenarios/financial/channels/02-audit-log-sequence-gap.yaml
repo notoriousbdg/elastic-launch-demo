@@ -6,50 +6,159 @@ sensor_type: sequence_validator
 affected_services:
 - audit-logger
 - compliance-monitor
+error_services:
+- audit-logger
 cascade_services:
 - settlement-processor
-description: Audit trail event sequence numbers have gaps indicating lost events
+description: Audit trail event sequence numbers have gaps because the audit writer drops records when its WORM sink buffer is full
+onset_delay_seconds: 10
+service_lag_seconds: {compliance-monitor: 30, settlement-processor: 60}
 investigation_notes: |-
-  1. Check audit-logger logs for AUDIT-SEQ-GAP — note audit_stream, expected_seq, and gap_count.
-  2. Query FROM logs.otel.financial.* | WHERE body.text LIKE "*AUDIT-SEQ-GAP*" | STATS count(), sum(gap_count) BY audit_stream to assess total event loss.
-  3. Inspect Kafka consumer lag on the affected stream — if kafka_consumer_lag > 5000 the pipeline cannot keep up with ingestion rate.
-  4. Check compliance-monitor for downstream hash chain validation errors — a broken chain invalidates the immutability proof for SEC-17a4.
-  5. If replay_source=kafka is available, trigger replay from expected_seq to close the gap before the regulatory audit window closes.
-remediation_action: replay_audit_stream
-error_message: '[AUDIT] AUDIT-SEQ-GAP: stream={audit_stream} expected={expected_seq} received={last_seq} gap_count={gap_count}'
+  Root cause: audit-logger config revision 47 (CR-4127) promoted the dev overlay's WORM sink writer settings to prod: overflow_policy block -> drop and buffer_records 65536 -> 4096. At the trading peak the immutable Azure Blob container (SEC 17a-4(f) WORM storage) slows to a write p99 of {sink_p99_ms} ms. That is inside the sink's 500 ms SLA and the 65536-record buffer used to absorb it with backpressure; the 4096-record buffer fills in about a second and, with overflow_policy=drop, the writer discards records it has already consumed from Kafka. Each discarded run leaves {gap_count} missing records after seq {last_seq} on stream {audit_stream}, and the hash chain cannot be verified past the gap. This is not a slow consumer: the audit-writer group's Kafka consumer lag stays at {kafka_lag} records (a lagging consumer shows more than 5,000 and no gaps), because dropping is how the writer keeps up. Kafka still holds every dropped record (7-day retention), so a replay closes the gaps. Audit ingest (metrics.audit_logger.ingest_events_per_s) is at its normal rate and the northeurope replication copy is healthy; only the sink's overflow settings changed.
+  Confirm:
+    - audit-logger integrity_check lines (body.text LIKE "*integrity_check*") show attributes.audit.sink.overflow_policy=drop, attributes.audit.sink.buffer_records=4096, attributes.config.revision=47 and attributes.integrity.hash_chain=BROKEN, with attributes.integrity.open_gaps growing
+    - metrics.audit_logger.sequence_gaps_per_min at 30-80 (0 normally), metrics.audit_logger.dropped_records_per_min at gaps times records per gap, metrics.audit_logger.open_sequence_gaps rising, metrics.audit_logger.sink_buffer_fill_pct near 100% and metrics.audit_logger.sink_write_p99_ms at 180-450, while metrics.audit_logger.kafka_consumer_lag stays under 400
+    - the audit-logger line "[AUDIT] config_reload source=config/audit-logger revision=47 ... overflow_policy=block->drop" (attributes.operation=config_change, attributes.change.request=CR-4127) comes before the first AUDIT-SEQ-GAP line
+    - compliance-monitor logs hash chain verification failures for the same streams and seq numbers
+  Remediation: opsctl rollback config/audit-logger --to-revision previous restores revision 46 (block, 65536 records); the three writer pods restart one at a time over about 30 s and no new gaps appear after about 45 s. Then opsctl run job/audit-gap-replay re-reads the missing offsets from Kafka and writes them to the WORM sink in sequence: open gaps fall to 0 and hash_chain returns to VALID within about 2 minutes, while the live consumer lag rises briefly (the block policy backpressures it) and drains. Adding consumers or partitions does nothing (the consumer is not behind), and a replay without the rollback only opens new gaps at the next peak.
+remediation_action: rollback_sink_config_and_replay_gaps
+remediation_command: |-
+  opsctl rollback config/audit-logger --to-revision previous
+  opsctl run job/audit-gap-replay
+error_message: '[AUDIT] AUDIT-SEQ-GAP: stream={audit_stream} missing={gap_count} records after seq={last_seq} sink=worm-azblob overflow_policy=drop buffer=4096/4096 write_p99_ms={sink_p99_ms}'
 stack_trace: |-
   === AUDIT PIPELINE STATUS ===
-  stream={audit_stream}  partition=0
+  stream={audit_stream}  sink=worm-azblob (immutable container audit-worm, SEC 17a-4(f))
   --- SEQUENCE ANALYSIS ---
     last_committed_seq   {last_seq}
-    expected_next_seq    {expected_seq}
-    gap_size             {gap_count} events
-    gap_duration         ~4.2s
-  --- PIPELINE HEALTH ---
-    kafka_consumer_lag   2,340
-    write_ahead_log      BEHIND
-    hash_chain           BROKEN (gap invalidates chain from seq {expected_seq})
-    immutability_proof   INVALID
+    missing_records      {gap_count}
+    hash_chain           BROKEN (cannot verify past seq {last_seq})
+  --- WRITER ---
+    config_revision      47
+    overflow_policy      drop
+    buffer               4096/4096 records (FULL)
+    sink_write_p99_ms    {sink_p99_ms}  (sink SLA 500)
+    dropped_since_reload {dropped_total}
+  --- KAFKA CONSUMER ---
+    topic=audit-events  group=audit-writer  consumer_lag={kafka_lag}  (keeping up)
   --- RECOVERY ---
-    replay_source=kafka  replay_from={expected_seq}  estimated_time=12s
+    dropped records still in Kafka (retention 7d), replay from committed offsets possible
     reg_impact=SEC-17a4  audit_gap_report=REQUIRED
-  ACTION: pause_pipeline=true  request_replay=true  alert=AUDIT-SEQ-GAP
 correlation_attr: {}
 fault_params:
   audit_stream: {choice: [orders, trades, settlements, risk-events, compliance-alerts]}
-  expected_seq: {randint: [1000000, 9999999]}
-  last_seq: {randint: [1000000, 9999999]}
-  gap_count: {randint: [1, 100]}
+  last_seq: {randint: [1000000, 9000000]}
+  gap_count: {randint: [20, 120]}
+  sink_p99_ms: {randint: [180, 450]}
+  dropped_total: {randint: [2000, 40000]}
+  kafka_lag: {randint: [50, 400]}
 rca_clues:
   audit-logger:
-    audit.seq_gap_count: {randint: [1, 100]}
-    audit.kafka_consumer_lag: {randint: [500, 20000]}
+    audit.sink.overflow_policy: drop
+    audit.sink.buffer_records: 4096
+    audit.seq_gap_count: {randint: [20, 120]}
+    audit.kafka_consumer_lag: {randint: [50, 400]}
   compliance-monitor:
     compliance.hash_chain_broken: true
-    compliance.immutability_violations: {randint: [1, 10]}
+    compliance.unverifiable_records: {randint: [20, 120]}
   settlement-processor:
-    settlement.audit_hold_count: {randint: [0, 25]}
+    settlement.audit_hold_count: {randint: [1, 25]}
     settlement.pending_reg_review: {randint: [1, 50]}
+cascade_messages:
+  compliance-monitor:
+    - severity: ERROR
+      message: '[COMPL] audit_chain_verify stream={audit_stream} result=FAILED hash chain breaks after seq {last_seq} ({gap_count} records missing); SEC 17a-4(f) immutability attestation on hold'
+  settlement-processor:
+    - severity: WARN
+      message: '[SETTLE] batch held for regulatory review: audit record for stream={audit_stream} after seq {last_seq} not confirmed by audit-logger'
+fault_scope:
+  cluster: finserv-aks-cluster
+  workloads: [audit-logger, compliance-monitor]
+infrastructure_events:
+  - service: audit-logger
+    severity: INFO
+    offset_seconds: -150
+    body: '[AUDIT] config_reload source=config/audit-logger revision=47 (was 46) worm_sink.overflow_policy=block->drop worm_sink.buffer_records=65536->4096 overlay=dev promoted_to=prod applied_by=audit-platform-ci (CR-4127)'
+    attributes:
+      user.name: audit-platform-ci
+      change.request: CR-4127
+      operation: config_change
+      change.summary: 'worm_sink.overflow_policy: block -> drop; worm_sink.buffer_records: 65536 -> 4096'
+      audit.sink.overflow_policy: drop
+      audit.sink.buffer_records: 4096
+      config.revision: '47'
+remediation_effects:
+  log_taper_seconds: 30
+  log_events:
+    - service: audit-logger
+      severity: INFO
+      offset_seconds: 1
+      body: '[AUDIT] event_logged stream=change-mgmt type=CHANGE_APPLIED cmd="opsctl rollback config/audit-logger --to-revision previous" actor={actor}: config/audit-logger revision 47 -> 46 (worm_sink.overflow_policy drop -> block, buffer_records 4096 -> 65536)'
+      attributes:
+        operation: change_applied
+        audit.stream: change-mgmt
+        change.target: config/audit-logger
+    - service: audit-logger
+      severity: INFO
+      offset_seconds: 2
+      body: '[AUDIT] event_logged stream=change-mgmt type=CHANGE_APPLIED cmd="opsctl run job/audit-gap-replay" actor={actor}: replay of open sequence gaps from Kafka topic audit-events into the WORM sink'
+      attributes:
+        operation: change_applied
+        audit.stream: change-mgmt
+        change.target: job/audit-gap-replay
+    - service: audit-logger
+      severity: INFO
+      offset_seconds: 4
+      body: '[AUDIT] config_reload source=config/audit-logger revision=46 worm_sink.overflow_policy=block worm_sink.buffer_records=65536; rolling restart 1/3 writer pods'
+      attributes:
+        operation: config_change
+        config.revision: '46'
+        audit.sink.overflow_policy: block
+    - service: audit-logger
+      severity: INFO
+      offset_seconds: 30
+      body: '[AUDIT] rollout complete: 3/3 writer pods on revision 46 overflow_policy=block buffer_records=65536; no records dropped since restart'
+      attributes:
+        operation: config_change
+        config.revision: '46'
+        audit.sink.overflow_policy: block
+    - service: audit-logger
+      severity: INFO
+      offset_seconds: 32
+      body: '[AUDIT] gap_replay job=audit-gap-replay started: re-reading missing offsets from topic=audit-events (retention 7d); live consumer backpressured while the sink absorbs replay writes'
+      attributes:
+        operation: gap_replay
+    - service: audit-logger
+      severity: INFO
+      offset_seconds: 110
+      body: '[AUDIT] gap_replay job=audit-gap-replay complete: all open sequence gaps closed, hash chain re-verified VALID on 5/5 streams'
+      attributes:
+        operation: gap_replay
+        integrity.hash_chain: VALID
+  verification:
+    - signal: audit_logger.sequence_gaps_per_min
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "audit-logger"'
+      field: 'metrics.audit_logger.sequence_gaps_per_min'
+      expect: 'back to 0 once the writer pods run revision 46, about 45 s (was 30-80 per minute)'
+      within_seconds: 60
+    - signal: audit_logger.open_sequence_gaps
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "audit-logger"'
+      field: 'metrics.audit_logger.open_sequence_gaps'
+      expect: 'falls to 0 as the replay closes every gap, about 2 minutes (was in the hundreds and growing); hash_chain=VALID again'
+      within_seconds: 150
+    - signal: AUDIT-SEQ-GAP lines
+      from: 'logs.otel.finserv'
+      where: 'body.text LIKE "*AUDIT-SEQ-GAP*"'
+      expect: '0 new lines after the rolling restart (about 30 s)'
+      within_seconds: 60
+    - signal: WORM sink overflow policy
+      from: 'logs.otel.finserv'
+      where: 'resource.attributes.service.name == "audit-logger" AND body.text LIKE "*integrity_check*"'
+      field: 'attributes.audit.sink.overflow_policy'
+      expect: 'block on every line since the fix; drop stops appearing'
+      within_seconds: 60
 business_impact:
   - kpi: business.reporting_latency_sec
     factor: {uniform: [3.0, 8.0]}

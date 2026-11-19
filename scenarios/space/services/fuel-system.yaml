@@ -89,9 +89,43 @@ steps:
       sensor.expected_max: 320.0
       sensor.status: NOMINAL
 - sample:
+    tc47_cal_offset_val:
+      expr: "round(0.5 + (rand.uniform(4.0, 11.5) - 0.5) * min(1.0, elapsed.get(1, 0) / 45.0), 2) if 1 in all_active
+        else (round(7.5 + (rand.uniform(0.2, 1.0) - 7.5) * min(1.0, since_fix.get(1, 0) / 45.0), 2) if 1 in fixed_channels
+        else round(rand.uniform(0.1, 0.9), 2))"
+    tc47_cal_status:
+      expr: "'ANOMALY' if 1 in all_active or tc47_cal_offset_val > 2.5 else 'NOMINAL'"
+    tcs_cal_rev:
+      expr: "'v2.3.1-canary' if 1 in all_active else 'v2.3.0'"
+- metric:
+    name: fuel_system.engine_thermal_cal_offset_k
+    value:
+      var: tc47_cal_offset_val
+    unit: K
+- log:
+    level: INFO
+    message: '[TCS] sensor=TC-47 cal_offset={tc47_cal_offset_val}K tolerance=2.5K cal_rev={tcs_cal_rev} status={tc47_cal_status}'
+    attrs:
+      operation: sensor_reading
+      sensor.name: engine_thermal_cal_offset
+      sensor.id: TC-47
+      sensor.value:
+        var: tc47_cal_offset_val
+      sensor.unit: K
+      sensor.expected_max: 2.5
+      sensor.status:
+        var: tc47_cal_status
+      deployment.config_version:
+        var: tcs_cal_rev
+- sample:
     lox_pressure_val:
-      expr: round(max(240.0, min(290.0, rand.uniform(240.0, 290.0) + rand.gauss(0, (290.0 - 240.0) * 0.02))) if not active
-        else round(rand.uniform(240.0, 290.0) + rand.gauss(0, (290.0 - 240.0) * 0.02), 2), 2)
+      expr: "round(265.0 + (rand.uniform(150.0, 195.0) - 265.0) * min(1.0, elapsed.get(2, 0) / 45.0), 2) if 2 in all_active
+        else (round(172.0 + (rand.uniform(250.0, 280.0) - 172.0) * min(1.0, since_fix.get(2, 0) / 60.0), 2) if 2 in fixed_channels
+        else round(max(240.0, min(290.0, rand.uniform(245.0, 285.0) + rand.gauss(0, 1.0))), 2))"
+    lox_status:
+      expr: "'ANOMALY' if 2 in all_active or lox_pressure_val < 240.0 or lox_pressure_val > 290.0 else 'NOMINAL'"
+    reg_a_fw:
+      expr: "'fw-4.2.0-rc1' if 2 in all_active else 'fw-4.1.7'"
 - metric:
     name: fuel_system.lox_pressure
     value:
@@ -99,17 +133,22 @@ steps:
     unit: PSI
 - log:
     level: INFO
-    message: '[PMS] sensor=lox_pressure reading={lox_pressure_val}PSI nominal=240.0-290.0PSI status=NOMINAL'
+    message: '[PMS] sensor=lox_pressure tank=LOX-1 reading={lox_pressure_val}PSI nominal=240.0-290.0PSI regulator=REG-A firmware={reg_a_fw} status={lox_status}'
     attrs:
       operation: sensor_reading
       sensor.name: lox_pressure
       sensor.type: lox
+      sensor.id: LOX-1
       sensor.value:
         var: lox_pressure_val
       sensor.unit: PSI
       sensor.expected_min: 240.0
       sensor.expected_max: 290.0
-      sensor.status: NOMINAL
+      sensor.status:
+        var: lox_status
+      propulsion.regulator: REG-A
+      infra.firmware_rev:
+        var: reg_a_fw
 - sample:
     rp1_pressure_val:
       expr: round(max(220.0, min(270.0, rand.uniform(220.0, 270.0) + rand.gauss(0, (270.0 - 220.0) * 0.02))) if not active
@@ -155,17 +194,31 @@ steps:
       sensor.expected_max: 5.8
       sensor.status: NOMINAL
 - sample:
+    ox_delta_pct:
+      expr: "round(-6.5 * min(1.0, elapsed.get(3, 0) / 45.0) + rand.uniform(-0.4, 0.4), 2) if 3 in all_active
+        else (round(-6.5 * (1.0 - min(1.0, since_fix.get(3, 0) / 45.0)) + rand.uniform(-1.0, 1.0), 2) if 3 in fixed_channels
+        else round(rand.uniform(-1.2, 1.2), 2))"
+    ox_commanded_val:
+      expr: "12.4"
     oxidizer_flow_val:
-      expr: round(max(10.5, min(14.5, rand.uniform(10.5, 14.5) + rand.gauss(0, (14.5 - 10.5) * 0.02))) if not active else
-        round(rand.uniform(10.5, 14.5) + rand.gauss(0, (14.5 - 10.5) * 0.02), 2), 2)
+      expr: "round(ox_commanded_val * (1.0 + ox_delta_pct / 100.0), 2)"
+    ox_status:
+      expr: "'ANOMALY' if 3 in all_active or abs(ox_delta_pct) > 3.0 else 'NOMINAL'"
+    mov_trim_pct:
+      expr: "0.0 if 3 in all_active else (6.5 if 3 in fixed_channels else 0.0)"
 - metric:
     name: fuel_system.oxidizer_flow_rate
     value:
       var: oxidizer_flow_val
     unit: kg/s
+- metric:
+    name: fuel_system.oxidizer_flow_commanded
+    value:
+      var: ox_commanded_val
+    unit: kg/s
 - log:
     level: INFO
-    message: '[PMS] sensor=oxidizer_flow reading={oxidizer_flow_val}kg/s nominal=10.5-14.5kg/s status=NOMINAL'
+    message: '[PMS] sensor=oxidizer_flow reading={oxidizer_flow_val}kg/s commanded={ox_commanded_val}kg/s delta={ox_delta_pct}% tolerance=3.0% valve=MOV-OX trim={mov_trim_pct}% status={ox_status}'
     attrs:
       operation: sensor_reading
       sensor.name: oxidizer_flow
@@ -175,7 +228,14 @@ steps:
       sensor.unit: kg/s
       sensor.expected_min: 10.5
       sensor.expected_max: 14.5
-      sensor.status: NOMINAL
+      sensor.status:
+        var: ox_status
+      propulsion.flow_commanded_kgs:
+        var: ox_commanded_val
+      propulsion.flow_delta_pct:
+        var: ox_delta_pct
+      propulsion.mov_trim_pct:
+        var: mov_trim_pct
 - sample:
     turbopump_rpm_val:
       expr: round(max(28000.0, min(34000.0, rand.uniform(28000.0, 34000.0) + rand.gauss(0, (34000.0 - 28000.0) * 0.02))) if

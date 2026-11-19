@@ -64,14 +64,157 @@ constants:
   - RUNNING
   - RUNNING
   - RUNNING
+  - RUNNING
   - IDLE
   - CHANGEOVER
 state:
   _work_orders_total:
     init: 0
-  _last_batch_report:
-    init: now
+  # Queue depth when the MES-QUEUE-OVERFLOW fix landed, so the drain starts from it.
+  _q18_at_fix:
+    init: 0
 steps:
+- sample:
+    # Per-channel fault intensity: ramps 0->1 once the fault reaches this service, drains 1->0 after its fix.
+    f1:
+      expr: "min(1.0, max(0.0, elapsed.get(1, 0) - lag.get(1, 0)) / 20.0) if 1 in all_active else (max(0.0, 1.0 - since_fix.get(1, 0) / 40.0) if 1 in fixed_channels else 0.0)"
+    f2:
+      expr: "min(1.0, max(0.0, elapsed.get(2, 0) - lag.get(2, 0)) / 30.0) if 2 in all_active else (max(0.0, 1.0 - since_fix.get(2, 0) / 90.0) if 2 in fixed_channels else 0.0)"
+    f3:
+      expr: "min(1.0, max(0.0, elapsed.get(3, 0) - lag.get(3, 0)) / 60.0) if 3 in all_active else (max(0.0, 1.0 - since_fix.get(3, 0) / 90.0) if 3 in fixed_channels else 0.0)"
+    f4:
+      expr: "min(1.0, max(0.0, elapsed.get(4, 0) - lag.get(4, 0)) / 20.0) if 4 in all_active else (max(0.0, 1.0 - since_fix.get(4, 0) / 60.0) if 4 in fixed_channels else 0.0)"
+    f7:
+      expr: "min(1.0, max(0.0, elapsed.get(7, 0) - lag.get(7, 0)) / 10.0) if 7 in all_active else (max(0.0, 1.0 - since_fix.get(7, 0) / 20.0) if 7 in fixed_channels else 0.0)"
+    f10:
+      expr: "min(1.0, max(0.0, elapsed.get(10, 0) - lag.get(10, 0)) / 60.0) if 10 in all_active else (max(0.0, 1.0 - since_fix.get(10, 0) / 120.0) if 10 in fixed_channels else 0.0)"
+    f15:
+      expr: "min(1.0, max(0.0, elapsed.get(15, 0) - lag.get(15, 0)) / 30.0) if 15 in all_active else (max(0.0, 1.0 - since_fix.get(15, 0) / 60.0) if 15 in fixed_channels else 0.0)"
+    f16:
+      expr: "min(1.0, max(0.0, elapsed.get(16, 0) - lag.get(16, 0)) / 20.0) if 16 in all_active else (max(0.0, 1.0 - since_fix.get(16, 0) / 45.0) if 16 in fixed_channels else 0.0)"
+    f18:
+      expr: "min(1.0, max(0.0, elapsed.get(18, 0) - lag.get(18, 0)) / 30.0) if 18 in all_active else (max(0.0, 1.0 - since_fix.get(18, 0) / 300.0) if 18 in fixed_channels else 0.0)"
+- sample:
+    deadlocks_per_min:
+      expr: "int(f2 * rand.randint(4, 10))"
+    stuck_work_orders:
+      expr: "int(rand.randint(0, 2) + f2 * rand.randint(20, 60))"
+    routing_ruleset:
+      expr: "'routing-v3.4.1' if 2 in all_active else 'routing-v3.4.0'"
+    orphan_operations:
+      expr: "int(f3 * rand.randint(12, 30))"
+    traceability_pct:
+      expr: "round(100.0 - f3 * rand.uniform(14.0, 30.0), 1)"
+    close_grace_s:
+      expr: "60 if 3 in all_active else 900"
+    workers:
+      expr: "2 if 18 in all_active else 6"
+    queue_base:
+      expr: "rand.randint(0, 150)"
+    queue_depth:
+      expr: "int(min(4800.0, 2100.0 + 7.0 * elapsed.get(18, 0) + rand.uniform(-40.0, 40.0))) if 18 in all_active else (int(max(queue_base, _q18_at_fix - 9.0 * since_fix.get(18, 0))) if 18 in fixed_channels else queue_base)"
+    drain_per_min:
+      expr: "workers * 240"
+    upstream_tag_age_s:
+      expr: "round(rand.uniform(0.2, 1.5) + (max(0.0, elapsed.get(1, 0) - lag.get(1, 0)) if 1 in all_active else 0.0) + (max(0.0, elapsed.get(7, 0) - lag.get(7, 0)) if 7 in all_active else 0.0) + f4 * rand.uniform(5.0, 35.0), 1)"
+    units_completed_per_min:
+      expr: "round(rand.uniform(38.0, 46.0) * (1.0 - 0.2 * f2) * (1.0 - 0.3 * f18) * (1.0 - 0.15 * f15) * (1.0 - 0.15 * f10) * (1.0 - 0.1 * f16), 1)"
+- counter:
+    state_key: _q18_at_fix
+    by:
+      expr: "(queue_depth - _q18_at_fix) if 18 in all_active else 0"
+- counter:
+    state_key: _work_orders_total
+    by: 1
+- metric:
+    name: mes.work_orders_processed
+    value:
+      var: _work_orders_total
+    unit: orders
+- metric:
+    name: mes.deadlocks_per_min
+    value:
+      var: deadlocks_per_min
+    unit: deadlocks/min
+- metric:
+    name: mes.stuck_work_orders
+    value:
+      var: stuck_work_orders
+    unit: orders
+- metric:
+    name: mes.genealogy_orphan_operations
+    value:
+      var: orphan_operations
+    unit: operations
+- metric:
+    name: mes.batch_traceability_complete_pct
+    value:
+      var: traceability_pct
+    unit: '%'
+- metric:
+    name: mes.work_order_queue_depth
+    value:
+      var: queue_depth
+    unit: orders
+- metric:
+    name: mes.workorder_workers
+    value:
+      var: workers
+    unit: workers
+- metric:
+    name: mes.upstream_tag_age_s
+    value:
+      var: upstream_tag_age_s
+    unit: s
+- metric:
+    name: mes.units_completed_per_min
+    value:
+      var: units_completed_per_min
+    unit: units/min
+- log:
+    level: INFO
+    message: '[MES] routing_status ruleset={routing_ruleset} line=LINE-02 transitions_per_min={units_completed_per_min} deadlocks_per_min={deadlocks_per_min} stuck_work_orders={stuck_work_orders}'
+    attrs:
+      operation: routing_status
+      mes.routing_ruleset:
+        var: routing_ruleset
+      mes.deadlocks_per_min:
+        var: deadlocks_per_min
+- log:
+    level: INFO
+    message: '[MES] workorder_pool deployment=mes-workorder-workers workers={workers} desired={workers} queue=WORK-ORDER depth={queue_depth} drain_per_min={drain_per_min}'
+    attrs:
+      operation: workorder_pool
+      mes.workorder_workers:
+        var: workers
+      mes.work_order_queue_depth:
+        var: queue_depth
+- sample:
+    batch_id:
+      expr: f'BATCH-{rand.randint(100000, 999999)}'
+    batch_product:
+      choice: PRODUCT_CODES
+    lot_count:
+      randint:
+      - 2
+      - 8
+    traceability:
+      expr: "'INCOMPLETE' if f3 > 0.5 and rand.random() < 0.6 else 'COMPLETE'"
+- log:
+    level: INFO
+    message: '[MES] batch_genealogy batch={batch_id} product={batch_product} raw_lots={lot_count} close_grace_s={close_grace_s} traceability={traceability}'
+    attrs:
+      operation: batch_genealogy
+      mes.batch_id:
+        var: batch_id
+      mes.product_code:
+        var: batch_product
+      mes.raw_material_lots:
+        var: lot_count
+      mes.batch_close_grace_s:
+        var: close_grace_s
+      mes.traceability_status:
+        var: traceability
 - sample:
     wo_id:
       expr: f'WO-{rand.randint(100000, 999999)}'
@@ -100,76 +243,18 @@ steps:
 - sample:
     eq_line:
       choice: LINES
-    state:
-      choice: EQUIPMENT_STATES
-    oee:
-      uniform:
-      - 72.0
-      - 94.0
-      round: 1
+    eq_state:
+      expr: "'UNKNOWN' if (eq_line == 'LINE-03' and f1 > 0.5) or (eq_line in ('LINE-01', 'LINE-02', 'LINE-03') and f7 > 0.5) else rand.choice(EQUIPMENT_STATES)"
     operator_id:
       expr: f'OP-{rand.randint(1000, 9999)}'
 - log:
     level: INFO
-    message: '[MES] equipment_state line={eq_line} state={state} oee={oee}% operator={operator_id}'
+    message: '[MES] equipment_state line={eq_line} state={eq_state} upstream_tag_age_s={upstream_tag_age_s} operator={operator_id}'
     attrs:
       operation: equipment_state
       mes.line:
         var: eq_line
       mes.equipment_state:
-        var: state
-      mes.oee_pct:
-        var: oee
-- every:
-    seconds: 10
-    state_key: _last_batch_report
-    steps:
-    - sample:
-        batch_id:
-          expr: f'BATCH-{rand.randint(100000, 999999)}'
-        batch_product:
-          choice: PRODUCT_CODES
-        lot_count:
-          randint:
-          - 2
-          - 8
-    - log:
-        level: INFO
-        message: '[MES] batch_genealogy batch={batch_id} product={batch_product} raw_lots={lot_count} traceability=COMPLETE'
-        attrs:
-          operation: batch_genealogy
-          mes.batch_id:
-            var: batch_id
-          mes.product_code:
-            var: batch_product
-          mes.raw_material_lots:
-            var: lot_count
-          mes.traceability_status: COMPLETE
-- counter:
-    state_key: _work_orders_total
-    by: 1
-- metric:
-    name: mes.work_orders_processed
-    value:
-      var: _work_orders_total
-    unit: orders
-- metric:
-    name: mes.work_order_queue_depth
-    value:
-      if_active:
-        randint:
-        - 180
-        - 950
-      else:
-        randint:
-        - 8
-        - 40
-    unit: orders
-- metric:
-    name: mes.line_utilization_pct
-    value:
-      uniform:
-      - 72.0
-      - 96.0
-      round: 1
-    unit: '%'
+        var: eq_state
+      mes.upstream_tag_age_s:
+        var: upstream_tag_age_s

@@ -8,39 +8,102 @@ affected_services:
 - cloud-load-balancer
 cascade_services:
 - cloud-nat-gateway
-description: VPC peering route table exceeding maximum advertised route limit
+description: VPC peering route table exceeding maximum advertised route limit, dropping routes to the Cloud SQL for PostgreSQL private network
 investigation_notes: |-
-  Root cause: VPC peering has a hard limit of 250 advertised routes per peering connection. When custom routes are exported across peerings, aggregate routes from all subnets and static/dynamic routes count toward this limit. Check current usage with:
-    gcloud compute networks peerings list-routes <peering> --network=<vpc> --region=<region> --direction=INCOMING
-  Remediation: Consolidate overlapping CIDR ranges using supernets, remove stale static routes, or switch to a Shared VPC model which avoids peering route limits. If immediate relief is needed, request a quota increase via gcloud compute project-info describe --project=<project> and file a support case referencing the PEER_ROUTES_PER_PEERING quota.
+  Root cause: Terraform release tf-1.7.2-canary turned on --import-custom-routes on the gcpnet-vpc-prod side of the peering gcpnet-vpc-staging-peer (gcpnet-vpc-staging already exports its custom routes, so the import takes effect). gcpnet-vpc-prod now imports every custom route of gcpnet-vpc-staging on top of its subnet routes, so imported routes grow from about 180 to {route_count}, the {route_max}-route peering group limit, and the {dropped_prefixes} prefixes beyond the limit are dropped. Cloud SQL for PostgreSQL is reached over Private Service Access (a peering to servicenetworking), so its private route is among the dropped prefixes: application connections to the primary time out, the application opens a reconnect storm, and replication lag to the cross-region read replica climbs. The route limit is the only cause: the other VPCs (gcpnet-vpc-staging, gcpnet-vpc-shared) stay at 80-200 routes, and the regional subnets, NAT and firewalls are unchanged, which rules out a subnet exhaustion, a firewall change or a NAT fault.
+  Confirm:
+    - vpc-network-manager metric vpc.peering_imported_routes rises from ~180 to {route_max} (the limit) and vpc.peering_dropped_prefixes from 0 to {dropped_prefixes} (the same {dropped_prefixes} on every poll); metrics.vpc.route.count follows the same values
+    - vpc-network-manager log "peering=gcpnet-vpc-staging-peer imported_routes=250/250 ... status=ANOMALY" with attributes.vpc.peering.import_custom_routes = true and attributes.vpc.dropped_prefixes > 0
+    - the vpc-network-manager line "Terraform apply tf-1.7.2-canary" (attributes.deployment.terraform_version) precedes the first VPC-ROUTE-LIMIT-EXCEEDED
+    - GCP Cloud SQL for PostgreSQL OTel dashboards: replica lag and number of backends climb after the routes are dropped
+  Remediation: opsctl patch peering/gcpnet-vpc-staging-peer --network gcpnet-vpc-prod --import-custom-routes false stops the custom route export; imported routes fall back to ~180 within about a minute and the dropped prefixes are re-learned. Raising the peering-group quota would only move the limit and the extra routes are not needed, and consolidating routes is not needed. Follow-up: revert the --import-custom-routes change in the Terraform repository or the next apply re-enables it.
 remediation_action: reset_vpc_peering
+remediation_command: |-
+  opsctl patch peering/gcpnet-vpc-staging-peer --network gcpnet-vpc-prod --import-custom-routes false
 error_message: level=error ts={{timestamp}} caller=vpc_manager.go:312 msg="VPC-ROUTE-LIMIT-EXCEEDED" project={gcp_project}
   peering={vpc_peering_name} routes={route_count}/{route_max} network={vpc_network} region={gcp_region} dropped_prefixes={dropped_prefixes}
-stack_trace: "goroutine 234 [running]:\nruntime/debug.Stack()\n\t/usr/local/go/src/runtime/debug/stack.go:24 +0x5e\ncloud.google.com/go/compute/apiv1.(*RoutesClient).AggregatedList(0xc000518000,\
-  \ {{0xc000a12480}}, {{0xc000a124c0}})\n\t/app/internal/vpc/route_manager.go:312 +0x3a2\n  VPC Network: {vpc_network}\n \
+stack_trace: "goroutine 234 [running]:\nruntime/debug.Stack()\n\t/usr/local/go/src/runtime/debug/stack.go:24 +0x5e\ngcpnet/internal/vpc.(*RouteManager).checkPeeringRoutes(0xc000518000,\
+  \ {{0xc000a12480}}, {{0xc000a124c0}})\n\t/app/internal/vpc/vpc_manager.go:312 +0x3a2\n  VPC Network: {vpc_network}\n \
   \ Peering: {vpc_peering_name}\n  Routes: {route_count}/{route_max}\n  Dropped Prefixes: {dropped_prefixes}\n  Action: Consolidate\
   \ routes or request quota increase"
 correlation_attr:
   key: deployment.terraform_version
   value: tf-1.7.2-canary
 fault_params:
-  gcp_project: {choice: [gcpnet-prod-001, gcpnet-prod-002, gcpnet-staging]}
-  gcp_region: {choice: [us-central1, us-east1, europe-west1]}
-  vpc_network: {choice: [gcpnet-vpc-prod, gcpnet-vpc-staging, gcpnet-vpc-shared]}
-  vpc_peering_name: {choice: [peer-to-shared-vpc, peer-to-onprem, peer-to-partner]}
-  route_count: {randint: [240, 250]}
+  gcp_project: gcpnet-prod-001
+  gcp_region: us-central1
+  vpc_network: gcpnet-vpc-prod
+  vpc_peering_name: gcpnet-vpc-staging-peer
+  route_count: 250
   route_max: 250
-  dropped_prefixes: {randint: [5, 30]}
+  dropped_prefixes: 18
 rca_clues:
   vpc-network-manager:
-    vpc.route_utilization_pct: {uniform: [96, 100], round: 1}
-    vpc.peering_name: peer-to-shared-vpc
+    vpc.route_utilization_pct: 100.0
+    vpc.peering_name: gcpnet-vpc-staging-peer
   cloud-load-balancer:
     lb.route_advertisement_status: stale
     lb.backend_reachability: partial
   cloud-nat-gateway:
     nat.egress_route_affected: true
     nat.fallback_route: default-igw
+cascade_messages:
+  cloud-nat-gateway:
+    - severity: WARN
+      message: 'nat-agent: egress probe to the private services range (Cloud SQL) failed on network={vpc_network}: no route to host'
+fault_scope:
+  cluster: gcpnet-gke-central1
+  workloads: [vpc-network-manager, cloud-load-balancer]
+infrastructure_events:
+  - service: vpc-network-manager
+    severity: INFO
+    offset_seconds: -90
+    body: 'terraform: apply tf-1.7.2-canary completed project=gcpnet-prod-001 google_compute_network_peering.staging_peer import_custom_routes: false -> true peering=gcpnet-vpc-staging-peer network=gcpnet-vpc-prod change.request=CHG-7741 applied_by=terraform-cloud'
+    attributes:
+      user.name: terraform-cloud
+      change.request: CHG-7741
+      deployment.terraform_version: tf-1.7.2-canary
+      operation: terraform_apply
+      change.summary: 'peering gcpnet-vpc-staging-peer import_custom_routes: false -> true'
+remediation_effects:
+  transition_seconds: 60
+  log_events:
+    - service: vpc-network-manager
+      severity: INFO
+      offset_seconds: 2
+      body: 'gcp-audit: logName=cloudaudit.googleapis.com/activity serviceName=compute.googleapis.com methodName=v1.compute.networks.updatePeering resourceName=projects/gcpnet-prod-001/global/networks/gcpnet-vpc-prod principalEmail={actor} status=OK'
+      attributes:
+        operation: updatePeering
+        cloud.provider: gcp
+    - service: vpc-network-manager
+      severity: INFO
+      offset_seconds: 20
+      body: 'vpc-monitor: peering=gcpnet-vpc-staging-peer import_custom_routes=false; custom routes withdrawn from gcpnet-vpc-prod, dropped prefixes re-learned'
+      attributes:
+        operation: peering_update
+        vpc.peering.import_custom_routes: 'false'
+  steady_attributes:
+    vpc-network-manager:
+      vpc.peering.import_custom_routes: 'false'
+  verification:
+    - signal: vpc.peering_imported_routes
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "vpc-network-manager"'
+      field: 'metrics.vpc.peering_imported_routes'
+      expect: 'back to 176-186 routes (was 250 of 250)'
+      within_seconds: 90
+    - signal: vpc.peering_dropped_prefixes
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "vpc-network-manager"'
+      field: 'metrics.vpc.peering_dropped_prefixes'
+      expect: '0 (was 18)'
+      within_seconds: 90
+    - signal: peering import_custom_routes
+      from: 'logs.otel.gcpnet'
+      where: 'resource.attributes.service.name == "vpc-network-manager"'
+      field: 'attributes.vpc.peering.import_custom_routes'
+      expect: 'false on every line logged since the fix; true stops appearing'
+      within_seconds: 90
 business_impact:
   - kpi: business.uptime_pct
     factor: {uniform: [0.92, 0.97]}
@@ -50,3 +113,7 @@ business_impact:
     factor: {uniform: [0.80, 0.92]}
   - kpi: business.customer_sla_breach_count
     factor: {uniform: [2.0, 5.0]}
+generator_impact:
+  gcp_cloudsql_postgresql_otel:
+    replica_lag_high: 300.0
+    connections_high: 950.0

@@ -1,0 +1,37 @@
+name: "GT supabase_otel: filesystem_is_read_only"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-SUPABASE-FILESYSTEM-IS-READ-ONLY
+sensor_type: impact_key_probe
+affected_services:
+  - gt-supabase-aws-svc-1
+cascade_services:
+  - gt-supabase-aws-svc-2
+description: "Tests impact_key filesystem_is_read_only on generator supabase_otel."
+investigation_notes: |-
+  1. Verify supabase_otel is active and reporting metrics.
+  2. Check that the filesystem_is_read_only metric has reached the trigger value (1.0).
+  3. Confirm generator_impact for supabase_otel.filesystem_is_read_only is set to 1.0.
+  4. Look for correlated changes in service gt-supabase-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_filesystem_is_read_only_baseline
+error_message: "GT-PROBE: gen=supabase_otel key=filesystem_is_read_only value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=supabase_otel
+  impact_key: filesystem_is_read_only
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 1.0
+  svc_name: gt-supabase-aws-svc-1
+rca_clues:
+  gt-supabase-aws-svc-1:
+    probe.generator: supabase_otel
+    probe.impact_key: filesystem_is_read_only
+    probe.trigger_value: 1.0
+  gt-supabase-aws-svc-2:
+    probe.upstream_generator: supabase_otel
+    probe.upstream_key: filesystem_is_read_only
+generator_impact:
+  supabase_otel:
+    filesystem_is_read_only: 1.0

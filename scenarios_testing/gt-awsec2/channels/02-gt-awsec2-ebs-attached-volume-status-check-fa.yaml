@@ -1,0 +1,37 @@
+name: "GT aws_ec2_otel: ebs_attached_volume_status_check_failed"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-AWSEC2-EBS-ATTACHED-VOLUME-STATUS-C
+sensor_type: impact_key_probe
+affected_services:
+  - gt-awsec2-aws-svc-1
+cascade_services:
+  - gt-awsec2-aws-svc-2
+description: "Tests impact_key ebs_attached_volume_status_check_failed on generator aws_ec2_otel."
+investigation_notes: |-
+  1. Verify aws_ec2_otel is active and reporting metrics.
+  2. Check that the ebs_attached_volume_status_check_failed metric has reached the trigger value (50.0).
+  3. Confirm generator_impact for aws_ec2_otel.ebs_attached_volume_status_check_failed is set to 50.0.
+  4. Look for correlated changes in service gt-awsec2-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_ebs_attached_volume_status_check_failed_baseline
+error_message: "GT-PROBE: gen=aws_ec2_otel key=ebs_attached_volume_status_check_failed value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=aws_ec2_otel
+  impact_key: ebs_attached_volume_status_check_failed
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 50.0
+  svc_name: gt-awsec2-aws-svc-1
+rca_clues:
+  gt-awsec2-aws-svc-1:
+    probe.generator: aws_ec2_otel
+    probe.impact_key: ebs_attached_volume_status_check_failed
+    probe.trigger_value: 50.0
+  gt-awsec2-aws-svc-2:
+    probe.upstream_generator: aws_ec2_otel
+    probe.upstream_key: ebs_attached_volume_status_check_failed
+generator_impact:
+  aws_ec2_otel:
+    ebs_attached_volume_status_check_failed: 50.0

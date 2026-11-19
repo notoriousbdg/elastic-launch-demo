@@ -1,0 +1,37 @@
+name: "GT etcd_otel: proposal_failures"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-ETCD-PROPOSAL-FAILURES
+sensor_type: impact_key_probe
+affected_services:
+  - gt-etcd-aws-svc-1
+cascade_services:
+  - gt-etcd-aws-svc-2
+description: "Tests impact_key proposal_failures on generator etcd_otel."
+investigation_notes: |-
+  1. Verify etcd_otel is active and reporting metrics.
+  2. Check that the proposal_failures metric has reached the trigger value (50.0).
+  3. Confirm generator_impact for etcd_otel.proposal_failures is set to 50.0.
+  4. Look for correlated changes in service gt-etcd-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_proposal_failures_baseline
+error_message: "GT-PROBE: gen=etcd_otel key=proposal_failures value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=etcd_otel
+  impact_key: proposal_failures
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 50.0
+  svc_name: gt-etcd-aws-svc-1
+rca_clues:
+  gt-etcd-aws-svc-1:
+    probe.generator: etcd_otel
+    probe.impact_key: proposal_failures
+    probe.trigger_value: 50.0
+  gt-etcd-aws-svc-2:
+    probe.upstream_generator: etcd_otel
+    probe.upstream_key: proposal_failures
+generator_impact:
+  etcd_otel:
+    proposal_failures: 50.0

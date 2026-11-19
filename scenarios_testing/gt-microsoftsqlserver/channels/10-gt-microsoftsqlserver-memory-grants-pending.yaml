@@ -1,0 +1,37 @@
+name: "GT microsoft_sqlserver_otel: memory_grants_pending"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-MICROSOFTSQLSERVER-MEMORY-GRANTS-PE
+sensor_type: impact_key_probe
+affected_services:
+  - gt-microsoftsqlserver-aws-svc-1
+cascade_services:
+  - gt-microsoftsqlserver-aws-svc-2
+description: "Tests impact_key memory_grants_pending on generator microsoft_sqlserver_otel."
+investigation_notes: |-
+  1. Verify microsoft_sqlserver_otel is active and reporting metrics.
+  2. Check that the memory_grants_pending metric has reached the trigger value (500).
+  3. Confirm generator_impact for microsoft_sqlserver_otel.memory_grants_pending is set to 500.
+  4. Look for correlated changes in service gt-microsoftsqlserver-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_memory_grants_pending_baseline
+error_message: "GT-PROBE: gen=microsoft_sqlserver_otel key=memory_grants_pending value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=microsoft_sqlserver_otel
+  impact_key: memory_grants_pending
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 500
+  svc_name: gt-microsoftsqlserver-aws-svc-1
+rca_clues:
+  gt-microsoftsqlserver-aws-svc-1:
+    probe.generator: microsoft_sqlserver_otel
+    probe.impact_key: memory_grants_pending
+    probe.trigger_value: 500
+  gt-microsoftsqlserver-aws-svc-2:
+    probe.upstream_generator: microsoft_sqlserver_otel
+    probe.upstream_key: memory_grants_pending
+generator_impact:
+  microsoft_sqlserver_otel:
+    memory_grants_pending: 500

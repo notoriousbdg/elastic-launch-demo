@@ -27,19 +27,14 @@ constants:
   - AP-OFFICE-01
   - AP-OFFICE-02
   - AP-SHIPPING-01
-  WIFI_CHANNELS:
-  - 1
-  - 6
-  - 11
-  - 36
-  - 40
-  - 44
-  - 48
-  - 149
-  - 153
-  - 157
-  - 161
 steps:
+- sample:
+    dropped_aps:
+      expr: "min(4, int(elapsed.get(7, 0) / 35.0)) if 7 in all_active else 0"
+    recovered_aps:
+      expr: "min(4, int(since_fix.get(7, 0) / 70.0)) if 7 in fixed_channels else 4"
+    aps_connected_val:
+      expr: "6 - dropped_aps if 7 in all_active else (2 + recovered_aps if 7 in fixed_channels else 6)"
 - sample:
     sampled_aps:
       sample:
@@ -50,37 +45,36 @@ steps:
     as: ap
     steps:
     - sample:
+        ap_idx:
+          expr: "{'AP-WAREHOUSE-01': 0, 'AP-WAREHOUSE-02': 1, 'AP-PRINT-FLOOR-01': 2, 'AP-SHIPPING-01': 3, 'AP-OFFICE-01': 4, 'AP-OFFICE-02': 5}[ap]"
+        ap_down:
+          expr: "ap_idx < 4 and ((7 in all_active and ap_idx < dropped_aps) or (7 in fixed_channels and ap_idx >= recovered_aps))"
         clients:
-          randint:
-          - 5
-          - 45
+          expr: "int(max(2, round(rand.gauss(28 if ap_idx < 4 else 18, 3))))"
         channel:
-          choice: WIFI_CHANNELS
+          expr: "149 if (8 in all_active and ap_idx < 4) else {0: 36, 1: 44, 2: 157, 3: 161, 4: 40, 5: 48}[ap_idx]"
         signal_dbm:
-          uniform:
-          - -65.0
-          - -30.0
-          round: 1
+          expr: "round(rand.gauss(-52.0, 1.5), 1)"
         noise_dbm:
-          uniform:
-          - -95.0
-          - -85.0
-          round: 1
+          expr: "round(rand.gauss(-91.0, 1.0), 1)"
         ap_key:
           expr: ap.lower().replace('-', '_')
-    - metric:
+    - when: "not ap_down"
+      metric:
         name:
           expr: f'wifi.ap.{ap_key}.clients'
         value:
           var: clients
         unit: clients
-    - metric:
+    - when: "not ap_down"
+      metric:
         name:
           expr: f'wifi.ap.{ap_key}.signal_dbm'
         value:
           var: signal_dbm
         unit: dBm
-    - log:
+    - when: "not ap_down"
+      log:
         level: INFO
         message: mist-event type=AP_STATS ap_name={ap} clients={clients} channel={channel} signal={signal_dbm}dBm noise={noise_dbm}dBm
         attrs:
@@ -96,10 +90,17 @@ steps:
           wifi.noise_dbm:
             var: noise_dbm
 - sample:
+    ap_status:
+      expr: "'ANOMALY' if aps_connected_val < 6 else 'nominal'"
+    fleet_fw_rev:
+      expr: "'mist-fw-0.14.29313-beta' if 7 in all_active else 'mist-fw-0.14.28870'"
     total_clients:
-      randint:
-      - 80
-      - 200
+      expr: "int(round(max(0, aps_connected_val - 2) * 28 + 2 * 18 + rand.gauss(0, 4)))"
+- metric:
+    name: wifi.aps_connected
+    value:
+      var: aps_connected_val
+    unit: aps
 - metric:
     name: wifi.total_clients
     value:
@@ -107,9 +108,112 @@ steps:
     unit: clients
 - log:
     level: INFO
-    message: mist-event type=WLC_HEALTH aps_online=6 total_clients={total_clients} status=nominal
+    message: mist-event type=WLC_HEALTH aps_online={aps_connected_val}/6 total_clients={total_clients} fleet_firmware={fleet_fw_rev} status={ap_status}
     attrs:
       operation: controller_health
-      wifi.ap_count: 6
+      wifi.ap_count:
+        var: aps_connected_val
       wifi.total_clients:
         var: total_clients
+      wifi.status:
+        var: ap_status
+      deployment.ap_firmware:
+        var: fleet_fw_rev
+- sample:
+    cci_level:
+      expr: "8.0 + 40.0 * min(1.0, elapsed.get(8, 0) / 180.0) if 8 in all_active
+        else (8.0 + 40.0 * max(0.0, 1.0 - since_fix.get(8, 0) / 150.0) if 8 in fixed_channels else 8.0)"
+    cci_pct:
+      expr: "round(max(2.0, cci_level + rand.gauss(0, max(0.6, 0.03 * cci_level))), 1)"
+    retransmit_pct:
+      expr: "round(max(0.5, 2.0 + cci_pct * 0.45 + rand.gauss(0, 0.4)), 1)"
+    rrm_status:
+      expr: "'ANOMALY' if cci_pct > 20.0 else 'NOMINAL'"
+    rrm_algo:
+      expr: "'auto-rrm-v3.1-aggressive' if 8 in all_active else 'auto-rrm-v3.1-balanced'"
+- metric:
+    name: wifi.co_channel_interference_pct
+    value:
+      var: cci_pct
+    unit: '%'
+- metric:
+    name: wifi.retransmit_rate_pct
+    value:
+      var: retransmit_pct
+    unit: '%'
+- log:
+    level: INFO
+    message: mist-event type=RADIO_STATS band=5 co_channel_interference={cci_pct}% retransmit_rate={retransmit_pct}% rrm_profile={rrm_algo} status={rrm_status}
+    attrs:
+      operation: rrm_status
+      wifi.co_channel_interference_pct:
+        var: cci_pct
+      wifi.retransmit_pct:
+        var: retransmit_pct
+      wifi.status:
+        var: rrm_status
+      infra.rrm_algorithm:
+        var: rrm_algo
+- sample:
+    rrm_ap:
+      expr: "rand.choice(['AP-WAREHOUSE-01', 'AP-WAREHOUSE-02', 'AP-PRINT-FLOOR-01', 'AP-SHIPPING-01'])"
+    rrm_old_ch:
+      expr: "rand.choice([36, 44, 157, 161])"
+- when: "8 in all_active and rand.random() < 0.4"
+  log:
+    level: INFO
+    message: mist-event type=AP_CONFIG_CHANGED_BY_RRM ap_name={rrm_ap} band=5 channel={rrm_old_ch}->149 power=max
+    attrs:
+      operation: rrm_channel_change
+      wifi.ap_name:
+        var: rrm_ap
+      infra.rrm_algorithm: auto-rrm-v3.1-aggressive
+- sample:
+    fail_level:
+      expr: "6.0 + 534.0 * min(1.0, elapsed.get(9, 0) / 10.0) if 9 in all_active
+        else (6.0 + 534.0 * (1.0 if since_fix.get(9, 0) < 15 else max(0.0, 1.0 - (since_fix.get(9, 0) - 15) / 60.0)) if 9 in fixed_channels else 6.0)"
+    auth_fail_val:
+      expr: "int(round(max(0.0, fail_level + rand.gauss(0, max(1.5, 0.04 * fail_level)))))"
+    radius_req_val:
+      expr: "int(round(360 + rand.gauss(0, 15) + auth_fail_val * 3))"
+    eap_reason:
+      expr: "'server_cert_untrusted' if (9 in all_active or (9 in fixed_channels and since_fix.get(9, 0) < 15)) else ('eap_timeout' if auth_fail_val > 50 else 'none')"
+    radius_policy:
+      expr: "'nps-policy-2025q1-draft' if 9 in all_active else 'nps-policy-2024q4'"
+    auth_status:
+      expr: "'ANOMALY' if auth_fail_val > 50 else 'NOMINAL'"
+    guest_denied:
+      expr: "int(max(0, round(rand.gauss(2, 1))))"
+- metric:
+    name: wifi.auth_failures_per_min
+    value:
+      var: auth_fail_val
+    unit: failures/min
+- metric:
+    name: wifi.radius_requests_per_min
+    value:
+      var: radius_req_val
+    unit: requests/min
+- log:
+    level: INFO
+    message: mist-event type=NAC_AUTH_SUMMARY ssid=Fanatics-Corp eap=PEAP-MSCHAPv2 requests_per_min={radius_req_val} denied_per_min={auth_fail_val} reason={eap_reason} nps_policy={radius_policy} status={auth_status}
+    attrs:
+      operation: radius_auth
+      wifi.ssid: Fanatics-Corp
+      wifi.auth_failures_per_min:
+        var: auth_fail_val
+      wifi.radius_requests_per_min:
+        var: radius_req_val
+      wifi.eap_failure_reason:
+        var: eap_reason
+      wifi.status:
+        var: auth_status
+      deployment.radius_config:
+        var: radius_policy
+- log:
+    level: INFO
+    message: mist-event type=NAC_AUTH_SUMMARY ssid=Fanatics-Guest auth=captive-portal denied_per_min={guest_denied} status=NOMINAL
+    attrs:
+      operation: radius_auth
+      wifi.ssid: Fanatics-Guest
+      wifi.status: NOMINAL

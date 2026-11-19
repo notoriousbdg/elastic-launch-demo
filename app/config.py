@@ -21,13 +21,6 @@ OTLP_ENDPOINT = os.getenv("OTLP_ENDPOINT", "")
 OTLP_API_KEY = os.getenv("OTLP_API_KEY", "")
 OTLP_AUTH_TYPE = os.getenv("OTLP_AUTH_TYPE", "ApiKey")  # "ApiKey" or "Bearer"
 
-TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID", "")
-TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", "")
-TWILIO_FROM_NUMBER = os.getenv("TWILIO_FROM_NUMBER", "")
-TWILIO_TO_NUMBER = os.getenv("TWILIO_TO_NUMBER", "")
-
-SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL", "")
-
 SMTP_HOST = os.getenv("SMTP_HOST", "")
 SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
 SMTP_USER = os.getenv("SMTP_USER", "")
@@ -68,7 +61,7 @@ _scenario = get_scenario(ACTIVE_SCENARIO)
 
 # ── Scenario-derived Configuration ────────────────────────────────────────
 # These module-level variables ensure all existing imports continue working:
-#   from app.config import SERVICES, CHANNEL_REGISTRY, MISSION_ID, etc.
+#   from app.config import SERVICES, CHANNEL_REGISTRY, MISSION_ID
 
 NAMESPACE = _scenario.namespace
 SERVICES: dict[str, dict[str, Any]] = _scenario.services
@@ -76,7 +69,6 @@ CHANNEL_REGISTRY: dict[int, dict[str, Any]] = _scenario.channel_registry
 
 # Mission/scenario identity
 MISSION_ID = _scenario.namespace.upper()  # "NOVA7", "FANATICS", etc.
-MISSION_NAME = _scenario.scenario_name
 
 # Severity Number Mapping (shared across all scenarios)
 SEVERITY_MAP = {

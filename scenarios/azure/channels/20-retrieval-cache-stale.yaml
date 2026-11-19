@@ -1,0 +1,122 @@
+name: Retrieval Cache Stale
+subsystem: caching
+vehicle_section: caching_pipeline
+error_type: RAG-CACHE-STALE
+sensor_type: health_check
+affected_services: [retrieval-service]
+cascade_services: [chat-orchestrator]
+
+description: The retrieval-service result cache keeps serving grounding passages past their TTL after an AI Search index refresh, because the cache is not invalidated when the index is refreshed.
+
+investigation_notes: |
+  Root cause: cache retrieval-results has invalidate_on_index_refresh=false and a sliding expiration, so entries renewed on every hit outlive the {ttl_s} second TTL and nothing evicts them when index {index_name} refreshes (last refresh {index_refreshed_min_ago} min ago). {stale_hit_pct}% of cache hits are stale, with entries up to {cache_entry_age_s} seconds old. The index itself is fresh.
+  Confirm:
+    - retrieval-service logs retrieval.cache_status cache=retrieval-results invalidate_on_index_refresh=false status=ANOMALY (attributes.cache.config); metric retrieval.cache_stale_hit_pct rises from 0 to 30-85 and retrieval.cache_hit_pct rises above its 38-66 band as stale entries keep being served
+    - the retrieval-service line "[RETRIEVAL] index {index_name} refreshed ... result cache not invalidated" comes before the first RAG-CACHE-STALE; rca attribute cache.invalidation_events_since_refresh=0
+    - retrieval.index_freshness_minutes stays at 2-18 minutes and the indexer status is success, which rules out a stale index (an indexer failure); retrieval.search_latency_ms and retrieval.hits_returned stay at baseline
+    - chat-orchestrator grounding.outdated_citation_pct is a downstream effect: answers cite outdated passages but nothing is corrupted at the source
+  Remediation: enable invalidation with opsctl patch cache/retrieval-results --invalidate-on-index-refresh true, then empty the cache with opsctl delete cache/retrieval-results --all so entries repopulate from the refreshed index. Stale hits fall to 0 within about 30 seconds; cache_hit_pct dips to a few percent and refills to its 38-66 band over about 4 minutes, with only brief extra latency. Flushing alone would recur at the next refresh, and shortening the TTL does not help because the sliding expiration renews entries on every hit.
+
+remediation_action: flush_retrieval_cache
+remediation_command: |-
+  opsctl patch cache/retrieval-results --invalidate-on-index-refresh true
+  opsctl delete cache/retrieval-results --all
+
+error_message: |
+  [RETRIEVAL] RAG-CACHE-STALE: cache=retrieval-results index={index_name} stale_hit_pct={stale_hit_pct}% entry_age={cache_entry_age_s}s ttl={ttl_s}s index_refreshed={index_refreshed_min_ago}min_ago
+
+stack_trace: |
+  StaleCacheWarning: RAG-CACHE-STALE
+    at RetrievalService.get_passages(index={index_name})
+    at ResultCache.lookup(ttl={ttl_s})
+  Entry age:        {cache_entry_age_s}s
+  TTL:              {ttl_s}s
+  Stale hit rate:   {stale_hit_pct}%
+  Index refreshed:  {index_refreshed_min_ago} min ago
+
+correlation_attr:
+  key: retrieval.cache_config
+  value: result-cache-v2-ttl900s-no-index-invalidation
+
+fault_params:
+  index_name: kb-passages-prod
+  stale_hit_pct: {uniform: [30.0, 85.0], round: 1}
+  cache_entry_age_s: {randint: [1800, 14400]}
+  ttl_s: 900
+  index_refreshed_min_ago: {randint: [10, 25]}
+
+rca_clues:
+  retrieval-service:
+    cache.stale_entries: {randint: [500, 9000]}
+    cache.max_entry_age_s: {randint: [1800, 14400]}
+    cache.invalidation_events_since_refresh: 0
+  chat-orchestrator:
+    grounding.outdated_citation_pct: {uniform: [20.0, 70.0], round: 1}
+    grounding.user_thumbs_down: {randint: [10, 120]}
+
+cascade_messages:
+  chat-orchestrator:
+    - severity: WARN
+      message: '[CHAT] grounding passages from {index_name} served from cache are {cache_entry_age_s}s old (ttl {ttl_s}s); answers may cite outdated documents'
+
+service_lag_seconds: {chat-orchestrator: 30}
+fault_scope:
+  workloads: [retrieval-service]
+
+infrastructure_events:
+  - service: retrieval-service
+    severity: INFO
+    offset_seconds: -600
+    body: '[RETRIEVAL] index kb-passages-prod refreshed by indexer kb-passages-indexer (1284 documents updated); result cache retrieval-results not invalidated (invalidate_on_index_refresh=false)'
+    attributes:
+      operation: index_refresh
+      search.index: kb-passages-prod
+      cache.name: retrieval-results
+      cache.config: invalidate_on_index_refresh=false
+      change.summary: 'index refreshed; cache invalidation hook not configured'
+
+remediation_effects:
+  log_events:
+    - service: retrieval-service
+      severity: INFO
+      offset_seconds: 1
+      body: 'config-service: change applied cache/retrieval-results cmd="opsctl patch cache/retrieval-results --invalidate-on-index-refresh true" by={actor} : invalidate_on_index_refresh false -> true'
+      attributes:
+        operation: cache_config_patch
+        cache.config: invalidate_on_index_refresh=true
+        change.summary: 'invalidate_on_index_refresh: false -> true'
+    - service: retrieval-service
+      severity: INFO
+      offset_seconds: 4
+      body: 'config-service: change applied cache/retrieval-results cmd="opsctl delete cache/retrieval-results --all" by={actor} : all cached entries evicted'
+      attributes:
+        operation: cache_flush
+        change.summary: 'all entries evicted from retrieval-results'
+  steady_attributes:
+    retrieval-service:
+      cache.config: invalidate_on_index_refresh=true
+  verification:
+    - signal: retrieval.cache_stale_hit_pct
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "retrieval-service"'
+      field: 'metrics.retrieval.cache_stale_hit_pct'
+      expect: '0 (was 30-85)'
+      within_seconds: 60
+    - signal: retrieval.cache_hit_pct
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "retrieval-service"'
+      field: 'metrics.retrieval.cache_hit_pct'
+      expect: 'dips right after the flush, then refills to the 38-66 band (was above 72)'
+      within_seconds: 300
+    - signal: cache config
+      from: 'logs.otel.azureai'
+      where: 'resource.attributes.service.name == "retrieval-service"'
+      field: 'attributes.cache.config'
+      expect: 'invalidate_on_index_refresh=true on every line logged since the fix'
+      within_seconds: 60
+
+business_impact:
+  - kpi: business.error_rate_pct
+    factor: {uniform: [1.5, 3.0]}
+  - kpi: business.availability_pct
+    factor: {uniform: [0.92, 0.98]}

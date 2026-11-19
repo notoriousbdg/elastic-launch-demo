@@ -1,0 +1,117 @@
+# opsctl profile for the Live Gaming Platform (see app/ops_profile.py for the contract).
+# Changes go to the game platform's three clusters (EKS, GKE, AKS) and their managed
+# services through the live-ops change pipeline. The service that owns the target logs the
+# applied change; game-server is the fallback for commands that match no fix.
+extends: [neutral]
+
+banner: "opsctl applies changes to the live game platform (EKS, GKE and AKS clusters and their managed services). Every applied change is written to the live-ops change log with a change id."
+
+actors:
+  default: sre-oncall/liveops-console        # an engineer resolving from the Chaos UI
+  auto: automation/liveops-auto-remediator    # the remediation workflow (approval skipped)
+
+auto_remediate_channels: [16, 17, 18, 19, 20]
+
+verbs:
+  rollback:
+    summary: "Roll a deployment, ConfigMap, model or managed-service config back to an earlier revision (--to-revision N|previous)"
+    example: "opsctl rollback deployment/<name> --to-revision previous\n  opsctl rollback configmap/<name> --to-revision previous"
+    describe: "{ref} rolled back to {rev_text}"
+  patch:
+    summary: "Change settings on a workload, node group or network resource (--cpu-limit, --max-size, --mtu ...)"
+    example: "opsctl patch deployment/<name> --cpu-limit 2000m\n  opsctl patch nodegroup/<name> --max-size 120"
+    describe: "{ref} updated{settings_text}"
+  run:
+    summary: "Run a one-off job (replay, rebuild, reconcile, recalculation)"
+    example: "opsctl run job/<name>"
+    describe: "{ref} started{=(' (' + change_id + ')') if change_id else ''}"
+  restart:
+    summary: "Rolling restart of a workload"
+    example: "opsctl restart deployment/<name>"
+    describe: "{ref} restarted"
+  # not used on this platform
+  restore: null
+  renew: null
+  rotate: null
+  sync: null
+  drain: null
+  replace: null
+  apply: null
+  expand: null
+  delete: null
+
+kinds:
+  deployment: {aliases: [deploy, deployments]}
+  statefulset: {aliases: [sts, statefulsets]}
+  configmap: {aliases: [cm, configmaps]}
+  nodegroup: {aliases: [ng, node-group, nodegroups]}
+  memorystore: {aliases: [redis-instance]}
+  security-policy: {aliases: [armor-policy]}
+  tunnel: {aliases: [wg, tunnels]}
+  model: {aliases: [models]}
+  job: {aliases: [jobs]}
+
+audit:
+  service: [game-server]
+  default: change_log
+  formats:
+    change_log:
+      body: 'level=info logger=changelog msg="change applied" cmd="opsctl {command}" actor={actor} change_id={change_id}'
+      attributes:
+        operation: change_applied
+        event.action: "{verb}"
+        change.target: "{target}"
+        change.command: "opsctl {command}"
+        user.name: "{actor}"
+        change.id: "{change_id}"
+        ops.target: null
+        ops.command: null
+      match:
+        tokens: ["{target}"]
+
+runbook:
+  scope_note: "Other clusters, workloads and pools are unaffected and make a useful comparison."
+  recovery_note: "Each query names the fixed service, so its result is the value to compare."
+  audit_label: "live-ops change log"
+
+guide:
+  scenario: |
+    ## Where the game platform's telemetry is
+    The data is OpenTelemetry. Each platform component is a service
+    (`resource.attributes.service.name`): game-server, matchmaking-engine and
+    content-delivery on gaming-eks-cluster (AWS us-east-1); chat-service, leaderboard-api
+    and auth-gateway on gaming-gke-cluster (GCP us-central1); payment-processor,
+    analytics-pipeline and moderation-engine on gaming-aks-cluster (Azure eastus).
+
+    - **Logs:** `FROM logs.otel.gaming`. Message in `body.text` (never `body` alone), level
+      in `severity_text`. Error codes (for example `NET-STATE-DESYNC`) are in `body.text`
+      and `attributes.error.type`. Each component's periodic status line carries the
+      configuration it is running (build, ConfigMap revision, limits) as `attributes.*`,
+      for example `attributes.deployment.server_build` or `attributes.config.revision`.
+    - **Metrics:** `FROM metrics-generic.otel-default`, filtered by
+      `resource.attributes.service.name`, fields under `metrics.<component>.*`, for example
+      `metrics.game_server.tick_rate`, `metrics.matchmaking.queue_depth`,
+      `metrics.cdn.cache_hit_rate`, `metrics.auth.token_refresh_rate`.
+    - **Package metrics:** Memcached, Redis and Kafka are in their integration streams
+      (`metrics-memcachedreceiver.otel-*`, `metrics-redisreceiver.otel-*`,
+      `metrics-kafkametricsreceiver.otel-*`); Kubernetes object state is in
+      `metrics-k8sclusterreceiver.otel-*`.
+    - **Changes:** every applied change is a log line from the service that owns the
+      target, `body.text LIKE "*msg=\"change applied\"*"`, with the command in `body.text`.
+      Changes that preceded an incident (Argo CD syncs, Terraform applies, model
+      promotions) are logged by the owning service as `operation: config_change` or
+      `deployment_rollout` and carry `attributes.change.request`.
+
+    Readings converge back over the recovery time the runbook states; they do not jump
+    back instantly. Compare a short window after the command with the window before it.
+
+    Example: game server tick rate per minute over the last 15 minutes:
+
+    ```
+    FROM metrics-generic.otel-default
+    | WHERE @timestamp > NOW() - 15 minutes AND resource.attributes.service.name == "game-server"
+      AND metrics.game_server.tick_rate IS NOT NULL
+    | STATS min = MIN(metrics.game_server.tick_rate), avg = AVG(metrics.game_server.tick_rate)
+        BY minute = BUCKET(@timestamp, 1 minute)
+    | SORT minute DESC
+    ```

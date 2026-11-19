@@ -1,0 +1,37 @@
+name: "GT cassandra_otel: compaction_falling_behind_pending_tasks"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-CASSANDRA-COMPACTION-FALLING-BEHIND
+sensor_type: impact_key_probe
+affected_services:
+  - gt-cassandra-aws-svc-1
+cascade_services:
+  - gt-cassandra-aws-svc-2
+description: "Tests impact_key compaction_falling_behind_pending_tasks on generator cassandra_otel."
+investigation_notes: |-
+  1. Verify cassandra_otel is active and reporting metrics.
+  2. Check that the compaction_falling_behind_pending_tasks metric has reached the trigger value (75.0).
+  3. Confirm generator_impact for cassandra_otel.compaction_falling_behind_pending_tasks is set to 75.0.
+  4. Look for correlated changes in service gt-cassandra-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_compaction_falling_behind_pending_tasks_baseline
+error_message: "GT-PROBE: gen=cassandra_otel key=compaction_falling_behind_pending_tasks value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=cassandra_otel
+  impact_key: compaction_falling_behind_pending_tasks
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 75.0
+  svc_name: gt-cassandra-aws-svc-1
+rca_clues:
+  gt-cassandra-aws-svc-1:
+    probe.generator: cassandra_otel
+    probe.impact_key: compaction_falling_behind_pending_tasks
+    probe.trigger_value: 75.0
+  gt-cassandra-aws-svc-2:
+    probe.upstream_generator: cassandra_otel
+    probe.upstream_key: compaction_falling_behind_pending_tasks
+generator_impact:
+  cassandra_otel:
+    compaction_falling_behind_pending_tasks: 75.0

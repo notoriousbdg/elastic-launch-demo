@@ -107,29 +107,10 @@ class OtlpMixin:
         try:
             resp = client.post(
                 f"{endpoint}/v1/logs",
-                headers={
-                    "Authorization": f"ApiKey {self.api_key}",
-                    "Content-Type": "application/json",
-                },
+                headers=_es_headers(self.api_key),
                 json={"resourceLogs": []},
                 timeout=5,
             )
             return resp.status_code < 500
-        except Exception:
-            return False
-
-    def verify_otlp(self, otlp_url: str) -> bool:
-        """Verify an OTLP endpoint is reachable with our API key."""
-        try:
-            with httpx.Client(timeout=5, verify=True) as client:
-                resp = client.post(
-                    f"{otlp_url.rstrip('/')}/v1/logs",
-                    headers={
-                        "Authorization": f"ApiKey {self.api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json={"resourceLogs": []},
-                )
-                return resp.status_code == 200
         except Exception:
             return False

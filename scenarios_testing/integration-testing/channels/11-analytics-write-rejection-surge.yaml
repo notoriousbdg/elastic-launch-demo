@@ -1,0 +1,76 @@
+name: Analytics Write Rejection Surge
+subsystem: platform
+vehicle_section: platform_pipeline
+error_type: ANALYTICS-WRITE-REJECT-SURGE
+sensor_type: health_check
+affected_services:
+- analytics-service
+cascade_services:
+- data-platform
+description: 'The synthetic InfluxDB time-series store backing analytics-service is
+  rejecting a surge of writes to {influx_bucket} due to a compaction backlog, blocking
+  coverage rollups.
+
+  '
+investigation_notes: '1. Search for body.text containing *ANALYTICS-WRITE-REJECT-SURGE*
+  to find the affected bucket.
+
+  2. Check analytics-service analytics.write_rejection_pct for the rejection spike.
+
+  3. Confirm influxdb_otel write_error_rate/compaction_backlog_multiplier rise for
+  {influx_bucket}.
+
+  4. Check data-platform orchestration.dag_failure_pct for cascading coverage_report_dag
+  failures.
+
+  5. Verify write rejections subside once the compaction backlog on {influx_bucket}
+  drains.
+
+  '
+remediation_action: drain_influxdb_compaction_backlog
+error_message: 'ANALYTICS-WRITE-REJECT-SURGE: bucket={influx_bucket} rejection_rate={write_rejection_pct}%
+  rejected_points={rejected_point_count}
+
+  '
+stack_trace: "AnalyticsWriteRejectionError: bucket={influx_bucket}\n  at AnalyticsService.writeRollup()\n\
+  \  rejection_rate={write_rejection_pct}% rejected_points={rejected_point_count}\n"
+fault_params:
+  influx_bucket:
+    choice:
+    - signal_rollups
+    - coverage_reports
+  write_rejection_pct:
+    uniform:
+    - 20.0
+    - 75.0
+    round: 1
+  rejected_point_count:
+    randint:
+    - 500
+    - 20000
+rca_clues:
+  analytics-service:
+    analytics.write_rejection_pct:
+      uniform:
+      - 20.0
+      - 75.0
+      round: 1
+    analytics.compaction_backlog_flag: true
+  data-platform:
+    orchestration.dag_failure_pct:
+      uniform:
+      - 15.0
+      - 55.0
+      round: 1
+    orchestration.coverage_report_blocked: true
+generator_impact:
+  influxdb_otel:
+    shard_write_errors: &id001
+      uniform:
+      - 0.2
+      - 0.75
+    wal_write_errors: *id001
+    compaction_queue_backlog:
+      uniform:
+      - 3.0
+      - 9.0

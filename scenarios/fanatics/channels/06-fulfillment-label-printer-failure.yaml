@@ -6,46 +6,51 @@ sensor_type: label_printer
 affected_services:
 - packaging-fulfillment
 - card-printing-system
+error_services:
+- packaging-fulfillment
 cascade_services:
 - digital-marketplace
-description: Shipping label printers going offline or producing unreadable labels
+description: Shipping label printers rejecting jobs and producing unreadable labels
 investigation_notes: |-
-  1. Check the Zebra printer error code: E1001 = print head overheated, E2003 = ribbon empty, E3005 = label gap detection failure, E4002 = paper out.
-  2. For OFFLINE status, verify the network connection: `ping <printer_ip>` and check the switch port: `show interface <port> status`.
-  3. HEAD_ERROR requires print head replacement — Zebra ZT411/ZT421 heads have a ~50km print life; check the odometer in the printer menu.
-  4. Unreadable labels (barcode scan failures) indicate print darkness is too low or the thermal ribbon is wrinkled — run a test label: `^XA^FO50,50^BY3^BCN,100,Y,N,N^FD1234567890^FS^XZ`.
-  5. Queue depth above 200 while the printer is offline means shipments are stacking up — redirect traffic to a backup Zebra printer immediately.
-  6. For carrier-specific label format issues (ZPL vs EPL), verify the printer firmware supports the required label format and update if needed.
+  Root cause: the shipping label template was updated to zebra-zpl-ii-v6.1-patched (CR-2431) and pushed to all shipping-bay printers shortly before the first WMS-LABEL-PRINTER-FAULT. The patched template sets the label length (^LL) to 1624 for 4x8 stock while 4x6 media is loaded, so the printers feed past the label gap, pause with PAPER OUT and print misaligned labels: about 34 labels fail per minute from the first job after the push ({label_failed_count} in the last {label_window_min} minutes) and the queue of held shipments builds towards {label_queue_depth}. The hardware and consumables are healthy: the media roll and ribbon are loaded and the sensor sees the web, print head odometer is under 10 km (heads wear out above ~50 km) and the printers answer on the network, so head failure, an empty roll and connectivity are ruled out.
+  Confirm:
+    - packaging-fulfillment logs "wms.shipping printers=... status=PAUSED alert=PAPER_OUT ... template=zebra-zpl-ii-v6.1-patched" (attributes.infra.label_zpl_version); metric fulfillment.label_print_failures_per_min steps from 0-1 to ~34 and fulfillment.label_queue_depth grows from ~12 at about the same rate
+    - the packaging-fulfillment line "[WMS] shipping label template updated" comes before the first WMS-LABEL-PRINTER-FAULT
+    - all three printers fail after the push, whatever their age or odometer, and {label_carrier} labels fail the same as every other carrier
+  Remediation: roll the shipping label template back to the previous revision (v6.0.4) with opsctl rollback config/zpl-shipping-label --to-revision previous. New jobs print correctly at once, so the failure rate drops within seconds, but the held shipments stay queued until they are reprinted or purged: expect the queue to drain over about 2-3 minutes after the failure rate is back to normal.
 remediation_action: restart_label_printer
-error_message: wms.shipping WMS-LABEL-PRINTER-FAULT printer={label_printer_id} status={label_printer_status} error_code={label_error_code}
+remediation_command: |-
+  opsctl rollback config/zpl-shipping-label --to-revision previous
+error_message: wms.shipping WMS-LABEL-PRINTER-FAULT printer={label_printer_id} status={label_printer_status} alert={label_error_code}
   failed_labels={label_failed_count} window={label_window_min}m carrier={label_carrier} queue_depth={label_queue_depth}
 stack_trace: |-
   WMS Label Subsystem Diagnostic Report
   --------------------------------------
   Printer ID:     {label_printer_id}
   Status:         {label_printer_status}
-  Error Code:     {label_error_code}
+  Alert:          {label_error_code} (media loaded, label gap not found)
   Failed Labels:  {label_failed_count} in last {label_window_min} minutes
   Carrier:        {label_carrier}
   Queue Depth:    {label_queue_depth} shipments pending
-  ZPL Version:    ZPL-II
-  Print Head:     NEEDS_REPLACEMENT
+  ZPL Template:   zebra-zpl-ii-v6.1-patched
+  Print Head:     OK
   Last Maintenance: 45 days ago
-  Recommended Action: Replace print head, recalibrate label alignment
+  Recommended Action: Roll the shipping label template back to the previous revision
 correlation_attr:
   key: infra.label_zpl_version
   value: zebra-zpl-ii-v6.1-patched
 fault_params:
   label_printer_id: {choice: [ZBR-SHIP-01, ZBR-SHIP-02, ZBR-DOCK-01]}
-  label_printer_status: {choice: [OFFLINE, PAPER_OUT, HEAD_ERROR, RIBBON_EMPTY]}
-  label_error_code: {choice: [E1001, E2003, E3005, E4002]}
-  label_failed_count: {randint: [10, 100]}
-  label_window_min: {randint: [5, 30]}
+  label_printer_status: PAUSED
+  label_error_code: PAPER_OUT
+  label_failed_count: {randint: [160, 180]}
+  label_window_min: 5
   label_carrier: {choice: [UPS, FedEx, USPS, DHL]}
-  label_queue_depth: {randint: [50, 500]}
+  label_queue_depth: {randint: [150, 210]}
 rca_clues:
   packaging-fulfillment:
-    warehouse.label_printer_error: {choice: [E1001, E2003, E3005]}
+    warehouse.label_printer_error: PAPER_OUT
+    warehouse.printer_head_odometer_km: {uniform: [6, 10], round: 1}
     warehouse.shipments_held: {randint: [50, 500]}
   card-printing-system:
     print.completed_no_label: {randint: [20, 200]}
@@ -53,12 +58,82 @@ rca_clues:
   digital-marketplace:
     marketplace.shipping_delay_orders: {randint: [50, 500]}
     marketplace.tracking_unavailable_count: {randint: [30, 300]}
+cascade_messages:
+  card-printing-system:
+    - severity: WARN
+      message: 'print-staging: completed cards staged without a shipping label ({label_failed_count} in the last {label_window_min}m); staging area filling'
+  digital-marketplace:
+    - severity: WARN
+      message: 'shipment-notify: tracking number unavailable for {label_failed_count} orders (carrier={label_carrier}); customer shipping notice delayed'
+fault_scope:
+  workloads: [packaging-fulfillment, card-printing-system]
+infrastructure_events:
+  - service: packaging-fulfillment
+    severity: INFO
+    offset_seconds: -90
+    body: '[WMS] shipping label template updated: zebra-zpl-ii-v6.0.4 -> zebra-zpl-ii-v6.1-patched (^LL1218 -> ^LL1624); pushed to printers=ZBR-SHIP-01,ZBR-SHIP-02,ZBR-DOCK-01 by wms-label-release (CR-2431)'
+    attributes:
+      user.name: wms-label-release
+      change.request: CR-2431
+      operation: config_change
+      infra.label_zpl_version: zebra-zpl-ii-v6.1-patched
+      change.summary: 'Shipping label template: zebra-zpl-ii-v6.0.4 -> zebra-zpl-ii-v6.1-patched'
+remediation_effects:
+  log_events:
+    - service: packaging-fulfillment
+      severity: INFO
+      offset_seconds: 1
+      body: '[CHG] CHANGE APPLIED opsctl rollback config/zpl-shipping-label --to-revision previous by {actor}: shipping label template rolled back zebra-zpl-ii-v6.1-patched -> zebra-zpl-ii-v6.0.4'
+      attributes:
+        operation: change_applied
+        change.target: config/zpl-shipping-label
+    - service: packaging-fulfillment
+      severity: INFO
+      offset_seconds: 5
+      body: '[WMS] shipping label template zebra-zpl-ii-v6.0.4 loaded on printers=ZBR-SHIP-01,ZBR-SHIP-02,ZBR-DOCK-01; printers resumed, test label printed'
+      attributes:
+        operation: config_change
+        infra.label_zpl_version: zebra-zpl-ii-v6.0.4
+    - service: packaging-fulfillment
+      severity: INFO
+      offset_seconds: 150
+      body: '[WMS] label reprint queue drained: held shipments reprinted or purged, queue_depth=12'
+      attributes:
+        operation: label_printer_status
+        infra.label_zpl_version: zebra-zpl-ii-v6.0.4
+  steady_attributes:
+    packaging-fulfillment:
+      infra.label_zpl_version: zebra-zpl-ii-v6.0.4
+  verification:
+    - signal: fulfillment.label_print_failures_per_min
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "packaging-fulfillment"'
+      field: 'metrics.fulfillment.label_print_failures_per_min'
+      expect: 'back under 2 per minute (was ~34); drops within seconds of the rollback'
+      within_seconds: 60
+    - signal: fulfillment.label_queue_depth
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "packaging-fulfillment"'
+      field: 'metrics.fulfillment.label_queue_depth'
+      expect: 'back under 40 shipments (was 150-210); drains over about 2-3 minutes after the failure rate drops'
+      within_seconds: 240
+    - signal: ZPL label template revision
+      from: 'logs.otel.fanatics'
+      where: 'resource.attributes.service.name == "packaging-fulfillment"'
+      field: 'attributes.infra.label_zpl_version'
+      expect: 'zebra-zpl-ii-v6.0.4 on every printer status line since the fix; zebra-zpl-ii-v6.1-patched stops appearing'
+      within_seconds: 60
+    - signal: WMS-LABEL-PRINTER-FAULT lines
+      from: 'logs.otel.fanatics'
+      where: 'body.text LIKE "*WMS-LABEL-PRINTER-FAULT*"'
+      expect: '0 new lines'
+      within_seconds: 60
 business_impact:
   - kpi: business.merch_gmv_usd_per_min
-    factor: {uniform: [0.25, 0.55]}
+    value: {uniform: [10416.0, 11984.0], round: 1}
   - kpi: business.loyalty_points_redeemed_per_min
-    factor: {uniform: [0.30, 0.60]}
+    value: {uniform: [15112.0, 17388.0]}
   - kpi: business.churn_risk_index_0_100
     factor: {uniform: [2.0, 4.0]}
-  - kpi: business.net_satisfaction_proxy_nps
-    factor: {uniform: [0.20, 0.50]}
+# dependents degrade after the component at fault, in dependency order
+service_lag_seconds: {card-printing-system: 45, digital-marketplace: 120}

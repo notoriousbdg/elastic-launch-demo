@@ -8,59 +8,140 @@ affected_services:
 cascade_services:
 - storefront-gateway
 - analytics-pipeline
-description: Ad serving pipeline failing — impressions drop to zero, causing direct revenue loss reportable to senior leadership
+error_services: [ad-platform]
+description: Ad fill rate collapses to about 3% because targeting-index-builder 3.8.0 fails on every run, so the targeting index ages past the ad servers' 30-minute limit and they fall back to house ads.
+onset_delay_seconds: 10
 investigation_notes: |-
-  1. Check ad-platform logs for ADS-SERVING-FAILURE — ads.fill_rate_pct near zero is the primary revenue impact signal.
-  2. Quantify revenue impact: multiply ads.impressions_per_sec (expected ~{expected_impressions}) by ads.cpm_usd ({cpm_usd}) / 1000 to get $/sec loss.
-  3. Verify the ad decision service is reachable: check for CONNECTION_REFUSED or DNS_RESOLUTION_FAILURE in ad-platform logs.
-  4. Check ad server process health — OOM kills or core dumps under /var/log/ads/ indicate memory pressure from the creative cache.
-  5. Review ad targeting index freshness: a stale targeting index (>30min) causes bid requests to return empty, driving fill rate to zero.
-  6. If the ad server is healthy but fill_rate is low, check demand-side platform (DSP) integrations — a DSP outage reduces available bid inventory.
+  Root cause: the targeting-index-builder job was upgraded from 3.7.4 to 3.8.0 (CR-4127) and fails on every run since the audience segment feed changed segment_ids from ARRAY<INT64> to ARRAY<STRING>; 3.8.0 still casts segment ids to int64 and aborts with pyarrow ArrowInvalid. No new targeting index has been published since, so the ad servers keep serving index generation {index_generation} until it passes their 30-minute max age, then refuse it, stop targeted decisions and serve house ads or no-fill. Restarting the ad servers is the tempting fix and does not help: they reload the same stale generation {index_generation} and refuse it again. The ad servers are healthy and the DSP integrations are connected (ads.ad_server_healthy and ads.dsp_connected on the error lines), and request volume is normal, which rules out a server crash, a DSP outage and a traffic drop.
+  Confirm:
+    - ad-platform metrics.ads.fill_rate_pct falls from about 89% to about 3% within about 60s; metrics.ads.impressions_per_sec (about 14,500/s normally) and metrics.ads.revenue_per_minute_usd (about 2,100 USD/min) fall with it
+    - metrics.ads.targeting_index_age_min is 31 minutes or more and climbing by one per minute (normally about 7, never above 15 because the builder publishes every 15 minutes)
+    - ad-platform "adplatform.serving.index" status lines show generation={index_generation}, decisioning=house_ad_fallback, status=ANOMALY and attributes.ads.index_builder_version = 3.8.0 (3.7.4 before the upgrade)
+    - the ad-platform line "targeting-index-builder ... failed ... last successful publish 31m ago" (attributes.change.request CR-4127) comes before the first ADS-SERVING-FAILURE line
+    - storefront-gateway logs empty ad slots filled with fallback content and analytics-pipeline sees ad impression events drop to {ad_impression_eps}/s (normally about 14,500/s), both after ad-platform
+  Remediation: roll the CronJob back with opsctl rollback cronjob/targeting-index-builder --to-revision previous, then publish a fresh index now with a one-off run from the reverted template, opsctl run job/targeting-index-builder (the next scheduled run is up to 15 minutes away). The 3.7.4 run reads the STRING segment ids and publishes generation 18343 in about 20s; the 12 ad servers hot-load it over the next ~70s, so targeting index age drops to about 1 minute and fill rate is back at about 89% roughly 90s after the run starts.
 remediation_action: restart_ad_server
-error_message: '[AdPlatform] ADS-SERVING-FAILURE: fill_rate={fill_rate_pct}% (expected >{expected_fill_pct}%) impressions_lost={impressions_lost}
-  revenue_impact_usd={revenue_impact_usd} ad_unit={ad_unit_id} error={ad_error_detail}'
-stack_trace: |-
-  AdServingException: ADS-SERVING-FAILURE
-    at AdDecisionService.serve_ad(placement={ad_unit_id})
-    at AdPlatform.handle_bid_request(request_id={bid_request_id})
-  Fill Rate:       {fill_rate_pct}% (threshold: {expected_fill_pct}%)
-  Impressions Lost:{impressions_lost}
-  Revenue Impact:  ${revenue_impact_usd}
-  Ad Unit:         {ad_unit_id}
-  Error Detail:    {ad_error_detail}
-  DSP Status:      DEGRADED
-  Targeting Index: STALE ({targeting_staleness_min}min)
-  Expected CPM:    ${cpm_usd}
-  Exp. imp/sec:    {expected_impressions}
+remediation_command: |-
+  opsctl rollback cronjob/targeting-index-builder --to-revision previous
+  opsctl run job/targeting-index-builder
+error_message: '[adplatform.serving.decision] ADS-SERVING-FAILURE placement={placement} ad_unit={ad_unit_id} bid_request={bid_request_id}:
+  targeting index generation {index_generation} is {targeting_staleness_min}m old (max_age=30m), refusing stale index; targeted
+  decisioning disabled, serving house ad'
+stack_trace: ''
 correlation_attr:
-  key: ads.serving_degraded
-  value: true
+  key: ads.targeting_index_generation
+  value: 18342
 fault_params:
-  fill_rate_pct: {uniform: [0, 4], round: 1}
-  expected_fill_pct: 85
-  impressions_lost: {randint: [10000, 500000]}
-  revenue_impact_usd: {uniform: [500, 50000], round: 2}
+  placement: {choice: [homepage_banner, search_top, pdp_sidebar, cart_upsell]}
   ad_unit_id: {format: "AU-{n}", n: {randint: [1000, 9999]}}
   bid_request_id: {format: "BID-{n}", n: {randint: [100000, 999999]}}
-  ad_error_detail: {choice: [DSP_UNREACHABLE, TARGETING_INDEX_STALE, AD_DECISION_TIMEOUT]}
-  expected_impressions: {randint: [5000, 20000]}
-  cpm_usd: {uniform: [1.5, 8.0], round: 2}
-  targeting_staleness_min: {randint: [30, 120]}
+  index_generation: 18342
+  targeting_staleness_min: {randint: [31, 90]}
+  ad_impression_eps: {randint: [350, 650]}
 rca_clues:
   ad-platform:
-    ads.fill_rate_pct: {uniform: [0, 5], round: 1}
-    ads.ad_server_healthy: false
-    ads.dsp_connected: false
+    ads.targeting_index_age_min: {randint: [31, 90]}
+    ads.targeting_index_generation: 18342
+    ads.decisioning_mode: house_ad_fallback
+    ads.ad_server_healthy: true
+    ads.dsp_connected: true
   storefront-gateway:
     storefront.ad_slots_empty: {randint: [3, 8]}
     storefront.fallback_content_served: true
   analytics-pipeline:
-    analytics.ad_event_backlog: {randint: [1000, 50000]}
-    analytics.attribution_lag_min: {randint: [5, 60]}
+    analytics.ad_impression_events_per_sec: {randint: [350, 650]}
+    analytics.ad_impression_drop_pct: {uniform: [93.0, 97.0], round: 1}
+cascade_messages:
+  storefront-gateway:
+    - severity: WARN
+      message: '[storefront.ads] ad slot placement={placement} returned no targeted creative (house_ad) for {ad_unit_id}; rendering fallback content'
+  analytics-pipeline:
+    - severity: WARN
+      message: '[analytics.ingest.ad_events] ad_impression events below expected rate on stream ad-events: received {ad_impression_eps}/s, 1h average 14500/s'
+fault_scope:
+  cluster: ecommerce-gke-cluster
+  workloads: [ad-platform]
+infrastructure_events:
+  - service: ad-platform
+    severity: ERROR
+    offset_seconds: -90
+    body: '[adplatform.jobs.targeting_index_builder] run failed (targeting-index-builder 3.8.0): pyarrow.lib.ArrowInvalid: Could not convert ''seg_a91f2'' with type str: tried to convert to int64 (column segment_ids, source audience-segments); index not published, last successful publish 31m ago (generation 18342)'
+    attributes:
+      operation: index_build
+      user.name: ads-data-eng
+      change.request: CR-4127
+      change.summary: 'targeting-index-builder: 3.7.4 -> 3.8.0'
+      ads.index_builder_version: 3.8.0
+      ads.targeting_index_generation: 18342
+service_lag_seconds: {storefront-gateway: 20, analytics-pipeline: 30}
+remediation_effects:
+  log_taper_seconds: 90
+  log_events:
+    - service: ad-platform
+      severity: INFO
+      offset_seconds: 0
+      body: '[CHG] CHANGE APPLIED opsctl rollback cronjob/targeting-index-builder --to-revision previous by {actor}: job template reverted to targeting-index-builder 3.7.4 (from 3.8.0)'
+      attributes:
+        operation: change_applied
+        change.target: cronjob/targeting-index-builder
+        ads.index_builder_version: 3.7.4
+    - service: ad-platform
+      severity: INFO
+      offset_seconds: 2
+      body: '[CHG] CHANGE APPLIED opsctl run job/targeting-index-builder by {actor}: run started with targeting-index-builder 3.7.4'
+      attributes:
+        operation: change_applied
+        change.target: job/targeting-index-builder
+    - service: ad-platform
+      severity: INFO
+      offset_seconds: 20
+      body: '[adplatform.jobs.targeting_index_builder] index published: generation 18343, 41,286,904 docs, 6.8 GiB, segment_ids read as STRING (targeting-index-builder 3.7.4)'
+      attributes:
+        operation: index_build
+        ads.index_builder_version: 3.7.4
+        ads.targeting_index_generation: 18343
+    - service: ad-platform
+      severity: INFO
+      offset_seconds: 50
+      body: '[adplatform.serving.index] hot-loading targeting index generation 18343: 6/12 ad servers loaded'
+      attributes:
+        operation: targeting_index_status
+        ads.targeting_index_generation: 18343
+    - service: ad-platform
+      severity: INFO
+      offset_seconds: 90
+      body: '[adplatform.serving.index] 12/12 ad servers loaded targeting index generation 18343; targeted decisioning resumed'
+      attributes:
+        operation: targeting_index_status
+        ads.targeting_index_generation: 18343
+  verification:
+    - signal: ads.fill_rate_pct
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "ad-platform"'
+      field: 'metrics.ads.fill_rate_pct'
+      expect: 'climbs back from about 3% to about 89% within about 90s of the run as the ad servers load generation 18343'
+      within_seconds: 180
+    - signal: ads.targeting_index_age_min
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "ad-platform"'
+      field: 'metrics.ads.targeting_index_age_min'
+      expect: 'drops from over 30 minutes to about 1 minute about 20s after the run starts, then stays under 15'
+      within_seconds: 120
+    - signal: ADS-SERVING-FAILURE lines
+      from: 'logs.otel.ecommerce'
+      where: 'body.text LIKE "*ADS-SERVING-FAILURE*"'
+      expect: 'no new lines once the ad servers have loaded the fresh index (about 90s)'
+      within_seconds: 180
+    - signal: index builder version
+      from: 'logs.otel.ecommerce'
+      where: 'resource.attributes.service.name == "ad-platform"'
+      field: 'attributes.ads.index_builder_version'
+      expect: '3.7.4 on the index status lines after the rollback (3.8.0 while failing)'
+      within_seconds: 120
 business_impact:
   - kpi: business.ad_revenue_usd_per_min
-    factor: {uniform: [0.05, 0.20]}
+    factor: {uniform: [0.05, 0.2]}
   - kpi: business.gmv_usd_per_min
-    factor: {uniform: [0.30, 0.55]}
+    value: {uniform: [31620.0, 36380.0], round: 1}
   - kpi: business.conversion_rate_pct
-    factor: {uniform: [0.35, 0.60]}
+    value: {uniform: [1.15, 1.32], round: 2}

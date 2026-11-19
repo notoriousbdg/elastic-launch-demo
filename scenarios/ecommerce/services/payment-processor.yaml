@@ -40,27 +40,36 @@ constants:
   - adyen
   - braintree
 steps:
+# Fault intensity per channel: 0 at baseline, ramps to 1 after onset, decays back to 0 after the fix.
+# Ch 1: Stripe incident, timeouts ramp over 45s; in-flight retries finish within ~50s of the routing switch.
+# Ch 6: CDN edge IPs scored as client IPs, ramps over 60s; cached geo lookups expire over ~90s after the rollback.
+# Ch 18: expired cards not refreshed, renewal declines ramp over 60s; dunning retries succeed over ~180s.
 - sample:
-    transactions_per_min:
-      uniform:
-      - 90.0
-      - 380.0
-      round: 1
-    success_rate_pct:
-      uniform:
-      - 97.5
-      - 99.7
-      round: 2
-    avg_processing_ms:
-      uniform:
-      - 180.0
-      - 850.0
-      round: 1
+    f01:
+      expr: "min(1.0, max(0.0, elapsed.get(1, 0) - lag.get(1, 0)) / 45.0) if 1 in all_active else (max(0.0, 1.0 - since_fix.get(1, 0) / 50.0) if 1 in fixed_channels else 0.0)"
+    f06:
+      expr: "min(1.0, max(0.0, elapsed.get(6, 0) - lag.get(6, 0)) / 60.0) if 6 in all_active else (max(0.0, 1.0 - since_fix.get(6, 0) / 90.0) if 6 in fixed_channels else 0.0)"
+    f18:
+      expr: "min(1.0, max(0.0, elapsed.get(18, 0) - lag.get(18, 0)) / 60.0) if 18 in all_active else (max(0.0, 1.0 - since_fix.get(18, 0) / 180.0) if 18 in fixed_channels else 0.0)"
+- sample:
+    gateway_timeout_pct:
+      expr: "round(max(0.05, 0.2 + rand.gauss(0, 0.05)) + f01 * 30.0 * (1.0 + rand.gauss(0, 0.04)), 2)"
+    gateway_p95_ms:
+      expr: "round(min(10015.0, 420.0 + rand.gauss(0, 18.0) + (10000.0 - 420.0) * min(1.0, max(0.0, (gateway_timeout_pct - 2.0) / 4.0))))"
     fraud_block_rate_pct:
-      uniform:
-      - 0.3
-      - 1.8
-      round: 3
+      expr: "round(max(0.6, 1.1 + rand.gauss(0, 0.1)) + f06 * 12.9 * (1.0 + rand.gauss(0, 0.04)), 2)"
+    renewal_decline_pct:
+      expr: "round(max(1.5, 3.0 + rand.gauss(0, 0.3)) + f18 * 25.0 * (1.0 + rand.gauss(0, 0.04)), 2)"
+    transactions_per_min:
+      expr: "round((240.0 + rand.gauss(0, 8.0)) * (1.0 - gateway_timeout_pct / 100.0), 1)"
+    success_rate_pct:
+      expr: "round(max(0.0, min(99.9, 98.6 + rand.gauss(0, 0.25)) - gateway_timeout_pct * 0.97 - max(0.0, fraud_block_rate_pct - 1.1) * 0.9 - max(0.0, renewal_decline_pct - 3.0) * 0.2), 2)"
+    avg_processing_ms:
+      expr: "round(310.0 + rand.gauss(0, 14.0) + gateway_timeout_pct / 100.0 * 9700.0, 1)"
+    psp_primary:
+      expr: "'adyen' if 1 in fixed_channels else 'stripe'"
+    payments_status:
+      expr: "'ANOMALY' if gateway_timeout_pct > 2.0 else 'NOMINAL'"
 - metric:
     name: payments.transactions_per_min
     value:
@@ -77,14 +86,20 @@ steps:
       var: avg_processing_ms
     unit: ms
 - metric:
-    name: payments.fraud_block_rate_pct
+    name: payments.gateway_timeout_pct
     value:
-      var: fraud_block_rate_pct
+      var: gateway_timeout_pct
     unit: '%'
+- metric:
+    name: payments.gateway_p95_ms
+    value:
+      var: gateway_p95_ms
+    unit: ms
 - log:
     level: INFO
-    message: payments.health txn_per_min={transactions_per_min} success_rate={success_rate_pct}% avg_processing_ms={avg_processing_ms}
-      fraud_block_rate={fraud_block_rate_pct}%
+    message: 'info: Ecommerce.Payments.Telemetry.PaymentsHealthReporter[100] payments.health psp_primary={psp_primary} txn_per_min={transactions_per_min}
+      success_rate={success_rate_pct}% avg_processing_ms={avg_processing_ms} gateway_timeout_pct={gateway_timeout_pct} gateway_p95_ms={gateway_p95_ms}
+      http_timeout_ms=10000 status={payments_status}'
     attrs:
       operation: payments_health
       payments.transactions_per_min:
@@ -95,21 +110,153 @@ steps:
         var: avg_processing_ms
       payments.fraud_block_rate_pct:
         var: fraud_block_rate_pct
+      payments.gateway_timeout_pct:
+        var: gateway_timeout_pct
+      payments.gateway_p95_ms:
+        var: gateway_p95_ms
+      payment.psp_primary:
+        var: psp_primary
+      payments.status:
+        var: payments_status
+# Provider probes. Stripe's incident is on Stripe's side, so its probe stays slow after traffic moves
+# to Adyen and clears on its own about 15 minutes later; the routing stays on Adyen until switched back.
 - sample:
-    gateway_latency_ms:
-      uniform:
-      - 120.0
-      - 600.0
-      round: 1
     provider:
       choice: PROVIDERS
-- log:
+    stripe_incident:
+      expr: "min(1.0, max(0.0, elapsed.get(1, 0) - lag.get(1, 0)) / 45.0) if 1 in all_active else (1.0 if (1 in fixed_channels and since_fix.get(1, 0) < 900) else 0.0)"
+    gateway_latency_ms:
+      expr: "round(min(10000.0, max(90.0, (300.0 if provider == 'stripe' else (340.0 if provider == 'adyen' else 360.0)) + rand.gauss(0, 40.0)) + (stripe_incident * (8600.0 + rand.gauss(0, 700.0)) if provider == 'stripe' else 0.0)), 1)"
+    gateway_status:
+      expr: "'DEGRADED' if gateway_latency_ms > 2000.0 else 'HEALTHY'"
+    provider_role:
+      expr: "'primary' if provider == psp_primary else 'secondary'"
+    tls_handshake_ms:
+      expr: "round(rand.uniform(58.0, 92.0))"
+    pool_active:
+      expr: "round(70.0 + rand.gauss(0, 5.0) + f01 * 12.0)"
+- when: "gateway_status == 'HEALTHY'"
+  log:
     level: INFO
-    message: payments.gateway_health provider={provider} latency_ms={gateway_latency_ms} status=HEALTHY
+    message: 'info: Ecommerce.Payments.Gateway.GatewayHealthMonitor[210] payments.gateway_health provider={provider} role={provider_role}
+      latency_ms={gateway_latency_ms} tls_handshake_ms={tls_handshake_ms} pool_active={pool_active}/200 status={gateway_status}'
     attrs:
       operation: gateway_health
       payments.gateway_provider:
         var: provider
       payments.gateway_latency_ms:
         var: gateway_latency_ms
-      payments.gateway_status: HEALTHY
+      payments.gateway_status:
+        var: gateway_status
+      payments.gateway_role:
+        var: provider_role
+      payments.tls_handshake_ms:
+        var: tls_handshake_ms
+      payments.pool_active_connections:
+        var: pool_active
+      payments.pool_size: 200
+- when: "gateway_status != 'HEALTHY'"
+  log:
+    level: WARN
+    message: 'warn: Ecommerce.Payments.Gateway.GatewayHealthMonitor[211] payments.gateway_health provider={provider} role={provider_role}
+      latency_ms={gateway_latency_ms} tls_handshake_ms={tls_handshake_ms} pool_active={pool_active}/200 status={gateway_status}'
+    attrs:
+      operation: gateway_health
+      payments.gateway_provider:
+        var: provider
+      payments.gateway_latency_ms:
+        var: gateway_latency_ms
+      payments.gateway_status:
+        var: gateway_status
+      payments.gateway_role:
+        var: provider_role
+      payments.tls_handshake_ms:
+        var: tls_handshake_ms
+      payments.pool_active_connections:
+        var: pool_active
+      payments.pool_size: 200
+# Risk engine. fraud-model-v14 has been live for 16 days; only the ip_geo feature drifts when the
+# client IP it receives is a CDN edge address instead of the shopper's address.
+- sample:
+    geo_mismatch_block_share_pct:
+      expr: "round(min(97.0, max(4.0, 12.0 + rand.gauss(0, 1.5) + f06 * 73.0 * (1.0 + rand.gauss(0, 0.02)))), 1)"
+    ip_geo_psi:
+      expr: "round(max(0.01, 0.04 + rand.gauss(0, 0.008)) + f06 * 0.42 * (1.0 + rand.gauss(0, 0.05)), 3)"
+    amount_psi:
+      expr: "round(max(0.005, 0.03 + rand.gauss(0, 0.006)), 3)"
+    device_psi:
+      expr: "round(max(0.005, 0.05 + rand.gauss(0, 0.008)), 3)"
+    client_ip_source:
+      expr: "'remote-addr' if 6 in all_active else 'x-forwarded-for'"
+    fraud_status:
+      expr: "'ANOMALY' if fraud_block_rate_pct > 3.0 else 'NOMINAL'"
+- metric:
+    name: payments.fraud_block_rate_pct
+    value:
+      var: fraud_block_rate_pct
+    unit: '%'
+- metric:
+    name: payments.geo_mismatch_block_share_pct
+    value:
+      var: geo_mismatch_block_share_pct
+    unit: '%'
+- log:
+    level: INFO
+    message: 'info: Ecommerce.Payments.Risk.FraudEngine[310] risk.status model=fraud-model-v14 model_age_days=16 threshold=70 block_rate_pct={fraud_block_rate_pct}
+      geo_mismatch_share_pct={geo_mismatch_block_share_pct} psi_ip_geo={ip_geo_psi} psi_amount={amount_psi} psi_device={device_psi}
+      client_ip_source={client_ip_source} status={fraud_status}'
+    attrs:
+      operation: fraud_risk_status
+      payment.fraud_model_version: fraud-model-v14
+      payment.fraud_score_threshold: 70
+      payments.fraud_block_rate_pct:
+        var: fraud_block_rate_pct
+      payments.geo_mismatch_block_share_pct:
+        var: geo_mismatch_block_share_pct
+      payment.psi_ip_geo:
+        var: ip_geo_psi
+      payment.psi_amount:
+        var: amount_psi
+      payment.psi_device:
+        var: device_psi
+      payment.client_ip_source:
+        var: client_ip_source
+      payments.risk_status:
+        var: fraud_status
+# Recurring billing. The card-network Account Updater batch runs daily at 02:00 UTC; while its SFTP
+# credential is expired the hours since its last success keep growing.
+- sample:
+    renewal_decline_54_share_pct:
+      expr: "round(min(98.0, max(5.0, 22.0 + rand.gauss(0, 2.0) + f18 * 70.0)), 1)"
+    account_updater_last_success_h:
+      expr: "round(840.0 + elapsed.get(18, 0) / 3600.0, 2) if 18 in all_active else ((840.0 if since_fix.get(18, 0) < 50 else round(((since_fix.get(18, 0) - 50.0) / 3600.0) % 24.0, 3)) if 18 in fixed_channels else round((time.time() / 3600.0 - 2.0) % 24.0, 2))"
+    account_updater_status:
+      expr: "'AUTH_FAILED' if 18 in all_active else 'OK'"
+    renewal_status:
+      expr: "'ANOMALY' if (renewal_decline_pct > 6.0 or account_updater_status != 'OK') else 'NOMINAL'"
+- metric:
+    name: payments.renewal_decline_pct
+    value:
+      var: renewal_decline_pct
+    unit: '%'
+- metric:
+    name: payments.account_updater_last_success_h
+    value:
+      var: account_updater_last_success_h
+    unit: h
+- log:
+    level: INFO
+    message: 'info: Ecommerce.Payments.Billing.RecurringBillingMonitor[420] billing.renewals decline_pct={renewal_decline_pct} decline_code_54_share_pct={renewal_decline_54_share_pct}
+      account_updater={account_updater_status} account_updater_last_success_h={account_updater_last_success_h} status={renewal_status}'
+    attrs:
+      operation: recurring_billing_status
+      payments.renewal_decline_pct:
+        var: renewal_decline_pct
+      payments.renewal_decline_54_share_pct:
+        var: renewal_decline_54_share_pct
+      payments.account_updater_last_success_h:
+        var: account_updater_last_success_h
+      payment.account_updater_status:
+        var: account_updater_status
+      payments.renewal_status:
+        var: renewal_status

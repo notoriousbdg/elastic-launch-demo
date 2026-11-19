@@ -1,7 +1,7 @@
 name: DB Connection Pool Exhaustion
 subsystem: database
 vehicle_section: subscriber_data
-error_type: DB-CONNPOOL-EXHAUST
+error_type: Connection is not available, request timed out after
 sensor_type: connection_pool
 affected_services:
 - subscriber-db
@@ -9,74 +9,138 @@ affected_services:
 cascade_services:
 - activation-service
 - api-gateway
-description: PostgreSQL connection pool on subscriber-db saturated causing query timeouts across provisioning pipeline
-investigation_notes: |
-  1. Check HikariCP pool metrics on provisioning-service — pool_active near pool_max (100) indicates exhaustion. Run: kubectl exec provisioning-service -- curl localhost:8080/actuator/metrics/hikaricp.connections.active
-  2. Review pg_stat_activity on subscriber-db for long-running queries: SELECT pid, now()-query_start AS duration, query FROM pg_stat_activity WHERE state='active' ORDER BY duration DESC LIMIT 20.
-  3. Check for vacuum or reindex operations that may be holding locks on the subscribers table (45M rows). Long-running maintenance on large tables is the most common root cause of pool exhaustion.
-  4. Review CloudTrail for recent ModifyDBInstance events on subscriber-db RDS instance — automated maintenance windows can trigger vacuum operations without operator awareness.
-  5. Monitor connection wait time — if avg_wait_ms exceeds 3000ms, provisioning-service will begin returning 503s to activation-service. Check: SELECT count(*) FROM pg_stat_activity WHERE wait_event_type='Client'.
-remediation_action: restart_subscriber_db_pool
-error_message: '[DB] DB-CONNPOOL-EXHAUST: pool_active={pool_active} pool_max={pool_max} wait_queue={wait_queue} avg_wait_ms={avg_wait_ms} db_host={db_host}'
-stack_trace: |
-  === SUBSCRIBER DB CONNECTION POOL REPORT ===
-  db_host={db_host}  pool=HikariCP  table=subscribers (45M rows)
-  --- POOL STATUS ---
-    METRIC                VALUE       THRESHOLD    STATUS
-    active_connections     {pool_active}        100          EXHAUSTED
-    idle_connections       0           10           DEPLETED
-    wait_queue             {wait_queue}        50           OVERFLOW
-    avg_wait_ms            {avg_wait_ms}      3000         CRITICAL
-  --- BLOCKING QUERIES ---
-    pid=14829  duration=847s  query='VACUUM ANALYZE subscribers'
-    pid=14830  duration=612s  query='REINDEX INDEX idx_subscribers_msisdn'
-  --- CASCADE IMPACT ---
-    provisioning-service: 503 errors, timeout after 3000ms
-    activation-service: upstream timeout, retry storm (3x multiplier)
-    api-gateway: 502/503 to customers, {error_rate_pct}% error rate
-  ACTION: cancel_maintenance=true  kill_long_queries=true  alert=DB-CONNPOOL-EXHAUST
-infrastructure_events:
-- body: '[CloudWatch] RDS ConnectionPoolExhausted: instance=subscriber-db pool_active=100/100 wait_queue=350 avg_wait_ms=4200 alarm=ALARM region=eu-central-1'
-  severity: ERROR
-  event_name: aws.cloudwatch.alarm.ConnectionPoolExhausted
-  service: subscriber-db
-  attributes:
-    cloud.provider: aws
-    cloud.service: cloudwatch
-    aws.cloudwatch.alarm_name: subscriber-db-pool-exhaustion
-    aws.cloudwatch.state: ALARM
-    aws.rds.instance: subscriber-db
-    infrastructure.source: CloudWatch
+description: provisioning-service HikariCP pools to subscriber-db are exhausted by connections held idle in transaction
+investigation_notes: |-
+  Root cause: provisioning-service 2.14.0 (Argo CD sync about a minute before the first error, as the new pods took traffic; previous image 2.13.4) moved the synchronous HLR registration call inside the @Transactional SimReservationService.reserveSim() method. Each reservation now holds a row lock on sim_inventory and keeps its connection idle in transaction for the whole HLR round trip (2-8 s). The HikariCP pool (maximumPoolSize {pool_max} per pod, 6 pods) fills with these connections: {pool_active} active, 0 idle, {pending_threads} threads waiting. subscriber-db itself is not saturated: CPU, read latency and the queries that do run are normal, and its connections are mostly idle in transaction rather than active.
+  Confirm:
+    - provisioning-service status lines carry attributes.deployment.image_tag 2.14.0 and the Argo CD sync line (2.13.4 -> 2.14.0) comes before the first "Connection is not available"
+    - metric provisioning_service.hikari_active_connections sits at {pool_max} (normally about 12) and provisioning_service.hikari_pending_threads is in the hundreds (normally 0)
+    - metric subscriber_db.idle_in_transaction_sessions climbs from about 3 to about 280, and subscriber-db logs "still waiting for ShareLock on transaction" on sim_inventory; subscriber_db.cpu_utilization_pct stays near 30%, which rules out an overloaded database
+  Remediation: roll provisioning-service back to 2.13.4 with opsctl rollback deployment/provisioning-service --to-revision previous. The rolling update replaces one pod at a time (about 60 seconds for 6 pods); each new pod starts with an empty pool, so pending threads drop pod by pod and idle-in-transaction sessions fall back to single digits. Restarting subscriber-db or raising maximumPoolSize would only add more connections stuck in the same transactions.
+remediation_action: rollback_provisioning_service
+error_message: 'HikariPool-1 - Connection is not available, request timed out after 30000ms (total={pool_max}, active={pool_active}, idle=0, waiting={pending_threads})'
+stack_trace: |-
+  java.sql.SQLTransientConnectionException: HikariPool-1 - Connection is not available, request timed out after 30000ms (total={pool_max}, active={pool_active}, idle=0, waiting={pending_threads})
+  	at com.zaxxer.hikari.pool.HikariPool.createTimeoutException(HikariPool.java:686)
+  	at com.zaxxer.hikari.pool.HikariPool.getConnection(HikariPool.java:179)
+  	at com.zaxxer.hikari.pool.HikariPool.getConnection(HikariPool.java:144)
+  	at com.zaxxer.hikari.HikariDataSource.getConnection(HikariDataSource.java:127)
+  	at org.springframework.jdbc.datasource.DataSourceTransactionManager.doBegin(DataSourceTransactionManager.java:265)
+  	at org.springframework.transaction.support.AbstractPlatformTransactionManager.startTransaction(AbstractPlatformTransactionManager.java:400)
+  	at eu.meridian.provisioning.sim.SimReservationService.reserveSim(SimReservationService.java:88)
+  	at eu.meridian.provisioning.api.ProvisionController.provision(ProvisionController.java:61)
 correlation_attr:
-  key: deployment.hikari_pool_config
-  value: hikari-v5.1.0-custom-patch
+  key: deployment.image_tag
+  value: provisioning-service:2.14.0
 fault_params:
-  pool_active: {randint: [95, 100]}
-  pool_max: 100
-  wait_queue: {randint: [200, 500]}
-  avg_wait_ms: {randint: [3000, 8000]}
-  db_host: subscriber-db.eu-central-1.rds.amazonaws.com
-  error_rate_pct: {uniform: [10.0, 55.0], round: 1}
+  pool_active: 50
+  pool_max: 50
+  pending_threads: {randint: [140, 220]}
+  idle_in_tx: {randint: [260, 300]}
+  lock_wait_ms: {uniform: [1000.0, 7800.0], round: 3}
+  upstream_ms: {randint: [30005, 30090]}
 rca_clues:
-  subscriber-db:
-    db.pool_active: {randint: [95, 100]}
-    db.pool_max: 100
-    db.wait_queue: {randint: [200, 500]}
   provisioning-service:
-    upstream.db_latency_ms: {randint: [3000, 5000]}
-    upstream.timeout_count: {randint: [30, 80]}
+    deployment.image_tag: provisioning-service:2.14.0
+    hikari.active_connections: 50
+    hikari.pending_threads: {randint: [140, 220]}
+    hikari.connection_timeout_ms: 30000
+  subscriber-db:
+    db.idle_in_transaction_sessions: {randint: [260, 300]}
+    db.lock_wait_relation: sim_inventory
+    db.lock_waits: {randint: [60, 120]}
   activation-service:
-    upstream.degraded_subsystem: database
-    activation.failure_rate_pct: {uniform: [15.0, 55.0], round: 1}
+    upstream.degraded_subsystem: provisioning
+    upstream.status_code: 503
   api-gateway:
     upstream.degraded_subsystem: activation
-    gateway.5xx_rate: {uniform: [0.1, 0.5], round: 2}
+    gateway.5xx_rate: {uniform: [0.12, 0.45], round: 2}
+remediation_command: |-
+  opsctl rollback deployment/provisioning-service --to-revision previous
+fault_scope:
+  cluster: meridian-gke-cluster
+  workloads: [provisioning-service]
+error_services: [provisioning-service]
+cascade_messages:
+  subscriber-db:
+    - severity: WARN
+      message: '{iso_now}:10.42.7.19(51834):provisioning@subscribers:[48211]:LOG:  process 48211 still waiting for ShareLock on transaction 918273641 after {lock_wait_ms} ms'
+    - severity: WARN
+      message: '{iso_now}:10.42.7.22(40418):provisioning@subscribers:[48377]:DETAIL:  Process holding the lock: 47102. Wait queue: 48377. CONTEXT: while locking tuple (11742,9) in relation "sim_inventory"'
+  activation-service:
+    - severity: ERROR
+      message: 'POST http://provisioning-service/api/v1/provision failed: 503 Service Unavailable after {upstream_ms} ms; activation workflow moved to retry queue'
+  api-gateway:
+    - severity: WARN
+      message: 'upstream activation-service returned 503 for POST /api/v1/activate in {upstream_ms}ms'
+infrastructure_events:
+  - service: provisioning-service
+    severity: INFO
+    offset_seconds: -60
+    event_name: argocd.app.sync
+    body: 'argocd-application-controller: Sync operation to 4f1c9a2 succeeded; app=provisioning-service namespace=meridian image provisioning-service:2.13.4 -> provisioning-service:2.14.0 initiatedBy=argocd-image-updater'
+    attributes:
+      operation: deployment_sync
+      user.name: argocd-image-updater
+      deployment.image_tag: provisioning-service:2.14.0
+      change.summary: 'provisioning-service image 2.13.4 -> 2.14.0'
+remediation_effects:
+  log_taper_seconds: 60
+  log_events:
+    - service: provisioning-service
+      severity: INFO
+      offset_seconds: 1
+      body: '[NOC-CHG] executed opsctl rollback deployment/provisioning-service --to-revision previous actor={actor}: image provisioning-service:2.14.0 -> provisioning-service:2.13.4'
+      attributes:
+        operation: change_executed
+        change.target: deployment/provisioning-service
+        deployment.image_tag: provisioning-service:2.13.4
+    - service: provisioning-service
+      severity: INFO
+      offset_seconds: 60
+      body: 'argocd-application-controller: rollout complete app=provisioning-service 6/6 pods ready on provisioning-service:2.13.4'
+      attributes:
+        operation: deployment_sync
+        deployment.image_tag: provisioning-service:2.13.4
+  steady_attributes:
+    provisioning-service:
+      deployment.image_tag: provisioning-service:2.13.4
+  verification:
+    - signal: provisioning_service.hikari_pending_threads
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "provisioning-service"'
+      field: 'metrics.provisioning_service.hikari_pending_threads'
+      expect: 'back to 0 (was 140-220)'
+      within_seconds: 120
+    - signal: subscriber_db.idle_in_transaction_sessions
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "subscriber-db"'
+      field: 'metrics.subscriber_db.idle_in_transaction_sessions'
+      expect: 'under 10 (was 260-300)'
+      within_seconds: 120
+    - signal: Connection is not available lines
+      from: 'logs.otel.meridian'
+      where: 'body.text LIKE "*Connection is not available, request timed out after*"'
+      expect: '0 new lines once the rollout completes'
+      within_seconds: 120
+    - signal: provisioning-service image
+      from: 'logs.otel.meridian'
+      where: 'resource.attributes.service.name == "provisioning-service"'
+      field: 'attributes.deployment.image_tag'
+      expect: 'provisioning-service:2.13.4 on every line logged since the rollout'
+      within_seconds: 120
 business_impact:
   - kpi: business.activations_per_min
-    factor: {uniform: [0.20, 0.50]}
+    value: {uniform: [230.87, 265.63]}
   - kpi: business.revenue_usd_per_min
     factor: {uniform: [0.25, 0.55]}
   - kpi: business.support_tickets_per_min
     factor: {uniform: [2.0, 4.5]}
   - kpi: business.trouble_to_billing_ratio_pct
     factor: {uniform: [2.5, 5.0]}
+generator_impact:
+  aws_rds_otel:
+    database_connections_high: 150.0
+generator_hold_seconds:
+  aws_rds_otel: 60
+service_lag_seconds: {subscriber-db: 5, activation-service: 15, api-gateway: 25}

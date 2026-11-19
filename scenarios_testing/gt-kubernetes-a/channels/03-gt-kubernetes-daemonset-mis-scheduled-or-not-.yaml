@@ -1,0 +1,37 @@
+name: "GT kubernetes_otel: daemonset_mis_scheduled_or_not_ready"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-KUBERNETES-DAEMONSET-MIS-SCHEDULED-
+sensor_type: impact_key_probe
+affected_services:
+  - gt-kubernetes-a-aws-svc-1
+cascade_services:
+  - gt-kubernetes-a-aws-svc-2
+description: "Tests impact_key daemonset_mis_scheduled_or_not_ready on generator kubernetes_otel."
+investigation_notes: |-
+  1. Verify kubernetes_otel is active and reporting metrics.
+  2. Check that the daemonset_mis_scheduled_or_not_ready metric has reached the trigger value (50.0).
+  3. Confirm generator_impact for kubernetes_otel.daemonset_mis_scheduled_or_not_ready is set to 50.0.
+  4. Look for correlated changes in service gt-kubernetes-a-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_daemonset_mis_scheduled_or_not_ready_baseline
+error_message: "GT-PROBE: gen=kubernetes_otel key=daemonset_mis_scheduled_or_not_ready value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=kubernetes_otel
+  impact_key: daemonset_mis_scheduled_or_not_ready
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 50.0
+  svc_name: gt-kubernetes-a-aws-svc-1
+rca_clues:
+  gt-kubernetes-a-aws-svc-1:
+    probe.generator: kubernetes_otel
+    probe.impact_key: daemonset_mis_scheduled_or_not_ready
+    probe.trigger_value: 50.0
+  gt-kubernetes-a-aws-svc-2:
+    probe.upstream_generator: kubernetes_otel
+    probe.upstream_key: daemonset_mis_scheduled_or_not_ready
+generator_impact:
+  kubernetes_otel:
+    daemonset_mis_scheduled_or_not_ready: 50.0

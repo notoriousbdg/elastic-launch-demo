@@ -1,0 +1,46 @@
+name: Gcp Audit Permission Denials
+subsystem: platform
+vehicle_section: platform_pipeline
+error_type: GCP-AUDIT-DENY-SURGE
+sensor_type: health_check
+affected_services: [data-platform]
+cascade_services: [analytics-service]
+
+description: >
+  A synthetic GCP service-account permission drift is causing a surge of PERMISSION_DENIED
+  entries in the audit log for data-platform's orchestration DAGs, blocking scheduled runs.
+
+investigation_notes: |
+  1. Search for body.text containing *GCP-AUDIT-DENY-SURGE* to find the affected principal.
+  2. Check data-platform orchestration.dag_failure_pct for correlated DAG failures.
+  3. Confirm gcp_audit_otel error_rate and records_per_cycle metrics spike for {gcp_principal}.
+  4. Check analytics-service analytics.write_rejection_pct for cascading write failures.
+  5. Verify denials subside once the IAM binding for {gcp_principal} is restored.
+
+remediation_action: restore_iam_binding
+
+error_message: |
+  GCP-AUDIT-DENY-SURGE: principal={gcp_principal} denied_calls={denied_call_count} method={gcp_method}
+
+stack_trace: |
+  PermissionDeniedSurgeError: principal={gcp_principal}
+    at AuditLogSink.record()
+    denied_calls={denied_call_count} method={gcp_method}
+
+fault_params:
+  gcp_principal: {choice: [dag-runner-sa@inttest.iam.gserviceaccount.com, coverage-writer-sa@inttest.iam.gserviceaccount.com]}
+  denied_call_count: {randint: [50, 1200]}
+  gcp_method: {choice: [storage.objects.create, bigquery.jobs.create, pubsub.topics.publish]}
+
+rca_clues:
+  data-platform:
+    orchestration.dag_failure_pct: {uniform: [20.0, 70.0], round: 1}
+    orchestration.iam_denied_count: {randint: [50, 1200]}
+  analytics-service:
+    analytics.write_rejection_pct: {uniform: [15.0, 60.0], round: 1}
+    analytics.upstream_dag_blocked: true
+
+generator_impact:
+  gcp_audit_otel:
+    error_rate: {uniform: [0.3, 0.8]}
+    records_per_cycle: {randint: [100, 450]}

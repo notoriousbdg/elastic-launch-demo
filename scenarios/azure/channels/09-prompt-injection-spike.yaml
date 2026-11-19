@@ -1,0 +1,128 @@
+name: Prompt Injection Spike
+subsystem: safety
+vehicle_section: safety_pipeline
+error_type: PROMPT-INJECTION-SPIKE
+sensor_type: health_check
+affected_services: [prompt-guard, chat-orchestrator]
+error_services: [prompt-guard]
+cascade_services: []
+
+description: >
+  prompt-guard sees a sustained burst of system-prompt extraction attempts from a small set of client IPs led by 203.0.113.47, which the Application Gateway WAF policy does not yet block.
+
+investigation_notes: |
+  Root cause: a small set of external clients, led by {top_client_ip} ({top_ip_share_pct}% of attempts), is sending {injection_attempts} prompt-injection attempts over {window_minutes} minutes ({attack_pattern}) through the Application Gateway. prompt-shield detects and blocks nearly all of them ({blocked_count} blocked), but the volume is abuse and nothing at the gateway stops the source. No configuration change caused this: the content filter threshold and the WAF policy are unchanged.
+  Confirm:
+    - metric prompt_guard.injection_attempts_per_min is 900-1000 (baseline under 3) and prompt_guard.injection_score is 0.62-0.97 on screened prompts (baseline below 0.25), while prompt_guard.block_rate_pct stays near 1.5, which rules out a content filter change
+    - prompt-guard logs injection_shield ... top_ip={top_client_ip} pattern={attack_pattern} waf_custom_rule=none status=ANOMALY (attributes.waf.custom_rule is none, attributes.security.blocked_ip is none)
+    - the first injection_shield burst line for {top_client_ip} comes before the sustained spike; chat-orchestrator shows mostly anonymous sessions with high tokens per session from the same addresses
+  Remediation: after security review, block the confirmed offender at the gateway with opsctl apply waf-policy/waf-policy-azureai-prod --block-ips {top_client_ip}. Attempts fall back to baseline over about 60 seconds. Loosening or tightening the content filter does not help: the shield already detects these prompts and the volume comes from the source.
+
+remediation_action: block_offending_clients_after_review
+remediation_command: |-
+  opsctl apply waf-policy/waf-policy-azureai-prod --block-ips 203.0.113.47
+
+error_message: |
+  [PromptGuard] PROMPT-INJECTION-SPIKE: prompt-shield flagged attempts={injection_attempts} window={window_minutes}m distinct_ips={distinct_ips} top_ip={top_client_ip} pattern={attack_pattern} blocked={blocked_count}
+
+stack_trace: |
+  azure.ai.contentsafety.PromptInjectionDetected: PROMPT-INJECTION-SPIKE
+    at PromptGuard.shield_prompt(pattern={attack_pattern})
+    at PromptGuard.handleScreenRequest(client_ip={top_client_ip})
+  Attempts:           {injection_attempts} in {window_minutes}m (baseline {baseline_attempts})
+  Distinct client IPs: {distinct_ips}
+  Top source:         {top_client_ip} ({top_ip_share_pct}% of attempts)
+  Blocked by shield:  {blocked_count}
+  Technique:          {attack_pattern}
+
+correlation_attr:
+  key: security.top_client_ip
+  value: 203.0.113.47
+
+fault_params:
+  injection_attempts: {randint: [9000, 10000]}
+  window_minutes: 10
+  baseline_attempts: {randint: [3, 25]}
+  distinct_ips: {randint: [3, 9]}
+  top_client_ip: 203.0.113.47
+  top_ip_share_pct: {uniform: [55.0, 90.0], round: 1}
+  attack_pattern: system_prompt_extraction
+  blocked_count: {randint: [8600, 8900]}
+
+rca_clues:
+  prompt-guard:
+    safety.injection_attempts_per_min: {randint: [900, 1000]}
+    safety.top_ip_share_pct: {uniform: [55.0, 90.0], round: 1}
+    safety.shield_detection_rate_pct: {uniform: [86.0, 98.9], round: 1}
+    safety.top_attack_pattern: system_prompt_extraction
+  chat-orchestrator:
+    orchestrator.suspicious_sessions: {randint: [10, 200]}
+    orchestrator.tokens_per_session_p95: {randint: [6000, 40000]}
+    orchestrator.anonymous_session_share_pct: {uniform: [85.0, 100.0], round: 1}
+
+cascade_messages:
+  chat-orchestrator:
+    - severity: WARN
+      message: 'session flagged client_ip={top_client_ip} anonymous=true prompt-shield verdict=injection pattern={attack_pattern}; turn rejected before model call'
+
+service_lag_seconds: {chat-orchestrator: 10}
+fault_scope:
+  workloads: [prompt-guard, chat-orchestrator]
+
+infrastructure_events:
+  - service: prompt-guard
+    severity: WARN
+    offset_seconds: -120
+    body: '[PROMPT_GUARD] injection_shield first_burst top_ip=203.0.113.47 pattern=system_prompt_extraction attempts_last_60s=940 waf_custom_rule=none status=ANOMALY'
+    attributes:
+      operation: injection_shield
+      security.top_client_ip: 203.0.113.47
+      waf.custom_rule: none
+      change.summary: 'first burst of prompt injection attempts from 203.0.113.47 (not a configuration change)'
+
+remediation_effects:
+  log_events:
+    - service: assistant-web
+      severity: INFO
+      offset_seconds: 1
+      body: 'azure-activity: operationName=Microsoft.Network/ApplicationGatewayWebApplicationFirewallPolicies/write resourceId=/subscriptions/38514ecc-371c-5d0a-9c14-ab99a396027d/resourceGroups/azureai-rg/providers/Microsoft.Network/ApplicationGatewayWebApplicationFirewallPolicies/waf-policy-azureai-prod caller={actor} status=Succeeded category=Administrative'
+      attributes:
+        operation: waf_policy_write
+        azure.activity.operation_name: Microsoft.Network/ApplicationGatewayWebApplicationFirewallPolicies/write
+        waf.custom_rule: block-203.0.113.47
+        change.summary: 'custom rule block-203.0.113.47 added (match RemoteAddr 203.0.113.47, action Block)'
+  steady_attributes:
+    prompt-guard:
+      waf.custom_rule: block-203.0.113.47
+      security.blocked_ip: 203.0.113.47
+  verification:
+    - signal: prompt_guard.injection_attempts_per_min
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "prompt-guard"'
+      field: 'metrics.prompt_guard.injection_attempts_per_min'
+      expect: 'back under 3 (was 900-1000)'
+      within_seconds: 90
+    - signal: prompt_guard.injection_score
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "prompt-guard"'
+      field: 'metrics.prompt_guard.injection_score'
+      expect: 'back below 0.25 (was 0.62-0.97)'
+      within_seconds: 90
+    - signal: blocked client IP
+      from: 'logs.otel.azureai'
+      where: 'resource.attributes.service.name == "prompt-guard"'
+      field: 'attributes.security.blocked_ip'
+      expect: '203.0.113.47 on every line logged since the fix (was none)'
+      within_seconds: 90
+
+business_impact:
+  - kpi: business.error_rate_pct
+    value: {uniform: [7.67, 8.83], round: 2}
+  - kpi: business.latency_p99_ms
+    value: {uniform: [538.24, 619.26], round: 0}
+  - kpi: business.prompt_cache_hit_pct
+    value: {uniform: [20.46, 23.54], round: 1}
+
+generator_impact:
+  azure_activity_otel:
+    security_events: 1.0

@@ -6,51 +6,164 @@ sensor_type: price_replication
 affected_services:
 - product-catalog
 - inventory-service
+error_services:
+- product-catalog
 cascade_services:
 - order-management
-description: Product price updates failing to propagate from pricing engine to catalog and inventory — stale prices causing
-  customer disputes
+description: Catalog prices go stale because pricing-engine revision 52 started publishing price updates with an incompatible Avro schema (version 7) that the catalog price consumer cannot deserialize, so it stalls on the same offsets.
+onset_delay_seconds: 10
 investigation_notes: |-
-  1. Check product-catalog logs for CATALOG-PRICE-SYNC — failed_updates={failed_price_updates}/{total_price_updates} shows scope.
-  2. Check the pricing event stream consumer: if the consumer is behind by {price_lag_events} events, prices are stale by {price_lag_min}min.
-  3. Verify no schema mismatch in the pricing event format — a recently deployed pricing service may be emitting events in a new format.
-  4. Cross-check: if displayed price differs from order-confirmed price by >{price_delta_threshold_pct}%, customer dispute risk is high.
-  5. Run a forced sync: `catalog-cli sync-prices --source pricing-engine --batch-size 1000` to drain the backlog.
-  6. Enable price validation at checkout: compare display price to real-time pricing API call — reject if delta exceeds tolerance.
+  Root cause: pricing-engine revision 52 (CR-6248) registered Avro schema version 7 (id {schema_id}) for subject pricing.price-updated-value with compatibility NONE, changing the price field from double to a decimal logical type. The catalog price consumer still reads with schema version 6, so every new record fails with SerializationException (Found bytes, expecting double). The consumer does not commit a record it cannot decode: it seeks back and retries the same offset ({stuck_offset} on partition {price_partition}, and the same on the other partitions that received v7 records), so price updates stop reaching the catalog and catalog prices fall further behind every second. inventory-service reads catalog prices and starts reporting price mismatches, and order-management fails price validation at checkout. Kafka is healthy: the brokers are up, the consumer group is Stable with no rebalances, and the topic keeps receiving records, so this is not broker or network trouble. A forced price sync alone does not help while the producer still writes v7, and rolling back the producer alone leaves the consumer stuck on the v7 records already in the topic.
+  Confirm:
+    - the product-catalog schema registry watcher line "subject pricing.price-updated-value registered version 7 (id {schema_id}) by pricing-engine rev 52, compatibility NONE" (attributes.change.request CR-6248) comes before the first CATALOG-PRICE-SYNC line
+    - product-catalog "price sync" lines show attributes.catalog.price_schema_version 7 (writer schema seen; 6 before the incident) against reader_schema_version=6
+    - metrics.catalog.price_sync_lag_s grows by about one second per second from its 2s baseline, and metrics.catalog.price_deserialize_errors_per_min is about 600 (0 before)
+    - CATALOG-PRICE-SYNC lines name the same partition and offset on every retry
+    - inventory-service logs "price mismatch against catalog" (sku={sku_id} catalog_price={catalog_price} pricing_feed_price={current_price}) and order-management logs "checkout price validation failed" (order_id={order_id}, action=reprice_cart)
+  Remediation: first stop the bad records with opsctl rollback deployment/pricing-engine --to-revision previous (revision 51 publishes schema version 6 again), then opsctl run job/catalog-price-resync. The resync job republishes the current price of every changed SKU with schema version 6 and moves the consumer past the v7 offsets, which those republished prices supersede. Deserialization errors stop right away; metrics.catalog.price_sync_lag_s drains back to about 2s within about 120s and inventory price mismatches clear as the catalog catches up.
 remediation_action: resync_catalog_prices
-error_message: '[ProductCatalog] CATALOG-PRICE-SYNC: failed_updates={failed_price_updates}/{total_price_updates} price_lag={price_lag_min}min
-  consumer_lag={price_lag_events} affected_skus={affected_price_skus}'
-stack_trace: "com.ecommerce.catalog.PriceSyncException: CATALOG-PRICE-SYNC\n\tat com.ecommerce.catalog.PriceConsumer.applyUpdate(sku={sku_id})\n\
-  \tat com.ecommerce.catalog.CatalogService.syncPrices(batch={price_batch_id})\nFailed updates:    {failed_price_updates}/{total_price_updates}\n\
-  Price lag:         {price_lag_min}min\nConsumer lag:      {price_lag_events} events\nAffected SKUs:     {affected_price_skus}"
+remediation_command: |-
+  opsctl rollback deployment/pricing-engine --to-revision previous
+  opsctl run job/catalog-price-resync
+error_message: '[catalog-price-consumer-{consumer_thread}] ERROR c.e.catalog.pricing.PriceUpdateConsumer - CATALOG-PRICE-SYNC poll
+  failed topic=pricing.price-updated partition={price_partition} offset={stuck_offset} group=catalog-price-consumer: org.apache.kafka.common.errors.SerializationException:
+  Error deserializing Avro message for id {schema_id}; seeking back to offset {stuck_offset} (retry {retry_attempt})'
+stack_trace: |-
+  org.apache.kafka.common.errors.RecordDeserializationException: Error deserializing key/value for partition pricing.price-updated-{price_partition} at offset {stuck_offset}. If needed, please seek past the record to continue consumption.
+  	at org.apache.kafka.clients.consumer.internals.CompletedFetch.parseRecord(CompletedFetch.java:331)
+  	at org.apache.kafka.clients.consumer.internals.CompletedFetch.fetchRecords(CompletedFetch.java:283)
+  	at org.apache.kafka.clients.consumer.internals.FetchCollector.fetchRecords(FetchCollector.java:168)
+  	at org.apache.kafka.clients.consumer.KafkaConsumer.poll(KafkaConsumer.java:1255)
+  	at com.ecommerce.catalog.pricing.PriceUpdateConsumer.run(PriceUpdateConsumer.java:94)
+  Caused by: org.apache.kafka.common.errors.SerializationException: Error deserializing Avro message for id {schema_id}
+  	at io.confluent.kafka.serializers.AbstractKafkaAvroDeserializer$DeserializationContext.read(AbstractKafkaAvroDeserializer.java:432)
+  	at io.confluent.kafka.serializers.KafkaAvroDeserializer.deserialize(KafkaAvroDeserializer.java:76)
+  	at org.apache.kafka.clients.consumer.internals.CompletedFetch.parseRecord(CompletedFetch.java:321)
+  Caused by: org.apache.avro.AvroTypeException: Found bytes, expecting double
+  	at org.apache.avro.io.ResolvingDecoder.doAction(ResolvingDecoder.java:308)
+  	at org.apache.avro.io.parsing.Parser.advance(Parser.java:86)
+  	at org.apache.avro.io.ResolvingDecoder.readDouble(ResolvingDecoder.java:198)
 correlation_attr:
-  key: catalog.prices_stale
-  value: true
+  key: catalog.price_schema_version
+  value: 7
 fault_params:
-  failed_price_updates: {randint: [100, 5000]}
-  total_price_updates: {randint: [5000, 50000]}
-  price_lag_min: {randint: [5, 120]}
-  price_lag_events: {randint: [1000, 50000]}
-  affected_price_skus: {randint: [100, 10000]}
+  schema_id: 412
+  price_partition: 3
+  stuck_offset: 18734412
+  consumer_thread: {randint: [0, 5]}
+  retry_attempt: {randint: [1, 500]}
   sku_id: {format: "SKU-{n}", n: {randint: [100000, 999999]}}
-  price_batch_id: {format: "PRICE-BATCH-{n}", n: {randint: [1000, 9999]}}
-  price_delta_threshold_pct: 5.0
+  catalog_price: {uniform: [9.99, 499.99], round: 2}
+  current_price: {uniform: [9.99, 499.99], round: 2}
+  order_id: {format: "ORD-{n}", n: {randint: [100000, 999999]}}
 rca_clues:
   product-catalog:
-    catalog.stale_price_skus: {randint: [100, 10000]}
-    catalog.price_lag_min: {randint: [5, 120]}
+    catalog.price_schema_version: 7
+    catalog.price_reader_schema_version: 6
+    catalog.price_schema_compatibility: NONE
+    catalog.price_consumer_partition: 3
+    catalog.price_sync_lag_s: {uniform: [60.0, 900.0], round: 0}
+    catalog.price_deserialize_errors_per_min: {uniform: [540, 660], round: 0}
+    catalog.price_consumer_group_state: Stable
   inventory-service:
-    inventory.price_mismatch_count: {randint: [50, 5000]}
-    inventory.sync_consumer_behind: true
+    inventory.price_mismatch_count: {randint: [800, 4000]}
   order-management:
-    order.price_dispute_risk_count: {randint: [10, 200]}
-    order.price_validation_failures: {randint: [5, 100]}
+    order.price_validation_failures: {randint: [20, 120]}
+cascade_messages:
+  inventory-service:
+    - severity: WARN
+      message: 'level=warn ts={iso_now} caller=pricing/reconcile.go:118 msg="price mismatch against catalog" sku={sku_id} catalog_price={catalog_price} pricing_feed_price={current_price} source=catalog-api'
+  order-management:
+    - severity: WARN
+      message: 'level=warn ts={iso_now} caller=checkout/price_validator.go:73 msg="checkout price validation failed" order_id={order_id} sku={sku_id} cart_price={catalog_price} current_price={current_price} action=reprice_cart'
+fault_scope:
+  cluster: ecommerce-eks-cluster
+  workloads: [product-catalog]
+infrastructure_events:
+  - service: product-catalog
+    severity: WARN
+    offset_seconds: -100
+    body: '[schema-watcher] WARN  c.e.catalog.pricing.SchemaRegistryWatcher - subject pricing.price-updated-value registered version
+      7 (id 412) by pricing-engine rev 52, compatibility NONE; catalog-price-consumer reader schema version 6 (CR-6248)'
+    attributes:
+      user.name: pricing-platform-ci
+      change.request: CR-6248
+      operation: schema_registered
+      catalog.price_schema_version: 7
+      schema.subject: pricing.price-updated-value
+      schema.id: 412
+      schema.compatibility: NONE
+remediation_effects:
+  log_taper_seconds: 15
+  log_events:
+    - service: product-catalog
+      severity: INFO
+      offset_seconds: 0
+      body: '[CHG] CHANGE APPLIED opsctl rollback deployment/pricing-engine --to-revision previous by {actor}: pricing-engine rolled
+        back from revision 52 to revision 51, producer writes pricing.price-updated-value schema version 6 again'
+      attributes:
+        operation: change_applied
+        change.target: deployment/pricing-engine
+    - service: product-catalog
+      severity: INFO
+      offset_seconds: 2
+      body: '[CHG] CHANGE APPLIED opsctl run job/catalog-price-resync by {actor}: catalog-price-resync started, republishing current
+        prices with schema version 6 and moving catalog-price-consumer past the version 7 offsets'
+      attributes:
+        operation: change_applied
+        change.target: job/catalog-price-resync
+    - service: product-catalog
+      severity: INFO
+      offset_seconds: 20
+      body: '[catalog-price-resync] INFO  c.e.catalog.pricing.PriceResyncJob - republished 48210 current prices (schema version 6);
+        group catalog-price-consumer offsets advanced past the version 7 records on pricing.price-updated'
+      attributes:
+        operation: price_resync
+        catalog.price_schema_version: 6
+    - service: product-catalog
+      severity: INFO
+      offset_seconds: 120
+      body: '[price-sync-monitor] INFO  c.e.catalog.pricing.PriceSyncMonitor - catalog-price-consumer caught up on pricing.price-updated,
+        no stale prices remaining'
+      attributes:
+        operation: price_sync
+  verification:
+    - signal: catalog.price_sync_lag_s
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "product-catalog"'
+      field: 'metrics.catalog.price_sync_lag_s'
+      expect: 'stops growing at the fix and drains back to about 2s within about 120s'
+      within_seconds: 180
+    - signal: catalog.price_deserialize_errors_per_min
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "product-catalog"'
+      field: 'metrics.catalog.price_deserialize_errors_per_min'
+      expect: '0 right after the resync moves the consumer past the version 7 records (was about 600)'
+      within_seconds: 60
+    - signal: CATALOG-PRICE-SYNC lines
+      from: 'logs.otel.ecommerce'
+      where: 'body.text LIKE "*CATALOG-PRICE-SYNC*"'
+      expect: 'no new lines within about 15s of the resync'
+      within_seconds: 60
+    - signal: price schema version
+      from: 'logs.otel.ecommerce'
+      where: 'resource.attributes.service.name == "product-catalog"'
+      field: 'attributes.catalog.price_schema_version'
+      expect: '6 on every price sync line (was 7)'
+      within_seconds: 60
 business_impact:
   - kpi: business.conversion_rate_pct
-    factor: {uniform: [0.30, 0.55]}
+    value: {uniform: [1.15, 1.32], round: 2}
   - kpi: business.orders_placed_per_min
-    factor: {uniform: [0.30, 0.55]}
+    factor: {uniform: [0.3, 0.55]}
   - kpi: business.cancel_rate_pct
     factor: {uniform: [2.0, 4.0]}
   - kpi: business.csat_score_0_5
-    factor: {uniform: [0.35, 0.60]}
+    factor: {uniform: [0.35, 0.6]}
+
+generator_impact:
+  kafka_otel:
+    high_consumer_lag_by_topic: 60000.0
+generator_hold_seconds: {kafka_otel: 120}
+# dependents degrade after the component at fault, in dependency order
+service_lag_seconds: {inventory-service: 30, order-management: 40}

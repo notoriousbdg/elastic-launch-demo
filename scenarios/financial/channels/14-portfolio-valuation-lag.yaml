@@ -6,24 +6,33 @@ sensor_type: valuation_timer
 affected_services:
 - customer-portal
 - risk-calculator
+error_services:
+- customer-portal
 cascade_services:
 - compliance-monitor
-description: Real-time portfolio valuation falling behind, showing stale P&L to clients
+description: Real-time portfolio valuation falling behind, showing stale P&L to clients, because every FX conversion goes to a rate-limited provider
+onset_delay_seconds: 10
+service_lag_seconds: {risk-calculator: 30, compliance-monitor: 60}
 investigation_notes: |-
-  1. Check customer-portal logs for PORTAL-VALUATION-LAG — note portfolio_id, lag_s, and position_count to assess scope of stale P&L exposure.
-  2. Query FROM logs.otel.financial.* | WHERE body.text LIKE "*PORTAL-VALUATION-LAG*" | STATS max(lag_s), count() BY portfolio_id to find most-affected portfolios.
-  3. Inspect the valuation pipeline bottleneck — fx_conversion stage SLOW indicates a currency rate provider timeout; check which FX pairs are affected.
-  4. Check risk-calculator for stale_risk_calcs — if risk calcs are also stale, the issue is upstream at market-data-feed, not the portal itself.
-  5. Trigger priority revaluation for the largest portfolios; display the stale data banner to clients and update disclaimer_shown=true to meet MiFID II best-execution disclosure requirements.
-remediation_action: trigger_priority_portfolio_revaluation
-error_message: '[PORTAL] PORTAL-VALUATION-LAG: portfolio={portfolio_id} lag_s={lag_s} max_lag_s={max_lag_s} pending_positions={position_count}'
+  Root cause: config portal-valuation revision 22 (CR-4462) set fx.rates.cache_ttl_s from 60 to 0, meant to debug one stale rate. With no cache every position conversion calls the FX rate provider; the platform's shared key is rate-limited, so the provider answers HTTP 429 and the portal retries with backoff. fx_conversion takes {fx_conversion_ms} ms instead of 5-20 ms, the valuation queue backs up and portfolio {portfolio_id} is valued {lag_s}s late (limit {max_lag_s}s) with {position_count} positions pending. The market data feed is fine: market_data_fetch and price_snap stay at their normal 10-15 ms, and risk-calculator's own risk calcs are current (stale_risk_calcs 0) because it keeps its 60 s FX cache and only logs 429s on its refreshes, which share the provider key. If risk calcs were stale too the cause would be upstream at market-data-feed.
+  Confirm:
+    - customer-portal valuation_status lines (body.text LIKE "*valuation_status*") show attributes.valuation.fx_cache_ttl_s=0, attributes.valuation.lag_s above 15 and attributes.valuation.fx_conversion_ms at 3,000-10,000
+    - metrics.customer_portal.valuation_lag_s climbing from its normal 1-5 s to 30-300 s, metrics.customer_portal.fx_conversion_ms at 3,000-10,000 and metrics.customer_portal.fx_provider_429_per_min in the hundreds (0 normally)
+    - risk-calculator logs HTTP 429 on FX rate refreshes but serves cached rates; its calcs are not stale
+    - the customer-portal line "[PORTAL] config_reload source=config/portal-valuation revision=22 ... fx.rates.cache_ttl_s=60->0" (attributes.operation=config_change, attributes.change.request=CR-4462) comes before the first PORTAL-VALUATION-LAG line
+  Remediation: opsctl patch config/portal-valuation --fx-cache-ttl 60 hot-reloads the setting without a restart. The cache warms within about 10 s, conversions are served from it again, 429s stop and the valuation backlog drains: lag is under 15 s within about 90 s. Priority revaluation of the largest portfolios or more valuation workers would only send more requests into the provider's rate limit; the stale-data banner is still required for client views shown while the lag lasted (MiFID II Art. 24(3)).
+remediation_action: restore_fx_rate_cache_ttl
+remediation_command: |-
+  opsctl patch config/portal-valuation --fx-cache-ttl 60
+error_message: '[PORTAL] PORTAL-VALUATION-LAG: portfolio={portfolio_id} lag_s={lag_s} max_lag_s={max_lag_s} pending_positions={position_count} stage=fx_conversion fx_ms={fx_conversion_ms} provider_status=429'
 stack_trace: |-
   === PORTFOLIO VALUATION STATS ===
   portfolio={portfolio_id}  positions={position_count}
   --- VALUATION PIPELINE ---
     market_data_fetch   OK       12ms
     price_snap          OK       8ms
-    fx_conversion       SLOW     4,200ms  <<< BOTTLENECK
+    fx_conversion       SLOW     {fx_conversion_ms}ms  <<< BOTTLENECK
+                        fx_cache ttl_s=0 hit_rate=0%  provider=fx-rates-api HTTP 429 x{fx_429_count} (Retry-After 1s)
     greeks_calc         QUEUED   ---
     pnl_attribution     QUEUED   ---
     total_lag           {lag_s}s  max={max_lag_s}s
@@ -40,16 +49,90 @@ fault_params:
   lag_s: {uniform: [30.0, 300.0], round: 1}
   max_lag_s: 15.0
   position_count: {randint: [50, 500]}
+  fx_conversion_ms: {randint: [3000, 10000]}
+  fx_429_count: {randint: [3, 40]}
 rca_clues:
   customer-portal:
     portal.valuation_lag_s: {uniform: [30.0, 300.0], round: 1}
-    portal.stale_pnl_positions: {randint: [50, 500]}
+    portal.fx_cache_hit_pct: 0
+    portal.fx_provider_429_count: {randint: [3, 40]}
   risk-calculator:
-    risk.stale_greeks_count: {randint: [10, 200]}
-    risk.fx_conversion_timeout_ms: {randint: [1000, 10000]}
+    risk.stale_risk_calcs: 0
+    risk.fx_rate_refresh_429: {randint: [1, 20]}
   compliance-monitor:
     compliance.best_execution_disclosure_missing: true
     compliance.stale_data_client_views: {randint: [10, 500]}
+cascade_messages:
+  risk-calculator:
+    - severity: WARN
+      message: '[RISK] fx_rates refresh provider=fx-rates-api HTTP 429 Too Many Requests (shared key fxrates-prod); serving cached rates (ttl 60s), risk calcs current'
+  compliance-monitor:
+    - severity: WARN
+      message: '[COMPL] client_disclosure_check portfolio={portfolio_id} valuation_age_s={lag_s} limit_s={max_lag_s} stale-data banner required (MiFID II Art. 24(3))'
+fault_scope:
+  cluster: finserv-aks-cluster
+  workloads: [customer-portal, risk-calculator]
+infrastructure_events:
+  - service: customer-portal
+    severity: INFO
+    offset_seconds: -120
+    body: '[PORTAL] config_reload source=config/portal-valuation revision=22 (was 21) fx.rates.cache_ttl_s=60->0 reason="debug stale EURJPY rate" applied_by=k.brandt (CR-4462)'
+    attributes:
+      user.name: k.brandt
+      change.request: CR-4462
+      operation: config_change
+      change.summary: 'fx.rates.cache_ttl_s: 60 -> 0'
+      valuation.fx_cache_ttl_s: 0
+      config.revision: '22'
+remediation_effects:
+  log_taper_seconds: 70
+  log_events:
+    - service: audit-logger
+      severity: INFO
+      offset_seconds: 1
+      body: '[AUDIT] event_logged stream=change-mgmt type=CHANGE_APPLIED cmd="opsctl patch config/portal-valuation --fx-cache-ttl 60" actor={actor}: config/portal-valuation fx.rates.cache_ttl_s 0 -> 60'
+      attributes:
+        operation: change_applied
+        audit.stream: change-mgmt
+        change.target: config/portal-valuation
+    - service: customer-portal
+      severity: INFO
+      offset_seconds: 2
+      body: '[PORTAL] config_reload source=config/portal-valuation fx.rates.cache_ttl_s=0->60 (hot reload, no restart); FX rate cache warming'
+      attributes:
+        operation: config_change
+        valuation.fx_cache_ttl_s: 60
+    - service: customer-portal
+      severity: INFO
+      offset_seconds: 12
+      body: '[PORTAL] fx_rates cache warm: 38 currency pairs cached, provider calls back to one refresh per pair per minute'
+      attributes:
+        operation: fx_cache
+        valuation.fx_cache_ttl_s: 60
+  verification:
+    - signal: customer_portal.valuation_lag_s
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "customer-portal"'
+      field: 'metrics.customer_portal.valuation_lag_s'
+      expect: 'back under 15 s within about 90 s as the queue drains (was 30-300 s)'
+      within_seconds: 120
+    - signal: customer_portal.fx_conversion_ms
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "customer-portal"'
+      field: 'metrics.customer_portal.fx_conversion_ms'
+      expect: 'back under 50 ms once the cache is warm, about 10 s (was 3,000-10,000 ms)'
+      within_seconds: 60
+    - signal: PORTAL-VALUATION-LAG lines
+      from: 'logs.otel.finserv'
+      where: 'body.text LIKE "*PORTAL-VALUATION-LAG*"'
+      expect: '0 new lines once the backlog has drained'
+      within_seconds: 120
+    - signal: FX rate cache TTL
+      from: 'logs.otel.finserv'
+      where: 'resource.attributes.service.name == "customer-portal" AND body.text LIKE "*valuation_status*"'
+      field: 'attributes.valuation.fx_cache_ttl_s'
+      expect: '60 on every line since the fix; 0 stops appearing'
+      within_seconds: 60
 business_impact:
   - kpi: business.mark_to_market_pnl_usd_per_min
     factor: {uniform: [0.20, 0.50]}

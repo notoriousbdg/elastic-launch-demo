@@ -6,74 +6,144 @@ sensor_type: performance_monitor
 affected_services:
 - game-server
 - matchmaking-engine
-cascade_services:
-- analytics-pipeline
-- chat-service
-description: Game server tick rate drops below target causing gameplay lag, hit registration failures, and desync cascades
+error_services: [game-server]
+cascade_services: []
+description: Game server tick rate drops below target as dropped items and projectiles are no longer despawned and the per-tick entity work outgrows the frame budget, causing gameplay lag and hit registration failures
+onset_delay_seconds: 15
+ramp_seconds: 60
 investigation_notes: |-
-  Root cause: the game loop frame budget (15.6ms for 64Hz) is being exceeded because the physics system consumes 54% of tick time at 8.4ms. Combined with net_serialize at 27%, the server has no headroom and tick rate degrades under load.
-  1. Profile per-system costs: physics at 8.4ms with 4,201 entities is the bottleneck — check if entity_count spiked due to spawned projectiles or dropped items not being GC'd.
-  2. Review CPU metrics: 97.2% CPU means the server is saturated — verify no co-located processes are stealing cycles with `ps aux --sort=-%cpu | head -20`.
-  3. Check memory: 84.1% memory usage may be causing swap pressure — verify with `vmstat 1 5` for si/so columns indicating swap activity.
-  4. Remediate: issue `reduce_entity_budget` to cap active entities at 2,000 and force garbage collection of expired objects; disable non-essential AI to reclaim tick budget.
-  5. Long-term: implement server-side LOD (level of detail) that reduces physics fidelity for distant entities and pauses AI updates for out-of-range NPCs.
-remediation_action: resync_world_state
+  Root cause: Argo CD synced the game-server-entity-lifecycle ConfigMap (CHG0071419) about three minutes before the first ENGINE-TICKRATE-DEGRAD, changing despawn_ttl_s from 120 to 0. 0 disables the despawn timer, so dropped items, projectiles and corpses are never removed and every match accumulates entities: server {server_id} is at {entity_count} entities (baseline 800-1400). Each tick updates every entity on the single match thread, so frame time grows with the entity count to {frame_time_ms} ms against the 15.6 ms budget and the tick rate falls to {tick_rate} Hz (target {target_tick_rate} Hz). Nothing else changed: player counts, network bandwidth and memory are at their usual levels, and the per-system profile shows entity_update, not physics or networking, taking the extra time. Matchmaking deprioritizes the slow servers (health score {health_score}), which is a consequence, not the cause.
+  Confirm:
+    - game-server `[Engine] entity-status` lines carry attributes.config.despawn_ttl_s 0 (was 120) and despawned_1m=0, and they follow the Argo CD sync line with change.request CHG0071419
+    - metric game_server.entity_count climbs to 3000-6000 (baseline 800-1400) while game_server.frame_time_ms rises to 25-55 ms (baseline 8-14)
+    - metric game_server.tick_rate falls to 18-40 Hz (baseline 63.4-64.0), and the ENGINE-TICKRATE-DEGRAD lines show game.entity_update_pct_of_frame near 60%
+  Remediation: roll the ConfigMap back with opsctl rollback configmap/game-server-entity-lifecycle --to-revision previous. The despawn timers restart, so the backlog of entities is removed over about 120 seconds (entities_despawned_per_min spikes while it drains) and entity_count falls back to 800-1400; frame_time_ms returns to 8-14 and tick_rate converges back to 63.4-64.0 over about 150 seconds. Scaling up the fleet or raising the CPU limit would not help: each match runs on one thread, so more servers or cores do not shorten its tick, and the container CPU throttling is a symptom of that busy loop that clears as the entities drain.
+remediation_action: restore_entity_despawn
+remediation_command: |-
+  opsctl rollback configmap/game-server-entity-lifecycle --to-revision previous
 error_message: '[Engine] ENGINE-TICKRATE-DEGRAD: server={server_id} tickrate={tick_rate}Hz target={target_tick_rate}Hz frame_time={frame_time_ms}ms
-  players={active_players} match={match_id}'
+  entities={entity_count} despawn_ttl_s=0 players={active_players} match={match_id}'
 stack_trace: |-
   === SERVER PERFORMANCE PROFILER ===
   server={server_id}  match={match_id}  players={active_players}
   ----------- tick timing -------------
     tick_rate    = {tick_rate}Hz (target {target_tick_rate}Hz)
     frame_time   = {frame_time_ms}ms (budget 15.6ms)
-    frame_budget  = EXCEEDED by {frame_time_ms}ms
   ----------- per-system tick time ----
-    physics        = 8.4ms  (54%)
-    net_serialize  = 4.2ms  (27%)
-    ai_update      = 1.8ms  (12%)
-    game_logic     = 0.7ms  (4%)
-    gc_pause       = 0.4ms  (3%)
-  ----------- resource usage ----------
-    cpu_pct      = 97.2%
-    memory_pct   = 84.1%
-    entity_count = 4,201
-    net_bandwidth = 128Mbps (cap 200Mbps)
-  ----------- action ------------------
-    REDUCE entity_budget  DISABLE non-essential AI  WARN players
+    entity_update  = 61% of frame
+    physics        = 17% of frame
+    net_serialize  = 14% of frame
+    game_logic     = 5% of frame
+    gc_pause       = 3% of frame
+  ----------- entities ----------------
+    entity_count   = {entity_count}
+    despawn_queue  = 0  (despawn_ttl_s=0)
+    oldest_dropped_item_age_s = {oldest_item_age_s}
   ENGINE-TICKRATE-DEGRAD: server {server_id} at {tick_rate}Hz, target {target_tick_rate}Hz
 correlation_attr:
-  key: network.routing_policy
-  value: ecmp-4path-asymmetric
+  key: config.despawn_ttl_s
+  value: 0
 fault_params:
   server_id:
     format: "GS-{region}-{n:02d}"
     region: {choice: [US-E, US-W, EU-W, AP-SE]}
     n: {randint: [1, 99]}
-  tick_rate: {uniform: [12.0, 45.0], round: 1}
+  tick_rate: {uniform: [18.0, 40.0], round: 1}
   target_tick_rate: 64
-  frame_time_ms: {uniform: [22.0, 83.0], round: 1}
-  active_players: {randint: [10, 100]}
+  frame_time_ms: {uniform: [25.0, 55.0], round: 1}
+  active_players: {randint: [24, 64]}
+  entity_count: {randint: [3000, 6000]}
+  oldest_item_age_s: {randint: [600, 1800]}
   match_id:
     format: "MATCH-{n}"
     n: {randint: [100000, 999999]}
+  health_score: {uniform: [0.2, 0.5], round: 2}
 rca_clues:
   game-server:
-    game.physics_tick_budget_pct: {uniform: [45.0, 65.0], round: 1}
+    config.despawn_ttl_s: 0
     game.entity_count: {randint: [3000, 6000]}
+    game.entity_update_pct_of_frame: {uniform: [55.0, 65.0], round: 1}
+    game.despawn_queue: 0
   matchmaking-engine:
     matchmaking.server_health_score: {uniform: [0.2, 0.5], round: 2}
-    matchmaking.rebalance_triggered: true
-  analytics-pipeline:
-    analytics.perf_alert_count: {randint: [50, 200]}
-  chat-service:
-    chat.voice_server_colocated: true
-    chat.voice_quality_impacted: true
+cascade_messages:
+  matchmaking-engine:
+    - severity: WARN
+      message: 'level=warn component=allocator msg="server health below threshold, deprioritized for allocation" server={server_id} tick_rate={tick_rate} health_score={health_score}'
+    - severity: WARN
+      message: 'level=warn component=session-tracker msg="match ended with high leave rate" match={match_id} players={active_players} reason=player_quit_lag'
+fault_scope:
+  cluster: gaming-eks-cluster
+  workloads: [game-server]
+service_lag_seconds: {matchmaking-engine: 45}
+infrastructure_events:
+  - service: game-server
+    severity: INFO
+    offset_seconds: -180
+    body: 'level=info msg="Sync operation to 91d5c0f succeeded" application=game-server-config dest-namespace=game-servers dest-server=gaming-eks-cluster resource=ConfigMap/game-server-entity-lifecycle revision=91d5c0f initiator=t.nguyen'
+    attributes:
+      operation: config_change
+      change.request: CHG0071419
+      user.name: t.nguyen
+      change.summary: 'game-server-entity-lifecycle despawn_ttl_s: 120 -> 0'
+      config.despawn_ttl_s: 0
+remediation_effects:
+  transition_seconds: 150
+  log_taper_seconds: 120
+  log_events:
+    - service: game-server
+      severity: INFO
+      offset_seconds: 1
+      body: 'level=info logger=changelog msg="change applied" cmd="opsctl rollback configmap/game-server-entity-lifecycle --to-revision previous" actor={actor} result="configmap/game-server-entity-lifecycle restored (despawn_ttl_s=120)"'
+      attributes:
+        operation: change_applied
+        change.target: configmap/game-server-entity-lifecycle
+        config.despawn_ttl_s: 120
+    - service: game-server
+      severity: INFO
+      offset_seconds: 10
+      body: '[Engine] entity lifecycle reloaded despawn_ttl_s=120; despawn timers restarted for existing entities'
+      attributes:
+        operation: entity_lifecycle_reload
+        config.despawn_ttl_s: 120
+  steady_attributes:
+    game-server:
+      config.despawn_ttl_s: 120
+  verification:
+    - signal: server tick rate
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "game-server"'
+      field: 'metrics.game_server.tick_rate'
+      expect: 'back in 63.4-64.0 Hz (was 18-40) over about 150 seconds'
+      within_seconds: 180
+    - signal: entity count
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "game-server"'
+      field: 'metrics.game_server.entity_count'
+      expect: 'back in 800-1400 (was 3000-6000) within about 120 seconds'
+      within_seconds: 180
+    - signal: ENGINE-TICKRATE-DEGRAD lines
+      from: 'logs.otel.gaming'
+      where: 'body.text LIKE "*ENGINE-TICKRATE-DEGRAD*"'
+      expect: '0 new lines'
+      within_seconds: 180
+    - signal: despawn TTL
+      from: 'logs.otel.gaming'
+      where: 'resource.attributes.service.name == "game-server" AND attributes.operation == "entity_status"'
+      field: 'attributes.config.despawn_ttl_s'
+      expect: '120 on every entity-status line since the rollback (was 0)'
+      within_seconds: 180
 business_impact:
   - kpi: business.matches_played_per_min
-    factor: {uniform: [0.15, 0.40]}
+    value: {uniform: [229.71, 264.29]}
   - kpi: business.server_tick_lag_ms
     factor: {uniform: [3.0, 6.0]}
   - kpi: business.crash_rate_pct
     factor: {uniform: [2.5, 5.0]}
   - kpi: business.net_satisfaction_proxy_nps
-    factor: {uniform: [0.15, 0.40]}
+    value: {uniform: [9.3, 10.7], round: 1}
+generator_impact:
+  kubernetes_otel:
+    container_cpu_throttling: 0.97
+# the game loop keeps its CPU pegged until the entity backlog has drained
+generator_hold_seconds: {kubernetes_otel: 150}

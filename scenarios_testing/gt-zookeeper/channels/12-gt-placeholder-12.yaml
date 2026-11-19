@@ -1,0 +1,31 @@
+name: "GT Placeholder 12 (unused)"
+subsystem: placeholder
+vehicle_section: placeholder-pipeline
+error_type: GT-PLACEHOLDER-12
+sensor_type: placeholder
+affected_services:
+  - gt-zookeeper-aws-svc-1
+cascade_services:
+  - gt-zookeeper-aws-svc-2
+description: "Unused HITL channel slot — not testing any impact_key."
+investigation_notes: |-
+  1. This is a placeholder channel with no associated generator impact_key.
+  2. It exists to fill required channel slots (01-20 must all be present).
+  3. Do not activate this channel for testing purposes.
+  4. The name and error_type clearly indicate it is unused.
+  5. To add a real test, replace this file with a proper channel definition.
+remediation_action: no_op_placeholder
+error_message: "GT-PLACEHOLDER: channel={channel_num} label={label} status=unused"
+stack_trace: |-
+  PlaceholderChannel: channel=12
+  label: {label}
+  status: unused
+fault_params:
+  channel_num: 12
+  label: "GT-PLACEHOLDER-12"
+rca_clues:
+  gt-zookeeper-aws-svc-1:
+    placeholder.channel: 12
+    placeholder.label: "GT-PLACEHOLDER-12"
+  gt-zookeeper-aws-svc-2:
+    placeholder.upstream_channel: 12

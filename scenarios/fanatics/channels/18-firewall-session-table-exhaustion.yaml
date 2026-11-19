@@ -3,44 +3,37 @@ subsystem: security
 vehicle_section: perimeter_defense
 error_type: SYSTEM-session-threshold
 sensor_type: session_table
-affected_services:
-- firewall-gateway
-- network-controller
-cascade_services:
-- digital-marketplace
-- auction-engine
+affected_services: [firewall-gateway, network-controller, digital-marketplace]
+cascade_services: [auction-engine]
 description: Firewall session table approaching maximum capacity, new connections being dropped
 investigation_notes: |-
-  1. Run `show session all filter count yes` to confirm active session count, then `show session info` for utilization percentage.
-  2. Identify top talkers: `show session all filter source <zone> count yes` — look for a single IP consuming disproportionate sessions.
-  3. Check for a DDoS or scan: `show session all filter application unknown` — unknown apps with high session counts suggest malicious traffic.
-  4. Review session timeout settings: `show running-config | match timeout` — aggressive TCP timeout defaults (3600s) may keep stale sessions alive.
-  5. Reduce TCP session timeout for non-critical zones: `set deviceconfig setting session timeout-tcp 1800`.
-  6. If a specific source is flooding, apply a DoS Protection Profile or temporarily block via `set security-rule deny-source <ip>`.
+  Root cause: PAN-OS hotfix pan-os-11.1.3-hotfix2 was installed on pa-5260-edge (PA-5260, 32,000,000 sessions) about 40 minutes before the first SYSTEM-session-threshold (previous: pan-os-11.1.3). The hotfix reset the custom TCP session timeout to the default, so timeout-tcp is 3600s instead of 900s. The firewall handles about 19,000 new connections per second and roughly 45% of them come from clients that disappear without FIN or RST; those entries now stay for 3600s instead of 900s. The table grew from about 8M sessions (25%) at about 8,500 sessions/s of extra entries, and has now reached {session_count} of {session_max} ({session_util_pct}%) in zone {fw_zone}. This is not a flood: the new-connection rate is unchanged, the top source holds under 5% of sessions and unknown applications stay under 2%.
+  Confirm:
+    - firewall-gateway session-info lines show timeout-tcp=3600s and active near max (attributes.infra.fw_session_config = pan-os-11.1.3-hotfix2); metric firewall.tcp_session_timeout_s reads 3600 and firewall.session_utilization_pct is 90-98% against about 25% before the hotfix
+    - the firewall-gateway line "software-install ... pan-os-11.1.3-hotfix2 installed" comes well before the first SYSTEM-session-threshold
+    - firewall.session_rate stays near 19,000/s, which rules out a DDoS or scan
+  Remediation: set the TCP session timeout back to 900s with opsctl patch session-policy/pa-5260-edge --tcp-timeout 900. Idle sessions older than 900s age out first and the table then drains over several minutes (half of the excess is gone in under 2 minutes); utilization is back under 40% after about 4 minutes and near 25% after 8. Flushing the table is not needed and would drop live flows.
 remediation_action: flush_session_table
-error_message: '1,2025/01/15 14:32:01,007200001234,SYSTEM,session,0,SYSTEM-session-threshold,Session table utilization critical:
-  {session_count}/{session_max} ({session_util_pct}%) in zone {fw_zone}, {session_drops} new connections dropped, top source
-  {top_source_ip}'
+error_message: '1,{nginx_time},007200001234,SYSTEM,general,0,{nginx_time},,SYSTEM-session-threshold,,0,0,general,critical,"Session table utilization {session_util_pct}% ({session_count}/{session_max}) above threshold 90% in zone {fw_zone}, top source {top_source_ip}, timeout-tcp 3600s"'
 stack_trace: |-
   > show session info
-  Number of sessions supported:    {session_max}
-  Number of active sessions:       {session_count}
-  Session table utilization:       {session_util_pct}%
-  Number of sessions dropped:      {session_drops}
-    Zone: {fw_zone}
-    Top source: {top_source_ip}
-  TCP sessions:    {session_count}
-  UDP sessions:    1245
-  ICMP sessions:   89
-  Session aging:   TCP default timeout 3600s
+  target-dp:                               *.dp0
+  Number of sessions supported:            {session_max}
+  Number of active sessions:               {session_count}
+  Session table utilization:               {session_util_pct}%
+  New connection establish rate:           19000 cps
+  Session timeout
+    TCP default timeout:                   3600 seconds
+    UDP default timeout:                   30 seconds
+  > show session all filter from {fw_zone} count yes
+    top source: {top_source_ip}
 correlation_attr:
   key: infra.fw_session_config
   value: pan-os-11.1.3-hotfix2
 fault_params:
-  session_count: {randint: [58000, 63500]}
-  session_max: 64000
-  session_util_pct: {uniform: [90.0, 99.5], round: 1}
-  session_drops: {randint: [50, 500]}
+  session_count: 31000000
+  session_max: 32000000
+  session_util_pct: 96.9
   fw_zone: {choice: [TRUST, UNTRUST, DMZ]}
   top_source_ip:
     format: "10.{a}.{b}.{c}"
@@ -49,14 +42,12 @@ fault_params:
     c: {randint: [1, 254]}
 rca_clues:
   firewall-gateway:
-    firewall.top_session_source:
-      format: "10.{a}.{b}.{c}"
-      a: {randint: [1, 254]}
-      b: {randint: [1, 254]}
-      c: {randint: [1, 254]}
     firewall.tcp_timeout_config: 3600
+    firewall.tcp_timeout_previous_config: 900
+    firewall.top_source_session_share_pct: {uniform: [1, 4], round: 1}
+    firewall.unknown_app_session_pct: {uniform: [0.5, 2], round: 1}
   network-controller:
-    network.qos_drops_increasing: true
+    network.new_flow_setup_slow: true
     network.affected_queue: {choice: [Q1-PRIORITY, Q3-BEST-EFFORT]}
   digital-marketplace:
     marketplace.connection_pool_exhausted: true
@@ -64,12 +55,78 @@ rca_clues:
   auction-engine:
     auction.websocket_failures: {randint: [20, 200]}
     auction.bid_timeouts: {randint: [5, 50]}
+remediation_command: |-
+  opsctl patch session-policy/pa-5260-edge --tcp-timeout 900
+fault_scope:
+  workloads: [firewall-gateway, network-controller, digital-marketplace]
+cascade_messages:
+  network-controller:
+    - severity: WARN
+      message: 'flow-collector: new-flow setup through pa-5260-edge slow, SYN retransmits above baseline; interface counters normal'
+  digital-marketplace:
+    - severity: ERROR
+      message: '{{"level":"error","ts":"{iso_now}","msg":"connection timed out","dependency":"inventory-db","via":"edge-firewall","hint":"new flows through pa-5260-edge are timing out"}}'
+  auction-engine:
+    - severity: WARN
+      message: '{iso_now} WARN ws-gateway: websocket upgrade timed out after 5000ms; bid session not established'
+infrastructure_events:
+  - service: firewall-gateway
+    severity: INFO
+    offset_seconds: -2500
+    body: '1,{nginx_time},007200001234,SYSTEM,general,0,{nginx_time},,software-install,,0,0,general,informational,"PAN-OS pan-os-11.1.3-hotfix2 installed (was pan-os-11.1.3); session timeout defaults reloaded timeout-tcp=3600s; installed by netops-patching (CR-4488)"'
+    attributes:
+      user.name: netops-patching
+      change.request: CR-4488
+      operation: software_install
+      infra.fw_session_config: pan-os-11.1.3-hotfix2
+      change.summary: 'PAN-OS: pan-os-11.1.3 -> pan-os-11.1.3-hotfix2 (timeout-tcp 900s -> 3600s)'
+remediation_effects:
+  log_events:
+    - service: firewall-gateway
+      severity: INFO
+      offset_seconds: 1
+      body: '1,{nginx_time},007200001234,SYSTEM,general,0,{nginx_time},,config-commit,,0,0,general,informational,"[CHG] CHANGE APPLIED opsctl patch session-policy/pa-5260-edge --tcp-timeout 900 by {actor}: timeout-tcp 3600s -> 900s"'
+      attributes:
+        operation: change_applied
+        change.target: session-policy/pa-5260-edge
+    - service: firewall-gateway
+      severity: INFO
+      offset_seconds: 10
+      body: '1,{nginx_time},007200001234,SYSTEM,general,0,{nginx_time},,config-commit,,0,0,general,informational,"Commit complete: timeout-tcp 900s; idle TCP sessions aging out"'
+      attributes:
+        operation: config_commit
+        infra.fw_session_config: pan-os-11.1.3
+  steady_attributes:
+    firewall-gateway:
+      infra.fw_session_config: pan-os-11.1.3
+      firewall.tcp_timeout_s: 900
+  verification:
+    - signal: firewall.session_utilization_pct
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "firewall-gateway"'
+      field: 'metrics.firewall.session_utilization_pct'
+      expect: 'falling steadily and back under 40% (was 90-98%); near 25% after about 8 minutes'
+      within_seconds: 300
+    - signal: firewall.tcp_session_timeout_s
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "firewall-gateway"'
+      field: 'metrics.firewall.tcp_session_timeout_s'
+      expect: '900 (was 3600)'
+      within_seconds: 60
+    - signal: SYSTEM-session-threshold lines
+      from: 'logs.otel.fanatics'
+      where: 'body.text LIKE "*SYSTEM-session-threshold*"'
+      expect: '0 new lines'
+      within_seconds: 60
+error_services: [firewall-gateway]
 business_impact:
   - kpi: business.app_sessions_per_min
-    factor: {uniform: [0.15, 0.45]}
+    value: {uniform: [334.8, 385.2]}
   - kpi: business.page_views_per_min
-    factor: {uniform: [0.15, 0.45]}
+    value: {uniform: [66960.0, 77040.0]}
   - kpi: business.merch_gmv_usd_per_min
-    factor: {uniform: [0.15, 0.45]}
+    value: {uniform: [10416.0, 11984.0], round: 1}
   - kpi: business.betting_handle_usd_per_min
-    factor: {uniform: [0.15, 0.45]}
+    value: {uniform: [108810.0, 125190.0], round: 1}
+# dependents degrade after the component at fault, in dependency order
+service_lag_seconds: {network-controller: 30, digital-marketplace: 45, auction-engine: 90}

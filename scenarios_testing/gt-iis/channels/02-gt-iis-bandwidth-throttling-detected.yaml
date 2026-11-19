@@ -1,0 +1,37 @@
+name: "GT iis_otel: bandwidth_throttling_detected"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-IIS-BANDWIDTH-THROTTLING-DETECTED
+sensor_type: impact_key_probe
+affected_services:
+  - gt-iis-aws-svc-1
+cascade_services:
+  - gt-iis-aws-svc-2
+description: "Tests impact_key bandwidth_throttling_detected on generator iis_otel."
+investigation_notes: |-
+  1. Verify iis_otel is active and reporting metrics.
+  2. Check that the bandwidth_throttling_detected metric has reached the trigger value (75.0).
+  3. Confirm generator_impact for iis_otel.bandwidth_throttling_detected is set to 75.0.
+  4. Look for correlated changes in service gt-iis-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_bandwidth_throttling_detected_baseline
+error_message: "GT-PROBE: gen=iis_otel key=bandwidth_throttling_detected value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=iis_otel
+  impact_key: bandwidth_throttling_detected
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 75.0
+  svc_name: gt-iis-aws-svc-1
+rca_clues:
+  gt-iis-aws-svc-1:
+    probe.generator: iis_otel
+    probe.impact_key: bandwidth_throttling_detected
+    probe.trigger_value: 75.0
+  gt-iis-aws-svc-2:
+    probe.upstream_generator: iis_otel
+    probe.upstream_key: bandwidth_throttling_detected
+generator_impact:
+  iis_otel:
+    bandwidth_throttling_detected: 75.0

@@ -3,29 +3,29 @@ subsystem: network_core
 vehicle_section: switching_fabric
 error_type: SW_MATM-4-MACFLAP_NOTIF
 sensor_type: mac_table
-affected_services:
-- network-controller
-- dns-dhcp-service
-cascade_services:
-- firewall-gateway
-- wifi-controller
+affected_services: [network-controller, dns-dhcp-service, cloud-inventory-scanner]
+cascade_services: [firewall-gateway, wifi-controller]
 description: MAC address table instability causing port flapping on the switching fabric
+onset_delay_seconds: 5
+ramp_seconds: 10
 investigation_notes: |-
-  1. Run `show mac address-table notification mac-move` to identify the flapping MAC and involved ports.
-  2. Check for physical layer issues: `show interface status` on both source and destination ports for CRC errors, runts, or input errors.
-  3. Verify no switching loops exist: `show spanning-tree vlan <id> detail` — a flapping MAC often indicates an STP misconfiguration or a rogue switch.
-  4. Look for duplicate MAC from VM migration or HSRP/VRRP misconfiguration: `show mac address-table address <mac>`.
-  5. If caused by a NIC teaming misconfiguration on the host side, disable one NIC and confirm flapping stops.
-  6. As a short-term fix, apply `switchport port-security` to limit MAC addresses per port and contain the blast radius.
+  Root cause: release train net-core-v2.8.1-canary was pushed to acc-sw-wh01 a few seconds before the first SW_MATM-4-MACFLAP_NOTIF. The canary dropped `channel-group 12 mode active` from Gi0/0/1 and Gi0/0/4 (%EC-5-UNBUNDLE for both), so the two ports of the warehouse host's active LACP bond now run as independent access ports. The host sources frames from the same MAC on both NICs, and the switch moves {mac_address} between {interface_src} and {interface_dst}: {flap_count} moves in {flap_window}s, about 60 a minute. Only acc-sw-wh01 is affected: acc-sw-wh02 still bundles 2/2 with 0 moves, and the layer 2 fabric above it is healthy. Both ports show no CRC or input errors and VLAN {vlan_id} has no topology changes, which rules out a cable fault and a loop; there is no duplicate DHCP lease either.
+  Confirm:
+    - acc-sw-wh01 logs %SYS-5-CONFIG_I (net-core-v2.8.1-canary, CHG0048213) and %EC-5-UNBUNDLE for Gi0/0/1 and Gi0/0/4 before the first MACFLAP line (attributes.deployment.release_train)
+    - mac-table lines show po12_bundled=0/2 and release_train=net-core-v2.8.1-canary; metric network.mac_flaps_per_min is about 60 (baseline 0-1)
+    - network.interface.in_errors stays 0-2, network.stp.topology_changes stays 0-1, and acc-sw-wh02 stays NOMINAL
+  Remediation: roll the switch configuration back to the previous release train with opsctl rollback config/acc-sw-wh01 --to-revision previous. Both ports rejoin Po12 (%EC-5-BUNDLE) within seconds and the MAC moves stop within about 15 seconds. Port-security would only hide the symptom.
 remediation_action: clear_mac_table
+remediation_command: |-
+  opsctl rollback config/acc-sw-wh01 --to-revision previous
 error_message: '%SW_MATM-4-MACFLAP_NOTIF: Host {mac_address} in vlan {vlan_id} is flapping between port {interface_src} and
-  port {interface_dst}, {flap_count} moves in {flap_window}s'
+  port {interface_dst}'
 stack_trace: |-
   switch# show mac address-table notification mac-move
   MAC Move Notification Feature is Enabled on the switch
   VLAN  MAC Address       From Port          To Port            Move Count
   ----  ----------------  -----------------  -----------------  ----------
-  {vlan_id}   {mac_address}     {interface_src}         {interface_dst}         {flap_count}
+  {vlan_id}   {mac_address}     {interface_src}         {interface_dst}         {flap_count}   ({flap_window}s window)
 
   switch# show mac address-table count
   Total MAC Addresses for this criterion: 3847
@@ -37,7 +37,7 @@ correlation_attr:
   value: net-core-v2.8.1-canary
 fault_params:
   mac_address:
-    format: "{a:02x}:{b:02x}:{c:02x}:{d:02x}:{e:02x}:{f:02x}"
+    format: "{a:02x}{b:02x}.{c:02x}{d:02x}.{e:02x}{f:02x}"
     a: {randint: [0, 255]}
     b: {randint: [0, 255]}
     c: {randint: [0, 255]}
@@ -45,29 +45,118 @@ fault_params:
     e: {randint: [0, 255]}
     f: {randint: [0, 255]}
   vlan_id: {choice: [100, 200, 300, 400, 500, 1000]}
-  interface_src: {choice: [Gi0/0/1, Gi0/0/2, Gi0/0/3, Te1/0/1, Te1/0/2]}
-  interface_dst: {choice: [Gi0/0/4, Gi0/0/5, Te1/0/3, Te1/0/4]}
-  flap_count: {randint: [10, 50]}
-  flap_window: {randint: [5, 30]}
+  interface_src: Gi0/0/1
+  interface_dst: Gi0/0/4
+  flap_count: {randint: [27, 33]}
+  flap_window: 30
 rca_clues:
   network-controller:
-    switching.flap_port: {choice: [Gi0/0/1, Gi0/0/3, Te1/0/2]}
-    switching.mac_table_util_pct: {uniform: [85, 98], round: 1}
+    switching.flap_port: Gi0/0/1
+    switching.flap_ports_same_host: true
+    switching.lacp_bundle_members: 0
+    switching.stp_topology_changes: 0
+    switching.port_crc_errors: 0
+    switching.mac_table_util_pct: {uniform: [45, 49], round: 1}
   dns-dhcp-service:
-    dhcp.arp_conflict_detected: true
-    dhcp.stale_lease_mac: "00:11:22:33:44:55"
+    dhcp.arp_conflict_detected: false
+    dhcp.duplicate_mac_leases: 0
   firewall-gateway:
-    firewall.arp_inspection_failures: {randint: [20, 200]}
+    firewall.arp_inspection_failures: {randint: [0, 2]}
     firewall.zone_affected: TRUST
   wifi-controller:
-    wifi.client_roam_storm: true
+    wifi.client_roam_storm: false
     wifi.affected_ssid: Fanatics-Warehouse
+cascade_messages:
+  firewall-gateway:
+    - severity: WARN
+      message: '1,{iso_now},007200001234,SYSTEM,general,0,arp-move,Host {mac_address} on vlan {vlan_id} seen behind two aggregate members; ARP entry refreshed {flap_count} times in {flap_window}s'
+  wifi-controller:
+    - severity: WARN
+      message: 'ap=wh01-ap-14 wired uplink via acc-sw-wh01 unstable: gateway ARP re-resolved {flap_count} times in {flap_window}s on vlan {vlan_id}; client traffic delayed'
+fault_scope:
+  workloads: [network-controller, dns-dhcp-service, cloud-inventory-scanner]
+infrastructure_events:
+  - service: network-controller
+    severity: INFO
+    offset_seconds: -15
+    body: '%SYS-5-CONFIG_I: Configured from console by netops-release on vty0 (release train net-core-v2.8.1-canary, CHG0048213) [acc-sw-wh01]'
+    attributes:
+      user.name: netops-release
+      change.request: CHG0048213
+      operation: config_change
+      network.device: acc-sw-wh01
+      deployment.release_train: net-core-v2.8.1-canary
+      change.summary: 'acc-sw-wh01 release train: net-core-v2.8.0 -> net-core-v2.8.1-canary'
+  - service: network-controller
+    severity: INFO
+    offset_seconds: -14
+    body: '%EC-5-UNBUNDLE: Interface Gi0/0/1 left the port-channel Po12 [acc-sw-wh01]'
+    attributes:
+      operation: config_change
+      network.device: acc-sw-wh01
+      deployment.release_train: net-core-v2.8.1-canary
+  - service: network-controller
+    severity: INFO
+    offset_seconds: -14
+    body: '%EC-5-UNBUNDLE: Interface Gi0/0/4 left the port-channel Po12 [acc-sw-wh01]'
+    attributes:
+      operation: config_change
+      network.device: acc-sw-wh01
+      deployment.release_train: net-core-v2.8.1-canary
+remediation_effects:
+  log_events:
+    - service: network-controller
+      severity: INFO
+      offset_seconds: 1
+      body: '[CHG] CHANGE APPLIED opsctl rollback config/acc-sw-wh01 --to-revision previous by {actor}: acc-sw-wh01 release train net-core-v2.8.1-canary -> net-core-v2.8.0'
+      attributes:
+        operation: config_change
+        change.target: config/acc-sw-wh01
+    - service: network-controller
+      severity: INFO
+      offset_seconds: 4
+      body: '%EC-5-BUNDLE: Interface Gi0/0/1 joined port-channel Po12 [acc-sw-wh01]'
+      attributes:
+        operation: config_change
+        network.device: acc-sw-wh01
+        deployment.release_train: net-core-v2.8.0
+    - service: network-controller
+      severity: INFO
+      offset_seconds: 5
+      body: '%EC-5-BUNDLE: Interface Gi0/0/4 joined port-channel Po12 [acc-sw-wh01]'
+      attributes:
+        operation: config_change
+        network.device: acc-sw-wh01
+        deployment.release_train: net-core-v2.8.0
+  steady_attributes:
+    network-controller:
+      deployment.release_train: net-core-v2.8.0
+  verification:
+    - signal: network.mac_flaps_per_min
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "network-controller"'
+      field: 'metrics.network.mac_flaps_per_min'
+      expect: 'back to 0-1 (was about 60), within about 15 seconds of the fix'
+      within_seconds: 60
+    - signal: SW_MATM-4-MACFLAP_NOTIF lines
+      from: 'logs.otel.fanatics'
+      where: 'body.text LIKE "*MACFLAP_NOTIF*"'
+      expect: '0 new lines'
+      within_seconds: 60
+    - signal: Po12 members and release train
+      from: 'logs.otel.fanatics'
+      where: 'resource.attributes.service.name == "network-controller"'
+      field: 'attributes.switching.lacp_bundle_members'
+      expect: '2 on every mac-table line for acc-sw-wh01 since the fix, with attributes.deployment.release_train net-core-v2.8.0 (was 0 and net-core-v2.8.1-canary)'
+      within_seconds: 60
 business_impact:
   - kpi: business.app_sessions_per_min
-    factor: {uniform: [0.30, 0.60]}
+    value: {uniform: [334.8, 385.2]}
   - kpi: business.page_views_per_min
-    factor: {uniform: [0.35, 0.65]}
+    value: {uniform: [108810.0, 125190.0]}
   - kpi: business.churn_risk_index_0_100
     factor: {uniform: [1.5, 3.0]}
-  - kpi: business.net_satisfaction_proxy_nps
-    factor: {uniform: [0.30, 0.60]}
+  - kpi: business.sponsored_inventory_seconds_per_min
+    value: {uniform: [148.8, 171.2]}
+# dependents degrade after the component at fault, in dependency order
+service_lag_seconds: {dns-dhcp-service: 20, cloud-inventory-scanner: 40, firewall-gateway: 30, wifi-controller: 45}

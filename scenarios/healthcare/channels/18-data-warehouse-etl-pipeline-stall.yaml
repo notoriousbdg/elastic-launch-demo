@@ -10,8 +10,12 @@ cascade_services:
 - ehr-system
 description: Clinical data warehouse ETL pipeline stalls during extraction or transformation phase
 investigation_notes: |-
-  Root Cause: ETL pipeline stalls are caused by source database connection pool exhaustion, long-running transformation queries locking clinical tables, or target warehouse staging area disk full conditions. Extract-phase stalls often indicate the source EHR database is under heavy OLTP load during clinical hours.
-  Remediation: 1) Check the ETL job status: `etl-admin pipeline-status --pipeline {pipeline_id}`. 2) Restart the stalled pipeline stage: `etl-admin restart-stage --pipeline {pipeline_id} --stage {etl_stage}`. 3) Verify source database connectivity: `etl-admin test-source --pipeline {pipeline_id}`. 4) Check for blocking queries on the source: `etl-admin blocking-queries --pipeline {pipeline_id}`. 5) If the target staging area is full, expand or purge: `etl-admin staging-cleanup --pipeline {pipeline_id} --older-than 7d`. 6) Reschedule extract-phase jobs to off-peak hours (02:00-05:00) to avoid OLTP contention.
+  Root cause: etl-clinical-extractor 4.2.0 with pool config hikari-pool-experimental-64conn was rolled out shortly before the first ETL-PIPELINE-STALL. The new extractor does not return source connections to the pool when a cursor closes, so HikariPool-etl-clinical reaches 64/64 active with threads waiting. {pipeline_id} stalls at {etl_stage} with {rows_processed}/{total_rows} rows done and no progress for {stall_seconds}s. There are no blocking queries on the source and the staging disk is 40-60% used: this is a connection leak, not source contention or a full staging area. The other pipelines use their own pools and keep running.
+  Confirm:
+    - data-warehouse logs HikariPool-etl-clinical - Pool stats (total=64, active=64, idle=0, waiting=...) extractor=etl-clinical-extractor-4.2.0 config=hikari-pool-experimental-64conn ... status=STALLED (attributes.infra.etl_db_pool_config, attributes.deployment.etl_extractor_version)
+    - metric warehouse.etl_rows_per_second drops from about 15,000 to under 150 and warehouse.etl_source_pool_active_pct goes to 100 after the rollout
+    - the data-warehouse line "etl-clinical-extractor rolled out 4.2.0" comes before the first stall; ETL-BILLING-02, ETL-LAB-03 and ETL-QUALITY-04 keep logging etl_progress
+  Remediation: roll the extractor back with opsctl rollback deployment/etl-clinical-extractor --to-revision previous (4.1.3, hikari-pool-standard-64conn). The restart closes the leaked connections and throughput is back above 5,000 rows per second within about 90 seconds. Restarting the stage on 4.2.0 only leaks again within minutes. Moving the job to off-peak hours does not fix a leak.
 remediation_action: restart_etl_pipeline
 error_message: '[DW] ETL-PIPELINE-STALL: pipeline={pipeline_id} stage={etl_stage} rows={rows_processed}/{total_rows} stalled={stall_seconds}s'
 stack_trace: |-
@@ -31,21 +35,88 @@ correlation_attr:
   key: infra.etl_db_pool_config
   value: hikari-pool-experimental-64conn
 fault_params:
-  pipeline_id: {choice: [ETL-CLINICAL-01, ETL-BILLING-02, ETL-LAB-03, ETL-QUALITY-04]}
-  etl_stage: {choice: [extract, transform, load, validate]}
+  pipeline_id: ETL-CLINICAL-01
+  etl_stage: extract
   rows_processed: {randint: [10000, 500000]}
   total_rows: {randint: [500000, 2000000]}
-  stall_seconds: {randint: [120, 1800]}
+  stall_seconds: {randint: [120, 900]}
 rca_clues:
   data-warehouse:
     etl.source_db_pool_exhausted: true
-    etl.blocking_query_count: {randint: [3, 12]}
+    etl.source_db_pool_active_pct: 100
+    etl.blocking_query_count: 0
+    etl.staging_disk_used_pct: {uniform: [40, 60], round: 0}
   billing-processor:
     billing.revenue_cycle_report_stale: true
     billing.days_behind: {randint: [1, 5]}
   ehr-system:
     ehr.oltp_contention_detected: true
     ehr.query_timeout_count: {randint: [5, 30]}
+remediation_command: |-
+  opsctl rollback deployment/etl-clinical-extractor --to-revision previous
+error_services: [data-warehouse]
+service_lag_seconds:
+  billing-processor: 30
+  ehr-system: 20
+cascade_messages:
+  billing-processor:
+    - severity: WARN
+      message: '[CLAIMS] revenue_cycle_report_stale source={pipeline_id} stage={etl_stage}; dashboards show the previous load'
+  ehr-system:
+    - severity: WARN
+      message: '[EHR] reporting_session_contention source={pipeline_id} idle_in_transaction_sessions=64; chart queries slowed'
+fault_scope:
+  workloads: [data-warehouse]
+infrastructure_events:
+  - service: data-warehouse
+    severity: INFO
+    offset_seconds: -120
+    body: '[DW] deployment etl-clinical-extractor rolled out etl-clinical-extractor-4.2.0 (was etl-clinical-extractor-4.1.3) with pool config hikari-pool-experimental-64conn by dw-platform-release (CHG0032342)'
+    attributes:
+      user.name: dw-platform-release
+      change.request: CHG0032342
+      operation: deployment
+      deployment.etl_extractor_version: etl-clinical-extractor-4.2.0
+      infra.etl_db_pool_config: hikari-pool-experimental-64conn
+      change.summary: 'etl-clinical-extractor: 4.1.3 -> 4.2.0'
+remediation_effects:
+  log_events:
+    - service: data-warehouse
+      severity: INFO
+      offset_seconds: 1
+      body: '[CHG] CHANGE IMPLEMENTED opsctl rollback deployment/etl-clinical-extractor --to-revision previous by {actor}: etl-clinical-extractor-4.2.0 -> etl-clinical-extractor-4.1.3, pool config hikari-pool-standard-64conn'
+      attributes:
+        operation: change_implemented
+        change.target: deployment/etl-clinical-extractor
+    - service: data-warehouse
+      severity: INFO
+      offset_seconds: 20
+      body: 'HikariPool-etl-clinical - Shutdown completed. HikariPool-etl-clinical - Start completed. extractor=etl-clinical-extractor-4.1.3 config=hikari-pool-standard-64conn'
+      attributes:
+        operation: etl_source_pool
+        deployment.etl_extractor_version: etl-clinical-extractor-4.1.3
+        infra.etl_db_pool_config: hikari-pool-standard-64conn
+  steady_attributes:
+    data-warehouse:
+      infra.etl_db_pool_config: hikari-pool-standard-64conn
+  verification:
+    - signal: warehouse.etl_rows_per_second
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "data-warehouse"'
+      field: 'metrics.warehouse.etl_rows_per_second'
+      expect: 'back above 5000 rows per second (was under 150) within about 90 seconds'
+      within_seconds: 150
+    - signal: ETL-PIPELINE-STALL lines
+      from: 'logs.otel.healthcare'
+      where: 'body.text LIKE "*ETL-PIPELINE-STALL*"'
+      expect: '0 new lines'
+      within_seconds: 150
+    - signal: infra.etl_db_pool_config
+      from: 'logs.otel.healthcare'
+      where: 'resource.attributes.service.name == "data-warehouse"'
+      field: 'attributes.infra.etl_db_pool_config'
+      expect: 'hikari-pool-standard-64conn on every HikariPool-etl-clinical line since the fix; the experimental config stops appearing'
+      within_seconds: 120
 business_impact:
   - kpi: business.collections_usd_per_min
     factor: {uniform: [0.20, 0.50]}

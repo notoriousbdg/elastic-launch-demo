@@ -1,0 +1,37 @@
+name: "GT aws_elb_metrics_otel: application_load_balancer_unhealthy_targets_detected"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-AWSELBMETRIC-APPLICATION-LOAD-BA-06
+sensor_type: impact_key_probe
+affected_services:
+  - gt-awselbmetrics-aws-svc-1
+cascade_services:
+  - gt-awselbmetrics-aws-svc-2
+description: "Tests impact_key application_load_balancer_unhealthy_targets_detected on generator aws_elb_metrics_otel."
+investigation_notes: |-
+  1. Verify aws_elb_metrics_otel is active and reporting metrics.
+  2. Check that the application_load_balancer_unhealthy_targets_detected metric has reached the trigger value (50.0).
+  3. Confirm generator_impact for aws_elb_metrics_otel.application_load_balancer_unhealthy_targets_detected is set to 50.0.
+  4. Look for correlated changes in service gt-awselbmetrics-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_application_load_balancer_unhealthy_targets_detected_baseline
+error_message: "GT-PROBE: gen=aws_elb_metrics_otel key=application_load_balancer_unhealthy_targets_detected value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=aws_elb_metrics_otel
+  impact_key: application_load_balancer_unhealthy_targets_detected
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 50.0
+  svc_name: gt-awselbmetrics-aws-svc-1
+rca_clues:
+  gt-awselbmetrics-aws-svc-1:
+    probe.generator: aws_elb_metrics_otel
+    probe.impact_key: application_load_balancer_unhealthy_targets_detected
+    probe.trigger_value: 50.0
+  gt-awselbmetrics-aws-svc-2:
+    probe.upstream_generator: aws_elb_metrics_otel
+    probe.upstream_key: application_load_balancer_unhealthy_targets_detected
+generator_impact:
+  aws_elb_metrics_otel:
+    application_load_balancer_unhealthy_targets_detected: 50.0

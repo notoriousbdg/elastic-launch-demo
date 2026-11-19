@@ -1,0 +1,37 @@
+name: "GT docker_otel: memory_limit_bytes"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-DOCKER-MEMORY-LIMIT-BYTES
+sensor_type: impact_key_probe
+affected_services:
+  - gt-docker-aws-svc-1
+cascade_services:
+  - gt-docker-aws-svc-2
+description: "Tests impact_key memory_limit_bytes on generator docker_otel."
+investigation_notes: |-
+  1. Verify docker_otel is active and reporting metrics.
+  2. Check that the memory_limit_bytes metric has reached the trigger value (268435456).
+  3. Confirm generator_impact for docker_otel.memory_limit_bytes is set to 268435456.
+  4. Look for correlated changes in service gt-docker-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_memory_limit_bytes_baseline
+error_message: "GT-PROBE: gen=docker_otel key=memory_limit_bytes value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=docker_otel
+  impact_key: memory_limit_bytes
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 268435456
+  svc_name: gt-docker-aws-svc-1
+rca_clues:
+  gt-docker-aws-svc-1:
+    probe.generator: docker_otel
+    probe.impact_key: memory_limit_bytes
+    probe.trigger_value: 268435456
+  gt-docker-aws-svc-2:
+    probe.upstream_generator: docker_otel
+    probe.upstream_key: memory_limit_bytes
+generator_impact:
+  docker_otel:
+    memory_limit_bytes: 268435456

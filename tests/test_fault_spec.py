@@ -5,8 +5,6 @@ from __future__ import annotations
 import random
 import re
 
-import pytest
-
 from scenario_engine.fault_spec import resolve, resolve_dict
 
 

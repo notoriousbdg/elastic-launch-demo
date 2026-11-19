@@ -33,27 +33,41 @@ db_operations:
   - UPDATE search_index SET last_indexed = NOW(), doc_count = ? WHERE shard_id = ?
 emit_fault_logs: true
 kpi_emitter: false
+state:
+  pc_t:
+    init: now
+  price_backlog_s:
+    init: 0
 steps:
 - sample:
-    search_latency_ms:
-      uniform:
-      - 18.0
-      - 95.0
-      round: 1
+    dt:
+      expr: "min(10.0, max(0.0, time.time() - pc_t))"
+- counter:
+    state_key: pc_t
+    by:
+      expr: "dt"
+# Ch 3: the alias swap is atomic, so the doc count steps to the incomplete products-v13 and back.
+# Zero-result searches climb as cached result pages expire, and fall back over the 60s query
+# result cache TTL after the alias points at products-v12 again.
+- sample:
+    idx_frac:
+      expr: "min(1.0, max(0.0, elapsed.get(3, 0) - lag.get(3, 0)) / 20.0) if 3 in all_active else ((1.0 - min(1.0, since_fix.get(3, 0) / 60.0)) if 3 in fixed_channels else 0.0)"
+    idx_version:
+      expr: "'products-v13' if 3 in all_active else 'products-v12'"
     items_indexed:
-      randint:
-      - 1200000
-      - 2000000
-    reco_click_rate:
-      uniform:
-      - 4.5
-      - 12.0
-      round: 2
+      expr: "round((912000.0 if 3 in all_active else 1200000.0) + rand.gauss(0, 150.0))"
+    zero_result_pct:
+      expr: "round(max(0.5, 3.0 + rand.gauss(0, 0.4) + 25.0 * idx_frac * (1.0 + rand.gauss(0, 0.04))), 2)"
+    index_health_pct:
+      expr: "round(min(100.0, items_indexed / 1200000.0 * 100.0), 2)"
+    idx_status:
+      expr: "'ANOMALY' if (zero_result_pct > 6.0 or items_indexed < 1150000) else 'NOMINAL'"
+    search_latency_ms:
+      expr: "round(max(15.0, 42.0 + rand.gauss(0, 3.0)), 1)"
     search_rps:
-      uniform:
-      - 300.0
-      - 1200.0
-      round: 1
+      expr: "round(780.0 + rand.gauss(0, 25.0), 1)"
+    reco_click_rate:
+      expr: "round((8.2 + rand.gauss(0, 0.3)) * (1.0 - 0.25 * idx_frac), 2)"
 - metric:
     name: catalog.search_latency_ms
     value:
@@ -74,6 +88,11 @@ steps:
     value:
       var: search_rps
     unit: rps
+- metric:
+    name: catalog.zero_result_pct
+    value:
+      var: zero_result_pct
+    unit: '%'
 - log:
     level: INFO
     message: catalog.health search_latency_ms={search_latency_ms} items_indexed={items_indexed} reco_click_rate={reco_click_rate}%
@@ -88,16 +107,96 @@ steps:
         var: reco_click_rate
       catalog.search_rps:
         var: search_rps
-- sample:
-    index_health_pct:
-      uniform:
-      - 98.5
-      - 100.0
-      round: 2
 - log:
     level: INFO
-    message: catalog.index_health health_pct={index_health_pct}% items={items_indexed}
+    message: '[index-health-1] INFO  c.e.catalog.search.IndexHealthMonitor - index health alias=products index={idx_version}
+      cluster_status=green docs.count={items_indexed} source_rows=1200000 coverage={index_health_pct}% zero_result_pct={zero_result_pct}
+      status={idx_status}'
     attrs:
       operation: index_health
       catalog.index_health_pct:
         var: index_health_pct
+      catalog.index_version:
+        var: idx_version
+      catalog.items_indexed:
+        var: items_indexed
+      catalog.zero_result_pct:
+        var: zero_result_pct
+      catalog.index_status:
+        var: idx_status
+# Ch 15: the consumer retries the same undecodable offset, so price lag grows one second per
+# second. After the producer rollback and the resync job it skips past the v7 range and drains
+# (proportional catch-up, then a 5 s/s tail): about 120s from an hour-old backlog, less from shorter.
+- sample:
+    price_stalled:
+      expr: "15 in all_active and elapsed.get(15, 0) >= lag.get(15, 0)"
+    price_delta:
+      expr: "dt if price_stalled else ((-min(price_backlog_s, max(5.0, price_backlog_s / 30.0) * dt)) if 15 in fixed_channels else (0.0 if 15 in all_active else -price_backlog_s))"
+- counter:
+    state_key: price_backlog_s
+    by:
+      expr: "price_delta"
+- sample:
+    price_sync_lag_s:
+      expr: "round(max(0.5, 2.0 + rand.gauss(0, 0.5)) + price_backlog_s, 1)"
+    price_deser_errors:
+      expr: "round(max(0.0, 600.0 + rand.gauss(0, 40.0)) * min(1.0, (elapsed.get(15, 0) - lag.get(15, 0)) / 10.0)) if price_stalled else 0"
+    price_schema_version:
+      expr: "7 if 15 in all_active else 6"
+    price_status:
+      expr: "'ANOMALY' if (price_sync_lag_s > 10.0 or price_deser_errors > 0) else 'NOMINAL'"
+- metric:
+    name: catalog.price_sync_lag_s
+    value:
+      var: price_sync_lag_s
+    unit: s
+- metric:
+    name: catalog.price_deserialize_errors_per_min
+    value:
+      var: price_deser_errors
+    unit: errors/min
+- log:
+    level: INFO
+    message: '[price-sync-monitor] INFO  c.e.catalog.pricing.PriceSyncMonitor - price sync group=catalog-price-consumer topic=pricing.price-updated
+      lag_s={price_sync_lag_s} deserialize_errors_per_min={price_deser_errors} writer_schema_version={price_schema_version}
+      reader_schema_version=6 status={price_status}'
+    attrs:
+      operation: price_sync
+      catalog.price_schema_version:
+        var: price_schema_version
+      catalog.price_sync_lag_s:
+        var: price_sync_lag_s
+      catalog.price_deserialize_errors_per_min:
+        var: price_deser_errors
+      catalog.price_sync_status:
+        var: price_status
+# Ch 10: price runs normally purge the changed SKUs only; while the pattern purge is live every
+# price run unlinks catalog:product:*. Ramps in over ~20s and back to per-SKU purges ~20s after the fix.
+- sample:
+    purge_frac:
+      expr: "min(1.0, max(0.0, elapsed.get(10, 0) - lag.get(10, 0)) / 20.0) if 10 in all_active else ((1.0 - min(1.0, since_fix.get(10, 0) / 20.0)) if 10 in fixed_channels else 0.0)"
+    cache_purge_mode:
+      expr: "'pattern' if 10 in all_active else 'per-sku'"
+    cache_purge_pattern:
+      expr: "'catalog:product:*' if 10 in all_active else 'catalog:product:<sku>'"
+    cache_keys_purged:
+      expr: "round(max(0.0, 1500.0 + rand.gauss(0, 300.0) + purge_frac * (93500.0 + rand.gauss(0, 8000.0))))"
+    cache_purge_status:
+      expr: "'ANOMALY' if cache_keys_purged > 10000 else 'NOMINAL'"
+- metric:
+    name: catalog.cache_keys_purged_per_min
+    value:
+      var: cache_keys_purged
+    unit: keys/min
+- log:
+    level: INFO
+    message: '[price-cache-purger] INFO  c.e.catalog.cache.PriceCachePurger - cache purge mode={cache_purge_mode} match={cache_purge_pattern}
+      keys_purged_per_min={cache_keys_purged} status={cache_purge_status}'
+    attrs:
+      operation: cache_purge
+      catalog.cache_purge_mode:
+        var: cache_purge_mode
+      catalog.cache_keys_purged_per_min:
+        var: cache_keys_purged
+      catalog.cache_purge_status:
+        var: cache_purge_status

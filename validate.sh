@@ -86,6 +86,7 @@ if os.path.exists(db):
 resolve_sid = cli_scenario or sid
 if not resolve_sid:
     sys.exit(0)
+print(f"_DB_SID={resolve_sid}")
 
 sys.path.insert(0, SCRIPT_DIR)
 try:
@@ -343,12 +344,6 @@ wf_search_response=$(kb_get "/api/workflows")
 wf_search_code=$(echo "$wf_search_response" | tail -1)
 wf_search_body=$(echo "$wf_search_response" | sed '$d')
 
-# Fallback to POST search if GET not supported
-if [[ "$wf_search_code" -eq 404 || "$wf_search_code" -eq 405 ]]; then
-    wf_search_response=$(kb_post "/api/workflows/search" '{"page":1,"size":100}')
-    wf_search_code=$(echo "$wf_search_response" | tail -1)
-    wf_search_body=$(echo "$wf_search_response" | sed '$d')
-fi
 
 if [[ "$wf_search_code" -ge 200 && "$wf_search_code" -lt 300 ]]; then
     # Check all 3 core workflows exist and are valid
@@ -402,8 +397,7 @@ for item in items:
         fail "Notification workflow MISSING 'alert' trigger — alert rules won't fire it"
     fi
 
-    # Check Notification workflow has email step with a resolved connector
-    # (ECH: elastic-cloud-email; serverless: Elastic-Cloud-SMTP or similar)
+    # Check Notification workflow has email step with elastic-cloud-email
     notif_email=$(echo "$wf_search_body" | python3 -c "
 import sys, json
 data = json.load(sys.stdin)
@@ -412,15 +406,15 @@ for item in items:
     if 'Significant Event Notification' in item.get('name', '') and '${SCENARIO_NAME}' in item.get('name', ''):
         yaml_text = item.get('yaml', '')
         has_email_step = 'type: email' in yaml_text
-        unresolved = '__EMAIL_CONNECTOR_ID__' in yaml_text
-        print('yes' if (has_email_step and not unresolved) else 'no')
+        has_smtp = 'elastic-cloud-email' in yaml_text
+        print('yes' if (has_email_step and has_smtp) else 'no')
         break
 " 2>/dev/null || echo "unknown")
 
     if [[ "$notif_email" == "yes" ]]; then
-        pass "Notification workflow has email step with resolved connector"
+        pass "Notification workflow has email step with elastic-cloud-email connector"
     else
-        fail "Notification workflow MISSING email step or unresolved __EMAIL_CONNECTOR_ID__"
+        fail "Notification workflow MISSING email step with elastic-cloud-email"
     fi
 
     # Check Notification workflow uses var[0].event_meta pattern (json_parse for email extraction)
@@ -559,7 +553,7 @@ echo ""
 # ── 6c. Demo App ─────────────────────────────────────────────────────────────
 echo "--- Demo App (Chaos API) ---"
 
-app_response=$(curl -s -w "\n%{http_code}" http://localhost/api/status 2>/dev/null || echo -e "\n000")
+app_response=$(curl -s -w "\n%{http_code}" "http://localhost:8080/api/status?deployment_id=${_DB_SID:-$SCENARIO_NS}" 2>/dev/null || echo -e "\n000")
 app_code=$(echo "$app_response" | tail -1)
 
 if [[ "$app_code" -ge 200 && "$app_code" -lt 300 ]]; then
@@ -578,11 +572,6 @@ wf_exec_response=$(kb_get "/api/workflows")
 wf_exec_code=$(echo "$wf_exec_response" | tail -1)
 wf_exec_body=$(echo "$wf_exec_response" | sed '$d')
 
-if [[ "$wf_exec_code" -eq 404 || "$wf_exec_code" -eq 405 ]]; then
-    wf_exec_response=$(kb_post "/api/workflows/search" '{"page":1,"size":100}')
-    wf_exec_code=$(echo "$wf_exec_response" | tail -1)
-    wf_exec_body=$(echo "$wf_exec_response" | sed '$d')
-fi
 
 if [[ "$wf_exec_code" -ge 200 && "$wf_exec_code" -lt 300 ]]; then
     escalation_wf_id=$(echo "$wf_exec_body" | python3 -c "
@@ -608,11 +597,6 @@ for w in items:
         esc_run_response=$(kb_post "/api/workflows/workflow/${escalation_wf_id}/run" \
             '{"inputs":{"action":"escalate","channel":1,"severity":"ADVISORY","justification":"Validation test — automated escalation check","hold_id":"","investigation_summary":""}}')
         esc_run_code=$(echo "$esc_run_response" | tail -1)
-        if [[ "$esc_run_code" -eq 404 || "$esc_run_code" -eq 405 ]]; then
-            esc_run_response=$(kb_post "/api/workflows/${escalation_wf_id}/run" \
-                '{"inputs":{"action":"escalate","channel":1,"severity":"ADVISORY","justification":"Validation test — automated escalation check","hold_id":"","investigation_summary":""}}')
-            esc_run_code=$(echo "$esc_run_response" | tail -1)
-        fi
         esc_run_body=$(echo "$esc_run_response" | sed '$d')
 
         if [[ "$esc_run_code" -ge 200 && "$esc_run_code" -lt 300 ]]; then
@@ -620,10 +604,6 @@ for w in items:
             if [[ -n "$esc_exec_id" ]]; then
                 sleep 12
                 esc_status_response=$(kb_get "/api/workflows/executions/${esc_exec_id}")
-                esc_status_code=$(echo "$esc_status_response" | tail -1)
-                if [[ "$esc_status_code" -eq 404 || "$esc_status_code" -eq 405 ]]; then
-                    esc_status_response=$(kb_get "/api/workflowExecutions/${esc_exec_id}")
-                fi
                 esc_status=$(echo "$esc_status_response" | sed '$d' | python3 -c "import sys,json; print(json.load(sys.stdin).get('status','unknown'))" 2>/dev/null || echo "unknown")
 
                 if [[ "$esc_status" == "completed" ]]; then
@@ -654,11 +634,6 @@ print(e.get('message','') if isinstance(e,dict) else str(e))
         rem_run_response=$(kb_post "/api/workflows/workflow/${remediation_wf_id}/run" \
             '{"inputs":{"error_type":"validation_test","channel":1,"action_type":"validation_check","target_service":"","justification":"Validation test — automated dry-run check","dry_run":true,"case_id":""}}')
         rem_run_code=$(echo "$rem_run_response" | tail -1)
-        if [[ "$rem_run_code" -eq 404 || "$rem_run_code" -eq 405 ]]; then
-            rem_run_response=$(kb_post "/api/workflows/${remediation_wf_id}/run" \
-                '{"inputs":{"error_type":"validation_test","channel":1,"action_type":"validation_check","target_service":"","justification":"Validation test — automated dry-run check","dry_run":true,"case_id":""}}')
-            rem_run_code=$(echo "$rem_run_response" | tail -1)
-        fi
         rem_run_body=$(echo "$rem_run_response" | sed '$d')
 
         if [[ "$rem_run_code" -ge 200 && "$rem_run_code" -lt 300 ]]; then
@@ -666,10 +641,6 @@ print(e.get('message','') if isinstance(e,dict) else str(e))
             if [[ -n "$rem_exec_id" ]]; then
                 sleep 8
                 rem_status_response=$(kb_get "/api/workflows/executions/${rem_exec_id}")
-                rem_status_code=$(echo "$rem_status_response" | tail -1)
-                if [[ "$rem_status_code" -eq 404 || "$rem_status_code" -eq 405 ]]; then
-                    rem_status_response=$(kb_get "/api/workflowExecutions/${rem_exec_id}")
-                fi
                 rem_status=$(echo "$rem_status_response" | sed '$d' | python3 -c "import sys,json; print(json.load(sys.stdin).get('status','unknown'))" 2>/dev/null || echo "unknown")
 
                 if [[ "$rem_status" == "completed" ]]; then
@@ -746,17 +717,32 @@ if [[ -z "$se_stream" ]]; then
     se_stream="logs.otel"
 fi
 
+se_avail_response=$(kb_get "/internal/significant_events/availability")
+se_avail_code=$(echo "$se_avail_response" | tail -1)
+se_avail_body=$(echo "$se_avail_response" | sed '$d')
+
+# Use the availability endpoint to check whether significant events are enabled.
+# It returns {"available":true} or {"available":false,"reason":"<gate>"}.
+# A 404 means the significantEvents plugin isn't loaded — treat as unavailable.
+se_available=$(echo "$se_avail_body" | python3 -c "
+import sys, json
+try:
+    print('true' if json.load(sys.stdin).get('available', False) else 'false')
+except:
+    print('true')  # fail-open on unexpected response
+" 2>/dev/null || echo "true")
+
 se_response=$(kb_get "/api/streams/${se_stream}/queries")
 se_code=$(echo "$se_response" | tail -1)
 se_body=$(echo "$se_response" | sed '$d')
 
-# A 403 "not available in this environment" means significant events are
-# disabled by the streams.significantEventsAvailable feature flag (e.g. on
-# serverless).  Treat as skipped — not a deployment error.
-se_unavailable=$(echo "$se_body" | grep -c "not available in this environment" 2>/dev/null || echo "0")
-
-if [[ "$se_code" -eq 403 && "$se_unavailable" -gt 0 ]]; then
-    info "Significant Events skipped — streams.significantEventsAvailable not enabled in this environment"
+if [[ "$se_avail_code" -eq 404 || "$se_available" == "false" ]]; then
+    se_reason=$(echo "$se_avail_body" | python3 -c "
+import sys, json
+try: print(json.load(sys.stdin).get('reason', 'unknown'))
+except: print('plugin not loaded')
+" 2>/dev/null || echo "unknown")
+    info "Significant Events skipped — gate not enabled (gate: ${se_reason}; 9.5: observability:streamsEnableSignificantEvents uiSetting, 9.6: nightshift.enabled feature flag)"
 elif [[ "$se_code" -ge 200 && "$se_code" -lt 300 ]]; then
     se_count=$(echo "$se_body" | python3 -c "
 import sys, json

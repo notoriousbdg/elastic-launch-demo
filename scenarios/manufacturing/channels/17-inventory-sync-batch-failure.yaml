@@ -7,44 +7,122 @@ affected_services:
 - inventory-sync
 cascade_services:
 - erp-bridge
-description: Hourly inventory delta batch from WMS to ERP failed; auto-retry eligible
+description: After a planned restart of an SAP application server, the inventory sync RFC pool keeps handing out dead connections; every WMS-to-ERP delta batch fails with RFC_INVALID_HANDLE
 investigation_notes: |-
-  Root Cause: Transient batch failures in the WMS→ERP path are usually idempotent network or RFC-session timeouts. The auto-retry job is safe to invoke when the failure mode is `SOCKET_TIMEOUT` or `RFC_HANDLE_INVALID`.
-  Remediation (auto-remediate eligible): 1) Identify the failed batch: `wms-admin batch-status --last 1h --status FAILED`. 2) Retry: `wms-admin retry-batch --batch {batch_id}`. 3) Confirm reconciliation: `wms-admin reconcile --since {failure_time}`.
-remediation_action: retry_inventory_batch
-error_message: '[WMS] INVENTORY-SYNC-BATCH-FAIL: batch={batch_id} records={record_count} failure_mode={failure_mode} retry_count={retry_count}'
+  Root cause: SAP application server sapprd-app02 was restarted for a kernel patch shortly before the first INVENTORY-SYNC-BATCH-FAIL (planned maintenance by sap-basis, CHG-7398); erp-bridge logged the gateway disconnect. The inventory-sync RFC destination keeps a pool of 8 connections and does not validate idle connections before use, so the 5 connections that were open to sapprd-app02 are still in the pool. Each delta batch (every 5 min, {record_count} records) takes one of them and fails at the rfc_call stage with {failure_mode}; the in-batch retries pick other stale handles and fail the same way. Stock postings from the WMS are not reaching SAP, so the ERP-side stock lags reality. SAP itself is healthy again: sapprd-app02 is back in the logon group, erp-bridge's own RFC connections reconnected, and new connections succeed.
+  Confirm:
+    - inventory-sync rfc_pool lines show state=stale stale_handles=5 (attributes.rfc.pool_state); metric inventory.rfc_pool_stale_handles goes from 0 to 5 and inventory.rfc_errors_per_min from 0 to 3-8
+    - the erp-bridge sapprd-app02 restart line (CHG-7398) comes before the first INVENTORY-SYNC-BATCH-FAIL
+    - metric inventory.erp_sync_lag_s keeps growing past 300 s (normal is 30-300 s with 5-minute batches)
+  Remediation: two steps, both required. 1) Reset the pool so it opens fresh connections: opsctl restart rfc-pool/inventory-sync-sap. 2) Post the failed deltas: opsctl run job/inventory-delta-retry; the job resubmits the failed batches in order (the postings are idempotent by WMS document number). After both, RFC errors stop at once and the ERP sync lag returns under 300 s within about two minutes. Enabling connection validation on the destination is a follow-up.
+remediation_action: reset_rfc_pool_and_retry
+remediation_command: |-
+  opsctl restart rfc-pool/inventory-sync-sap
+  opsctl run job/inventory-delta-retry
+error_message: '[WMS] INVENTORY-SYNC-BATCH-FAIL: batch={batch_id} records={record_count} stage=rfc_call failure_mode={failure_mode} destination=SAPPRD_INV pool=inventory-sync-sap stale_handles=5/8 retry_count={retry_count}/3'
 stack_trace: |-
   === INVENTORY SYNC BATCH — {batch_id} ===
-  Records: {record_count} | Started: 2026-05-06T14:00:00Z | Failed: {failure_time}
+  Records: {record_count} | Destination: SAPPRD_INV (logon group PUBLIC) | Pool: inventory-sync-sap 8 conns
   ------------------------------------------------------------------------
   STAGE         | STATUS    | DURATION (s)
   ------------------------------------------------------------------------
   extract        | OK        | 12
   transform      | OK        | 8
-  rfc_call       | FAILED    | 30 — {failure_mode}
+  rfc_call       | FAILED    | 0.4 — {failure_mode} (conn to sapprd-app02, opened before restart)
   ------------------------------------------------------------------------
-  INVENTORY-SYNC-BATCH-FAIL: idempotent failure; retry eligible (retry {retry_count}/3)
+  SAP.Middleware.Connector.RfcCommunicationException: RFC_INVALID_HANDLE
+     at RfcConnection.Invoke(BAPI_GOODSMVT_CREATE)
+  INVENTORY-SYNC-BATCH-FAIL: retry {retry_count}/3 used a pooled handle to the same server
 correlation_attr:
-  key: infra.rfc_gateway_pool
-  value: rfc-pool-experimental-32conn
+  key: rfc.pool_state
+  value: stale
 fault_params:
   batch_id:
     format: "BATCH-{n}"
     n: {randint: [100000, 999999]}
-  record_count: {randint: [500, 4500]}
-  failure_mode: {choice: [SOCKET_TIMEOUT, RFC_HANDLE_INVALID]}
-  retry_count: {randint: [0, 2]}
-  failure_time: 2026-05-06T14:15:32Z
+  record_count: {randint: [500, 1800]}
+  failure_mode: RFC_INVALID_HANDLE
+  retry_count: {randint: [1, 3]}
 rca_clues:
   inventory-sync:
-    wms.batch_failure_mode: {choice: [SOCKET_TIMEOUT, RFC_HANDLE_INVALID]}
-    wms.retry_count: {randint: [0, 2]}
+    wms.batch_failure_mode: RFC_INVALID_HANDLE
+    rfc.pool_size: 8
+    rfc.validate_on_borrow: false
   erp-bridge:
-    erp.idoc_outbox_lag_s: {randint: [60, 600]}
+    erp.sap_gateway_status: reachable
+cascade_messages:
+  erp-bridge:
+    - severity: WARN
+      message: '[ERP] stock postings from inventory-sync missing for the last 2 batch windows; ERP stock for plant P002 not updated'
+fault_scope:
+  cluster: mfg-aks-cluster
+  workloads: [inventory-sync]
+infrastructure_events:
+  - service: erp-bridge
+    severity: INFO
+    offset_seconds: -150
+    body: '[ERP] SAP gateway connection to sapprd-app02 closed (CPIC-CALL: ThSAPCMRCV, partner restarted); application server restarted for kernel patch 793 PL 200 (planned, sap-basis CHG-7398); reconnected to logon group PUBLIC'
+    attributes:
+      operation: sap_server_restart
+      user.name: sap-basis
+      change.request: CHG-7398
+      sap.app_server: sapprd-app02
+service_lag_seconds:
+  erp-bridge: 20
+remediation_effects:
+  log_events:
+    - service: inventory-sync
+      severity: INFO
+      offset_seconds: 1
+      body: '[CHG] CHANGE APPLIED opsctl restart rfc-pool/inventory-sync-sap by {actor}: 8 connections closed and re-opened, 0 stale'
+      attributes:
+        operation: change_applied
+        change.target: rfc-pool/inventory-sync-sap
+    - service: inventory-sync
+      severity: INFO
+      offset_seconds: 2
+      body: '[CHG] CHANGE APPLIED opsctl run job/inventory-delta-retry by {actor}: resubmitting failed delta batches in order'
+      attributes:
+        operation: change_applied
+        change.target: job/inventory-delta-retry
+    - service: inventory-sync
+      severity: INFO
+      offset_seconds: 60
+      body: '[WMS] inventory-delta-retry completed: all failed batches posted, 0 errors; erp sync lag 95 s'
+      attributes:
+        operation: batch_retry
+  steady_attributes:
+    inventory-sync:
+      rfc.pool_state: healthy
+  log_taper_seconds: 20
+  verification:
+    - signal: inventory.rfc_errors_per_min
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "inventory-sync"'
+      field: 'metrics.inventory.rfc_errors_per_min'
+      expect: '0 (was 3-8)'
+      within_seconds: 60
+    - signal: inventory.erp_sync_lag_s
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "inventory-sync"'
+      field: 'metrics.inventory.erp_sync_lag_s'
+      expect: 'back under 300 s'
+      within_seconds: 150
+    - signal: INVENTORY-SYNC-BATCH-FAIL lines
+      from: 'logs.otel.mfg'
+      where: 'body.text LIKE "*INVENTORY-SYNC-BATCH-FAIL*"'
+      expect: '0 new lines'
+      within_seconds: 60
+    - signal: RFC pool state
+      from: 'logs.otel.mfg'
+      where: 'resource.attributes.service.name == "inventory-sync" AND body.text LIKE "*rfc_pool pool=inventory-sync-sap*"'
+      field: 'attributes.rfc.pool_state'
+      expect: 'healthy on every line logged since the fix; stale stops appearing'
+      within_seconds: 60
 business_impact:
   - kpi: business.inventory_turns
-    factor: {uniform: [0.40, 0.70]}
+    value: {uniform: [4.25, 4.9], round: 2}
   - kpi: business.on_time_delivery_pct
-    factor: {uniform: [0.45, 0.75]}
+    factor: {uniform: [0.75, 0.9]}
   - kpi: business.material_variance_usd
     factor: {uniform: [1.8, 3.5]}

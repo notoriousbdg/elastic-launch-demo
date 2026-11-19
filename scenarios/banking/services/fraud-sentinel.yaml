@@ -35,6 +35,20 @@ state:
     init: now
 steps:
 - sample:
+    f01:
+      expr: min(1.0, max(0.0, elapsed.get(1, 0) - lag.get(1, 0)) / 30.0) if 1 in all_active else (max(0.0, 1.0 - since_fix.get(1,
+        0) / 60.0) if 1 in fixed_channels else 0.0)
+    c01_model:
+      expr: '''FraudNet-v5.3'' if 1 in all_active else (''FraudNet-v5.2'' if 1 in fixed_channels else ''FraudNet-v5.2'')'
+    c01_decline:
+      expr: round(rand.uniform(0.2, 0.6) * (1.0 - f01) + rand.uniform(5.8, 8.4) * f01, 2)
+    c01_precision:
+      expr: round(rand.uniform(32.0, 45.0) * (1.0 - f01) + rand.uniform(4.0, 9.0) * f01, 1)
+    c01_risk:
+      expr: round(rand.uniform(8.0, 22.0) * (1.0 - f01) + rand.uniform(55.0, 72.0) * f01, 1)
+    c01_status:
+      expr: '''DEGRADED'' if 1 in all_active or f01 > 0.1 else ''NOMINAL'''
+- sample:
     fraud_risk_score:
       randint:
       - 0
@@ -44,34 +58,14 @@ steps:
     by: 1
 - log:
     level: INFO
-    message: '[FRAUD] transaction_scan score={fraud_risk_score}/100 decision=ALLOW model=FraudNet-v5.2 latency_ms=12 status=CLEAR'
+    message: '[FRAUD] transaction_scan score={fraud_risk_score}/100 decision=ALLOW model={c01_model} latency_ms=12 status=CLEAR'
     attrs:
       operation: transaction_scan
       fraud.score:
         var: fraud_risk_score
       fraud.decision: ALLOW
-      fraud.model: FraudNet-v5.2
-- sample:
-    model_precision:
-      uniform:
-      - 94.0
-      - 99.0
-      round: 1
-    model_recall:
-      uniform:
-      - 88.0
-      - 96.0
-      round: 1
-- log:
-    level: INFO
-    message: '[FRAUD] model_health precision={model_precision}% recall={model_recall}% drift=0.02 feature_count=247 status=NOMINAL'
-    attrs:
-      operation: model_health
-      model.precision:
-        var: model_precision
-      model.recall:
-        var: model_recall
-      model.drift: 0.02
+      fraud.model:
+        var: c01_model
 - every:
     seconds: 10
     state_key: _last_summary
@@ -84,23 +78,6 @@ steps:
           sentinel.scans:
             var: _scans_completed
           sentinel.blocked: 3
-- sample:
-    avg_risk_score:
-      if_active:
-        uniform:
-        - 40.0
-        - 90.0
-        round: 1
-      else:
-        uniform:
-        - 0.0
-        - 25.0
-        round: 1
-- metric:
-    name: fraud_sentinel.avg_risk_score
-    value:
-      var: avg_risk_score
-    unit: score
 - metric:
     name: fraud_sentinel.scans_per_sec
     value:
@@ -117,3 +94,88 @@ steps:
       - 45.0
       round: 1
     unit: ms
+- sample:
+    model_precision:
+      var: c01_precision
+    model_recall:
+      uniform:
+      - 88.0
+      - 96.0
+      round: 1
+- when: 1 in all_active
+  log:
+    level: WARN
+    message: '[FRAUD] model_health model={c01_model} alias=champion decline_rate={c01_decline}% block_precision={model_precision}%
+      recall={model_recall}% status={c01_status}'
+    attrs: &id001
+      operation: model_health
+      fraud.model_version:
+        var: c01_model
+      model.precision:
+        var: model_precision
+      model.recall:
+        var: model_recall
+      fraud.decline_rate_pct:
+        var: c01_decline
+      model.status:
+        var: c01_status
+- when: 1 not in all_active
+  log:
+    level: INFO
+    message: '[FRAUD] model_health model={c01_model} alias=champion decline_rate={c01_decline}% block_precision={model_precision}%
+      recall={model_recall}% status={c01_status}'
+    attrs: *id001
+- metric:
+    name: fraud_sentinel.decline_rate_pct
+    value:
+      var: c01_decline
+    unit: '%'
+- metric:
+    name: fraud_sentinel.block_precision_pct
+    value:
+      var: c01_precision
+    unit: '%'
+- metric:
+    name: fraud_sentinel.avg_risk_score
+    value:
+      var: c01_risk
+    unit: score
+- sample:
+    f06:
+      expr: min(1.0, max(0.0, elapsed.get(6, 0) - lag.get(6, 0)) / 30.0) if 6 in all_active else (max(0.0, 1.0 - since_fix.get(6,
+        0) / 60.0) if 6 in fixed_channels else 0.0)
+    c06_threshold:
+      expr: 0.85 if 6 in all_active else 0.92
+    c06_rev:
+      expr: '''rev-42'' if 6 in all_active else (''rev-41'' if 6 in fixed_channels else ''rev-41'')'
+    c06_alerts:
+      expr: round(round(rand.uniform(1.0, 4.0) * (1.0 - f06) + rand.uniform(60.0, 110.0) * f06, 0))
+    c06_status:
+      expr: '''DEGRADED'' if 6 in all_active or f06 > 0.1 else ''NOMINAL'''
+- when: 6 in all_active
+  log:
+    level: WARN
+    message: '[FRAUD] sanctions_screening policy=ofac-wire-screening rev={c06_rev} match_threshold={c06_threshold} algorithm=jaro_winkler
+      sdn_list=sdn-2026-11-14 alerts_per_min={c06_alerts} status={c06_status}'
+    attrs: &id002
+      operation: sanctions_screening
+      screening.policy_rev:
+        var: c06_rev
+      screening.match_threshold:
+        var: c06_threshold
+      screening.sdn_list_version: sdn-2026-11-14
+      screening.alerts_per_min:
+        var: c06_alerts
+      screening.status:
+        var: c06_status
+- when: 6 not in all_active
+  log:
+    level: INFO
+    message: '[FRAUD] sanctions_screening policy=ofac-wire-screening rev={c06_rev} match_threshold={c06_threshold} algorithm=jaro_winkler
+      sdn_list=sdn-2026-11-14 alerts_per_min={c06_alerts} status={c06_status}'
+    attrs: *id002
+- metric:
+    name: fraud_sentinel.screening_alerts_per_min
+    value:
+      var: c06_alerts
+    unit: alerts/min

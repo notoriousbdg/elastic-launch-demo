@@ -1,0 +1,37 @@
+name: "GT temporal_otel: namespace_open_workflow_count_anomaly"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-TEMPORAL-NAMESPACE-OPEN-WORKFLOW-COUNT-ANOMALY
+sensor_type: impact_key_probe
+affected_services:
+  - gt-temporal-aws-svc-1
+cascade_services:
+  - gt-temporal-aws-svc-2
+description: "Tests impact_key namespace_open_workflow_count_anomaly on generator temporal_otel."
+investigation_notes: |-
+  1. Verify temporal_otel is active and reporting metrics.
+  2. Check that the namespace_open_workflow_count_anomaly metric has reached the trigger value (40000.0).
+  3. Confirm generator_impact for temporal_otel.namespace_open_workflow_count_anomaly is set to 40000.0.
+  4. Look for correlated changes in service gt-temporal-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_namespace_open_workflow_count_anomaly_baseline
+error_message: "GT-PROBE: gen=temporal_otel key=namespace_open_workflow_count_anomaly value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=temporal_otel
+  impact_key: namespace_open_workflow_count_anomaly
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 40000.0
+  svc_name: gt-temporal-aws-svc-1
+rca_clues:
+  gt-temporal-aws-svc-1:
+    probe.generator: temporal_otel
+    probe.impact_key: namespace_open_workflow_count_anomaly
+    probe.trigger_value: 40000.0
+  gt-temporal-aws-svc-2:
+    probe.upstream_generator: temporal_otel
+    probe.upstream_key: namespace_open_workflow_count_anomaly
+generator_impact:
+  temporal_otel:
+    namespace_open_workflow_count_anomaly: 40000.0

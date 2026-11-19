@@ -1,0 +1,37 @@
+name: "GT airflow_otel: tasks_starving_due_to_pool_limits"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-AIRFLOW-TASKS-STARVING-DUE-TO-POOL-
+sensor_type: impact_key_probe
+affected_services:
+  - gt-airflow-aws-svc-1
+cascade_services:
+  - gt-airflow-aws-svc-2
+description: "Tests impact_key tasks_starving_due_to_pool_limits on generator airflow_otel."
+investigation_notes: |-
+  1. Verify airflow_otel is active and reporting metrics.
+  2. Check that the tasks_starving_due_to_pool_limits metric has reached the trigger value (75.0).
+  3. Confirm generator_impact for airflow_otel.tasks_starving_due_to_pool_limits is set to 75.0.
+  4. Look for correlated changes in service gt-airflow-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_tasks_starving_due_to_pool_limits_baseline
+error_message: "GT-PROBE: gen=airflow_otel key=tasks_starving_due_to_pool_limits value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=airflow_otel
+  impact_key: tasks_starving_due_to_pool_limits
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 75.0
+  svc_name: gt-airflow-aws-svc-1
+rca_clues:
+  gt-airflow-aws-svc-1:
+    probe.generator: airflow_otel
+    probe.impact_key: tasks_starving_due_to_pool_limits
+    probe.trigger_value: 75.0
+  gt-airflow-aws-svc-2:
+    probe.upstream_generator: airflow_otel
+    probe.upstream_key: tasks_starving_due_to_pool_limits
+generator_impact:
+  airflow_otel:
+    tasks_starving_due_to_pool_limits: 75.0

@@ -6,49 +6,142 @@ sensor_type: report_generator
 affected_services:
 - compliance-monitor
 - audit-logger
+error_services:
+- compliance-monitor
 cascade_services:
 - settlement-processor
 description: Mandatory regulatory report fails to generate before submission deadline
+onset_delay_seconds: 20
+service_lag_seconds: {audit-logger: 30, settlement-processor: 60}
 investigation_notes: |-
-  1. Check compliance-monitor logs for COMPL-REG-REPORT-FAIL — note report_type, failed_stage, and specific validation error counts (missing_LEI, invalid_UTI, stale_price).
-  2. Query FROM logs.otel.financial.* | WHERE body.text LIKE "*COMPL-REG-REPORT-FAIL*" | STATS count() BY report_type, stage to identify which report type and stage is most frequently failing.
-  3. Inspect audit-logger for the source trade records that failed validation — LEI and UTI issues typically trace back to stale reference data in the enrichment layer.
-  4. Check settlement-processor for trades with stale_price errors — if price data is older than T+1 the regulator schema will reject the record.
-  5. Remediate validation errors and resubmit; if the deadline is imminent, file a regulator extension request and document all remediation steps for the audit trail.
-remediation_action: remediate_validation_errors_and_resubmit
-error_message: '[COMPL] COMPL-REG-REPORT-FAIL: report={report_type} period={report_period} stage={stage} deadline={deadline_utc}'
+  Root cause: compliance-enrichment config revision 37 (CR-5281, applied by bcp-drills) switched lei_source from refdata-primary to refdata-dr-westus; it was set for a disaster recovery failover test and never switched back. The DR replica stopped replicating 4 days ago, so its LEI table is about 96 hours old: every counterparty registered or renewed since then comes back missing ({missing_lei} records) or LAPSED ({lapsed_lei} records), and the {report_type} report for {iso_now:.10} fails at stage {stage}. Trade data is healthy: price and UTI checks pass (stale_price=0), the same 1.2M records were collected as on previous days, and reports whose enrichment does not use LEIs keep passing. The T+1 23:59 UTC deadline is T+1 business day (the period is a Friday), so there is time to fix and resubmit before a late filing.
+  Confirm:
+    - compliance-monitor "[COMPL] report_validation ... lei_source=refdata-dr-westus refdata_age_h=96 ... status=ANOMALY" lines (attributes.compliance.lei_source, attributes.compliance.refdata_age_h); metrics.compliance.report_validation_errors at 1,500-3,500 per validation run against 0-5 normally, metrics.compliance.refdata_age_h above 72 against under 24
+    - the compliance-monitor line "[COMPL] config_change config=compliance-enrichment rev=37 ... lei_source: refdata-primary -> refdata-dr-westus" with attributes.operation config_change comes before the first COMPL-REG-REPORT-FAIL line
+    - the errors are only missing_LEI and lapsed_LEI; stale_price stays 0
+    - audit-logger records REPORT_VALIDATION_FAILED on the compliance-alerts stream (seq {audit_seq}) and settlement-processor shows {blocked_trades} trades PENDING_REPORT with reason=counterparty_LEI_rejected
+  Remediation: opsctl restore config/compliance-enrichment --lei-source refdata-primary. Enrichment re-resolves the failed records against the primary reference data, so validation errors fall over the next 30 seconds; the next validation run (about 30 seconds after the fix) passes, the report is submitted and the trade repository ACK arrives about 60 seconds after that, about 90 seconds after the fix. Remediating records by hand or filing late with an NCA notification is not needed; the records are correct once the LEIs come from current reference data.
+remediation_action: restore_lei_source_to_primary
+remediation_command: |-
+  opsctl restore config/compliance-enrichment --lei-source refdata-primary
+error_message: '[COMPL] COMPL-REG-REPORT-FAIL: report={report_type} period={iso_now:.10} stage={stage} missing_LEI={missing_lei} lapsed_LEI={lapsed_lei} lei_source=refdata-dr-westus deadline=T+1 23:59 UTC'
 stack_trace: |-
   === REG REPORT PIPELINE STATUS ===
-  report={report_type}  period={report_period}  deadline={deadline_utc}
+  report={report_type}  period={iso_now:.10}  deadline=T+1 23:59 UTC
   STAGE               STATUS       RECORDS     ERRORS
   data_collection     COMPLETE     1,247,832   0
-  validation          FAILED       1,247,832   3,412  <<< BLOCKED
+  enrichment          COMPLETE     1,247,832   0      lei_source=refdata-dr-westus (last replicated {refdata_age_h}h ago)
+  validation          FAILED       1,247,832   see below  <<< BLOCKED
   aggregation         PENDING      ---         ---
   formatting          PENDING      ---         ---
   submission          PENDING      ---         ---
   --- VALIDATION ERRORS ---
-    missing_LEI=1,204  invalid_UTI=892  stale_price=1,316
-    regulator=ESMA  schema=ISO20022  format=XML
+    missing_LEI={missing_lei}  lapsed_LEI={lapsed_lei}  stale_price=0
+    destination=TradeRepository  schema=ESMA-ISO20022  format=XML
   failed_stage={stage}  retry_count=3  max_retries=3
-  ACTION: manual_remediation=true  regulator_extension=REQUESTED  alert=COMPL-REG-REPORT-FAIL
-correlation_attr: {}
+correlation_attr:
+  key: compliance.lei_source
+  value: refdata-dr-westus
 fault_params:
-  report_type: {choice: [EMIR-TR, MiFID-II-RTS25, CAT-FINRA, SFTR, SEC-13F, TRF-TRACE]}
-  report_period:
-    format: "2026-Q{n}"
-    n: {randint: [1, 4]}
-  stage: {choice: [data_collection, validation, aggregation, formatting, submission]}
-  deadline_utc: 2026-02-16T23:59:00Z
+  report_type: {choice: [EMIR-TR, SFTR]}
+  stage: validation
+  missing_lei: {randint: [800, 1900]}
+  lapsed_lei: {randint: [700, 1600]}
+  refdata_age_h: {uniform: [96.0, 98.5], round: 1}
+  audit_seq: {randint: [48000000, 49000000]}
+  blocked_trades: {randint: [100, 5000]}
 rca_clues:
   compliance-monitor:
-    compliance.validation_error_count: {randint: [500, 5000]}
-    compliance.missing_lei_count: {randint: [100, 2000]}
+    compliance.lei_source: refdata-dr-westus
+    compliance.missing_lei_count: {randint: [800, 1900]}
+    compliance.lapsed_lei_count: {randint: [700, 1600]}
   audit-logger:
-    audit.invalid_uti_records: {randint: [100, 2000]}
-    audit.stale_price_records: {randint: [100, 2000]}
+    audit.reference_data_age_h: {uniform: [96.0, 98.5], round: 1}
+    audit.stale_price_records: 0
   settlement-processor:
-    settlement.stale_trade_price_age_s: {randint: [86400, 259200]}
     settlement.report_blocked_trades: {randint: [100, 5000]}
+    settlement.stale_trade_price_age_s: {randint: [5, 60]}
+cascade_messages:
+  audit-logger:
+    - severity: WARN
+      message: '[AUDIT] event_logged stream=compliance-alerts seq={audit_seq} type=REPORT_VALIDATION_FAILED report={report_type} period={iso_now:.10} lapsed_LEI={lapsed_lei} status=COMMITTED'
+  settlement-processor:
+    - severity: WARN
+      message: '[SETTLE] trade_report_status report={report_type} period={iso_now:.10} blocked_trades={blocked_trades} reason=counterparty_LEI_rejected status=PENDING_REPORT'
+fault_scope:
+  cluster: finserv-aks-cluster
+  workloads: [compliance-monitor, audit-logger]
+infrastructure_events:
+  - service: compliance-monitor
+    severity: INFO
+    offset_seconds: -150
+    body: '[COMPL] config_change config=compliance-enrichment rev=37 (was 36) lei_source: refdata-primary -> refdata-dr-westus; applied by bcp-drills (CR-5281)'
+    attributes:
+      user.name: bcp-drills
+      change.request: CR-5281
+      operation: config_change
+      change.summary: 'compliance-enrichment lei_source: refdata-primary -> refdata-dr-westus'
+      config.revision: 37
+      compliance.lei_source: refdata-dr-westus
+remediation_effects:
+  log_events:
+    - service: audit-logger
+      severity: INFO
+      offset_seconds: 1
+      body: '[AUDIT] event_logged stream=change-mgmt type=CHANGE_APPLIED cmd="opsctl restore config/compliance-enrichment --lei-source refdata-primary" actor={actor}: compliance-enrichment lei_source refdata-dr-westus -> refdata-primary'
+      attributes:
+        operation: change_applied
+        audit.stream: change-mgmt
+        change.target: config/compliance-enrichment
+    - service: compliance-monitor
+      severity: INFO
+      offset_seconds: 3
+      body: '[COMPL] config_change config=compliance-enrichment rev=38 lei_source: refdata-dr-westus -> refdata-primary; LEI cache flushed, re-enriching failed records'
+      attributes:
+        operation: config_reload
+        config.revision: 38
+        compliance.lei_source: refdata-primary
+    - service: compliance-monitor
+      severity: INFO
+      offset_seconds: 30
+      body: '[COMPL] report_validation_run report=EMIR-TR,SFTR period={iso_now:.10} records=1,247,832 errors=0 status=PASSED; submitting to TradeRepository'
+      attributes:
+        operation: report_validation_run
+        compliance.lei_source: refdata-primary
+    - service: compliance-monitor
+      severity: INFO
+      offset_seconds: 90
+      body: '[COMPL] report_submission report=EMIR-TR,SFTR period={iso_now:.10} destination=TradeRepository status=ACK deadline=T+1 23:59 UTC'
+      attributes:
+        operation: report_submission
+        compliance.lei_source: refdata-primary
+  steady_attributes:
+    compliance-monitor:
+      compliance.lei_source: refdata-primary
+  verification:
+    - signal: compliance.report_validation_errors
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "compliance-monitor"'
+      field: 'metrics.compliance.report_validation_errors'
+      expect: 'falls over about 30s as records are re-enriched, then under 5 per validation run (was 1,500-3,500)'
+      within_seconds: 150
+    - signal: compliance.refdata_age_h
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "compliance-monitor"'
+      field: 'metrics.compliance.refdata_age_h'
+      expect: 'under 24 (was about 96)'
+      within_seconds: 150
+    - signal: COMPL-REG-REPORT-FAIL lines
+      from: 'logs.otel.finserv'
+      where: 'body.text LIKE "*COMPL-REG-REPORT-FAIL*"'
+      expect: '0 new lines'
+      within_seconds: 150
+    - signal: LEI reference data source
+      from: 'logs.otel.finserv'
+      where: 'resource.attributes.service.name == "compliance-monitor"'
+      field: 'attributes.compliance.lei_source'
+      expect: 'refdata-primary on every line since the fix; refdata-dr-westus stops appearing'
+      within_seconds: 150
 business_impact:
   - kpi: business.reporting_latency_sec
     factor: {uniform: [4.0, 10.0]}

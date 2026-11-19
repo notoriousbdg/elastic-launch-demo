@@ -8,59 +8,139 @@ affected_services:
 cascade_services:
 - order-management
 - storefront-gateway
-description: Fraud model generating excessive false positives, blocking legitimate transactions and degrading conversion rate
+description: The risk engine blocks real shoppers as geo_mismatch because a storefront ingress change stopped trusting the CDN's X-Forwarded-For header, so it scores CDN edge IPs instead of customer IPs.
+onset_delay_seconds: 10
 investigation_notes: |-
-  1. Check payment-processor logs for FRAUD-FALSE-POSITIVE — false_positive_rate={false_positive_pct}% vs expected <{fp_threshold_pct}%.
-  2. Review the fraud model version — a recent model update or feature drift (e.g., new geographic pattern) often causes false positive spikes.
-  3. Identify the common false positive pattern: `show fraud_blocks | group by block_reason` — velocity_check and new_device_fingerprint are the most common.
-  4. Check if a specific feature is stuck: avg_order_value metric spike or unusual geolocation cluster can push legitimate orders above the fraud threshold.
-  5. Temporarily raise the fraud score threshold from {fraud_score_threshold} to {fraud_score_threshold_relaxed} to unblock legitimate traffic.
-  6. Trigger a manual review queue for blocked orders above ${min_manual_review_usd} — these are likely legitimate high-value orders that were incorrectly blocked.
+  Root cause: storefront-ingress revision 18 (CR-4127, edge-platform) replaced the trusted-proxy list (nginx set_real_ip_from / proxy-real-ip-cidr) with 10.0.0.0/8 only and dropped the CDN ranges 151.101.0.0/16 and 199.232.0.0/16. nginx now ignores X-Forwarded-For from the CDN, so the client IP passed to payment-processor is the CDN edge address (151.101.x.x, geolocated to Ashburn, VA) instead of the shopper's IP. fraud-model-v14 compares IP geolocation with the billing address, so orders from everywhere except northern Virginia score above the {fraud_score_threshold} threshold with block_reason={block_reason}. The model itself is unchanged: fraud-model-v14 has been live for 16 days, and only the ip_geo feature drifts (PSI about 0.45) while the amount and device features stay near 0.03-0.05. Retraining is wrong because the model is fine, and moving the threshold is wrong because it lets real fraud through and the input stays bad. The order mix is normal (average order value within a couple of percent), which rules out a real fraud wave.
+  Confirm:
+    - metrics.payments.fraud_block_rate_pct on payment-processor rises from about 1.1% to about 14% over 60s, and metrics.payments.geo_mismatch_block_share_pct (share of blocks with reason geo_mismatch) from about 12% to about 85%
+    - the "risk.status" line (attributes.operation fraud_risk_status) shows client_ip_source=remote-addr (attributes.payment.client_ip_source; normally x-forwarded-for), psi_ip_geo around 0.45 against psi_amount and psi_device near 0.03-0.05, and model=fraud-model-v14 model_age_days=16
+    - FRAUD-FALSE-POSITIVE lines name client_ip in 151.101.0.0/16 with ip_geo={ip_geo_location} and billing addresses all over the country, and the blocked shoppers pass the 3DS challenge on retry
+    - the storefront-gateway line "config storefront-ingress rolled out revision=18 ... CR-4127" comes about two minutes before the first block; storefront-gateway checkout requests log client_ip in the CDN range and order-management logs risk declines
+  Remediation: roll the ingress configuration back with opsctl rollback config/storefront-ingress --to-revision previous. nginx reloads revision 17 within seconds and X-Forwarded-For is trusted from the CDN again, so new authorizations carry the shopper's IP. Geo lookups cached for the edge addresses expire over about 90s, during which fraud_block_rate_pct falls back to about 1.1% and the geo_mismatch share to about 12%. Blocked shoppers can retry checkout; no model or threshold change is needed.
 remediation_action: retune_fraud_model
-error_message: '[PaymentProcessor] FRAUD-FALSE-POSITIVE: blocked_orders={blocked_orders} false_positive_rate={false_positive_pct}%
-  threshold={fp_threshold_pct}% fraud_score={fraud_score}/{fraud_score_threshold} block_reason={block_reason} revenue_held_usd={revenue_held_usd}'
-stack_trace: |-
-  FraudBlockException: FRAUD-FALSE-POSITIVE
-     at FraudEngine.evaluate(OrderId {order_id}, Score={fraud_score})
-     at PaymentProcessor.preAuthorize(CheckoutId {checkout_id})
-  Blocked orders:      {blocked_orders}
-  False positive rate: {false_positive_pct}%
-  Fraud score:         {fraud_score}/{fraud_score_threshold}
-  Block reason:        {block_reason}
-  Revenue held:        ${revenue_held_usd}
-  Model version:       fraud-model-v{fraud_model_version}
+remediation_command: |-
+  opsctl rollback config/storefront-ingress --to-revision previous
+error_message: 'warn: Ecommerce.Payments.Risk.FalsePositiveMonitor[3120] FRAUD-FALSE-POSITIVE order_id={order_id} model={fraud_model_version} fraud_score={fraud_score}/{fraud_score_threshold}
+  block_reason={block_reason} client_ip={cdn_edge_ip} ip_geo={ip_geo_location} billing_region={billing_region} outcome=blocked_then_passed_3ds_on_retry'
+stack_trace: ''
 correlation_attr:
-  key: payment.fraud_model_misfiring
-  value: true
+  key: payment.client_ip_source
+  value: remote-addr
 fault_params:
-  blocked_orders: {randint: [50, 1000]}
-  false_positive_pct: {uniform: [8, 25], round: 1}
-  fp_threshold_pct: 2.0
-  fraud_score: {randint: [75, 95]}
-  fraud_score_threshold: 70
-  fraud_score_threshold_relaxed: 80
-  block_reason: {choice: [velocity_check, new_device_fingerprint, high_value_new_account, geo_mismatch]}
-  revenue_held_usd: {uniform: [5000, 100000], round: 2}
   order_id: {format: "ORD-{n}", n: {randint: [100000, 999999]}}
-  checkout_id: {format: "CHK-{n}", n: {randint: [100000, 999999]}}
-  fraud_model_version: {randint: [10, 20]}
-  min_manual_review_usd: 500
+  fraud_model_version: fraud-model-v14
+  fraud_score: {randint: [74, 93]}
+  fraud_score_threshold: 70
+  block_reason: geo_mismatch
+  cdn_edge_ip: {format: "151.101.{a}.{b}", a: {randint: [0, 255]}, b: {randint: [1, 254]}}
+  ip_geo_location: Ashburn-VA-US
+  billing_region: {choice: [US-CA, US-TX, US-IL, US-WA, US-FL, US-NY, US-CO, US-GA, US-AZ, US-MN]}
 rca_clues:
   payment-processor:
-    payment.fraud_score_threshold_active: true
-    payment.false_positive_rate_pct: {uniform: [8, 25], round: 1}
+    payment.client_ip_source: remote-addr
+    payment.top_block_reason: geo_mismatch
+    payment.psi_ip_geo: {uniform: [0.38, 0.52], round: 2}
+    payment.psi_amount: {uniform: [0.02, 0.04], round: 3}
+    payment.fraud_model_version: fraud-model-v14
+    payment.model_deployed_days_ago: 16
   order-management:
-    order.payment_decline_rate_pct: {uniform: [10, 35], round: 1}
-    order.legitimate_orders_blocked: {randint: [50, 500]}
+    order.payment_decline_rate_pct: {uniform: [12.0, 16.0], round: 1}
+    order.avg_order_value_delta_pct: {uniform: [-2.0, 2.0], round: 1}
   storefront-gateway:
-    storefront.checkout_decline_shown: true
-    storefront.retry_rate_pct: {uniform: [20, 60], round: 1}
+    storefront.ingress_config_revision: 18
+    storefront.client_ip_source: remote-addr
+cascade_messages:
+  order-management:
+    - severity: WARN
+      message: 'time={iso_now} level=WARN msg="payment declined by risk engine" component=checkout order_id={order_id} upstream=payment-processor decline=risk_block risk_reason={block_reason} billing_region={billing_region}'
+  storefront-gateway:
+    - severity: WARN
+      message: '{iso_now} WARNING [storefront.checkout] POST /api/v1/checkout/complete status=402 order_id={order_id} decline=risk_block client_ip={cdn_edge_ip} remote_addr={cdn_edge_ip}'
+    - severity: INFO
+      message: '{iso_now} INFO [storefront.checkout] checkout retry after decline order_id={order_id} attempt=2 challenge=3ds client_ip={cdn_edge_ip}'
+fault_scope:
+  cluster: ecommerce-aks-cluster
+  workloads: [payment-processor]
+infrastructure_events:
+  - service: storefront-gateway
+    severity: INFO
+    offset_seconds: -120
+    body: '{iso_now} INFO [storefront.edge] config storefront-ingress rolled out revision=18 (was 17) by edge-platform change_request=CR-4127: proxy-real-ip-cidr 10.0.0.0/8,151.101.0.0/16,199.232.0.0/16 -> 10.0.0.0/8 (set_real_ip_from), real_ip_header=X-Forwarded-For; nginx reloaded on 6/6 pods'
+    attributes:
+      operation: config_rollout
+      change.request: CR-4127
+      user.name: edge-platform
+      config.name: storefront-ingress
+      config.revision: 18
+      change.summary: 'proxy-real-ip-cidr: 10.0.0.0/8,151.101.0.0/16,199.232.0.0/16 -> 10.0.0.0/8'
+      storefront.proxy_real_ip_cidr: 10.0.0.0/8
+remediation_effects:
+  log_taper_seconds: 60
+  log_events:
+    - service: storefront-gateway
+      severity: INFO
+      offset_seconds: 1
+      body: '[CHG] CHANGE APPLIED opsctl rollback config/storefront-ingress --to-revision previous by {actor}: storefront-ingress revision 18 -> 17, proxy-real-ip-cidr restored to 10.0.0.0/8,151.101.0.0/16,199.232.0.0/16'
+      attributes:
+        operation: change_applied
+        change.target: config/storefront-ingress
+        config.revision: 17
+    - service: storefront-gateway
+      severity: INFO
+      offset_seconds: 8
+      body: '{iso_now} INFO [storefront.edge] config storefront-ingress revision=17 active, nginx reloaded on 6/6 pods; X-Forwarded-For trusted from 151.101.0.0/16,199.232.0.0/16'
+      attributes:
+        operation: config_rollout
+        config.name: storefront-ingress
+        config.revision: 17
+        storefront.proxy_real_ip_cidr: 10.0.0.0/8,151.101.0.0/16,199.232.0.0/16
+    - service: payment-processor
+      severity: INFO
+      offset_seconds: 30
+      body: 'info: Ecommerce.Payments.Risk.GeoIpCache[330] geo cache: no new lookups for 151.101.0.0/16 in the last 30s, cached entries expire within ttl=90s'
+      attributes:
+        operation: geo_cache_status
+        payment.client_ip_source: x-forwarded-for
+    - service: payment-processor
+      severity: INFO
+      offset_seconds: 95
+      body: 'info: Ecommerce.Payments.Risk.FraudEngine[311] block reasons back to usual mix: velocity_check and new_device_fingerprint lead, geo_mismatch share 12%'
+      attributes:
+        operation: fraud_risk_status
+        payment.client_ip_source: x-forwarded-for
+  verification:
+    - signal: payments.fraud_block_rate_pct
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "payment-processor"'
+      field: 'metrics.payments.fraud_block_rate_pct'
+      expect: 'falls back to about 1.1% over about 90s as cached geo lookups expire (was about 14%)'
+      within_seconds: 180
+    - signal: payments.geo_mismatch_block_share_pct
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "payment-processor"'
+      field: 'metrics.payments.geo_mismatch_block_share_pct'
+      expect: 'back near 12% of blocks (was about 85%)'
+      within_seconds: 180
+    - signal: FRAUD-FALSE-POSITIVE lines
+      from: 'logs.otel.ecommerce'
+      where: 'body.text LIKE "*FRAUD-FALSE-POSITIVE*"'
+      expect: 'no new lines after about 60s'
+      within_seconds: 180
+    - signal: risk engine client IP source
+      from: 'logs.otel.ecommerce'
+      where: 'resource.attributes.service.name == "payment-processor"'
+      field: 'attributes.payment.client_ip_source'
+      expect: 'x-forwarded-for on the risk.status line once the rollback lands (was remote-addr)'
+      within_seconds: 60
 business_impact:
   - kpi: business.conversion_rate_pct
-    factor: {uniform: [0.25, 0.50]}
+    value: {uniform: [0.67, 0.77], round: 2}
   - kpi: business.orders_placed_per_min
-    factor: {uniform: [0.25, 0.50]}
+    value: {uniform: [51.38, 59.12]}
   - kpi: business.gmv_usd_per_min
-    factor: {uniform: [0.25, 0.50]}
+    factor: {uniform: [0.25, 0.5]}
   - kpi: business.churn_risk_index_0_100
     factor: {uniform: [1.5, 3.0]}
+# dependents degrade after the component at fault, in dependency order
+service_lag_seconds: {order-management: 20, storefront-gateway: 25}

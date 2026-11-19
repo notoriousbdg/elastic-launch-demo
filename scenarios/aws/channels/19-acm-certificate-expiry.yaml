@@ -1,0 +1,148 @@
+name: Acm Certificate Expiry
+subsystem: security
+vehicle_section: security_pipeline
+error_type: WEB-ACM-CERT-EXPIRY
+sensor_type: certificate_expiry
+affected_services: [storefront-web]
+cascade_services: [orders-gateway]
+
+description: >
+  The ACM certificate on the storefront ALB HTTPS listener has expired because its DNS validation CNAME record had been removed from the Route 53 zone weeks earlier, so managed renewal (which starts 60 days before expiry) never completed and clients now fail the TLS handshake.
+
+investigation_notes: |
+  1. Search body.text LIKE *WEB-ACM-CERT-EXPIRY* and confirm certificate_arn={certificate_arn} shows status=EXPIRED, expired {expired_hours_ago}h ago.
+  2. In CloudWatch AWS/CertificateManager check DaysToExpiry for the certificate; it sat below the 30-day alarm threshold for weeks and has now reached 0, with renewal_status={renewal_status} (ACM retries validation until expiry, then marks managed renewal FAILED).
+  3. Describe the certificate (acm:DescribeCertificate): DomainValidationOptions for {domain_name} still shows ValidationStatus=PENDING_VALIDATION because the CNAME {validation_record} is not present in the Route 53 hosted zone.
+  4. Confirm the impact: the ALB listener keeps serving the expired certificate, so browsers and internal clients reject the TLS handshake (certificate expired) before any request reaches the ALB: ClientTLSNegotiationErrorCount rises while the target 5xx count does not. The key and the CA are not compromised; only validity has lapsed.
+  5. Check orders-gateway rca_clues (tls.upstream_cert_expired, tls.handshake_failures): internal clients calling the storefront fail on the same expired certificate.
+  6. Search CloudTrail history for the Route 53 ChangeResourceRecordSets that removed {validation_record} (weeks before the incident, for example a zone clean-up), and confirm storefront.tls_handshake_failures_per_min is high from the moment the certificate lapsed.
+  7. Remediation: `opsctl restore route53-record/_acm-validation.www.awsorders.com` then `opsctl patch acm-certificate/www.awsorders.com`. An expired ACM certificate cannot be renewed, so a new certificate is requested (RequestCertificate, DNS validation); the validation CNAME is per domain, so it validates as soon as the restored record resolves (Route 53 INSYNC in about a minute), ACM issues within a few minutes, the listener picks up the new certificate and handshakes recover in about 3 minutes.
+remediation_action: replace_acm_certificate
+remediation_command: |-
+  opsctl restore route53-record/_acm-validation.www.awsorders.com
+  opsctl patch acm-certificate/www.awsorders.com
+
+error_message: |
+  WEB-ACM-CERT-EXPIRY: certificate={certificate_arn} domain={domain_name} status=EXPIRED expired_hours_ago={expired_hours_ago} renewal_status={renewal_status}
+
+stack_trace: |
+  === ACM CERTIFICATE EXPIRY REPORT ===
+  listener=storefront-alb:443  region=us-east-1  domain={domain_name}
+  --- CERTIFICATE ---
+    arn={certificate_arn}
+    type=AMAZON_ISSUED  validation_method=DNS  status=EXPIRED
+    expired_hours_ago={expired_hours_ago}  renewal_status={renewal_status}
+  --- DOMAIN VALIDATION ---
+    domain={domain_name}  validation_status=PENDING_VALIDATION
+    missing_cname={validation_record}
+  --- ASSESSMENT ---
+    handshakes=FAILING  customer_impact=tls_errors_on_storefront  cause=dns_validation_record_missing
+  ACTION: recreate_validation_record=true  request_new_certificate=true  attach_to_listener=true  alert=WEB-ACM-CERT-EXPIRY
+
+infrastructure_events:
+- body: '[AWS Health] AWS_ACM_RENEWAL_STATE_CHANGE: certificate={certificate_arn} domain={domain_name} renewal_status=FAILED reason=ValidationRecordNotFound not_after=2026-11-16T23:59:59Z; certificate has expired region=us-east-1'
+  severity: WARN
+  event_name: aws.health.AWS_ACM_RENEWAL_STATE_CHANGE
+  service: storefront-web
+  offset_seconds: -150
+  attributes:
+    cloud.provider: aws
+    cloud.service: acm
+    aws.health.event_type_code: AWS_ACM_RENEWAL_STATE_CHANGE
+    aws.acm.renewal_status: FAILED
+    aws.route53.record_name: _acm-validation.www.awsorders.com
+    infrastructure.source: AWS Health
+- body: '[CloudWatch] Alarm in ALARM: awsorders-storefront-acm-days-to-expiry < 30 region=us-east-1'
+  severity: WARN
+  event_name: aws.cloudwatch.AlarmStateChange
+  service: storefront-web
+  attributes:
+    cloud.provider: aws
+    cloud.service: acm
+    aws.cloudwatch.alarm_name: awsorders-storefront-acm-days-to-expiry
+    aws.acm.validation_method: DNS
+    infrastructure.source: CloudWatch
+
+correlation_attr:
+  key: aws.acm.certificate_arn
+  value: arn:aws:acm:us-east-1:781386958653:certificate/7c1e4b2a-9d3f-4a68-b5e1-2f0c8a6d41b7
+
+fault_params:
+  certificate_arn: arn:aws:acm:us-east-1:781386958653:certificate/7c1e4b2a-9d3f-4a68-b5e1-2f0c8a6d41b7
+  domain_name: www.awsorders.com
+  expired_hours_ago: {randint: [1, 30]}
+  renewal_status: FAILED
+  validation_record: _acm-validation.www.awsorders.com
+
+rca_clues:
+  storefront-web:
+    acm.certificate_status: EXPIRED
+    acm.expired_hours_ago: {randint: [1, 30]}
+    acm.validation_status: PENDING_VALIDATION
+    acm.validation_cname_present: false
+  orders-gateway:
+    tls.upstream_cert_expired: true
+    tls.handshake_failures: {randint: [400, 3000]}
+
+business_impact:
+  - kpi: business.availability_pct
+    value: {uniform: [73.43, 84.49], round: 2}
+  - kpi: business.orders_per_min
+    value: {uniform: [120.9, 139.1], round: 0}
+
+cascade_messages:
+  orders-gateway:
+    - severity: ERROR
+      message: '[gateway] TLS handshake with storefront-web {domain_name}:443 failed: x509: certificate has expired or is not yet valid: current time is after 2026-11-16T23:59:59Z'
+service_lag_seconds:
+  orders-gateway: 45
+fault_scope:
+  cluster: awsorders-eks-use1
+  workloads: [storefront-web]
+remediation_effects:
+  transition_seconds: 180
+  log_events:
+    - service: orders-gateway
+      severity: INFO
+      offset_seconds: 1
+      body: 'cloudtrail: eventSource=route53.amazonaws.com eventName=ChangeResourceRecordSets userIdentity={actor} requestParameters.recordName=_acm-validation.www.awsorders.com errorCode=none'
+      attributes:
+        operation: command
+        command.target: route53-record/_acm-validation.www.awsorders.com
+        aws.cloudtrail.event_name: ChangeResourceRecordSets
+    - service: orders-gateway
+      severity: INFO
+      offset_seconds: 2
+      body: 'cloudtrail: eventSource=acm.amazonaws.com eventName=RequestCertificate userIdentity={actor} requestParameters.domainName=www.awsorders.com requestParameters.validationMethod=DNS errorCode=none'
+      attributes:
+        operation: command
+        command.target: acm-certificate/www.awsorders.com
+        aws.cloudtrail.event_name: RequestCertificate
+    - service: storefront-web
+      severity: INFO
+      offset_seconds: 100
+      body: '[storefront] new ACM certificate for www.awsorders.com status=ISSUED (DNS validation passed) and attached to storefront-alb:443; TLS handshakes succeeding'
+      attributes:
+        operation: certificate_issued
+        tls.server.cert_not_after: '2027-12-17T23:59:59Z'
+  steady_attributes:
+    storefront-web:
+      tls.server.cert_not_after: '2027-12-17T23:59:59Z'
+  verification:
+    - signal: storefront.tls_handshake_failures_per_min
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "storefront-web"'
+      field: 'metrics.storefront.tls_handshake_failures_per_min'
+      expect: 'back to 0 (was 300-1500)'
+      within_seconds: 210
+    - signal: WEB-ACM-CERT-EXPIRY lines
+      from: 'logs.otel.awsorders'
+      where: 'body.text LIKE "*WEB-ACM-CERT-EXPIRY*"'
+      expect: '0 new lines'
+      within_seconds: 210
+    - signal: server certificate expiry
+      from: 'logs.otel.awsorders'
+      where: 'resource.attributes.service.name == "storefront-web"'
+      field: 'attributes.tls.server.cert_not_after'
+      expect: '2027-12-17T23:59:59Z (a date 13 months out) on every line since the fix; the expired 2026-11-16 date stops appearing'
+      within_seconds: 210

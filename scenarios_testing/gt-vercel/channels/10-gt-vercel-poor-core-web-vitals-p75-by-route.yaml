@@ -1,0 +1,37 @@
+name: "GT vercel_otel: poor_core_web_vitals_p75_by_route"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-VERCEL-POOR-CORE-WEB-VITALS-P75-BY-ROUTE
+sensor_type: impact_key_probe
+affected_services:
+  - gt-vercel-aws-svc-1
+cascade_services:
+  - gt-vercel-aws-svc-2
+description: "Tests impact_key poor_core_web_vitals_p75_by_route on generator vercel_otel."
+investigation_notes: |-
+  1. Verify vercel_otel is active and reporting metrics.
+  2. Check that the poor_core_web_vitals_p75_by_route metric has reached the trigger value (2.0).
+  3. Confirm generator_impact for vercel_otel.poor_core_web_vitals_p75_by_route is set to 2.0.
+  4. Look for correlated changes in service gt-vercel-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_poor_core_web_vitals_p75_by_route_baseline
+error_message: "GT-PROBE: gen=vercel_otel key=poor_core_web_vitals_p75_by_route value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=vercel_otel
+  impact_key: poor_core_web_vitals_p75_by_route
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 2.0
+  svc_name: gt-vercel-aws-svc-1
+rca_clues:
+  gt-vercel-aws-svc-1:
+    probe.generator: vercel_otel
+    probe.impact_key: poor_core_web_vitals_p75_by_route
+    probe.trigger_value: 2.0
+  gt-vercel-aws-svc-2:
+    probe.upstream_generator: vercel_otel
+    probe.upstream_key: poor_core_web_vitals_p75_by_route
+generator_impact:
+  vercel_otel:
+    poor_core_web_vitals_p75_by_route: 2.0

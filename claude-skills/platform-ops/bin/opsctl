@@ -1,0 +1,176 @@
+#!/usr/bin/env python3
+"""opsctl - apply changes through the operations API of the running environment.
+
+Every change is recorded in the audit trail with a change id. The verbs, kinds and
+help text come from the running scenario's ops profile (GET /api/ops/profile), so the
+same CLI fits every scenario; the built-in help below is only used when the API
+cannot be reached.
+"""
+
+import json
+import os
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+
+API = os.environ.get("OPSCTL_API", "http://localhost:8080").rstrip("/")
+TIMEOUT = float(os.environ.get("OPSCTL_TIMEOUT", "30"))
+VERSION = "opsctl v2.0.0"
+
+# Offline fallback only (the API is unreachable): the neutral verb set.
+FALLBACK_VERBS = [
+    ("rollback", "Roll a component back to an earlier revision (--to-revision N|previous)",
+     "opsctl rollback <kind>/<name> --to-revision previous"),
+    ("restore", "Restore a versioned object to a known-good version (--version)",
+     "opsctl restore <kind>/<name> --version <vN>"),
+    ("renew", "Renew a certificate, lease or token", "opsctl renew <kind>/<name>"),
+    ("rotate", "Rotate a credential or key and roll out the new value", "opsctl rotate <kind>/<name>"),
+    ("sync", "Force an immediate refresh from the source of truth", "opsctl sync <kind>/<name>"),
+    ("drain", "Take a unit out of service and move its load off it", "opsctl drain <kind>/<name>"),
+    ("replace", "Replace a unit with a new one", "opsctl replace <kind>/<name>"),
+    ("patch", "Change settings on a component (--<setting> <value>)",
+     "opsctl patch <kind>/<name> --<setting> <value>"),
+    ("apply", "Create or update a policy or configuration object",
+     "opsctl apply <kind>/<name> --<setting> <value>"),
+    ("expand", "Grow a capacity (--size)", "opsctl expand <kind>/<name> --size <size>"),
+    ("run", "Run a one-off job or procedure", "opsctl run <kind>/<name>"),
+    ("delete", "Delete an object, or every object matching --selector", "opsctl delete <kind>/<name>"),
+    ("restart", "Restart a component", "opsctl restart <kind>/<name>"),
+]
+
+
+def _deployment_query() -> str:
+    dep = os.environ.get("OPSCTL_DEPLOYMENT")
+    return f"?deployment_id={urllib.parse.quote(dep)}" if dep else ""
+
+
+def request(method: str, path: str, payload: dict | None = None) -> tuple:
+    req = urllib.request.Request(
+        API + path,
+        data=json.dumps(payload).encode() if payload is not None else None,
+        headers={"Content-Type": "application/json", "User-Agent": "opsctl/2.0"},
+        method=method,
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+            return resp.status, json.loads(resp.read().decode() or "{}")
+    except urllib.error.HTTPError as exc:
+        try:
+            body = json.loads(exc.read().decode() or "{}")
+        except ValueError:
+            body = {}
+        return exc.code, body
+    except (urllib.error.URLError, OSError) as exc:
+        reason = getattr(exc, "reason", exc)
+        return 0, {"error": f"error: unable to reach the operations API at {API}: {reason}"}
+
+
+def profile() -> dict:
+    """The running scenario's opsctl vocabulary, or the offline fallback."""
+    status, body = request("GET", "/api/ops/profile" + _deployment_query())
+    if status == 200 and body.get("verbs"):
+        return body
+    return {
+        "banner": "opsctl applies changes to the running environment. "
+                  "Every applied change is written to the audit log with a change id.",
+        "usage": "opsctl [plan] <verb> <kind>[/<name>] [--flag value | --flag=value | --switch]...",
+        "namespaces": True,
+        "verbs": [{"verb": v, "summary": s, "example": e} for v, s, e in FALLBACK_VERBS],
+        "guide": "",
+        "offline": True,
+    }
+
+
+def usage(prof: dict) -> str:
+    verbs = prof.get("verbs") or []
+    width = max([len(v["verb"]) for v in verbs] + [len("guide")])
+    lines = [prof.get("banner", ""), "", "Usage:", f"  {prof.get('usage', '')}", "", "Commands:"]
+    for v in verbs:
+        lines.append(f"  {v['verb'].ljust(width)}  {v.get('summary', '')}")
+    lines += [
+        f"  {'plan'.ljust(width)}  Dry run: show what a command would change without applying it",
+        f"  {'guide'.ljust(width)}  Where this environment's telemetry is and how to query it",
+        "",
+        "Options:",
+    ]
+    if prof.get("namespaces"):
+        lines.append("  -n, --namespace   Namespace of the target (omit for cluster or account scoped objects)")
+    lines += [
+        "  -h, --help        Show help for opsctl or a command",
+        "",
+        "Environment:",
+        f"  OPSCTL_API        Operations API (current: {API})",
+    ]
+    if prof.get("offline"):
+        lines += ["", "(operations API unreachable: showing the built-in verb list)"]
+    lines += ["", "Use \"opsctl <verb> --help\" for more information about a command."]
+    return "\n".join(lines)
+
+
+def verb_usage(prof: dict, verb: dict) -> str:
+    example = "\n  ".join(str(verb.get("example") or "").splitlines())
+    out = (f"{verb.get('summary', '')}.\n\nExamples:\n  {example}\n\n"
+           f"Dry run:\n  opsctl plan {verb['verb']} ...\n\nOptions:\n")
+    if prof.get("namespaces"):
+        out += "  -n, --namespace   Namespace of the target\n"
+    return out + "  -h, --help        Show this help"
+
+
+def main(argv: list) -> int:
+    if argv and argv[0] in ("--version", "version"):
+        print(VERSION)
+        return 0
+    prof = profile()
+    if not argv or argv[0] in ("-h", "--help", "help"):
+        print(usage(prof))
+        return 0
+    if argv[0] == "guide":
+        text = prof.get("guide") or "No telemetry guide is published for this environment."
+        print(text)
+        return 0
+
+    args = list(argv)
+    dry_run = False
+    if args[0] == "plan":
+        dry_run = True
+        args = args[1:]
+        if not args or args[0] in ("-h", "--help"):
+            print("Show what a command would change without applying it.\n\n"
+                  f"Usage:\n  {prof.get('usage', '').replace('[plan] ', 'plan ', 1)}")
+            return 0
+    verbs = {v["verb"]: v for v in prof.get("verbs") or []}
+    verb = args[0]
+    if verb in verbs and ("-h" in args[1:] or "--help" in args[1:]):
+        print(verb_usage(prof, verbs[verb]))
+        return 0
+
+    # The API validates the verb, target and flags against the scenario's profile.
+    payload = {"argv": args, "dry_run": dry_run}
+    if os.environ.get("OPSCTL_DEPLOYMENT"):
+        payload["deployment_id"] = os.environ["OPSCTL_DEPLOYMENT"]
+    status, body = request("POST", "/api/ops/actions", payload)
+    if status != 200 or body.get("error"):
+        msg = body.get("error") or f"error: request failed (HTTP {status})"
+        if status == 404:
+            msg = "error: the server could not find the target environment (no deployment registered)"
+        print(msg if msg.startswith("error") else f"error: {msg}", file=sys.stderr)
+        return 1
+
+    if body.get("status") == "planned":
+        print(f"Plan: {' '.join(args)}")
+        for line in body.get("changes", []):
+            print(f"  {line}")
+        print("\nNo changes applied (dry run). Run without 'plan' to apply.")
+        return 0
+
+    print(body.get("message", "applied"))
+    print(f"change id: {body.get('change_id', '-')}  ({body.get('timestamp', '')})")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except KeyboardInterrupt:
+        sys.exit(130)

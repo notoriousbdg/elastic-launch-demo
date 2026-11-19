@@ -33,11 +33,21 @@ constants:
   - SPN-MILL-04
   - PMP-COOL-02
   - CMP-AIR-01
+  # MTR-CONV-02 is on VIB-GW-01; the other four are behind VIB-GW-02.
+  ASSET_GATEWAY:
+    MTR-CONV-01: VIB-GW-02
+    MTR-CONV-02: VIB-GW-01
+    SPN-MILL-04: VIB-GW-02
+    PMP-COOL-02: VIB-GW-02
+    CMP-AIR-01: VIB-GW-02
   SENSORS:
   - vibration_rms_mm_s
   - bearing_temp_c
-  - current_amp
-  - thermal_dt_c
+  - motor_current_a
+  SENSOR_RANGE:
+    vibration_rms_mm_s: [1.4, 2.4]
+    bearing_temp_c: [48.0, 56.0]
+    motor_current_a: [38.0, 46.0]
   WO_TYPES:
   - preventive
   - preventive
@@ -50,38 +60,154 @@ constants:
 state:
   _work_orders_total:
     init: 0
-  _last_pm_report:
-    init: now
+  # DLQ depth when the CMMS-WORK-ORDER-BACKLOG fix landed, so the replay drains from it.
+  _dlq_at_fix:
+    init: 0
 steps:
+- sample:
+    # Per-channel fault intensity: ramps 0->1 once the fault reaches this service, drains 1->0 after its fix.
+    f11:
+      expr: "min(1.0, max(0.0, elapsed.get(11, 0) - lag.get(11, 0)) / 120.0) if 11 in all_active else (max(0.0, 1.0 - since_fix.get(11, 0) / 120.0) if 11 in fixed_channels else 0.0)"
+    f12:
+      expr: "min(1.0, max(0.0, elapsed.get(12, 0) - lag.get(12, 0)) / 10.0) if 12 in all_active else (max(0.0, 1.0 - since_fix.get(12, 0) / 30.0) if 12 in fixed_channels else 0.0)"
+- sample:
+    sync_version:
+      expr: "'4.0.0' if 11 in all_active else '3.9.2'"
+    rejected_per_min:
+      expr: "rand.randint(6, 14) if 11 in all_active else 0"
+    accepted_per_min:
+      expr: "0 if 11 in all_active else rand.randint(6, 14)"
+    dlq_depth:
+      expr: "int(min(180.0, 10.0 * elapsed.get(11, 0) / 60.0)) if 11 in all_active else (int(max(0.0, _dlq_at_fix * (1.0 - since_fix.get(11, 0) / 90.0))) if 11 in fixed_channels else 0)"
+    backlog_count:
+      expr: "int(rand.randint(30, 45) + f11 * rand.randint(60, 115))"
+    pm_compliance_pct:
+      expr: "round(rand.uniform(88.0, 96.0) - f11 * rand.uniform(18.0, 30.0), 1)"
+    labor_vs_plan_pct:
+      expr: "rand.randint(97, 103)"
+    sync_status:
+      expr: "'422 Unprocessable Entity: unknown field actual_work_unit' if 11 in all_active else '201 Created'"
+    profile_rev:
+      expr: "'r7' if 12 in all_active else 'r6'"
+    hp_filter_hz:
+      expr: "2 if 12 in all_active else 10"
+    vib_rms_max:
+      expr: "round(rand.uniform(1.4, 2.4) * (1.0 - f12) + rand.uniform(4.6, 7.0) * f12, 2)"
+    rul_days_min:
+      expr: "int(rand.randint(120, 400) * (1.0 - f12) + rand.randint(3, 21) * f12)"
+    bearing_temp_max:
+      expr: "round(rand.uniform(48.0, 56.0), 1)"
+    dominant_band:
+      expr: "'0-10Hz' if f12 > 0.5 else '1x-running-speed'"
+- counter:
+    state_key: _dlq_at_fix
+    by:
+      expr: "(dlq_depth - _dlq_at_fix) if 11 in all_active else 0"
+- counter:
+    state_key: _work_orders_total
+    by: 1
+- metric:
+    name: maintenance.work_orders_total
+    value:
+      var: _work_orders_total
+    unit: orders
+- metric:
+    name: maintenance.confirmations_rejected_per_min
+    value:
+      var: rejected_per_min
+    unit: confirmations/min
+- metric:
+    name: maintenance.confirmation_dlq_depth
+    value:
+      var: dlq_depth
+    unit: messages
+- metric:
+    name: maintenance.backlog_count
+    value:
+      var: backlog_count
+    unit: orders
+- metric:
+    name: maintenance.pm_compliance_pct
+    value:
+      var: pm_compliance_pct
+    unit: '%'
+- metric:
+    name: maintenance.labor_hours_vs_plan_pct
+    value:
+      var: labor_vs_plan_pct
+    unit: '%'
+- metric:
+    name: maintenance.vibration_rms_max_mm_s
+    value:
+      var: vib_rms_max
+    unit: mm/s
+    attrs:
+      maintenance.gateway: VIB-GW-02
+- metric:
+    name: maintenance.rul_days_min
+    value:
+      var: rul_days_min
+    unit: days
+- metric:
+    name: maintenance.bearing_temp_max_c
+    value:
+      var: bearing_temp_max
+    unit: C
+- log:
+    level: INFO
+    message: '[CMMS] confirmation_sync deployment=cmms-confirmation-sync version={sync_version} target=SAP-PM-IW41 accepted_per_min={accepted_per_min} rejected_per_min={rejected_per_min} dlq=cmms.confirmations.dlq depth={dlq_depth} last_status="{sync_status}"'
+    attrs:
+      operation: confirmation_sync
+      cmms.sync_version:
+        var: sync_version
+      cmms.dlq_depth:
+        var: dlq_depth
+- log:
+    level: INFO
+    message: '[CMMS] vibration_profile gateway=VIB-GW-02 profile_rev={profile_rev} hp_filter_hz={hp_filter_hz} assets=4 vel_rms_max_mm_s={vib_rms_max} dominant_band={dominant_band} bearing_temp_max_c={bearing_temp_max}'
+    attrs:
+      operation: vibration_profile
+      maintenance.gateway: VIB-GW-02
+      maintenance.sensor_profile_rev:
+        var: profile_rev
+      maintenance.hp_filter_hz:
+        var: hp_filter_hz
+- log:
+    level: INFO
+    message: '[CMMS] pm_compliance pct={pm_compliance_pct} backlog={backlog_count} labor_vs_plan_pct={labor_vs_plan_pct}'
+    attrs:
+      operation: pm_compliance
+      maintenance.pm_compliance_pct:
+        var: pm_compliance_pct
+      maintenance.backlog_count:
+        var: backlog_count
 - sample:
     asset:
       choice: ASSETS
     sensor:
       choice: SENSORS
+    gateway:
+      expr: "ASSET_GATEWAY[asset]"
     sensor_value:
-      uniform:
-      - 0.5
-      - 8.0
-      round: 2
+      expr: "round(rand.uniform(4.6, 7.0), 2) if (sensor == 'vibration_rms_mm_s' and gateway == 'VIB-GW-02' and f12 > 0.5) else round(rand.uniform(SENSOR_RANGE[sensor][0], SENSOR_RANGE[sensor][1]), 2)"
     health_score:
-      uniform:
-      - 0.65
-      - 0.99
-      round: 3
+      expr: "round(rand.uniform(0.25, 0.45), 3) if (gateway == 'VIB-GW-02' and f12 > 0.5) else round(rand.uniform(0.86, 0.99), 3)"
 - log:
     level: INFO
-    message: '[CMMS] predictive_signal asset={asset} sensor={sensor} value={sensor_value} health_score={health_score}'
+    message: '[CMMS] predictive_signal asset={asset} gateway={gateway} sensor={sensor} value={sensor_value} health_score={health_score}'
     attrs:
       operation: predictive_signal
-      maintenance.asset:
+      maintenance.asset_id:
         var: asset
+      maintenance.gateway:
+        var: gateway
       maintenance.sensor:
         var: sensor
-      maintenance.value:
+      maintenance.sensor_value:
         var: sensor_value
 - sample:
     wo_id:
-      expr: f'MWO-{rand.randint(10000, 99999)}'
+      expr: f'MWO-{rand.randint(4000800000, 4000899999)}'
     wo_asset:
       choice: ASSETS
     wo_type:
@@ -95,64 +221,7 @@ steps:
       operation: mwo_status
       maintenance.work_order_id:
         var: wo_id
-      maintenance.asset:
+      maintenance.asset_id:
         var: wo_asset
       maintenance.work_type:
         var: wo_type
-      maintenance.priority:
-        var: priority
-- every:
-    seconds: 10
-    state_key: _last_pm_report
-    steps:
-    - sample:
-        compliance:
-          uniform:
-          - 82.0
-          - 98.0
-          round: 1
-        overdue:
-          randint:
-          - 2
-          - 18
-        mttr_min:
-          randint:
-          - 15
-          - 95
-    - log:
-        level: INFO
-        message: '[CMMS] pm_compliance pct={compliance} overdue={overdue} mttr_min={mttr_min}'
-        attrs:
-          operation: pm_compliance
-          maintenance.pm_compliance_pct:
-            var: compliance
-          maintenance.overdue_count:
-            var: overdue
-- counter:
-    state_key: _work_orders_total
-    by: 1
-- metric:
-    name: maintenance.work_orders_total
-    value:
-      var: _work_orders_total
-    unit: orders
-- metric:
-    name: maintenance.backlog_count
-    value:
-      if_active:
-        randint:
-        - 80
-        - 240
-      else:
-        randint:
-        - 8
-        - 35
-    unit: orders
-- metric:
-    name: maintenance.mtbf_hours
-    value:
-      uniform:
-      - 220.0
-      - 680.0
-      round: 1
-    unit: hours

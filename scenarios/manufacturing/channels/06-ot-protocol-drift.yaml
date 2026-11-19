@@ -8,42 +8,111 @@ affected_services:
 cascade_services:
 - mes-controller
 - ot-historian
-description: Modbus/EtherNet-IP frame parse failures after a PLC firmware drift introduces a non-standard register layout
+description: The packaging PLC was upgraded with a recompiled Modbus holding-register block, but the gateway still polls it with the old register map; reads hit the wrong offsets
 investigation_notes: |-
-  Root Cause: After a PLC firmware update, Modbus register maps (function codes 03/04/16) or EtherNet-IP CIP class objects can shift offsets, causing the gateway parser to misalign data words. The result is plausibly-shaped values that pass type checks but represent the wrong physical quantity.
-  Remediation: 1) Compare current vs. expected register map: `scada-admin diff-regmap --plc {plc_id} --baseline {firmware_baseline}`. 2) Reload the corrected register-map config: `scada-admin reload-regmap --plc {plc_id} --version {firmware_version}`. 3) Validate sample reads against the engineering reference: `scada-admin read-sample --plc {plc_id} --tag MotorSpeed`. 4) If firmware was unauthorized, open an OT change-control ticket to roll back to {firmware_baseline}. 5) Add a parser-version assertion to CI on the SCADA config repo.
+  Root cause: {plc_id} was upgraded from firmware {firmware_baseline} to {firmware_version} under MOC-2620 shortly before the first PROTOCOL-DRIFT, and the project was downloaded with a recompiled MB_SERVER holding-register data block. The recompile moved several tags: OvenTempC from 40009 to 40012 and PressurePsi from 30001 to 30005. The upgrade itself was planned and is healthy, but the matching gateway register map (regmap v3.1) was never loaded, so scada-gateway still polls {plc_id} with regmap v3.0. Reads past the end of the new block return Modbus exception 02 (Illegal Data Address), and shifted reads return plausible-looking values for the wrong quantity, which fail the engineering-range check. The network and the other four PLCs are fine; tag quality on the shifted reads is still GOOD, because the read itself succeeds.
+  Confirm:
+    - scada-gateway modbus_poll lines for {plc_id} show regmap=v3.0 with firmware={firmware_version} (attributes.scada.regmap_version, attributes.scada.plc_firmware); metric scada.modbus_exceptions_per_min rises from 0 to 20-60 and scada.range_violations_per_min from 0-2 to 40-150
+    - the scada-gateway firmware_load line for {plc_id} (MOC-2620) comes before the first PROTOCOL-DRIFT
+    - mes-controller and ot-historian log implausible values from {plc_id} only (for example OvenTempC readings that match pressure values)
+  Remediation: load the register map that matches the new PLC program with opsctl apply regmap/plc-pack-01 --version v3.1. The gateway re-reads its map on the next poll cycle, exceptions stop and values return to their engineering ranges within about 15 s. The firmware stays at {firmware_version}: rolling the PLC back is not needed and would need its own MOC and a line stop.
 remediation_action: reload_regmap
-error_message: '[SCADA] PROTOCOL-DRIFT: plc={plc_id} protocol={protocol} firmware_current={firmware_version} expected={firmware_baseline}
-  parse_failures={parse_failure_count}'
+remediation_command: |-
+  opsctl apply regmap/plc-pack-01 --version v3.1
+error_message: '[SCADA] PROTOCOL-DRIFT: plc={plc_id} protocol={protocol} unit_id=1 firmware={firmware_version} regmap=v3.0 (expects {firmware_baseline}) exceptions={exception_count}/min range_violations={parse_failure_count}/min first_bad_register=40012'
 stack_trace: |-
-  === PROTOCOL PARSER DIAGNOSTIC — {plc_id} ===
-  Protocol: {protocol} | Firmware: {firmware_version} (baseline: {firmware_baseline})
+  === MODBUS TCP POLL DIAGNOSTIC — {plc_id} (unit 1) ===
+  Protocol: {protocol} | Firmware: {firmware_version} | Gateway regmap: v3.0 (built for {firmware_baseline})
   ------------------------------------------------------------------------
-  FN CODE   | EXPECTED OFFSET | ACTUAL OFFSET | TAG               | STATUS
+  FN CODE   | REGMAP OFFSET | PLC OFFSET | TAG          | RESULT
   ------------------------------------------------------------------------
-  FC-03     | 40001           | 40001         | MotorSpeed         | OK
-  FC-03     | 40009           | 40012         | OvenTempC          | DRIFT (+3)
-  FC-04     | 30001           | 30005         | PressurePsi        | DRIFT (+4)
-  FC-16     | 41001           | 41001         | SetpointWrite      | OK
+  FC-03     | 40001         | 40001      | MotorSpeed   | OK
+  FC-03     | 40009         | 40012      | OvenTempC    | RANGE (read 87.4, expected 150-260 C)
+  FC-04     | 30001         | 30005      | PressurePsi  | RANGE (read 1402, expected 0-150 psi)
+  FC-03     | 40121         | --         | PartsCounter | EXCEPTION 02 Illegal Data Address
   ------------------------------------------------------------------------
-  PROTOCOL-DRIFT: {parse_failure_count} parse failures in 60s on {plc_id}
+  PROTOCOL-DRIFT: register map out of step with the PLC program on {plc_id}
 correlation_attr:
-  key: infra.plc_firmware_version
-  value: siemens-s7-1500-v3.1.7-unsigned
+  key: scada.regmap_version
+  value: v3.0
 fault_params:
-  plc_id: {choice: [PLC-LINE01-A, PLC-LINE02-A, PLC-LINE03-A, PLC-LINE03-B, PLC-PACK-01]}
-  protocol: {choice: [modbus_tcp, ethernet_ip]}
-  firmware_version: {choice: [v3.1.7, v3.2.0, v3.2.1]}
-  firmware_baseline: v3.0.4
-  parse_failure_count: {randint: [20, 200]}
+  plc_id: PLC-PACK-01
+  protocol: modbus_tcp
+  firmware_version: V3.1.0
+  firmware_baseline: V3.0.3
+  parse_failure_count: {randint: [40, 150]}
+  exception_count: {randint: [20, 60]}
 rca_clues:
   scada-gateway:
-    scada.parse_failure_count: {randint: [20, 200]}
-    scada.firmware_diff: true
+    scada.plc: PLC-PACK-01
+    scada.modbus_exception_code: 2
+    scada.tag_quality: GOOD
   mes-controller:
     mes.implausible_tag_value_count: {randint: [2, 25]}
   ot-historian:
-    historian.tag_quality_bad_count: {randint: [5, 80]}
+    historian.out_of_range_points: {randint: [5, 80]}
+cascade_messages:
+  mes-controller:
+    - severity: WARN
+      message: '[MES] equipment_state line=PACK-01 OvenTempC=87.4 below process window 150-260 C while state=RUNNING; value flagged implausible, packaging release check skipped'
+  ot-historian:
+    - severity: WARN
+      message: '[HIST] range_check plc={plc_id} tag=PressurePsi value=1402 outside engineering range 0-150; point stored with quality=Uncertain'
+fault_scope:
+  cluster: mfg-eks-cluster
+  workloads: [scada-gateway]
+infrastructure_events:
+  - service: scada-gateway
+    severity: INFO
+    offset_seconds: -150
+    body: '[SCADA] firmware_load plc=PLC-PACK-01 device identity changed: firmware V3.0.3 -> V3.1.0, program checksum 0x6B21F0A4 -> 0x9E03C7D1; reconnected (upgrade under MOC-2620 by controls-eng)'
+    attributes:
+      operation: firmware_load
+      user.name: controls-eng
+      change.request: MOC-2620
+      scada.plc: PLC-PACK-01
+      scada.plc_firmware: V3.1.0
+      change.summary: 'PLC-PACK-01 firmware: V3.0.3 -> V3.1.0'
+service_lag_seconds:
+  mes-controller: 20
+  ot-historian: 20
+remediation_effects:
+  log_events:
+    - service: scada-gateway
+      severity: INFO
+      offset_seconds: 1
+      body: '[CHG] CHANGE APPLIED opsctl apply regmap/plc-pack-01 --version v3.1 by {actor}: register map v3.0 -> v3.1 for PLC-PACK-01 (firmware V3.1.0)'
+      attributes:
+        operation: change_applied
+        change.target: regmap/plc-pack-01
+  steady_attributes:
+    scada-gateway:
+      scada.regmap_version: v3.1
+  log_taper_seconds: 10
+  verification:
+    - signal: scada.modbus_exceptions_per_min
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "scada-gateway"'
+      field: 'metrics.scada.modbus_exceptions_per_min'
+      expect: '0 (was 20-60)'
+      within_seconds: 60
+    - signal: scada.range_violations_per_min
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "scada-gateway"'
+      field: 'metrics.scada.range_violations_per_min'
+      expect: 'back under 3 (was 40-150)'
+      within_seconds: 60
+    - signal: PROTOCOL-DRIFT lines
+      from: 'logs.otel.mfg'
+      where: 'body.text LIKE "*PROTOCOL-DRIFT*"'
+      expect: '0 new lines'
+      within_seconds: 60
+    - signal: PLC-PACK-01 register map
+      from: 'logs.otel.mfg'
+      where: 'resource.attributes.service.name == "scada-gateway" AND body.text LIKE "*modbus_poll plc=PLC-PACK-01*"'
+      field: 'attributes.scada.regmap_version'
+      expect: 'v3.1 on every line logged since the fix; v3.0 stops appearing (firmware stays V3.1.0)'
+      within_seconds: 60
 business_impact:
   - kpi: business.oee_quality_pct
     factor: {uniform: [0.35, 0.65]}

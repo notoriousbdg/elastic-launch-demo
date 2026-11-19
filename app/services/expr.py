@@ -1,9 +1,8 @@
 """Expression evaluator for the telemetry DSL (internal tooling).
 
-Provides ``safe_eval(expr, env)`` using Python ``eval()`` with an empty
-``__builtins__`` dict so the most dangerous builtins (import, exec, open …)
-are absent.  Suitable for team-authored YAML expressions; not hardened against
-adversarial input.
+Provides ``safe_eval(expr, env)``: the expression is checked against an AST
+allow-list (no lambdas, comprehensions, or underscore/``format`` attribute
+access) and then evaluated with an empty ``__builtins__`` dict.
 
 Available in every expression
 ------------------------------
@@ -20,6 +19,7 @@ Available in every expression
 """
 from __future__ import annotations
 
+import ast
 import random as _random
 import time as _time
 from typing import Any
@@ -85,12 +85,47 @@ _SAFE_BUILTINS: dict[str, Any] = {
 }
 
 
+# AST node types an expression may contain.  Anything else (Lambda, comprehensions,
+# generator expressions, Await, Yield, NamedExpr, ...) is rejected before eval.
+_ALLOWED_NODES: tuple[type[ast.AST], ...] = (
+    ast.Expression, ast.Constant, ast.Name, ast.Load,
+    ast.BinOp, ast.UnaryOp, ast.BoolOp, ast.Compare, ast.IfExp,
+    ast.Subscript, ast.Slice, ast.Attribute, ast.Call, ast.keyword, ast.Starred,
+    ast.Tuple, ast.List, ast.Dict, ast.Set,
+    ast.JoinedStr, ast.FormattedValue,
+    ast.operator, ast.unaryop, ast.boolop, ast.cmpop,
+)
+
+# ``str.format`` / ``format_map`` evaluate attribute lookups inside the format
+# string ("{0.__class__}"), which bypasses the underscore check below.
+_BLOCKED_ATTRS = frozenset({"format", "format_map"})
+
+
+def _validate(tree: ast.AST) -> None:
+    """Reject any construct outside the expression allow-list.
+
+    Dunder/underscore attribute access is what every ``eval`` sandbox escape
+    relies on (``().__class__.__base__.__subclasses__()``), so attributes that
+    start with ``_`` are refused outright.
+    """
+    for node in ast.walk(tree):
+        if not isinstance(node, _ALLOWED_NODES):
+            raise ValueError(f"disallowed syntax: {type(node).__name__}")
+        if isinstance(node, ast.Attribute) and (
+            node.attr.startswith("_") or node.attr in _BLOCKED_ATTRS
+        ):
+            raise ValueError(f"disallowed attribute: {node.attr!r}")
+        if isinstance(node, ast.Name) and node.id.startswith("__"):
+            raise ValueError(f"disallowed name: {node.id!r}")
+
+
 def safe_eval(expr: str, env: dict[str, Any]) -> Any:
     """Evaluate *expr* in a restricted context built from *env*.
 
-    Merges *env* with :data:`_SAFE_BUILTINS` and calls ``eval()`` with an
-    empty ``__builtins__``.  Objects already in *env* (like ``rand``) can be
-    accessed normally — attribute access on those objects is unrestricted.
+    The expression is parsed and checked against an AST allow-list
+    (:data:`_ALLOWED_NODES`) before it is evaluated with an empty
+    ``__builtins__``; see :func:`_validate` for what is refused.  Scenario YAML
+    can be uploaded over HTTP, so this has to hold for untrusted input.
 
     Parameters
     ----------
@@ -104,12 +139,14 @@ def safe_eval(expr: str, env: dict[str, Any]) -> Any:
     Raises
     ------
     ValueError
-        If compilation or evaluation fails; wraps the original exception.
+        If the expression is rejected, or compilation or evaluation fails.
     """
     context = {**_SAFE_BUILTINS, **env}
     try:
-        return eval(  # noqa: S307  (internal tooling, env is team-authored)
-            compile(expr, "<expr>", "eval"), {"__builtins__": {}}, context
+        tree = ast.parse(expr, "<expr>", mode="eval")
+        _validate(tree)
+        return eval(  # noqa: S307  (AST-validated above)
+            compile(tree, "<expr>", "eval"), {"__builtins__": {}}, context
         )
     except Exception as exc:
         raise ValueError(f"expr eval failed: {expr!r} — {exc}") from exc

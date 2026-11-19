@@ -1,73 +1,112 @@
 name: Enterprise SLA Breach Alert
 subsystem: billing
 vehicle_section: sla_monitor
-error_type: BSS-SLA-BREACH
+error_type: SLA breach contract=
 sensor_type: sla_monitoring
 affected_services:
+- activation-service
 - bss-billing
-- notification-service
 cascade_services:
+- notification-service
 - api-gateway
-description: Enterprise customer SLA thresholds breached requiring escalation and financial credit calculation
-investigation_notes: |
-  1. Check SLA breach severity — Enterprise SLA: 99.5% activation success, max 30s activation time. Current success rate and avg activation time determine credit tier.
-  2. SLA breach duration determines financial credit: <15min = warning only, 15-30min = 5% monthly credit, 30-60min = 10% credit, >60min = 20% credit + executive escalation.
-  3. MVNO partner SLA: 99.0% activation success. MVNO breaches trigger wholesale revenue credits and potential partnership review. Check MVNO-specific metrics separately.
-  4. Notification-service must send breach alerts to: enterprise account managers, MVNO partner liaisons, VP of Enterprise Sales, and SRE on-call. Verify notification delivery.
-  5. Begin RCA documentation immediately — enterprise contract requires RCA delivery within 48 hours of SLA breach. Include: timeline, root cause, customer impact, remediation actions, prevention plan.
-remediation_action: escalate_sla_breach
-error_message: '[BSS] BSS-SLA-BREACH: customer_segment={sla_segment} success_rate={sla_success_rate}% sla_target={sla_target}% breach_duration_min={sla_breach_min} credit_tier={sla_credit_tier}'
-stack_trace: |
-  === SLA BREACH REPORT ===
-  segment={sla_segment}  contract=ENT-2024-MERIDIAN
-  --- SLA METRICS ---
-    METRIC                  CURRENT     SLA_TARGET   STATUS
-    activation_success      {sla_success_rate}%       {sla_target}%       BREACH
-    activation_time_p99     {sla_activation_time_s}s        30s          BREACH
-    availability            99.1%       99.5%        BREACH
-  --- BREACH TIMELINE ---
-    breach_start={breach_start_time}  duration={sla_breach_min}min
-    credit_tier={sla_credit_tier}  estimated_credit=${sla_credit_amount}
-  --- ESCALATION ---
-    enterprise_accounts_affected={enterprise_affected}
-    mvno_partners_affected={mvno_affected}
-    rca_due_date=48h_from_breach  notifications_sent={notifications_sent}
-  ACTION: escalate_enterprise=true  calculate_credits=true  alert=BSS-SLA-BREACH
-infrastructure_events:
-- body: '[AzureMonitor] EnterpriseSLABreach: customer_segment=Enterprise activation_success_rate=89.2% sla_threshold=99.5% penalty_risk=EUR_250000 region=westeurope'
-  severity: ERROR
-  event_name: azure.monitor.EnterpriseSLABreach
-  service: bss-billing
-  attributes:
-    cloud.provider: azure
-    cloud.service: monitor
-    azure.health.status: Critical
-    infrastructure.source: AzureMonitor
+description: the enterprise priority lane in activation-service was switched off by a flag cleanup and enterprise activations now queue behind consumer orders
+investigation_notes: |-
+  Root cause: a stale-flag cleanup about a minute before the first breach switched feature flag enterprise-priority-lane off in activation-service (flag considered unused after the Q3 queue redesign; it is still read by ActivationScheduler). Without it, enterprise activations go through the same FIFO queue as consumer orders, and today's consumer promotion keeps that queue {queue_depth} deep. Enterprise activation p95 is {ent_p95_s} s against the 30 s contractual target, so the bss-billing SLA monitor raises a breach for every enterprise activation over target. Consumer activation time, provisioning, HLR and the network are normal; the activations succeed, they are just slow.
+  Confirm:
+    - the activation-service line "feature flag enterprise-priority-lane changed true -> false" comes before the first "SLA breach contract=", and scheduler status lines carry attributes.activation.priority_lane disabled
+    - metric activation_service.enterprise_activation_p95_s rises from about 12 s to {ent_p95_s} s while activation_service.consumer_activation_p95_s stays near 25 s
+    - metric activation_service.queue_depth is high but activation_service.success_rate stays near 99%, which rules out failing downstream calls
+  Remediation: turn the flag back on with opsctl patch feature-flag/enterprise-priority-lane --enabled true. The scheduler reads the flag within about 5 seconds and moves queued enterprise orders ahead; enterprise p95 is back under 30 s within about 90 seconds as the waiting orders complete, and new breaches stop. Scaling activation-service would shorten the shared queue but enterprise orders would still wait behind consumer ones.
+remediation_action: enable_enterprise_priority_lane
+error_message: 'SLA breach contract={contract_id} customer={ent_customer} activation_time_s={ent_activation_s} target_s=30 segment=Enterprise credit_tier=5_PCT_CREDIT'
+stack_trace: |-
+  sla-monitor rule ENT-ACTIVATION-30S fired
+    contract={contract_id} customer={ent_customer}
+    activation_time_s={ent_activation_s} target_s=30
+    window=rolling-60m breaches_in_window={breaches_in_window}
+    source=activation-service queue_wait_s={queue_wait_s}
 correlation_attr:
-  key: billing.sla_monitor_config
-  value: sla-monitor-v2.1.0-patch
+  key: activation.priority_lane
+  value: disabled
 fault_params:
-  sla_segment: {choice: [Enterprise, MVNO]}
-  sla_success_rate: {uniform: [92.0, 98.5], round: 1}
-  sla_target: 99.5
-  sla_breach_min: {randint: [5, 60]}
-  sla_credit_tier: {choice: [WARNING, 5_PCT_CREDIT, 10_PCT_CREDIT, 20_PCT_CREDIT]}
-  sla_activation_time_s: {randint: [35, 120]}
-  breach_start_time: 2026-03-08T07:12:00Z
-  sla_credit_amount: {uniform: [5000.0, 50000.0], round: 0}
-  enterprise_affected: {randint: [5, 50]}
-  mvno_affected: {randint: [1, 5]}
-  notifications_sent: {randint: [3, 15]}
+  contract_id: {choice: [ENT-2025-0417, ENT-2025-0532, ENT-2026-0108, ENT-2026-0211]}
+  ent_customer: {choice: [DHL-Freight-DE, Siemens-Mobility, Allianz-Partners, Lufthansa-Technik]}
+  ent_activation_s: {randint: [48, 160]}
+  ent_p95_s: {randint: [85, 140]}
+  queue_depth: {randint: [1800, 3200]}
+  queue_wait_s: {randint: [40, 150]}
+  breaches_in_window: {randint: [12, 60]}
 rca_clues:
+  activation-service:
+    activation.priority_lane: disabled
+    activation.enterprise_queue_wait_s: {randint: [40, 150]}
+    activation.queue_depth: {randint: [1800, 3200]}
   bss-billing:
-    billing.sla_success_rate_pct: {uniform: [92.0, 98.0], round: 1}
-    billing.breach_duration_min: {randint: [5, 60]}
+    billing.sla_rule: ENT-ACTIVATION-30S
+    billing.enterprise_activation_p95_s: {randint: [85, 140]}
   notification-service:
-    notification.sla_alerts_sent: {randint: [1, 10]}
-    notification.escalation_level: {choice: [P1, P2]}
+    notification.escalation_level: P2
   api-gateway:
-    gateway.enterprise_error_rate: {uniform: [0.03, 0.15], round: 2}
-    gateway.mvno_error_rate: {uniform: [0.02, 0.1], round: 2}
+    gateway.enterprise_activation_wait_s: {randint: [40, 150]}
+remediation_command: |-
+  opsctl patch feature-flag/enterprise-priority-lane --enabled true
+fault_scope:
+  cluster: meridian-eks-cluster
+  workloads: [activation-service]
+error_services: [bss-billing]
+cascade_messages:
+  activation-service:
+    - severity: WARN
+      message: 'activation queue wait {queue_wait_s}s for segment=Enterprise order (queue_depth={queue_depth}, lane=default)'
+  notification-service:
+    - severity: INFO
+      message: 'SLA breach notice queued for account manager of {ent_customer} (contract {contract_id})'
+  api-gateway:
+    - severity: WARN
+      message: 'POST /api/v1/activate for enterprise client {ent_customer} still pending after {queue_wait_s}s'
+infrastructure_events:
+  - service: activation-service
+    severity: INFO
+    offset_seconds: -60
+    event_name: feature_flag.change
+    body: 'feature flag enterprise-priority-lane changed true -> false in environment production by flag-janitor (stale flag cleanup, last evaluated 0 days ago)'
+    attributes:
+      operation: feature_flag_change
+      user.name: flag-janitor
+      activation.priority_lane: disabled
+      change.summary: 'enterprise-priority-lane true -> false'
+remediation_effects:
+  log_taper_seconds: 90
+  log_events:
+    - service: activation-service
+      severity: INFO
+      offset_seconds: 1
+      body: '[NOC-CHG] executed opsctl patch feature-flag/enterprise-priority-lane --enabled true actor={actor}: false -> true'
+      attributes:
+        operation: change_executed
+        change.target: feature-flag/enterprise-priority-lane
+        activation.priority_lane: enabled
+  steady_attributes:
+    activation-service:
+      activation.priority_lane: enabled
+  verification:
+    - signal: activation_service.enterprise_activation_p95_s
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "activation-service"'
+      field: 'metrics.activation_service.enterprise_activation_p95_s'
+      expect: 'under 30 s (was 85-140 s)'
+      within_seconds: 150
+    - signal: SLA breach lines
+      from: 'logs.otel.meridian'
+      where: 'body.text LIKE "*SLA breach contract=*"'
+      expect: '0 new lines once the queued enterprise orders have completed'
+      within_seconds: 150
+    - signal: priority lane state
+      from: 'logs.otel.meridian'
+      where: 'resource.attributes.service.name == "activation-service"'
+      field: 'attributes.activation.priority_lane'
+      expect: 'enabled on every scheduler status line since the patch'
+      within_seconds: 60
 business_impact:
   - kpi: business.enterprise_arpu_usd
     factor: {uniform: [0.15, 0.45]}
@@ -77,3 +116,4 @@ business_impact:
     factor: {uniform: [2.0, 4.5]}
   - kpi: business.nps
     factor: {uniform: [0.25, 0.55]}
+service_lag_seconds: {bss-billing: 30, notification-service: 40, api-gateway: 10}

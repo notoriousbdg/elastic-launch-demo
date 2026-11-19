@@ -1,0 +1,37 @@
+name: "GT envoyproxy_otel: warming_clusters_stuck"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-ENVOYPROXY-WARMING-CLUSTERS-STUCK
+sensor_type: impact_key_probe
+affected_services:
+  - gt-envoyproxy-aws-svc-1
+cascade_services:
+  - gt-envoyproxy-aws-svc-2
+description: "Tests impact_key warming_clusters_stuck on generator envoyproxy_otel."
+investigation_notes: |-
+  1. Verify envoyproxy_otel is active and reporting metrics.
+  2. Check that the warming_clusters_stuck metric has reached the trigger value (50.0).
+  3. Confirm generator_impact for envoyproxy_otel.warming_clusters_stuck is set to 50.0.
+  4. Look for correlated changes in service gt-envoyproxy-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_warming_clusters_stuck_baseline
+error_message: "GT-PROBE: gen=envoyproxy_otel key=warming_clusters_stuck value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=envoyproxy_otel
+  impact_key: warming_clusters_stuck
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 50.0
+  svc_name: gt-envoyproxy-aws-svc-1
+rca_clues:
+  gt-envoyproxy-aws-svc-1:
+    probe.generator: envoyproxy_otel
+    probe.impact_key: warming_clusters_stuck
+    probe.trigger_value: 50.0
+  gt-envoyproxy-aws-svc-2:
+    probe.upstream_generator: envoyproxy_otel
+    probe.upstream_key: warming_clusters_stuck
+generator_impact:
+  envoyproxy_otel:
+    warming_clusters_stuck: 50.0

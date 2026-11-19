@@ -22,91 +22,127 @@ topology:
   - POST
 emit_fault_logs: true
 kpi_emitter: false
-state:
-  _auth_count:
-    init: 0
-  _last_summary:
-    init: now
 steps:
+# FastAPI on AKS. Keycloak (realm meridian) issues tokens; JWKS cached 24h. Enterprise SSO federates
+# with customers' Entra ID tenants through login.microsoftonline.com. Sessions in Redis
+# meridian-sessions (maxmemory 6 GB, volatile-lru).
+#   ch 7  new kid active without pre-publication: failures grow as 5-minute tokens are refreshed;
+#         the JWKS sync fixes every pod within ~10s.
+#   ch 8  Entra ID egress dropped: every federation waits for the 10s connect timeout until the
+#         firewall policy update applies (~60s after the rollback).
+#   ch 9  3.8.0 writes authz:introspect keys without TTL (~1,500/s, ~20 MB/s) from the trigger:
+#         memory 62% -> maxmemory over 120s, sessions evicted over the next 30s, then OOM (onset
+#         150s). The purge frees it over ~90s; users log back in over ~5 min.
 - sample:
-    auth_method:
-      choice:
-      - oauth2
-      - saml
-      - api_key
-      - mtls
-    auth_provider:
-      choice:
-      - internal
-      - azure_ad
-      - mvno_partner
-- counter:
-    state_key: _auth_count
-    by: 1
-- log:
-    level: INFO
-    message: '[AUTH] token_validated method={auth_method} provider={auth_provider} scope=activation status=VALID'
-    attrs:
-      operation: token_validated
-      auth.method:
-        var: auth_method
-      auth.provider:
-        var: auth_provider
-      auth.status: VALID
-- sample:
-    sessions:
-      randint:
-      - 400000
-      - 600000
-- log:
-    level: INFO
-    message: '[AUTH] session_health active_sessions={sessions} redis_memory=62% jwks_cache_age=1200s status=NORMAL'
-    attrs:
-      operation: session_health
-      auth.sessions:
-        var: sessions
-      auth.redis_memory_pct: 62
-- every:
-    seconds: 10
-    state_key: _last_summary
-    steps:
-    - log:
-        level: INFO
-        message: '[AUTH] auth_summary validations={_auth_count} success_rate=99.8% federation_status=OK status=NORMAL'
-        attrs:
-          operation: auth_summary
-          auth.total_validations:
-            var: _auth_count
-          auth.success_rate: 99.8
-- sample:
-    auth_latency_ms:
-      if_active:
-        uniform:
-        - 1000.0
-        - 10000.0
-        round: 1
-      else:
-        uniform:
-        - 20.0
-        - 150.0
-        round: 1
+    r7:
+      expr: "(0.25 + 0.75 * min(1.0, elapsed.get(7, 0) / 300.0)) if 7 in all_active else ((max(0.0, 1.0 - since_fix.get(7, 0) / 10.0)) if 7 in fixed_channels else 0.0)"
+    jwt_fail:
+      expr: "max(0, int(2 + 1400 * r7 + rand.gauss(0, 1 + 40 * r7)))"
+    token_issue:
+      expr: "int(2400 * (1.0 + rand.gauss(0, 0.03)))"
+    jwks_kids:
+      expr: "'kc-meridian-2026-08,kc-meridian-2026-11' if 7 in fixed_channels else 'kc-meridian-2026-08'"
+    jwks_status:
+      expr: "'ANOMALY' if 7 in all_active else 'NORMAL'"
+    validation_ms:
+      expr: "round(4.0 * (1.0 + rand.gauss(0, 0.08)), 2)"
+- metric:
+    name: auth_service.jwt_validation_failures_per_min
+    value: {var: jwt_fail}
+    unit: failures/min
+- metric:
+    name: auth_service.token_issue_per_min
+    value: {var: token_issue}
+    unit: tokens/min
 - metric:
     name: auth_service.validation_latency_ms
-    value:
-      var: auth_latency_ms
+    value: {var: validation_ms}
     unit: ms
+- log:
+    level: INFO
+    message: 'level=info logger=auth.jwks msg="jwks status" issuer=https://sso.meridian.eu/realms/meridian kids={jwks_kids} validation_failures_last_min={jwt_fail} tokens_issued_last_min={token_issue} status={jwks_status}'
+    attrs:
+      operation: jwks_status
+      auth.jwks_kids: {var: jwks_kids}
+      auth.jwt_validation_failures_per_min: {var: jwt_fail}
+      auth.status: {var: jwks_status}
+- sample:
+    fed_blocked:
+      expr: "bool(8 in all_active or (8 in fixed_channels and since_fix.get(8, 0) < 60))"
+    fed_fail:
+      expr: "max(0, int(190 + rand.gauss(0, 18))) if fed_blocked else 0"
+    fed_p95_ms:
+      expr: "int(10010 + rand.gauss(0, 4)) if fed_blocked else int(120 + rand.gauss(0, 10))"
+    idp_reachable:
+      expr: "'false' if 8 in all_active else 'true'"
+    fed_status:
+      expr: "'ANOMALY' if fed_blocked else 'NORMAL'"
+- metric:
+    name: auth_service.federation_failures_per_min
+    value: {var: fed_fail}
+    unit: failures/min
+- metric:
+    name: auth_service.federation_connect_p95_ms
+    value: {var: fed_p95_ms}
+    unit: ms
+- log:
+    level: INFO
+    message: 'level=info logger=auth.federation msg="idp health" idp=login.microsoftonline.com reachable={idp_reachable} connect_p95_ms={fed_p95_ms} failures_last_min={fed_fail} status={fed_status}'
+    attrs:
+      operation: federation_health
+      auth.idp: login.microsoftonline.com
+      auth.idp_reachable: {var: idp_reachable}
+      auth.federation_connect_ms: {var: fed_p95_ms}
+      auth.federation_failures_per_min: {var: fed_fail}
+- sample:
+    e9:
+      expr: "elapsed.get(9, 0) if 9 in all_active else 0.0"
+    filling:
+      expr: "bool(9 in all_active and e9 < 120)"
+    evicting:
+      expr: "bool(9 in all_active and 120 <= e9 < 150)"
+    purge:
+      expr: "min(1.0, since_fix.get(9, 0) / 90.0) if 9 in fixed_channels else 1.0"
+    mem_center:
+      expr: "(62.0 + 37.5 * e9 / 120.0) if filling else (99.6 if 9 in all_active else (99.6 - 37.6 * purge if 9 in fixed_channels else 62.0))"
+    used_memory_pct:
+      expr: "round(min(100.0, mem_center + rand.gauss(0, 0.15 if mem_center > 95 else 0.4)), 1)"
+    evicted_per_s:
+      expr: "0 if filling else (max(0, int(5600 + rand.gauss(0, 300))) if evicting else (max(0, int(250 + rand.gauss(0, 25))) if (9 in all_active or (9 in fixed_channels and since_fix.get(9, 0) < 5)) else 0))"
+    cache_keys:
+      expr: "int(1500 * min(e9, 150.0) + rand.gauss(0, 200)) if 9 in all_active else (int(226000 * (1.0 - purge)) if 9 in fixed_channels else 0)"
+    sessions_factor:
+      expr: "1.0 if filling else ((1.0 - 0.94 * (e9 - 120.0) / 30.0) if evicting else (0.06 if 9 in all_active else ((0.06 + 0.94 * min(1.0, since_fix.get(9, 0) / 300.0)) if 9 in fixed_channels else 1.0)))"
+    active_sessions:
+      expr: "int(180000 * sessions_factor * (1.0 + rand.gauss(0, 0.01)))"
+    image_tag:
+      expr: "'auth-service:3.8.0' if 9 in all_active else 'auth-service:3.7.2'"
+    redis_status:
+      expr: "'ANOMALY' if 9 in all_active or used_memory_pct > 90.0 else 'NORMAL'"
+- metric:
+    name: auth_service.session_store_used_memory_pct
+    value: {var: used_memory_pct}
+    unit: '%'
+- metric:
+    name: auth_service.session_store_evicted_keys_per_s
+    value: {var: evicted_per_s}
+    unit: keys/s
+- metric:
+    name: auth_service.introspection_cache_keys
+    value: {var: cache_keys}
+    unit: keys
 - metric:
     name: auth_service.active_sessions
-    value:
-      randint:
-      - 400000
-      - 600000
+    value: {var: active_sessions}
     unit: sessions
-- metric:
-    name: auth_service.token_validation_rate
-    value:
-      uniform:
-      - 98.0
-      - 99.9
-      round: 2
-    unit: '%'
+- log:
+    level: INFO
+    message: 'level=info logger=auth.session msg="session store stats" redis=meridian-sessions:6380 used_memory_pct={used_memory_pct} maxmemory=6gb policy=volatile-lru evicted_keys_per_s={evicted_per_s} introspect_keys={cache_keys} sessions={active_sessions} image={image_tag} status={redis_status}'
+    attrs:
+      operation: session_store_stats
+      redis.used_memory_pct: {var: used_memory_pct}
+      redis.evicted_keys_per_s: {var: evicted_per_s}
+      redis.introspection_cache_keys: {var: cache_keys}
+      redis.maxmemory_policy: volatile-lru
+      deployment.image_tag: {var: image_tag}
+      redis.status: {var: redis_status}

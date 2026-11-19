@@ -23,45 +23,241 @@ db_operations:
 emit_fault_logs: true
 kpi_emitter: false
 constants:
+  # Share of the ~1,200 tag updates/s each PLC contributes (PACK-01 is Modbus TCP).
   PLCS:
   - PLC-LINE01-A
+  - PLC-LINE01-A
+  - PLC-LINE02-A
   - PLC-LINE02-A
   - PLC-LINE03-A
+  - PLC-LINE03-A
+  - PLC-LINE03-B
   - PLC-LINE03-B
   - PLC-PACK-01
-  PROTOCOLS:
-  - opcua
-  - opcua
-  - opcua
-  - modbus_tcp
-  - ethernet_ip
+  PLC_PROTOCOL:
+    PLC-LINE01-A: opcua
+    PLC-LINE02-A: opcua
+    PLC-LINE03-A: opcua
+    PLC-LINE03-B: opcua
+    PLC-PACK-01: modbus_tcp
   TAGS:
   - MotorSpeed
   - OvenTempC
   - ConveyorRPM
   - PressurePsi
   - PartsCounter
+  TAG_RANGE:
+    MotorSpeed: [1452.0, 1488.0]
+    OvenTempC: [184.0, 196.0]
+    ConveyorRPM: [58.0, 62.5]
+    PressurePsi: [88.0, 96.0]
+    PartsCounter: [18000.0, 26000.0]
 state:
   _tag_updates_total:
     init: 0
-  _last_subscription_report:
-    init: now
 steps:
+- sample:
+    # Per-channel fault intensity: ramps 0->1 once the fault reaches this service, drains 1->0 after its fix.
+    f1:
+      expr: "min(1.0, max(0.0, elapsed.get(1, 0) - lag.get(1, 0)) / 20.0) if 1 in all_active else (max(0.0, 1.0 - since_fix.get(1, 0) / 40.0) if 1 in fixed_channels else 0.0)"
+    f2:
+      expr: "min(1.0, max(0.0, elapsed.get(2, 0) - lag.get(2, 0)) / 30.0) if 2 in all_active else (max(0.0, 1.0 - since_fix.get(2, 0) / 60.0) if 2 in fixed_channels else 0.0)"
+    f4:
+      expr: "min(1.0, max(0.0, elapsed.get(4, 0) - lag.get(4, 0)) / 10.0) if 4 in all_active else (max(0.0, 1.0 - since_fix.get(4, 0) / 15.0) if 4 in fixed_channels else 0.0)"
+    f5:
+      expr: "min(1.0, max(0.0, elapsed.get(5, 0) - lag.get(5, 0)) / 30.0) if 5 in all_active else (max(0.0, 1.0 - since_fix.get(5, 0) / 90.0) if 5 in fixed_channels else 0.0)"
+    f6:
+      expr: "min(1.0, max(0.0, elapsed.get(6, 0) - lag.get(6, 0)) / 10.0) if 6 in all_active else (max(0.0, 1.0 - since_fix.get(6, 0) / 15.0) if 6 in fixed_channels else 0.0)"
+    f7:
+      expr: "min(1.0, max(0.0, elapsed.get(7, 0) - lag.get(7, 0)) / 5.0) if 7 in all_active else (max(0.0, 1.0 - since_fix.get(7, 0) / 15.0) if 7 in fixed_channels else 0.0)"
+    f19:
+      expr: "min(1.0, max(0.0, elapsed.get(19, 0) - lag.get(19, 0)) / 10.0) if 19 in all_active else (max(0.0, 1.0 - since_fix.get(19, 0) / 10.0) if 19 in fixed_channels else 0.0)"
+- sample:
+    connected_plcs:
+      expr: "max(1, int(round(5 - f1 - 4 * f7)))"
+    tag_rate:
+      expr: "int(rand.gauss(1200.0, 35.0) * (1.0 - 0.24 * f1) * (1.0 - 0.88 * f7) + f4 * rand.uniform(29000.0, 39000.0))"
+    stale_tags:
+      expr: "int(rand.randint(0, 3) + 640 * f1 + 2240 * f7)"
+    reconnects_per_min:
+      expr: "int(f1 * rand.randint(4, 8) + f7 * rand.randint(8, 16))"
+    line03a_load_pct:
+      expr: "round(min(99.5, rand.uniform(28.0, 38.0) + f1 * (rand.gauss(95.0, 2.0) - 33.0)), 1)"
+    modbus_exceptions:
+      expr: "int(f6 * rand.randint(20, 60))"
+    range_violations:
+      expr: "int(rand.randint(0, 2) + f6 * rand.randint(40, 150))"
+    cert_valid:
+      expr: "0 if 7 in all_active and elapsed.get(7, 0) >= lag.get(7, 0) else 1"
+    session_pool_used:
+      expr: "min(64, int(rand.randint(18, 26) + f19 * rand.randint(36, 42)))"
+    sessions_refused:
+      expr: "int(f19 * rand.randint(4, 20))"
+    active_subs:
+      expr: "int(rand.randint(180, 320) * (1.0 - 0.8 * f7) * (1.0 - 0.2 * f1))"
+    store_forward_buffered:
+      expr: "int(rand.randint(0, 5) + f2 * rand.randint(20, 200) + f5 * rand.randint(2000, 9000))"
+    profile_rev:
+      expr: "'15' if 1 in all_active else '14'"
+    template_rev:
+      expr: "'9' if 4 in all_active else '8'"
+    monitored_items:
+      expr: "2560 if 1 in all_active else 640"
+    sampling_ms:
+      expr: "100 if 1 in all_active else 1000"
+    session_state:
+      expr: "'RECONNECTING' if f1 > 0.5 or f7 > 0.5 else 'ACTIVE'"
+    deadband:
+      expr: "0.0 if 4 in all_active else 0.5"
+    conveyor_rate:
+      expr: "int(rand.gauss(310.0, 15.0) + f4 * rand.uniform(29000.0, 39000.0))"
+    regmap:
+      expr: "'v3.1' if 6 in fixed_channels and 6 not in all_active else 'v3.0'"
+    pack_firmware:
+      expr: "'V3.1.0' if 6 in all_active or 6 in fixed_channels else 'V3.0.3'"
+    cert_serial:
+      expr: "'7B10E5D2A946' if 7 in fixed_channels and 7 not in all_active else '4F2A91C3E07B'"
+    cert_state:
+      expr: "'true' if cert_valid == 1 else 'false'"
+    secure_channels:
+      expr: "max(0, int(round(4 - f1 - 4 * f7)))"
+    idle_timeout_s:
+      expr: "0 if 19 in all_active else 300"
+- metric:
+    name: scada.connected_plcs
+    value:
+      var: connected_plcs
+    unit: plcs
+- metric:
+    name: scada.tag_update_rate_per_s
+    value:
+      var: tag_rate
+    unit: updates/s
+- metric:
+    name: scada.stale_tags
+    value:
+      var: stale_tags
+    unit: tags
+- metric:
+    name: scada.opcua_reconnects_per_min
+    value:
+      var: reconnects_per_min
+    unit: reconnects/min
+- metric:
+    name: scada.plc_comm_load_pct
+    value:
+      var: line03a_load_pct
+    unit: '%'
+    attrs:
+      scada.plc: PLC-LINE03-A
+- metric:
+    name: scada.modbus_exceptions_per_min
+    value:
+      var: modbus_exceptions
+    unit: exceptions/min
+    attrs:
+      scada.plc: PLC-PACK-01
+- metric:
+    name: scada.range_violations_per_min
+    value:
+      var: range_violations
+    unit: violations/min
+- metric:
+    name: scada.cert_valid
+    value:
+      var: cert_valid
+    unit: bool
+- metric:
+    name: scada.session_pool_used
+    value:
+      var: session_pool_used
+    unit: sessions
+- metric:
+    name: scada.session_refused_per_min
+    value:
+      var: sessions_refused
+    unit: sessions/min
+- metric:
+    name: scada.active_subscriptions
+    value:
+      var: active_subs
+    unit: subs
+- metric:
+    name: scada.store_forward_buffered
+    value:
+      var: store_forward_buffered
+    unit: updates
+- counter:
+    state_key: _tag_updates_total
+    by:
+      var: tag_rate
+- metric:
+    name: scada.tag_updates_total
+    value:
+      var: _tag_updates_total
+    unit: updates
+- log:
+    level: INFO
+    message: '[SCADA] plc_status plc=PLC-LINE03-A endpoint=opc.tcp://10.40.3.21:4840 profile_rev={profile_rev} monitored_items={monitored_items} sampling_ms={sampling_ms} comm_load_pct={line03a_load_pct} session={session_state}'
+    attrs:
+      operation: plc_status
+      scada.plc: PLC-LINE03-A
+      scada.opcua_profile_rev:
+        var: profile_rev
+      scada.plc_comm_load_pct:
+        var: line03a_load_pct
+- log:
+    level: INFO
+    message: '[SCADA] tag_group group=conveyor-drives tags=1200 template_rev={template_rev} deadband_pct={deadband} publish_interval_ms=1000 rate_per_s={conveyor_rate}'
+    attrs:
+      operation: tag_group_status
+      scada.tag_group: conveyor-drives
+      scada.tag_template_rev:
+        var: template_rev
+      scada.deadband_pct:
+        var: deadband
+- log:
+    level: INFO
+    message: '[SCADA] modbus_poll plc=PLC-PACK-01 unit_id=1 firmware={pack_firmware} regmap={regmap} registers=124 exceptions_per_min={modbus_exceptions} range_violations_per_min={range_violations}'
+    attrs:
+      operation: modbus_poll
+      scada.plc: PLC-PACK-01
+      scada.regmap_version:
+        var: regmap
+      scada.plc_firmware:
+        var: pack_firmware
+- log:
+    level: INFO
+    message: '[SCADA] certificate subject="CN=scada-gateway, O=Manufacturing OT, OU=Plant P002" serial={cert_serial} issuer="OT Issuing CA 01" valid={cert_state} secure_channels={secure_channels}/4'
+    attrs:
+      operation: certificate_status
+      scada.cert_serial:
+        var: cert_serial
+      scada.cert_valid:
+        var: cert_state
+- log:
+    level: INFO
+    message: '[SCADA] session_pool pool=client-sessions used={session_pool_used}/64 idle_timeout_s={idle_timeout_s} refused_per_min={sessions_refused}'
+    attrs:
+      operation: session_pool_status
+      scada.session_pool_used:
+        var: session_pool_used
+      scada.session_idle_timeout_s:
+        var: idle_timeout_s
 - sample:
     plc:
       choice: PLCS
-    protocol:
-      choice: PROTOCOLS
     tag:
       choice: TAGS
+    protocol:
+      expr: "PLC_PROTOCOL[plc]"
+    tag_quality:
+      expr: "'Uncertain_LastUsableValue' if (plc == 'PLC-LINE03-A' and f1 > 0.5) or (plc != 'PLC-PACK-01' and f7 > 0.5) else 'Good'"
     tag_value:
-      uniform:
-      - 0.0
-      - 1500.0
-      round: 2
+      expr: "round(rand.uniform(78.0, 96.0), 2) if (plc == 'PLC-PACK-01' and tag == 'OvenTempC' and f6 > 0.5) else round(rand.uniform(TAG_RANGE[tag][0], TAG_RANGE[tag][1]), 2)"
 - log:
     level: INFO
-    message: '[SCADA] tag_update plc={plc} protocol={protocol} tag={tag} value={tag_value} quality=GOOD'
+    message: '[SCADA] tag_update plc={plc} protocol={protocol} tag={tag} value={tag_value} quality={tag_quality}'
     attrs:
       operation: tag_update
       scada.plc:
@@ -72,73 +268,5 @@ steps:
         var: tag
       scada.value:
         var: tag_value
-      scada.quality: GOOD
-- sample:
-    session_plc:
-      choice: PLCS
-    rtt_ms:
-      randint:
-      - 2
-      - 18
-- log:
-    level: DEBUG
-    message: '[SCADA] session_keepalive plc={session_plc} rtt_ms={rtt_ms} secure_channel=ACTIVE'
-    attrs:
-      operation: session_keepalive
-      scada.plc:
-        var: session_plc
-      scada.rtt_ms:
-        var: rtt_ms
-- every:
-    seconds: 10
-    state_key: _last_subscription_report
-    steps:
-    - sample:
-        active_subs:
-          randint:
-          - 180
-          - 320
-        tags_per_sub:
-          randint:
-          - 8
-          - 24
-    - sample:
-        total_tags:
-          expr: active_subs * tags_per_sub
-    - log:
-        level: INFO
-        message: '[SCADA] subscription_summary active={active_subs} total_tags={total_tags} health=NOMINAL'
-        attrs:
-          operation: subscription_summary
-          scada.active_subscriptions:
-            var: active_subs
-- counter:
-    state_key: _tag_updates_total
-    by:
-      randint:
-      - 50
-      - 200
-- metric:
-    name: scada.tag_updates_total
-    value:
-      var: _tag_updates_total
-    unit: updates
-- metric:
-    name: scada.tag_update_rate_per_s
-    value:
-      if_active:
-        randint:
-        - 15000
-        - 60000
-      else:
-        randint:
-        - 800
-        - 1500
-    unit: updates/s
-- metric:
-    name: scada.active_subscriptions
-    value:
-      randint:
-      - 180
-      - 320
-    unit: subs
+      scada.quality:
+        var: tag_quality

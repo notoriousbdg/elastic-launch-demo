@@ -8,56 +8,121 @@ affected_services:
 - cloud-interconnect
 cascade_services:
 - cloud-nat-gateway
-description: IKE phase negotiation failing between Cloud VPN and remote peer
+description: Cloud VPN tunnel gets no response from its peer, which stopped answering IKEv1
 investigation_notes: |-
-  Root cause: IKE negotiation failure at the indicated phase. Phase 1 failures (NO_PROPOSAL_CHOSEN, AUTHENTICATION_FAILED) indicate cipher suite or PSK mismatch. Phase 2 failures (TS_UNACCEPTABLE, INVALID_KE_PAYLOAD) indicate traffic selector or DH group mismatch. GCP Cloud VPN supports specific cipher combinations; the remote peer must match exactly. Diagnose:
-    gcloud compute vpn-tunnels describe <tunnel> --region=<region> --format='value(detailedStatus)'
-    Console > Logging > resource.type='vpn_gateway' severity>=WARNING
-  Remediation: For NO_PROPOSAL_CHOSEN, align cipher suites with GCP-supported combinations:
-    IKEv2: AES-256-CBC + SHA-256 + DH group 14 (or AES-256-GCM for combined mode)
-  For AUTHENTICATION_FAILED, verify pre-shared key matches on both sides. Rekey the session:
-    gcloud compute vpn-tunnels update <tunnel> --region=<region> --shared-secret=<new-secret>
-    (then update the same secret on the remote peer)
-  For TS_UNACCEPTABLE, ensure traffic selectors (local/remote CIDR) match: Cloud VPN uses 0.0.0.0/0 by default with route-based VPN; remote peer must also use 0.0.0.0/0.
+  Root cause: a firmware update on the on-premises gateway onprem-gw-ams ({vpn_peer_ip}, change FW-9.4.2-ams) removed IKEv1 support, so the gateway now only speaks IKEv2. {vpn_tunnel_name} on {vpn_gateway_name} was created as an IKEv1 tunnel, and an IKEv2-only responder does not answer an IKEv1 first message, it drops it. Cloud VPN therefore sends its {ike_phase} request, gets no response and retransmits ({ike_retry_count} retransmits, then gives up and tries again); the tunnel sits in NEGOTIATION_FAILURE with detailedStatus "Negotiation failure: no response from peer ...". The ike_version of a Cloud VPN tunnel cannot be edited in place, it is changed by recreating the tunnel. Ruled out: the pre-shared key (a wrong secret fails later with AUTHORIZATION_ERROR after the peer answers, and gcpnet-vpn-tunnel-04, a second tunnel to the same peer {vpn_peer_ip} with the same psk_version, is ESTABLISHED on IKEv2), a path problem or peer address change (the peer answers ICMP, vpn.peer_icmp_reachable true, and tunnel-04 reaches it), and traffic selectors (never reached because no IKE SA is set up). gcpnet-vpn-tunnel-01 is already IKEv2 and keeps working; the separate authorization failure on gcpnet-vpn-tunnel-02 is another fault.
+  Confirm:
+    - cloud-vpn-gateway metrics.vpn.tunnel_03_ike_negotiation_failures rises from 0 to 3-10 per minute; metrics.vpn.tunnel_03_established goes 1 -> 0
+    - cloud-vpn log "tunnel_status" for {vpn_tunnel_name}: attributes.vpn.ike_version 1, attributes.vpn.status NEGOTIATION_FAILURE, attributes.vpn.detailed_status "Negotiation failure: no response from peer ...", attributes.vpn.health ANOMALY, while the same peer's gcpnet-vpn-tunnel-04 reads ike_version 2, status ESTABLISHED with the same attributes.vpn.psk_version
+    - cloud-vpn logs operation=ike_retransmit "[IKE] retransmit N of request ... no response from peer" followed by "giving up after 5 retransmits"
+    - the cause event for the onprem-gw-ams firmware update (IKEv1 removed, peer now accepts IKEv2 only) precedes the first VPN-IKE-NEGOTIATION-FAILURE line
+  Remediation: recreate the tunnel as IKEv2, which the peer accepts: opsctl replace vpn-tunnel/{vpn_tunnel_name} --region europe-west1 --ike-version 2 (Cloud Audit method v1.compute.vpnTunnels.insert). The tunnel goes through FIRST_HANDSHAKE and is ESTABLISHED within about 40 seconds; retransmissions and failures drop to 0 and ike_version reads 2. The peer, its shared secret and the traffic selectors are unchanged.
 remediation_action: rekey_vpn_session
+remediation_command: |-
+  opsctl replace vpn-tunnel/gcpnet-vpn-tunnel-03 --region europe-west1 --ike-version 2
 error_message: '[CloudVPN] VPN-IKE-NEGOTIATION-FAILURE tunnel={vpn_tunnel_name} gateway={vpn_gateway_name} peer={vpn_peer_ip}
-  ike_phase={ike_phase} error="{ike_error}" retries={ike_retry_count}/{ike_max_retries}'
+  ike_version=IKEv1 ike_phase={ike_phase} error="{ike_error}" retransmits={ike_retry_count}/{ike_max_retries}'
 stack_trace: |-
   Cloud VPN IKE Negotiation Report
   ----------------------------------
   Tunnel:      {vpn_tunnel_name}
   Gateway:     {vpn_gateway_name}
   Peer IP:     {vpn_peer_ip}
+  Status:      NEGOTIATION_FAILURE
+  IKE Version: IKEv1
   IKE Phase:   {ike_phase}
   Error:       {ike_error}
-  Retries:     {ike_retry_count}/{ike_max_retries}
-  Cipher:      AES-256-CBC
-  Auth:        SHA-256
-  Action: Verify pre-shared key and cipher suite compatibility
+  Retransmits: {ike_retry_count}/{ike_max_retries}
+  Detail:      Negotiation failure: no response from peer
+  Peer:        onprem-gw-ams fw-9.4.2
+  Action: Recreate the tunnel with IKEv2
 correlation_attr:
-  key: network.ike_cipher_suite
-  value: aes256-sha384-dh20-nonstandard
+  key: network.ike_version_policy
+  value: peer-ikev2-only
 fault_params:
-  vpn_tunnel_name: {choice: [gcpnet-vpn-tunnel-01, gcpnet-vpn-tunnel-02, gcpnet-vpn-tunnel-03]}
-  vpn_gateway_name: {choice: [gcpnet-vpn-gw-europe1, gcpnet-vpn-gw-central1]}
-  vpn_peer_ip: {format: "203.0.113.{a}", a: {randint: [1, 254]}}
-  ike_phase: {choice: ["1", "2"]}
-  ike_error:
-    choice:
-      - NO_PROPOSAL_CHOSEN
-      - AUTHENTICATION_FAILED
-      - INVALID_KE_PAYLOAD
-      - TS_UNACCEPTABLE
-  ike_retry_count: {randint: [3, 10]}
-  ike_max_retries: 10
+  vpn_tunnel_name: gcpnet-vpn-tunnel-03
+  vpn_gateway_name: gcpnet-vpn-gw-europe1
+  vpn_peer_ip: 203.0.113.77
+  ike_phase: phase 1 (main mode) message 1
+  ike_error: no response from peer
+  ike_retry_count: 5
+  ike_max_retries: 5
 rca_clues:
   cloud-vpn-gateway:
-    vpn.ike_phase_failing: {choice: ["1", "2"]}
-    vpn.cipher_mismatch: {choice: [true, false]}
+    vpn.ike_phase_failing: phase 1
+    vpn.tunnel_ike_version: "1"
+    vpn.peer_ike_response: none
+    vpn.peer_icmp_reachable: true
+    vpn.sibling_tunnel_to_peer: gcpnet-vpn-tunnel-04 ESTABLISHED ike_version=2
   cloud-interconnect:
     interconnect.vpn_failback_blocked: true
   cloud-nat-gateway:
     nat.vpn_egress_rerouted: true
+cascade_messages:
+  cloud-nat-gateway:
+    - severity: WARN
+      message: 'cloud-nat: egress via VPN tunnel {vpn_tunnel_name} unavailable, traffic rerouted'
+fault_scope:
+  cluster: gcpnet-gke-europe1
+  workloads: [cloud-vpn-gateway]
+infrastructure_events:
+  - service: cloud-vpn-gateway
+    severity: INFO
+    offset_seconds: -90
+    body: 'cloud-vpn: on-prem gateway onprem-gw-ams ({vpn_peer_ip}) firmware updated to fw-9.4.2 by netops-onprem (change FW-9.4.2-ams); IKEv1 support removed, peer now accepts IKEv2 only'
+    attributes:
+      user.name: netops-onprem
+      change.request: FW-9.4.2-ams
+      operation: peer_firmware_update
+      network.ike_version_policy: peer-ikev2-only
+      change.summary: 'onprem-gw-ams IKE versions: IKEv1+IKEv2 -> IKEv2 only'
+remediation_effects:
+  transition_seconds: 40
+  log_events:
+    - service: vpc-network-manager
+      severity: INFO
+      offset_seconds: 2
+      body: 'gcp-audit: logName=cloudaudit.googleapis.com/activity serviceName=compute.googleapis.com methodName=v1.compute.vpnTunnels.insert resourceName=projects/gcpnet-prod-001/regions/europe-west1/vpnTunnels/gcpnet-vpn-tunnel-03 principalEmail={actor} status=OK'
+      attributes:
+        operation: command
+        command.target: vpn-tunnel/gcpnet-vpn-tunnel-03
+    - service: cloud-vpn-gateway
+      severity: INFO
+      offset_seconds: 38
+      body: 'cloud-vpn: tunnel=gcpnet-vpn-tunnel-03 recreated with ike_version=IKEv2, IKE_SA_INIT and IKE_AUTH completed, status=ESTABLISHED'
+      attributes:
+        operation: tunnel_status
+        vpn.tunnel: gcpnet-vpn-tunnel-03
+        vpn.ike_version: "2"
+  steady_attributes:
+    cloud-vpn-gateway:
+      vpn.ike_version: "2"
+  log_taper_seconds: 0
+  verification:
+    - signal: vpn.tunnel_03_ike_negotiation_failures
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "cloud-vpn-gateway"'
+      field: 'metrics.vpn.tunnel_03_ike_negotiation_failures'
+      expect: '0 (was 3-10 per minute)'
+      within_seconds: 120
+    - signal: vpn.tunnel_03_established
+      from: 'metrics-generic.otel-default'
+      where: 'resource.attributes.service.name == "cloud-vpn-gateway"'
+      field: 'metrics.vpn.tunnel_03_established'
+      expect: '1 (was 0)'
+      within_seconds: 120
+    - signal: tunnel status
+      from: 'logs.otel.gcpnet'
+      where: 'resource.attributes.service.name == "cloud-vpn-gateway" AND attributes.vpn.tunnel == "gcpnet-vpn-tunnel-03" AND attributes.operation == "tunnel_status"'
+      field: 'attributes.vpn.status'
+      expect: 'ESTABLISHED within about 40 s (was NEGOTIATION_FAILURE), via FIRST_HANDSHAKE'
+      within_seconds: 120
+    - signal: tunnel IKE version
+      from: 'logs.otel.gcpnet'
+      where: 'resource.attributes.service.name == "cloud-vpn-gateway" AND attributes.vpn.tunnel == "gcpnet-vpn-tunnel-03"'
+      field: 'attributes.vpn.ike_version'
+      expect: '2 on every line logged since the fix (was 1)'
+      within_seconds: 120
 business_impact:
   - kpi: business.api_success_rate_pct
     factor: {uniform: [0.60, 0.82]}

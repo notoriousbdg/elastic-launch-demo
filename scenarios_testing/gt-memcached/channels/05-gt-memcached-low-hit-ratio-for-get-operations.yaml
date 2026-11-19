@@ -1,0 +1,37 @@
+name: "GT memcached_otel: low_hit_ratio_for_get_operations"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-MEMCACHED-LOW-HIT-RATIO-FOR-GET-OPE
+sensor_type: impact_key_probe
+affected_services:
+  - gt-memcached-aws-svc-1
+cascade_services:
+  - gt-memcached-aws-svc-2
+description: "Tests impact_key low_hit_ratio_for_get_operations on generator memcached_otel."
+investigation_notes: |-
+  1. Verify memcached_otel is active and reporting metrics.
+  2. Check that the low_hit_ratio_for_get_operations metric has reached the trigger value (50.0).
+  3. Confirm generator_impact for memcached_otel.low_hit_ratio_for_get_operations is set to 50.0.
+  4. Look for correlated changes in service gt-memcached-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_low_hit_ratio_for_get_operations_baseline
+error_message: "GT-PROBE: gen=memcached_otel key=low_hit_ratio_for_get_operations value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=memcached_otel
+  impact_key: low_hit_ratio_for_get_operations
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 50.0
+  svc_name: gt-memcached-aws-svc-1
+rca_clues:
+  gt-memcached-aws-svc-1:
+    probe.generator: memcached_otel
+    probe.impact_key: low_hit_ratio_for_get_operations
+    probe.trigger_value: 50.0
+  gt-memcached-aws-svc-2:
+    probe.upstream_generator: memcached_otel
+    probe.upstream_key: low_hit_ratio_for_get_operations
+generator_impact:
+  memcached_otel:
+    low_hit_ratio_for_get_operations: 50.0

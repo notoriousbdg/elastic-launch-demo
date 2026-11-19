@@ -1,0 +1,37 @@
+name: "GT kubernetes_otel: pods_stuck_in_pending_phase"
+subsystem: generator-test
+vehicle_section: generator-test-pipeline
+error_type: GT-KUBERNETES-PODS-STUCK-IN-PENDING-PH
+sensor_type: impact_key_probe
+affected_services:
+  - gt-kubernetes-b-aws-svc-1
+cascade_services:
+  - gt-kubernetes-b-aws-svc-2
+description: "Tests impact_key pods_stuck_in_pending_phase on generator kubernetes_otel."
+investigation_notes: |-
+  1. Verify kubernetes_otel is active and reporting metrics.
+  2. Check that the pods_stuck_in_pending_phase metric has reached the trigger value (0.8).
+  3. Confirm generator_impact for kubernetes_otel.pods_stuck_in_pending_phase is set to 0.8.
+  4. Look for correlated changes in service gt-kubernetes-b-aws-svc-1 metrics.
+  5. Restore by deactivating this channel and verifying metric returns to baseline.
+remediation_action: restore_pods_stuck_in_pending_phase_baseline
+error_message: "GT-PROBE: gen=kubernetes_otel key=pods_stuck_in_pending_phase value={trigger_value} svc={svc_name}"
+stack_trace: |-
+  GeneratorImpactProbe: gen=kubernetes_otel
+  impact_key: pods_stuck_in_pending_phase
+  trigger_value: {trigger_value}
+  affected_svc: {svc_name}
+fault_params:
+  trigger_value: 0.8
+  svc_name: gt-kubernetes-b-aws-svc-1
+rca_clues:
+  gt-kubernetes-b-aws-svc-1:
+    probe.generator: kubernetes_otel
+    probe.impact_key: pods_stuck_in_pending_phase
+    probe.trigger_value: 0.8
+  gt-kubernetes-b-aws-svc-2:
+    probe.upstream_generator: kubernetes_otel
+    probe.upstream_key: pods_stuck_in_pending_phase
+generator_impact:
+  kubernetes_otel:
+    pods_stuck_in_pending_phase: 0.8
